@@ -26,7 +26,13 @@
       "Bash(grep -B5 \"fn commit_from_file\" ~/.cargo/registry/src/index.crates.io-*/ort-2.0.0-rc.12/src/session/builder/impl_commit.rs)",
       "Bash(ls -la /c/development/decibri/rust/decibri/repository/decibri/npm/decibri/decibri.*.node)",
       "Bash(node tests/test-vad-silero.js)",
-      "Bash(cargo clippy:*)"
+      "Bash(cargo clippy:*)",
+      "Bash(npm link:*)",
+      "Bash(npm test:*)",
+      "Bash(node -e \"const Decibri = require\\('decibri'\\); const mic = new Decibri\\({sampleRate:16000,channels:1,format:'int16'}\\); let n=0; mic.on\\('data',\\(\\)=>n++\\); mic.on\\('error',\\(e\\)=>console.error\\('ERROR:',e.message\\)\\); setTimeout\\(\\(\\)=>{mic.stop\\(\\);console.log\\('chunks:',n\\);console.log\\('PASS: voxagent capture pattern works'\\)},2000\\)\")",
+      "Bash(node -e ':*)",
+      "Bash(npm unlink:*)",
+      "Bash(npm rm:*)"
     ]
   }
 }
