@@ -1,0 +1,76 @@
+{
+  "name": "decibri",
+  "version": "3.0.0",
+  "description": "Cross-platform audio capture, output, and processing for Node.js and browsers",
+  "main": "src/decibri.js",
+  "types": "src/decibri.d.ts",
+  "exports": {
+    ".": {
+      "types": "./src/decibri.d.ts",
+      "require": "./src/decibri.js",
+      "import": "./src/decibri.js"
+    }
+  },
+  "license": "Apache-2.0",
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "os": [
+    "win32",
+    "darwin",
+    "linux"
+  ],
+  "cpu": [
+    "x64",
+    "arm64"
+  ],
+  "keywords": [
+    "audio",
+    "microphone",
+    "capture",
+    "sound",
+    "voice",
+    "speech",
+    "recording",
+    "pcm",
+    "stream",
+    "real-time"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/decibri/decibri"
+  },
+  "homepage": "https://decibri.com",
+  "bugs": {
+    "url": "https://github.com/decibri/decibri/issues"
+  },
+  "napi": {
+    "binaryName": "decibri",
+    "targets": [
+      "x86_64-pc-windows-msvc",
+      "aarch64-apple-darwin",
+      "x86_64-unknown-linux-gnu",
+      "aarch64-unknown-linux-gnu"
+    ]
+  },
+  "files": [
+    "src/",
+    "index.js",
+    "index.d.ts"
+  ],
+  "optionalDependencies": {
+    "@decibri/win32-x64-msvc": "3.0.0",
+    "@decibri/darwin-arm64": "3.0.0",
+    "@decibri/linux-x64-gnu": "3.0.0",
+    "@decibri/linux-arm64-gnu": "3.0.0"
+  },
+  "devDependencies": {
+    "@napi-rs/cli": "^3.0.0"
+  },
+  "scripts": {
+    "build": "napi build --platform --release -p decibri-node --manifest-path ../../bindings/node/Cargo.toml -o .",
+    "artifacts": "napi artifacts",
+    "prepublishOnly": "napi prepublish -t npm",
+    "version": "napi version"
+  }
+}

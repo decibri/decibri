@@ -1,0 +1,10 @@
+{
+  "name": "@decibri/win32-x64-msvc",
+  "version": "3.0.0",
+  "os": ["win32"],
+  "cpu": ["x64"],
+  "main": "decibri.win32-x64-msvc.node",
+  "files": ["decibri.win32-x64-msvc.node"],
+  "license": "Apache-2.0",
+  "description": "decibri native binary for Windows x64"
+}

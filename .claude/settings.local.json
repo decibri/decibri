@@ -1,0 +1,16 @@
+{
+  "permissions": {
+    "allow": [
+      "WebSearch",
+      "WebFetch(domain:raw.githubusercontent.com)",
+      "WebFetch(domain:github.com)",
+      "Bash(xargs grep:*)",
+      "Bash(cargo check:*)",
+      "Bash(npm install:*)",
+      "Bash(npm run:*)",
+      "Bash(ls -la /c/development/decibri/rust/decibri/repository/decibri/npm/decibri/*.node /c/development/decibri/rust/decibri/repository/decibri/npm/decibri/index.js /c/development/decibri/rust/decibri/repository/decibri/npm/decibri/index.d.ts)",
+      "Bash(ls -la /c/development/decibri/rust/decibri/repository/decibri/npm/decibri/decibri.* /c/development/decibri/rust/decibri/repository/decibri/npm/decibri/index.*)",
+      "Bash(node tests/test-capture.js)"
+    ]
+  }
+}

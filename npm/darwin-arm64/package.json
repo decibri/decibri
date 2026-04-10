@@ -1,0 +1,10 @@
+{
+  "name": "@decibri/darwin-arm64",
+  "version": "3.0.0",
+  "os": ["darwin"],
+  "cpu": ["arm64"],
+  "main": "decibri.darwin-arm64.node",
+  "files": ["decibri.darwin-arm64.node"],
+  "license": "Apache-2.0",
+  "description": "decibri native binary for macOS arm64"
+}

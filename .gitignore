@@ -1,0 +1,30 @@
+# Rust
+/target/
+**/*.rs.bk
+Cargo.lock
+
+# Node.js
+node_modules/
+npm-debug.log*
+*.node
+
+# napi-rs build artifacts
+npm/decibri/*.node
+npm/decibri/index.js
+npm/decibri/index.d.ts
+
+# Platform binary packages
+npm/win32-x64-msvc/*.node
+npm/darwin-arm64/*.node
+npm/linux-x64-gnu/*.node
+npm/linux-arm64-gnu/*.node
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db

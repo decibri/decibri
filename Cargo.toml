@@ -1,0 +1,25 @@
+[workspace]
+resolver = "2"
+members = [
+  "crates/decibri",
+  "bindings/node",
+]
+
+[workspace.package]
+version = "3.0.0"
+edition = "2021"
+license = "Apache-2.0"
+repository = "https://github.com/decibri/decibri"
+
+[workspace.dependencies]
+cpal = "0.17"
+dasp_sample = "0.11"
+thiserror = "2"
+parking_lot = "0.12"
+crossbeam-channel = "0.5"
+
+[profile.release]
+lto = true
+strip = "symbols"
+codegen-units = 1
+opt-level = 3
