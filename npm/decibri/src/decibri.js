@@ -175,4 +175,7 @@ class Decibri extends Readable {
   }
 }
 
+const DecibriOutput = require('./decibri-output.js');
+Decibri.DecibriOutput = DecibriOutput;
+
 module.exports = Decibri;

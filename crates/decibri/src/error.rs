@@ -27,6 +27,9 @@ pub enum DecibriError {
     #[error("No microphone found. Check system audio input settings.")]
     NoMicrophoneFound,
 
+    #[error("No audio output device found. Check system audio settings.")]
+    NoOutputDeviceFound,
+
     #[error("Selected device is not a valid input device.")]
     NotAnInputDevice,
 

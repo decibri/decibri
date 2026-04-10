@@ -1,7 +1,7 @@
 pub mod error;
 pub mod sample;
 
-#[cfg(feature = "capture")]
+#[cfg(any(feature = "capture", feature = "output"))]
 pub mod device;
 
 #[cfg(feature = "capture")]

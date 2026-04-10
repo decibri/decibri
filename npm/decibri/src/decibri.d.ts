@@ -1,4 +1,4 @@
-import { Readable, ReadableOptions } from 'stream';
+import { Readable, ReadableOptions, Writable, WritableOptions } from 'stream';
 
 /** Information about an available audio input device. */
 export interface DeviceInfo {
@@ -133,4 +133,90 @@ declare class Decibri extends Readable {
   once(event: string | symbol, listener: (...args: any[]) => void): this;
 }
 
+/** Information about an available audio output device. */
+export interface OutputDeviceInfo {
+  /** Device index (pass to constructor as `device`). */
+  index: number;
+  /** Human-readable device name from the OS. */
+  name: string;
+  /** Maximum number of output channels the device supports. */
+  maxOutputChannels: number;
+  /** Device's preferred sample rate in Hz. */
+  defaultSampleRate: number;
+  /** Whether this is the current system default output device. */
+  isDefault: boolean;
+}
+
+/** Constructor options for `DecibriOutput`. */
+export interface DecibriOutputOptions extends WritableOptions {
+  /**
+   * Sample rate in Hz.
+   * @default 16000
+   * @range 1000–384000
+   */
+  sampleRate?: number;
+
+  /**
+   * Number of output channels.
+   * @default 1
+   * @range 1–32
+   */
+  channels?: number;
+
+  /**
+   * Sample encoding format of incoming data.
+   * - `'int16'` — 16-bit signed integer, little-endian (2 bytes per sample)
+   * - `'float32'` — 32-bit IEEE 754 float, little-endian (4 bytes per sample)
+   * @default 'int16'
+   */
+  format?: 'int16' | 'float32';
+
+  /**
+   * Audio output device. Pass a numeric index or a case-insensitive name
+   * substring. Omit to use the system default output device.
+   */
+  device?: number | string;
+}
+
+/**
+ * Cross-platform audio output (speaker playback) as a Node.js Writable stream.
+ *
+ * @example
+ * ```js
+ * const { DecibriOutput } = require('decibri');
+ * const speaker = new DecibriOutput({ sampleRate: 16000, channels: 1 });
+ * speaker.write(pcmBuffer);
+ * speaker.end();
+ * ```
+ */
+declare class DecibriOutput extends Writable {
+  constructor(options?: DecibriOutputOptions);
+
+  /** Immediate stop. Discards remaining buffered audio. */
+  stop(): void;
+
+  /** Whether audio is currently being output. */
+  readonly isPlaying: boolean;
+
+  /** List all available audio output devices. */
+  static devices(): OutputDeviceInfo[];
+
+  /** Version information for decibri and the audio runtime. */
+  static version(): VersionInfo;
+
+  // ── Event overloads ──────────────────────────────────────────────────────
+
+  on(event: 'drain', listener: () => void): this;
+  on(event: 'finish', listener: () => void): this;
+  on(event: 'error', listener: (err: Error) => void): this;
+  on(event: 'close', listener: () => void): this;
+  on(event: 'pipe', listener: (src: Readable) => void): this;
+  on(event: 'unpipe', listener: (src: Readable) => void): this;
+  on(event: string | symbol, listener: (...args: any[]) => void): this;
+}
+
 export = Decibri;
+
+declare namespace Decibri {
+  export { DecibriOutput };
+}

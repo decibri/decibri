@@ -8,6 +8,7 @@ use napi_derive::napi;
 
 use decibri::capture::{AudioCapture, CaptureConfig, CaptureStream};
 use decibri::device::{self, DeviceSelector};
+use decibri::output::{AudioOutput, OutputConfig, OutputStream};
 use decibri::sample;
 
 /// Audio sample format.
@@ -242,4 +243,154 @@ fn to_napi_error(e: decibri::error::DecibriError) -> Error {
         _ => Status::GenericFailure,
     };
     Error::new(status, e.to_string())
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// DecibriOutputBridge — audio playback
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// Options passed from JS constructor for output.
+#[napi(object)]
+#[derive(Default)]
+pub struct DecibriOutputOptions {
+    pub sample_rate: Option<u32>,
+    pub channels: Option<u32>,
+    pub format: Option<String>,
+    pub device: Option<serde_json::Value>,
+}
+
+/// Output device info returned to JS.
+#[napi(object)]
+pub struct OutputDeviceInfoJs {
+    pub index: u32,
+    pub name: String,
+    pub max_output_channels: u32,
+    pub default_sample_rate: u32,
+    pub is_default: bool,
+}
+
+/// Native bridge class for audio output, exposed to Node.js via napi-rs.
+#[napi]
+pub struct DecibriOutputBridge {
+    output: Option<AudioOutput>,
+    stream: Option<OutputStream>,
+    format: SampleFormat,
+}
+
+#[napi]
+impl DecibriOutputBridge {
+    #[napi(constructor)]
+    pub fn new(options: Option<DecibriOutputOptions>) -> Result<Self> {
+        let opts = options.unwrap_or_default();
+
+        let sample_rate = opts.sample_rate.unwrap_or(16000);
+        let channels = opts.channels.unwrap_or(1) as u16;
+
+        let format_str = opts.format.as_deref().unwrap_or("int16");
+        let format = match format_str {
+            "int16" => SampleFormat::Int16,
+            "float32" => SampleFormat::Float32,
+            _ => {
+                return Err(Error::new(
+                    Status::InvalidArg,
+                    "format must be 'int16' or 'float32'",
+                ))
+            }
+        };
+
+        let device = resolve_device_option(&opts.device)?;
+
+        let config = OutputConfig {
+            sample_rate,
+            channels,
+            device,
+        };
+
+        let output = AudioOutput::new(config).map_err(to_napi_error)?;
+
+        Ok(Self {
+            output: Some(output),
+            stream: None,
+            format,
+        })
+    }
+
+    /// Write PCM data for playback. Starts the output stream on first call.
+    /// Empty buffers are a no-op.
+    #[napi]
+    pub fn write(&mut self, buffer: Buffer) -> Result<()> {
+        if buffer.is_empty() {
+            return Ok(());
+        }
+
+        // Start stream on first write
+        if self.stream.is_none() {
+            let output = self.output.as_ref().ok_or_else(|| {
+                Error::new(Status::GenericFailure, "Output not initialized")
+            })?;
+            let stream = output.start().map_err(to_napi_error)?;
+            self.stream = Some(stream);
+        }
+
+        let samples = match self.format {
+            SampleFormat::Int16 => sample::i16_le_bytes_to_f32(&buffer),
+            SampleFormat::Float32 => sample::f32_le_bytes_to_f32(&buffer),
+        };
+
+        self.stream
+            .as_ref()
+            .unwrap()
+            .send(samples)
+            .map_err(to_napi_error)
+    }
+
+    /// Graceful drain: blocks until all queued samples have been played.
+    #[napi]
+    pub fn drain(&self) {
+        if let Some(stream) = self.stream.as_ref() {
+            stream.drain();
+        }
+    }
+
+    /// Immediate stop. Discards remaining samples.
+    #[napi]
+    pub fn stop(&mut self) {
+        if let Some(stream) = self.stream.as_ref() {
+            stream.stop();
+        }
+        self.stream = None;
+    }
+
+    /// Whether audio is currently being output.
+    #[napi(getter)]
+    pub fn is_playing(&self) -> bool {
+        self.stream
+            .as_ref()
+            .map_or(false, |s| s.is_playing())
+    }
+
+    /// List all available audio output devices.
+    #[napi]
+    pub fn devices() -> Result<Vec<OutputDeviceInfoJs>> {
+        let devices = device::enumerate_output_devices().map_err(to_napi_error)?;
+        Ok(devices
+            .into_iter()
+            .map(|d| OutputDeviceInfoJs {
+                index: d.index as u32,
+                name: d.name,
+                max_output_channels: d.max_output_channels as u32,
+                default_sample_rate: d.default_sample_rate,
+                is_default: d.is_default,
+            })
+            .collect())
+    }
+
+    /// Version information.
+    #[napi]
+    pub fn version() -> VersionInfoJs {
+        VersionInfoJs {
+            decibri: env!("CARGO_PKG_VERSION").to_string(),
+            portaudio: "cpal 0.17".to_string(),
+        }
+    }
 }
