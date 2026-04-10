@@ -6,6 +6,12 @@
 - Run `npx vitest run` after browser source changes.
 - Rebuild the native addon (`cd npm/decibri && npm run build`) after any Rust changes before running Node.js tests.
 
+## API Compatibility
+
+- The Node.js `Decibri` class API is frozen. Do not change constructor options, event names, method signatures, or error messages without explicit approval.
+- Downstream consumers (mcp-listen, voxagent, Wake Word) depend on exact API compatibility. Any change must be tested against all three.
+- Error messages are exact string matches. Do not rephrase them.
+
 ## Changelog
 
 - Update `CHANGELOG.md` when adding features, fixing bugs, or making breaking changes.
