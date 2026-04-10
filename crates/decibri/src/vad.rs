@@ -91,11 +91,10 @@ impl SileroVad {
             ));
         }
 
-        let mut builder = ort::session::Session::builder()
+        let session = ort::session::Session::builder()
             .map_err(|e| DecibriError::Other(format!("Failed to create ort session builder: {e}")))?
             .with_intra_threads(1)
-            .map_err(|e| DecibriError::Other(format!("Failed to set ort threads: {e}")))?;
-        let session = builder
+            .map_err(|e| DecibriError::Other(format!("Failed to set ort threads: {e}")))?
             .commit_from_file(&config.model_path)
             .map_err(|e| {
                 DecibriError::Other(format!(
