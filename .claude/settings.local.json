@@ -25,7 +25,8 @@
       "Bash(py -c ':*)",
       "Bash(grep -B5 \"fn commit_from_file\" ~/.cargo/registry/src/index.crates.io-*/ort-2.0.0-rc.12/src/session/builder/impl_commit.rs)",
       "Bash(ls -la /c/development/decibri/rust/decibri/repository/decibri/npm/decibri/decibri.*.node)",
-      "Bash(node tests/test-vad-silero.js)"
+      "Bash(node tests/test-vad-silero.js)",
+      "Bash(cargo clippy:*)"
     ]
   }
 }

@@ -123,7 +123,7 @@ impl AudioOutput {
 
         let stream_config = cpal::StreamConfig {
             channels,
-            sample_rate: sample_rate,
+            sample_rate,
             buffer_size: cpal::BufferSize::Default,
         };
 

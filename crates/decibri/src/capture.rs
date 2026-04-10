@@ -122,7 +122,7 @@ impl AudioCapture {
 
         let stream_config = cpal::StreamConfig {
             channels,
-            sample_rate: sample_rate,
+            sample_rate,
             buffer_size: cpal::BufferSize::Fixed(frames_per_buffer),
         };
 

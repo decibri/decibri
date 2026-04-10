@@ -411,7 +411,7 @@ impl DecibriOutputBridge {
     pub fn is_playing(&self) -> bool {
         self.stream
             .as_ref()
-            .map_or(false, |s| s.is_playing())
+            .is_some_and(|s| s.is_playing())
     }
 
     /// List all available audio output devices.

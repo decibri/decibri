@@ -61,9 +61,7 @@ pub fn enumerate_input_devices() -> Result<Vec<DeviceInfo>, DecibriError> {
             Err(_) => (0, 0),
         };
 
-        let is_default = default_device_name
-            .as_ref()
-            .map_or(false, |dn| dn == &name);
+        let is_default = default_device_name.as_ref() == Some(&name);
 
         result.push(DeviceInfo {
             index,
@@ -161,9 +159,7 @@ pub fn enumerate_output_devices() -> Result<Vec<OutputDeviceInfo>, DecibriError>
             Err(_) => (0, 0),
         };
 
-        let is_default = default_device_name
-            .as_ref()
-            .map_or(false, |dn| dn == &name);
+        let is_default = default_device_name.as_ref() == Some(&name);
 
         result.push(OutputDeviceInfo {
             index,

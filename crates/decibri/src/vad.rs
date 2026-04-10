@@ -68,7 +68,8 @@ pub struct SileroVad {
 }
 
 /// State size: 2 (hidden + cell) * 1 (batch) * 128 (hidden_dim) = 256.
-const STATE_SIZE: usize = 2 * 1 * 128;
+/// State size: 2 (hidden + cell layers) × batch(1) × hidden_dim(128).
+const STATE_SIZE: usize = 256;
 
 #[cfg(feature = "vad")]
 impl SileroVad {
