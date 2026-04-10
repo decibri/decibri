@@ -14,7 +14,18 @@
       "Bash(node tests/test-api.js)",
       "Bash(cargo test:*)",
       "Bash(node tests/test-output.js)",
-      "Bash(npx vitest:*)"
+      "Bash(npx vitest:*)",
+      "WebFetch(domain:ort.pyke.io)",
+      "WebFetch(domain:docs.rs)",
+      "WebFetch(domain:lib.rs)",
+      "Bash(curl -L -o /c/development/decibri/rust/decibri/repository/decibri/models/silero_vad.onnx https://github.com/snakers4/silero-vad/raw/master/src/silero_vad/data/silero_vad.onnx)",
+      "Bash(python -c ':*)",
+      "Bash(pip install:*)",
+      "Bash(py -m pip install onnxruntime)",
+      "Bash(py -c ':*)",
+      "Bash(grep -B5 \"fn commit_from_file\" ~/.cargo/registry/src/index.crates.io-*/ort-2.0.0-rc.12/src/session/builder/impl_commit.rs)",
+      "Bash(ls -la /c/development/decibri/rust/decibri/repository/decibri/npm/decibri/decibri.*.node)",
+      "Bash(node tests/test-vad-silero.js)"
     ]
   }
 }

@@ -1,4 +1,4 @@
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::Arc;
 use std::thread;
 
@@ -10,6 +10,7 @@ use decibri::capture::{AudioCapture, CaptureConfig, CaptureStream};
 use decibri::device::{self, DeviceSelector};
 use decibri::output::{AudioOutput, OutputConfig, OutputStream};
 use decibri::sample;
+use decibri::vad::{SileroVad, VadConfig};
 
 /// Audio sample format.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -27,6 +28,8 @@ pub struct DecibriOptions {
     pub frames_per_buffer: Option<u32>,
     pub format: Option<String>,
     pub device: Option<serde_json::Value>,
+    pub vad_mode: Option<String>,
+    pub model_path: Option<String>,
 }
 
 /// Native bridge class exposed to Node.js via napi-rs.
@@ -39,6 +42,8 @@ pub struct DecibriBridge {
     channels: u16,
     running: Arc<AtomicBool>,
     pump_handle: Option<thread::JoinHandle<()>>,
+    vad: Option<SileroVad>,
+    vad_probability: Arc<AtomicU32>,
 }
 
 #[napi]
@@ -74,6 +79,22 @@ impl DecibriBridge {
 
         let capture = AudioCapture::new(config).map_err(to_napi_error)?;
 
+        // Silero VAD: load model if vadMode is 'silero'
+        let vad_mode = opts.vad_mode.as_deref().unwrap_or("energy");
+        let vad = if vad_mode == "silero" {
+            let model_path = opts.model_path.ok_or_else(|| {
+                Error::new(Status::InvalidArg, "modelPath is required when vadMode is 'silero'")
+            })?;
+            let vad_config = VadConfig {
+                model_path: std::path::PathBuf::from(model_path),
+                sample_rate,
+                threshold: 0.5, // JS wrapper controls the actual threshold
+            };
+            Some(SileroVad::new(vad_config).map_err(to_napi_error)?)
+        } else {
+            None
+        };
+
         Ok(Self {
             capture: Some(capture),
             stream: None,
@@ -82,6 +103,8 @@ impl DecibriBridge {
             channels,
             running: Arc::new(AtomicBool::new(false)),
             pump_handle: None,
+            vad,
+            vad_probability: Arc::new(AtomicU32::new(0)),
         })
     }
 
@@ -108,6 +131,10 @@ impl DecibriBridge {
         let running = self.running.clone();
         let format = self.format;
         let target_samples = self.frames_per_buffer as usize * self.channels as usize;
+        let vad_probability = self.vad_probability.clone();
+
+        // Move VAD into the pump thread (SileroVad is Send)
+        let mut vad = self.vad.take();
 
         // Create a threadsafe function to call back into JS from the pump thread.
         let tsfn = callback.build_threadsafe_function()
@@ -129,6 +156,17 @@ impl DecibriBridge {
                         // Drain full frames from the accumulator
                         while accum.len() >= target_samples {
                             let frame: Vec<f32> = accum.drain(..target_samples).collect();
+
+                            // Run Silero VAD on the f32 frame (before format conversion)
+                            if let Some(ref mut v) = vad {
+                                if let Ok(result) = v.process(&frame) {
+                                    vad_probability.store(
+                                        result.probability.to_bits(),
+                                        Ordering::Relaxed,
+                                    );
+                                }
+                            }
+
                             let bytes = match format {
                                 SampleFormat::Int16 => sample::f32_to_i16_le_bytes(&frame),
                                 SampleFormat::Float32 => sample::f32_to_f32_le_bytes(&frame),
@@ -170,6 +208,13 @@ impl DecibriBridge {
     #[napi(getter)]
     pub fn is_open(&self) -> bool {
         self.running.load(Ordering::Relaxed)
+    }
+
+    /// Latest VAD speech probability (0.0–1.0). Updated by pump thread.
+    /// Returns 0.0 if VAD is not active.
+    #[napi(getter)]
+    pub fn vad_probability(&self) -> f64 {
+        f32::from_bits(self.vad_probability.load(Ordering::Relaxed)) as f64
     }
 
     /// List all available audio input devices.

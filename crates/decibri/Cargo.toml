@@ -12,7 +12,7 @@ categories = ["multimedia::audio"]
 default = ["capture", "output", "vad", "denoise", "gain"]
 capture = ["dep:cpal", "dep:crossbeam-channel"]
 output = ["dep:cpal", "dep:crossbeam-channel"]
-vad = []
+vad = ["dep:ort"]
 denoise = []
 gain = []
 
@@ -22,3 +22,4 @@ dasp_sample = { workspace = true }
 thiserror = { workspace = true }
 parking_lot = { workspace = true }
 crossbeam-channel = { workspace = true, optional = true }
+ort = { workspace = true, optional = true }

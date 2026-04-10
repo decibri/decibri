@@ -1,6 +1,8 @@
 'use strict';
 
 const { Readable } = require('stream');
+const path = require('path');
+const fs = require('fs');
 const { DecibriBridge } = require('../index.js');
 
 // ─── RMS helper ──────────────────────────────────────────────────────────────
@@ -79,11 +81,27 @@ class Decibri extends Readable {
       resolvedDevice = options.device;
     }
 
+    // ── Validate VAD options ─────────────────────────────────────────────────
+
+    const vadMode = options.vadMode ?? 'energy';
+    if (vadMode !== 'energy' && vadMode !== 'silero') {
+      throw new TypeError("vadMode must be 'energy' or 'silero'");
+    }
+
+    let modelPath = undefined;
+    if (vadMode === 'silero' && options.vad) {
+      modelPath = options.modelPath || path.join(__dirname, '..', 'models', 'silero_vad.onnx');
+      if (!fs.existsSync(modelPath)) {
+        throw new Error(`Silero VAD model not found at ${modelPath}. Ensure the models/ directory is included in your installation.`);
+      }
+    }
+
     // ── Store config ───────────────────────────────────────────────────────
 
     this._format = format;
     this._vad = options.vad || false;
-    this._vadThreshold = options.vadThreshold ?? 0.01;
+    this._vadMode = vadMode;
+    this._vadThreshold = options.vadThreshold ?? (vadMode === 'silero' ? 0.5 : 0.01);
     this._vadHoldoff = options.vadHoldoff ?? 300;
     this._isSpeaking = false;
     this._silenceTimer = null;
@@ -97,6 +115,8 @@ class Decibri extends Readable {
       framesPerBuffer,
       format,
       device: resolvedDevice,
+      vadMode: (options.vad && vadMode === 'silero') ? 'silero' : 'energy',
+      modelPath,
     });
   }
 
@@ -119,23 +139,43 @@ class Decibri extends Readable {
       }
 
       if (this._vad) {
-        const rms = computeRMS(chunk, this._format);
-        if (rms >= this._vadThreshold) {
-          clearTimeout(this._silenceTimer);
-          this._silenceTimer = null;
-          if (!this._isSpeaking) {
-            this._isSpeaking = true;
-            this.emit('speech');
-          }
-        } else if (this._isSpeaking && !this._silenceTimer) {
-          this._silenceTimer = setTimeout(() => {
-            this._isSpeaking = false;
-            this._silenceTimer = null;
-            this.emit('silence');
-          }, this._vadHoldoff);
+        if (this._vadMode === 'silero') {
+          const prob = this._native.vadProbability;
+          this._processVadSilero(prob);
+        } else {
+          this._processVadEnergy(chunk);
         }
       }
     });
+  }
+
+  /** @internal — Energy-based VAD (RMS threshold) */
+  _processVadEnergy(chunk) {
+    const rms = computeRMS(chunk, this._format);
+    this._processVadValue(rms);
+  }
+
+  /** @internal — Silero ML-based VAD (reads probability from native) */
+  _processVadSilero(probability) {
+    this._processVadValue(probability);
+  }
+
+  /** @internal — Common speech/silence state machine */
+  _processVadValue(value) {
+    if (value >= this._vadThreshold) {
+      clearTimeout(this._silenceTimer);
+      this._silenceTimer = null;
+      if (!this._isSpeaking) {
+        this._isSpeaking = true;
+        this.emit('speech');
+      }
+    } else if (this._isSpeaking && !this._silenceTimer) {
+      this._silenceTimer = setTimeout(() => {
+        this._isSpeaking = false;
+        this._silenceTimer = null;
+        this.emit('silence');
+      }, this._vadHoldoff);
+    }
   }
 
   /**

@@ -79,6 +79,21 @@ export interface DecibriOptions extends ReadableOptions {
    * @default 300
    */
   vadHoldoff?: number;
+
+  /**
+   * VAD engine to use.
+   * - `'energy'` — RMS energy threshold (default, lightweight)
+   * - `'silero'` — Silero VAD v5 ML model (more accurate, ~1ms inference)
+   * @default 'energy'
+   */
+  vadMode?: 'energy' | 'silero';
+
+  /**
+   * Path to the Silero VAD ONNX model file.
+   * Only used when `vadMode` is `'silero'`.
+   * Defaults to `models/silero_vad.onnx` relative to the package.
+   */
+  modelPath?: string;
 }
 
 /**

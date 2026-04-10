@@ -63,6 +63,7 @@
   },
   "files": [
     "src/",
+    "models/",
     "index.js",
     "index.d.ts"
   ],

@@ -17,6 +17,7 @@ dasp_sample = "0.11"
 thiserror = "2"
 parking_lot = "0.12"
 crossbeam-channel = "0.5"
+ort = { version = "=2.0.0-rc.12", default-features = false, features = ["std", "download-binaries", "tls-native"] }
 
 [profile.release]
 lto = true
