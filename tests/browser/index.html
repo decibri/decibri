@@ -1,0 +1,263 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>decibri browser smoke test</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body { font-family: system-ui, sans-serif; max-width: 640px; margin: 40px auto; padding: 0 20px; color: #222; }
+    h1 { font-size: 1.4rem; margin-bottom: 16px; }
+    .controls { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 16px; }
+    button { padding: 8px 16px; font-size: 0.9rem; border: 1px solid #ccc; border-radius: 4px; cursor: pointer; background: #f8f8f8; }
+    button:hover { background: #e8e8e8; }
+    button:disabled { opacity: 0.4; cursor: default; }
+    .format-toggle { margin-bottom: 16px; font-size: 0.9rem; }
+    .format-toggle label { margin-right: 12px; cursor: pointer; }
+    .meter-container { height: 20px; background: #eee; border-radius: 4px; margin-bottom: 16px; overflow: hidden; }
+    .meter-bar { height: 100%; width: 0%; background: #4caf50; transition: width 50ms; }
+    .stats { font-size: 0.85rem; color: #666; margin-bottom: 12px; }
+    #log { background: #1a1a1a; color: #0f0; font-family: monospace; font-size: 0.8rem; padding: 12px; border-radius: 4px; height: 320px; overflow-y: auto; white-space: pre-wrap; word-break: break-all; }
+  </style>
+</head>
+<body>
+  <h1>decibri browser smoke test</h1>
+
+  <div class="format-toggle">
+    <strong>Format:</strong>
+    <label><input type="radio" name="format" value="int16" checked> int16</label>
+    <label><input type="radio" name="format" value="float32"> float32</label>
+  </div>
+
+  <div class="controls">
+    <button id="btn-start">Start</button>
+    <button id="btn-stop" disabled>Stop</button>
+    <button id="btn-devices">Devices</button>
+    <button id="btn-version">Version</button>
+  </div>
+
+  <div class="meter-container"><div class="meter-bar" id="meter"></div></div>
+  <div class="stats" id="stats"></div>
+  <div id="log"></div>
+
+  <!--
+    This smoke test loads the browser source directly via a module bundler or
+    by serving with a tool that supports CommonJS (e.g., browserify, webpack).
+    For quick testing, use a simple bundler or adapt the imports below.
+
+    For now, this page works with the decibri-web global build as a reference.
+    A proper bundled version will be available after the IIFE build is added.
+  -->
+  <script type="module">
+    // Inline the browser source for smoke testing without a bundler.
+    // In production, users import via: import { Decibri } from 'decibri';
+
+    // ── Emitter ──────────────────────────────────────────────────────────
+    class Emitter {
+      constructor() { this._listeners = new Map(); }
+      on(event, fn) {
+        let set = this._listeners.get(event);
+        if (!set) { set = new Set(); this._listeners.set(event, set); }
+        set.add(fn); return this;
+      }
+      off(event, fn) {
+        const set = this._listeners.get(event);
+        if (!set) return this;
+        if (set.delete(fn)) return this;
+        for (const l of set) { if (l._original === fn) { set.delete(l); return this; } }
+        return this;
+      }
+      once(event, fn) {
+        const w = (...a) => { this.off(event, w); fn(...a); };
+        w._original = fn; return this.on(event, w);
+      }
+      emit(event, ...args) {
+        const set = this._listeners.get(event);
+        if (!set || set.size === 0) return false;
+        for (const fn of set) fn(...args); return true;
+      }
+      removeAllListeners(event) {
+        if (event !== undefined) this._listeners.delete(event);
+        else this._listeners.clear();
+        return this;
+      }
+    }
+
+    // ── Worklet inline ───────────────────────────────────────────────────
+    const WORKLET_SOURCE = "var u=class extends AudioWorkletProcessor{constructor(r){super();let e=r.processorOptions;this.framesPerBuffer=e.framesPerBuffer,this.format=e.format,this.ratio=e.nativeSampleRate/e.targetSampleRate,this.needsResample=e.nativeSampleRate!==e.targetSampleRate,this.position=0,this.buffer=new Float32Array(this.framesPerBuffer),this.bufferIndex=0}process(r,e,s){let t=r[0]?.[0];if(!t||t.length===0)return!0;let f;this.needsResample?f=this.resample(t):f=t;let a=0;for(;a<f.length;){let i=this.framesPerBuffer-this.bufferIndex,o=f.length-a,n=Math.min(i,o);this.buffer.set(f.subarray(a,a+n),this.bufferIndex),this.bufferIndex+=n,a+=n,this.bufferIndex>=this.framesPerBuffer&&this.flush()}return!0}resample(r){let e=r.length,s=0,t=this.position;for(;t<e-1;)s++,t+=this.ratio;let f=new Float32Array(s);t=this.position;for(let a=0;a<s;a++){let i=Math.floor(t),o=t-i;f[a]=r[i]*(1-o)+r[i+1]*o,t+=this.ratio}return this.position=Math.max(0,t-e),f}flush(){let r;if(this.format===\"int16\"){let e=new Int16Array(this.framesPerBuffer);for(let s=0;s<this.framesPerBuffer;s++)e[s]=Math.max(-32768,Math.min(32767,Math.round(this.buffer[s]*32768)));r=e.buffer}else r=this.buffer.slice(0,this.framesPerBuffer).buffer;this.port.postMessage(r,[r]),this.buffer=new Float32Array(this.framesPerBuffer),this.bufferIndex=0}};registerProcessor(\"decibri-processor\",u);\n";
+
+    // ── Decibri (browser) ────────────────────────────────────────────────
+    class Decibri extends Emitter {
+      constructor(options = {}) {
+        super();
+        this._audioContext = null; this._stream = null; this._sourceNode = null;
+        this._workletNode = null; this._started = false; this._starting = null;
+        this._stopRequested = false; this._vad = options.vad ?? false;
+        this._vadThreshold = options.vadThreshold ?? 0.01;
+        this._vadHoldoff = options.vadHoldoff ?? 300;
+        this._isSpeaking = false; this._silenceTimer = null;
+        this._sampleRate = options.sampleRate ?? 16000;
+        this._channels = options.channels ?? 1;
+        this._framesPerBuffer = options.framesPerBuffer ?? 1600;
+        this._device = options.device; this._format = options.format ?? 'int16';
+        this._echoCancellation = options.echoCancellation ?? true;
+        this._noiseSuppression = options.noiseSuppression ?? true;
+      }
+      start() {
+        if (this._started) return Promise.resolve();
+        if (this._starting) return this._starting;
+        this._starting = this._doStart().finally(() => { this._starting = null; });
+        return this._starting;
+      }
+      stop() {
+        if (!this._started) { if (this._starting) this._stopRequested = true; return; }
+        this._started = false;
+        this._stream?.getTracks().forEach(t => t.stop());
+        this._sourceNode?.disconnect(); this._workletNode?.disconnect();
+        this._workletNode?.port.close(); this._audioContext?.close();
+        if (this._silenceTimer !== null) { clearTimeout(this._silenceTimer); this._silenceTimer = null; }
+        this._isSpeaking = false;
+        this._audioContext = null; this._stream = null; this._sourceNode = null; this._workletNode = null;
+        this.emit('end'); this.emit('close');
+      }
+      get isOpen() { return this._started; }
+      static async devices() {
+        const all = await navigator.mediaDevices.enumerateDevices();
+        return all.filter(d => d.kind === 'audioinput').map(d => ({ deviceId: d.deviceId, label: d.label, groupId: d.groupId }));
+      }
+      static version() { return { decibri: '3.0.0' }; }
+      async _doStart() {
+        this._audioContext = new AudioContext();
+        const nativeSampleRate = this._audioContext.sampleRate;
+        await this._audioContext.resume();
+        const constraints = { channelCount: this._channels, echoCancellation: this._echoCancellation, noiseSuppression: this._noiseSuppression };
+        if (this._device) constraints.deviceId = { exact: this._device };
+        try { this._stream = await navigator.mediaDevices.getUserMedia({ audio: constraints }); } catch (err) {
+          await this._audioContext.close(); this._audioContext = null;
+          const e = err instanceof DOMException && err.name === 'NotAllowedError' ? new Error('Microphone permission denied') : err instanceof DOMException && err.name === 'NotFoundError' ? new Error('No microphone found') : err instanceof Error ? err : new Error(String(err));
+          this.emit('error', e); throw e;
+        }
+        const blob = new Blob([WORKLET_SOURCE], { type: 'application/javascript' });
+        const blobUrl = URL.createObjectURL(blob);
+        try { await this._audioContext.audioWorklet.addModule(blobUrl); } catch (err) {
+          URL.revokeObjectURL(blobUrl); this._stream.getTracks().forEach(t => t.stop()); this._stream = null;
+          await this._audioContext.close(); this._audioContext = null;
+          const e = new Error('Failed to load audio worklet: ' + (err instanceof Error ? err.message : String(err)));
+          this.emit('error', e); throw e;
+        }
+        URL.revokeObjectURL(blobUrl);
+        this._sourceNode = this._audioContext.createMediaStreamSource(this._stream);
+        this._workletNode = new AudioWorkletNode(this._audioContext, 'decibri-processor', {
+          processorOptions: { framesPerBuffer: this._framesPerBuffer, format: this._format, nativeSampleRate, targetSampleRate: this._sampleRate }
+        });
+        this._workletNode.port.onmessage = (event) => {
+          const buf = event.data;
+          const chunk = this._format === 'int16' ? new Int16Array(buf) : new Float32Array(buf);
+          this.emit('data', chunk);
+          if (this._vad) {
+            let sum = 0; const n = chunk.length;
+            if (chunk instanceof Float32Array) { for (let i = 0; i < n; i++) sum += chunk[i] * chunk[i]; }
+            else { for (let i = 0; i < n; i++) { const s = chunk[i] / 32768; sum += s * s; } }
+            const rms = n > 0 ? Math.sqrt(sum / n) : 0;
+            if (rms >= this._vadThreshold) {
+              if (this._silenceTimer !== null) { clearTimeout(this._silenceTimer); this._silenceTimer = null; }
+              if (!this._isSpeaking) { this._isSpeaking = true; this.emit('speech'); }
+            } else if (this._isSpeaking && this._silenceTimer === null) {
+              this._silenceTimer = setTimeout(() => { this._isSpeaking = false; this._silenceTimer = null; this.emit('silence'); }, this._vadHoldoff);
+            }
+          }
+        };
+        this._sourceNode.connect(this._workletNode);
+        this._started = true;
+        if (this._stopRequested) { this._stopRequested = false; this.stop(); }
+      }
+    }
+
+    // ── UI ────────────────────────────────────────────────────────────────
+    const logEl = document.getElementById('log');
+    const meterEl = document.getElementById('meter');
+    const statsEl = document.getElementById('stats');
+    const btnStart = document.getElementById('btn-start');
+    const btnStop = document.getElementById('btn-stop');
+
+    let mic = null;
+    let chunkCount = 0;
+    let startTime = 0;
+
+    function log(msg) {
+      const ts = new Date().toISOString().slice(11, 23);
+      logEl.textContent += `[${ts}] ${msg}\n`;
+      logEl.scrollTop = logEl.scrollHeight;
+    }
+
+    function getFormat() {
+      return document.querySelector('input[name="format"]:checked').value;
+    }
+
+    function computeRms(chunk) {
+      let sum = 0;
+      if (chunk instanceof Float32Array) {
+        for (let i = 0; i < chunk.length; i++) sum += chunk[i] * chunk[i];
+      } else {
+        for (let i = 0; i < chunk.length; i++) { const s = chunk[i] / 32768; sum += s * s; }
+      }
+      return chunk.length > 0 ? Math.sqrt(sum / chunk.length) : 0;
+    }
+
+    btnStart.addEventListener('click', async () => {
+      const format = getFormat();
+      chunkCount = 0;
+      startTime = Date.now();
+      log(`Creating Decibri({ sampleRate: 16000, format: '${format}', vad: true })`);
+      mic = new Decibri({ sampleRate: 16000, format, vad: true });
+      mic.on('data', (chunk) => {
+        chunkCount++;
+        const rms = computeRms(chunk);
+        const pct = Math.min(100, rms * 400);
+        meterEl.style.width = pct + '%';
+        meterEl.style.background = pct > 30 ? '#f44336' : pct > 10 ? '#ff9800' : '#4caf50';
+        const elapsed = ((Date.now() - startTime) / 1000).toFixed(1);
+        const type = chunk instanceof Int16Array ? 'Int16Array' : 'Float32Array';
+        statsEl.textContent = `Chunks: ${chunkCount} | Type: ${type} | Length: ${chunk.length} | RMS: ${rms.toFixed(4)} | Elapsed: ${elapsed}s`;
+      });
+      mic.on('speech', () => log('EVENT: speech'));
+      mic.on('silence', () => log('EVENT: silence'));
+      mic.on('end', () => log('EVENT: end'));
+      mic.on('close', () => log('EVENT: close'));
+      mic.on('error', (err) => log('ERROR: ' + err.message));
+      try {
+        await mic.start();
+        log('Started — mic.isOpen = ' + mic.isOpen);
+        btnStart.disabled = true;
+        btnStop.disabled = false;
+      } catch (err) {
+        log('START FAILED: ' + err.message);
+      }
+    });
+
+    btnStop.addEventListener('click', () => {
+      if (mic) {
+        mic.stop();
+        log('Stopped — mic.isOpen = ' + mic.isOpen);
+        mic = null;
+        meterEl.style.width = '0%';
+        btnStart.disabled = false;
+        btnStop.disabled = true;
+      }
+    });
+
+    document.getElementById('btn-devices').addEventListener('click', async () => {
+      try {
+        const devices = await Decibri.devices();
+        log('Devices:\n' + JSON.stringify(devices, null, 2));
+      } catch (err) {
+        log('DEVICES ERROR: ' + err.message);
+      }
+    });
+
+    document.getElementById('btn-version').addEventListener('click', () => {
+      log('Version: ' + JSON.stringify(Decibri.version()));
+    });
+  </script>
+</body>
+</html>

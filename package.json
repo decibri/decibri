@@ -1,0 +1,9 @@
+{
+  "private": true,
+  "devDependencies": {
+    "vitest": "^4.0.0"
+  },
+  "scripts": {
+    "test:browser": "vitest run"
+  }
+}

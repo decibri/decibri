@@ -4,11 +4,19 @@
   "description": "Cross-platform audio capture, output, and processing for Node.js and browsers",
   "main": "src/decibri.js",
   "types": "src/decibri.d.ts",
+  "browser": "./src/browser/index.js",
   "exports": {
     ".": {
-      "types": "./src/decibri.d.ts",
-      "require": "./src/decibri.js",
-      "import": "./src/decibri.js"
+      "node": {
+        "types": "./src/decibri.d.ts",
+        "require": "./src/decibri.js",
+        "import": "./src/decibri.js"
+      },
+      "browser": {
+        "types": "./src/browser/index.d.ts",
+        "default": "./src/browser/index.js"
+      },
+      "default": "./src/decibri.js"
     }
   },
   "license": "Apache-2.0",
