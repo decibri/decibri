@@ -10,7 +10,8 @@
       "Bash(npm run:*)",
       "Bash(ls -la /c/development/decibri/rust/decibri/repository/decibri/npm/decibri/*.node /c/development/decibri/rust/decibri/repository/decibri/npm/decibri/index.js /c/development/decibri/rust/decibri/repository/decibri/npm/decibri/index.d.ts)",
       "Bash(ls -la /c/development/decibri/rust/decibri/repository/decibri/npm/decibri/decibri.* /c/development/decibri/rust/decibri/repository/decibri/npm/decibri/index.*)",
-      "Bash(node tests/test-capture.js)"
+      "Bash(node tests/test-capture.js)",
+      "Bash(node tests/test-api.js)"
     ]
   }
 }

@@ -53,6 +53,32 @@ class Decibri extends Readable {
       throw new TypeError("format must be 'int16' or 'float32'");
     }
 
+    // ── Resolve device ──────────────────────────────────────────────────────
+
+    let resolvedDevice = options.device;
+    if (typeof options.device === 'string') {
+      const lower = options.device.toLowerCase();
+      const matches = DecibriBridge.devices().filter(d =>
+        d.name.toLowerCase().includes(lower)
+      );
+      if (matches.length === 0) {
+        throw new TypeError(`No audio input device found matching "${options.device}"`);
+      }
+      if (matches.length > 1) {
+        const names = matches.map(d => `  [${d.index}] ${d.name}`).join('\n');
+        throw new TypeError(
+          `Multiple devices match "${options.device}":\n${names}\nUse a more specific name or pass the device index directly.`
+        );
+      }
+      resolvedDevice = matches[0].index;
+    } else if (typeof options.device === 'number') {
+      const devices = DecibriBridge.devices();
+      if (options.device < 0 || options.device >= devices.length) {
+        throw new RangeError('device index out of range — call Decibri.devices() to list available devices');
+      }
+      resolvedDevice = options.device;
+    }
+
     // ── Store config ───────────────────────────────────────────────────────
 
     this._format = format;
@@ -70,7 +96,7 @@ class Decibri extends Readable {
       channels,
       framesPerBuffer,
       format,
-      device: options.device,
+      device: resolvedDevice,
     });
   }
 
