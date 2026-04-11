@@ -3,7 +3,7 @@
 const { Emitter } = require('./emitter.js');
 const { WORKLET_SOURCE } = require('./worklet-inline.js');
 
-const VERSION = '3.0.0-rc.3';
+const VERSION = '3.0.0-rc.4';
 
 /**
  * Browser microphone capture.
