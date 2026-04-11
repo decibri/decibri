@@ -19,6 +19,16 @@
       </td>
     </tr>
     <tr>
+    <td><strong>Binaries</strong></td>
+    <td>
+      <a href="https://github.com/decibri/decibri/actions/workflows/release.yml"><img src="https://img.shields.io/github/actions/workflow/status/decibri/decibri/release.yml?job=Build%20x86_64-pc-windows-msvc&label=Windows%20x64&logo=microsoft&logoColor=white" alt="Windows x64"></a>&nbsp;
+      <a href="https://github.com/decibri/decibri/actions/workflows/release.yml"><img src="https://img.shields.io/github/actions/workflow/status/decibri/decibri/release.yml?job=Build%20aarch64-apple-darwin&label=macOS%20ARM64&logo=apple" alt="macOS ARM64"></a>&nbsp;
+      <a href="https://github.com/decibri/decibri/actions/workflows/release.yml"><img src="https://img.shields.io/github/actions/workflow/status/decibri/decibri/release.yml?job=Build%20x86_64-unknown-linux-gnu&label=Linux%20x64&logo=linux&logoColor=white" alt="Linux x64"></a>&nbsp;
+      <a href="https://github.com/decibri/decibri/actions/workflows/release.yml"><img src="https://img.shields.io/github/actions/workflow/status/decibri/decibri/release.yml?job=Build%20aarch64-unknown-linux-gnu&label=Linux%20ARM64&logo=linux&logoColor=white" alt="Linux ARM64"></a>
+    </td>
+  </tr>
+  <tr>
+    <tr>
       <td><strong>Integrations</strong></td>
       <td>
         <a href="https://decibri.com/docs/node/integrations/openai-realtime"><img src="https://img.shields.io/badge/OpenAI-cloud-blue" alt="OpenAI"></a>&nbsp;
