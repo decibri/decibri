@@ -1,6 +1,6 @@
 {
-  "name": "decibri-win32-x64-msvc",
-  "version": "3.0.0-rc.6",
+  "name": "@decibri/decibri-win32-x64-msvc",
+  "version": "3.0.0-rc.7",
   "os": ["win32"],
   "cpu": ["x64"],
   "main": "decibri.win32-x64-msvc.node",

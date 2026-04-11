@@ -58,6 +58,7 @@ jobs:
           npx napi build --platform --release \
             -p decibri-node \
             --manifest-path ../../bindings/node/Cargo.toml \
+            --js-package-name @decibri/decibri \
             --target ${{ matrix.target }} \
             -o .
 
@@ -111,17 +112,17 @@ jobs:
       - name: Stage platform binaries
         shell: bash
         run: |
-          find artifacts/ -name "decibri.win32-x64-msvc.node" -exec cp {} npm/decibri-win32-x64-msvc/ \;
-          find artifacts/ -name "decibri.darwin-arm64.node" -exec cp {} npm/decibri-darwin-arm64/ \;
-          find artifacts/ -name "decibri.linux-x64-gnu.node" -exec cp {} npm/decibri-linux-x64-gnu/ \;
-          find artifacts/ -name "decibri.linux-arm64-gnu.node" -exec cp {} npm/decibri-linux-arm64-gnu/ \;
+          find artifacts/ -name "decibri.win32-x64-msvc.node" -exec cp {} npm/platform-win32-x64-msvc/ \;
+          find artifacts/ -name "decibri.darwin-arm64.node" -exec cp {} npm/platform-darwin-arm64/ \;
+          find artifacts/ -name "decibri.linux-x64-gnu.node" -exec cp {} npm/platform-linux-x64-gnu/ \;
+          find artifacts/ -name "decibri.linux-arm64-gnu.node" -exec cp {} npm/platform-linux-arm64-gnu/ \;
 
       - name: Verify staged binaries
         run: |
-          ls -la npm/decibri-win32-x64-msvc/decibri.*.node
-          ls -la npm/decibri-darwin-arm64/decibri.*.node
-          ls -la npm/decibri-linux-x64-gnu/decibri.*.node
-          ls -la npm/decibri-linux-arm64-gnu/decibri.*.node
+          ls -la npm/platform-win32-x64-msvc/decibri.*.node
+          ls -la npm/platform-darwin-arm64/decibri.*.node
+          ls -la npm/platform-linux-x64-gnu/decibri.*.node
+          ls -la npm/platform-linux-arm64-gnu/decibri.*.node
 
       - name: Stage napi loader
         run: |
@@ -134,23 +135,23 @@ jobs:
           ls -la npm/decibri/index.d.ts
 
       # Publish platform packages FIRST (main package depends on them)
-      - name: Publish decibri-win32-x64-msvc
-        run: cd npm/decibri-win32-x64-msvc && npm publish --access public --provenance
+      - name: Publish @decibri/decibri-win32-x64-msvc
+        run: cd npm/platform-win32-x64-msvc && npm publish --access public --provenance
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
 
-      - name: Publish decibri-darwin-arm64
-        run: cd npm/decibri-darwin-arm64 && npm publish --access public --provenance
+      - name: Publish @decibri/decibri-darwin-arm64
+        run: cd npm/platform-darwin-arm64 && npm publish --access public --provenance
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
 
-      - name: Publish decibri-linux-x64-gnu
-        run: cd npm/decibri-linux-x64-gnu && npm publish --access public --provenance
+      - name: Publish @decibri/decibri-linux-x64-gnu
+        run: cd npm/platform-linux-x64-gnu && npm publish --access public --provenance
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
 
-      - name: Publish decibri-linux-arm64-gnu
-        run: cd npm/decibri-linux-arm64-gnu && npm publish --access public --provenance
+      - name: Publish @decibri/decibri-linux-arm64-gnu
+        run: cd npm/platform-linux-arm64-gnu && npm publish --access public --provenance
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
 
