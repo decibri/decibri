@@ -105,7 +105,10 @@ pub fn resolve_device(selector: &DeviceSelector) -> Result<cpal::Device, Decibri
 
             let mut matches: Vec<(usize, String, cpal::Device)> = Vec::new();
             for (index, device) in devices.enumerate() {
-                let name = device.description().map(|d| d.name().to_string()).unwrap_or_default();
+                let name = device
+                    .description()
+                    .map(|d| d.name().to_string())
+                    .unwrap_or_default();
                 if name.to_lowercase().contains(&query_lower) {
                     matches.push((index, name, device));
                 }
@@ -203,7 +206,10 @@ pub fn resolve_output_device(selector: &DeviceSelector) -> Result<cpal::Device, 
 
             let mut matches: Vec<(usize, String, cpal::Device)> = Vec::new();
             for (index, device) in devices.enumerate() {
-                let name = device.description().map(|d| d.name().to_string()).unwrap_or_default();
+                let name = device
+                    .description()
+                    .map(|d| d.name().to_string())
+                    .unwrap_or_default();
                 if name.to_lowercase().contains(&query_lower) {
                     matches.push((index, name, device));
                 }
