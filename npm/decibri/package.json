@@ -1,6 +1,6 @@
 {
   "name": "decibri",
-  "version": "3.0.0-rc.7",
+  "version": "3.0.0",
   "description": "Cross-platform audio capture, output, and processing for Node.js and browsers",
   "main": "src/decibri.js",
   "types": "src/decibri.d.ts",
@@ -69,10 +69,10 @@
     "README.md"
   ],
   "optionalDependencies": {
-    "@decibri/decibri-win32-x64-msvc": "3.0.0-rc.7",
-    "@decibri/decibri-darwin-arm64": "3.0.0-rc.7",
-    "@decibri/decibri-linux-x64-gnu": "3.0.0-rc.7",
-    "@decibri/decibri-linux-arm64-gnu": "3.0.0-rc.7"
+    "@decibri/decibri-win32-x64-msvc": "3.0.0",
+    "@decibri/decibri-darwin-arm64": "3.0.0",
+    "@decibri/decibri-linux-x64-gnu": "3.0.0",
+    "@decibri/decibri-linux-arm64-gnu": "3.0.0"
   },
   "devDependencies": {
     "@napi-rs/cli": "^3.0.0"
