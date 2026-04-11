@@ -19,6 +19,9 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy, rustfmt
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: "rust"
       - run: sudo apt-get update && sudo apt-get install -y libasound2-dev
       - run: cargo clippy --workspace -- -D warnings
       - run: cargo fmt --all -- --check
@@ -29,10 +32,14 @@ jobs:
     steps:
       - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
-      - run: cargo generate-lockfile
-      - uses: rustsec/audit-check@v2
+      - uses: Swatinem/rust-cache@v2
         with:
-          token: ${{ secrets.GITHUB_TOKEN }}
+          shared-key: "rust"
+      - run: cargo generate-lockfile
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-audit
+      - run: cargo audit
 
   test-rust:
     name: Rust Tests
@@ -41,6 +48,9 @@ jobs:
     steps:
       - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: "rust"
       - run: sudo apt-get update && sudo apt-get install -y libasound2-dev
       - run: cargo test -p decibri
 
@@ -51,9 +61,16 @@ jobs:
     steps:
       - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: "rust"
       - uses: actions/setup-node@v6
         with:
           node-version: '20'
+          cache: 'npm'
+          cache-dependency-path: |
+            package-lock.json
+            npm/decibri/package-lock.json
       - run: sudo apt-get update && sudo apt-get install -y libasound2-dev
       - name: Install npm dependencies
         run: cd npm/decibri && npm install --ignore-optional
@@ -73,6 +90,8 @@ jobs:
       - uses: actions/setup-node@v6
         with:
           node-version: '20'
+          cache: 'npm'
+          cache-dependency-path: package-lock.json
       - name: Install vitest
         run: npm install
       - name: Run browser unit tests
