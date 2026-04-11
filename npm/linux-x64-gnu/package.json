@@ -9,6 +9,6 @@
   "description": "decibri native binary for Linux x64",
   "repository": {
     "type": "git",
-    "url": "https://github.com/decibri/decibri"
+    "url": "git+https://github.com/decibri/decibri.git"
   }
 }
