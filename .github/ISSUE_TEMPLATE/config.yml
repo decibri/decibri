@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Security Vulnerability
+    url: https://github.com/decibri/decibri/security/advisories/new
+    about: Report a security issue privately through GitHub's vulnerability reporting. Do not use public issues for security reports.
+  - name: Questions and Documentation
+    url: https://decibri.com
+    about: For general questions, usage help, and documentation, visit decibri.com.
