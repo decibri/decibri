@@ -95,18 +95,30 @@ jobs:
         with:
           path: artifacts/
 
+      - name: List downloaded artifacts
+        run: find artifacts/ -type f
+
       - name: Stage platform binaries
+        shell: bash
         run: |
-          cp artifacts/decibri-win32-x64-msvc/decibri.win32-x64-msvc.node npm/win32-x64-msvc/
-          cp artifacts/decibri-darwin-arm64/decibri.darwin-arm64.node npm/darwin-arm64/
-          cp artifacts/decibri-linux-x64-gnu/decibri.linux-x64-gnu.node npm/linux-x64-gnu/
-          cp artifacts/decibri-linux-arm64-gnu/decibri.linux-arm64-gnu.node npm/linux-arm64-gnu/
+          find artifacts/ -name "decibri.win32-x64-msvc.node" -exec cp {} npm/win32-x64-msvc/ \;
+          find artifacts/ -name "decibri.darwin-arm64.node" -exec cp {} npm/darwin-arm64/ \;
+          find artifacts/ -name "decibri.linux-x64-gnu.node" -exec cp {} npm/linux-x64-gnu/ \;
+          find artifacts/ -name "decibri.linux-arm64-gnu.node" -exec cp {} npm/linux-arm64-gnu/ \;
+
+      - name: Verify staged binaries
+        run: |
+          ls -la npm/win32-x64-msvc/decibri.*.node
+          ls -la npm/darwin-arm64/decibri.*.node
+          ls -la npm/linux-x64-gnu/decibri.*.node
+          ls -la npm/linux-arm64-gnu/decibri.*.node
 
       - name: Generate napi loader
+        shell: bash
         run: |
           cd npm/decibri
           npm install --ignore-optional
-          cp artifacts/decibri-linux-x64-gnu/decibri.linux-x64-gnu.node .
+          find ../../artifacts/ -name "decibri.linux-x64-gnu.node" -exec cp {} . \;
           npx napi build --platform --release \
             -p decibri-node \
             --manifest-path ../../bindings/node/Cargo.toml \
