@@ -1,0 +1,62 @@
+name: Release Dry Run
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    name: Build ${{ matrix.target }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+          - os: macos-14
+            target: aarch64-apple-darwin
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            setup: sudo apt-get update && sudo apt-get install -y libasound2-dev
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Platform setup
+        if: matrix.setup
+        run: ${{ matrix.setup }}
+
+      - name: Install npm dependencies
+        run: cd npm/decibri && npm install --ignore-optional
+
+      - name: Build native addon
+        run: |
+          cd npm/decibri
+          npx napi build --platform --release \
+            -p decibri-node \
+            --manifest-path ../../bindings/node/Cargo.toml \
+            --target ${{ matrix.target }} \
+            -o .
+
+      - name: Verify binary exists
+        shell: bash
+        run: ls -la npm/decibri/decibri.*.node
+
+      - name: Smoke test require()
+        shell: bash
+        run: cd npm/decibri && node -e "const d = require('./src/decibri.js'); console.log('version:', JSON.stringify(d.version())); console.log('devices:', d.devices().length)"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: decibri-${{ matrix.target }}
+          path: npm/decibri/decibri.*.node
+          retention-days: 7
+          if-no-files-found: error

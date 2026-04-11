@@ -1,0 +1,17 @@
+version: 2
+updates:
+  - package-ecosystem: cargo
+    directory: "/"
+    schedule:
+      interval: weekly
+    groups:
+      cargo-deps:
+        patterns: ["*"]
+
+  - package-ecosystem: npm
+    directory: "/npm/decibri"
+    schedule:
+      interval: weekly
+    groups:
+      npm-deps:
+        patterns: ["*"]

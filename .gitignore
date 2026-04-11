@@ -19,6 +19,9 @@ npm/darwin-arm64/*.node
 npm/linux-x64-gnu/*.node
 npm/linux-arm64-gnu/*.node
 
+# Claude Code local settings
+.claude/
+
 # IDE
 .idea/
 .vscode/
