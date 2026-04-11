@@ -12,7 +12,7 @@
  *
  * This file cannot import other modules (AudioWorklet restriction).
  *
- * Ported from decibri-web worklet-processor.ts — logic identical, types removed.
+ * Ported from decibri-web worklet-processor.ts. Logic identical, types removed.
  */
 
 class DecibriProcessor extends AudioWorkletProcessor {

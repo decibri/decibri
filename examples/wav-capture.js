@@ -1,6 +1,6 @@
 'use strict';
 // Captures audio for DURATION_MS and writes a valid WAV file.
-// No external dependencies — uses Node.js built-ins only.
+// No external dependencies. Uses Node.js built-ins only.
 // Usage: node examples/wav-capture.js
 
 const fs = require('fs');

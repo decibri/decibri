@@ -11,7 +11,7 @@ const VERSION = '3.0.0-rc.1';
  * Uses getUserMedia + AudioWorklet for real-time audio capture in browsers.
  * Emits 'data' events with Int16Array or Float32Array chunks.
  *
- * Ported from decibri-web decibri.ts — logic identical, types removed.
+ * Ported from decibri-web decibri.ts. Logic identical, types removed.
  *
  * @example
  * const { Decibri } = require('decibri'); // browser entry via conditional export

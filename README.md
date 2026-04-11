@@ -92,7 +92,7 @@ mic.pipe(speaker);
 
 ---
 
-## API — Decibri (Capture)
+## API: Decibri (Capture)
 
 ### `new Decibri(options?)`
 
@@ -106,7 +106,7 @@ Creates a `Readable` stream that captures from the microphone.
 | `device` | number \| string | system default | Device index or case-insensitive name substring |
 | `format` | `'int16'` \| `'float32'` | `'int16'` | Sample encoding |
 | `vad` | boolean | `false` | Enable voice activity detection |
-| `vadMode` | `'energy'` \| `'silero'` | `'energy'` | VAD engine — RMS threshold or Silero ML model |
+| `vadMode` | `'energy'` \| `'silero'` | `'energy'` | VAD engine: RMS threshold or Silero ML model |
 | `vadThreshold` | number | `0.01` / `0.5` | Speech threshold. Default depends on vadMode |
 | `vadHoldoff` | number | `300` | Silence holdoff in ms |
 
@@ -131,15 +131,15 @@ Standard `ReadableOptions` (e.g. `highWaterMark`) are also accepted.
 | Event | Payload | Description |
 | --- | --- | --- |
 | `'data'` | `Buffer` | Audio chunk (Int16 LE or Float32 LE) |
-| `'backpressure'` | — | Internal buffer full, consumer too slow |
-| `'speech'` | — | VAD: audio crosses threshold |
-| `'silence'` | — | VAD: audio below threshold for `vadHoldoff` ms |
-| `'end'` | — | Stream ended |
+| `'backpressure'` | - | Internal buffer full, consumer too slow |
+| `'speech'` | - | VAD: audio crosses threshold |
+| `'silence'` | - | VAD: audio below threshold for `vadHoldoff` ms |
+| `'end'` | - | Stream ended |
 | `'error'` | `Error` | An error occurred |
 
 ---
 
-## API — DecibriOutput (Playback)
+## API: DecibriOutput (Playback)
 
 ### `new DecibriOutput(options?)`
 
@@ -157,15 +157,15 @@ Standard `WritableOptions` (e.g. `highWaterMark`) are also accepted.
 | Method / Property | Description |
 | --- | --- |
 | `speaker.write(chunk)` | Write PCM data for playback |
-| `speaker.end()` | Signal end — drains remaining audio, then emits `'finish'` |
-| `speaker.stop()` | Immediate stop — discards remaining audio |
+| `speaker.end()` | Signal end. Drains remaining audio, then emits `'finish'` |
+| `speaker.stop()` | Immediate stop. Discards remaining audio |
 | `speaker.isPlaying` | `true` while audio is being output |
 | `DecibriOutput.devices()` | List available output devices |
 | `DecibriOutput.version()` | Same as `Decibri.version()` |
 
 ---
 
-## API — Browser
+## API: Browser
 
 The browser API uses `getUserMedia` and `AudioWorklet`. It differs from the Node.js API because browser audio is fundamentally async.
 
@@ -267,7 +267,7 @@ Integration guides for OpenAI, Deepgram, AssemblyAI, and other providers are at 
 | macOS | arm64 | CoreAudio |
 | Linux | x64 | ALSA |
 | Linux | arm64 | ALSA |
-| Browser | — | Web Audio API (AudioWorklet) |
+| Browser | - | Web Audio API (AudioWorklet) |
 
 ---
 

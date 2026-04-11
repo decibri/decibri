@@ -245,7 +245,7 @@ async function testVAD() {
     sampleRate: 16000,
     channels: 1,
     vad: true,
-    vadThreshold: 0.001, // very low — ambient noise should trigger
+    vadThreshold: 0.001, // very low, ambient noise should trigger
   });
 
   let speechFired = false;
@@ -261,7 +261,7 @@ async function testVAD() {
 
   assert(dataCount > 0, `received ${dataCount} data chunks`);
   assert(speechFired, 'speech event fired (threshold 0.001)');
-  // silence may or may not fire depending on ambient conditions — don't assert
+  // silence may or may not fire depending on ambient conditions, so don't assert
   console.log(`  speech: ${speechFired}, silence: ${silenceFired}, chunks: ${dataCount}`);
   console.log('  Group 6 done\n');
 }
@@ -300,7 +300,7 @@ async function testBackpressure() {
   let backpressureFired = false;
   mic.on('backpressure', () => { backpressureFired = true; });
 
-  // Attach data listener but don't drain fast — just let the buffer fill
+  // Attach data listener but don't drain fast. Just let the buffer fill.
   mic.on('data', () => { /* intentionally slow consumer */ });
 
   await sleep(3000);

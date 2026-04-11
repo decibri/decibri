@@ -227,7 +227,7 @@
       mic.on('error', (err) => log('ERROR: ' + err.message));
       try {
         await mic.start();
-        log('Started — mic.isOpen = ' + mic.isOpen);
+        log('Started, mic.isOpen = ' + mic.isOpen);
         btnStart.disabled = true;
         btnStop.disabled = false;
       } catch (err) {
@@ -238,7 +238,7 @@
     btnStop.addEventListener('click', () => {
       if (mic) {
         mic.stop();
-        log('Stopped — mic.isOpen = ' + mic.isOpen);
+        log('Stopped, mic.isOpen = ' + mic.isOpen);
         mic = null;
         meterEl.style.width = '0%';
         btnStart.disabled = false;

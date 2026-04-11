@@ -13,7 +13,7 @@ Complete rewrite from C++ (PortAudio) to Rust (cpal). One unified package for No
 
 - Complete rewrite from C++ (PortAudio) to Rust (cpal)
 - Native addon built with napi-rs (replaces node-gyp / prebuildify)
-- JS API unchanged — drop-in replacement for v1.x consumers (mcp-listen, voxagent, Wake Word verified)
+- JS API unchanged: drop-in replacement for v1.x consumers (mcp-listen, voxagent, Wake Word verified)
 
 ### Added
 
@@ -34,7 +34,7 @@ Complete rewrite from C++ (PortAudio) to Rust (cpal). One unified package for No
 
 ### Deprecated
 
-- `decibri-web` npm package — use `decibri` with the browser conditional export instead
+- `decibri-web` npm package (use `decibri` with the browser conditional export instead)
 
 ## [1.0.0] - 2025-06-15
 

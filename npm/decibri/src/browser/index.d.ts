@@ -4,7 +4,7 @@ export interface DeviceInfo {
   deviceId: string;
   /** Human-readable device name. May be empty until permission is granted. */
   label: string;
-  /** Group identifier — devices sharing the same physical device. */
+  /** Group identifier. Devices sharing the same physical device. */
   groupId: string;
 }
 
@@ -45,8 +45,8 @@ export interface DecibriOptions {
 
   /**
    * Sample encoding format.
-   * - `'int16'` — Int16Array of PCM samples
-   * - `'float32'` — Float32Array of samples in [-1, 1]
+   * - `'int16'`: Int16Array of PCM samples
+   * - `'float32'`: Float32Array of samples in [-1, 1]
    * @default 'int16'
    */
   format?: 'int16' | 'float32';

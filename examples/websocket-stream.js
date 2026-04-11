@@ -12,7 +12,7 @@ const ws  = new WebSocket(url);
 const mic = new Decibri({ sampleRate: 16000, channels: 1 });
 
 ws.on('open', () => {
-  console.log(`Connected to ${url} — streaming audio. Ctrl+C to stop.`);
+  console.log(`Connected to ${url}, streaming audio. Ctrl+C to stop.`);
 
   mic.on('data', (chunk) => {
     if (ws.readyState === WebSocket.OPEN) ws.send(chunk);
@@ -24,7 +24,7 @@ ws.on('open', () => {
   });
 
   mic.on('backpressure', () => {
-    console.warn('Backpressure — consumer too slow');
+    console.warn('Backpressure: consumer too slow');
   });
 });
 

@@ -132,7 +132,7 @@ class Decibri extends Readable {
         return;
       }
 
-      // push returns false when the consumer is slow — we can't pause a mic,
+      // push returns false when the consumer is slow. We can't pause a mic,
       // but we surface the backpressure warning so callers can react.
       if (!this.push(chunk)) {
         this.emit('backpressure');
@@ -149,18 +149,18 @@ class Decibri extends Readable {
     });
   }
 
-  /** @internal — Energy-based VAD (RMS threshold) */
+  /** @internal Energy-based VAD (RMS threshold) */
   _processVadEnergy(chunk) {
     const rms = computeRMS(chunk, this._format);
     this._processVadValue(rms);
   }
 
-  /** @internal — Silero ML-based VAD (reads probability from native) */
+  /** @internal Silero ML-based VAD (reads probability from native) */
   _processVadSilero(probability) {
     this._processVadValue(probability);
   }
 
-  /** @internal — Common speech/silence state machine */
+  /** @internal Common speech/silence state machine */
   _processVadValue(value) {
     if (value >= this._vadThreshold) {
       clearTimeout(this._silenceTimer);

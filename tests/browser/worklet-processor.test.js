@@ -15,7 +15,7 @@ globalThis.registerProcessor = (name, ctor) => {
   registeredProcessor = { name, ctor };
 };
 
-// Import after mocks are in place — triggers registerProcessor
+// Import after mocks are in place (triggers registerProcessor)
 await import('../../npm/decibri/src/browser/worklet-processor.js');
 
 function createProcessor(opts = {}) {

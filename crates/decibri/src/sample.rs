@@ -18,7 +18,7 @@ pub fn f32_to_i16_le_bytes(samples: &[f32]) -> Vec<u8> {
 
 /// Convert f32 samples to 32-bit IEEE 754 float little-endian bytes.
 ///
-/// Each f32 sample produces 4 bytes (f32 LE). No clamping — values pass through as-is.
+/// Each f32 sample produces 4 bytes (f32 LE). No clamping; values pass through as-is.
 pub fn f32_to_f32_le_bytes(samples: &[f32]) -> Vec<u8> {
     let mut out = Vec::with_capacity(samples.len() * 4);
     for &s in samples {

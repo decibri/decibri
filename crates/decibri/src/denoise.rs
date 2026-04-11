@@ -1,4 +1,4 @@
-// Noise reduction — stub for Phase 2.
+// Noise reduction. Stub for Phase 2.
 //
 // Two paths planned:
 //   1. Basic DSP: spectral subtraction (open source, works but has artifacts)

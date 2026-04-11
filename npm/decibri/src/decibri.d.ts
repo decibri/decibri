@@ -54,8 +54,8 @@ export interface DecibriOptions extends ReadableOptions {
 
   /**
    * Sample encoding format.
-   * - `'int16'` — 16-bit signed integer, little-endian (2 bytes per sample)
-   * - `'float32'` — 32-bit IEEE 754 float, little-endian (4 bytes per sample)
+   * - `'int16'`: 16-bit signed integer, little-endian (2 bytes per sample)
+   * - `'float32'`: 32-bit IEEE 754 float, little-endian (4 bytes per sample)
    * @default 'int16'
    */
   format?: 'int16' | 'float32';
@@ -82,8 +82,8 @@ export interface DecibriOptions extends ReadableOptions {
 
   /**
    * VAD engine to use.
-   * - `'energy'` — RMS energy threshold (default, lightweight)
-   * - `'silero'` — Silero VAD v5 ML model (more accurate, ~1ms inference)
+   * - `'energy'`: RMS energy threshold (default, lightweight)
+   * - `'silero'`: Silero VAD v5 ML model (more accurate, ~1ms inference)
    * @default 'energy'
    */
   vadMode?: 'energy' | 'silero';
@@ -180,8 +180,8 @@ export interface DecibriOutputOptions extends WritableOptions {
 
   /**
    * Sample encoding format of incoming data.
-   * - `'int16'` — 16-bit signed integer, little-endian (2 bytes per sample)
-   * - `'float32'` — 32-bit IEEE 754 float, little-endian (4 bytes per sample)
+   * - `'int16'`: 16-bit signed integer, little-endian (2 bytes per sample)
+   * - `'float32'`: 32-bit IEEE 754 float, little-endian (4 bytes per sample)
    * @default 'int16'
    */
   format?: 'int16' | 'float32';

@@ -84,7 +84,7 @@ class DecibriOutput extends Writable {
     }
   }
 
-  /** @internal — called by end() after all buffered writes complete */
+  /** @internal Called by end() after all buffered writes complete. */
   _final(callback) {
     try {
       this._native.drain();

@@ -7,7 +7,7 @@
  * as Node.js EventEmitter. Used instead of browser-native EventTarget to
  * preserve API parity with the Node.js decibri (.on('data', cb) pattern).
  *
- * Ported from decibri-web emitter.ts — logic identical, types removed.
+ * Ported from decibri-web emitter.ts. Logic identical, types removed.
  */
 class Emitter {
   constructor() {

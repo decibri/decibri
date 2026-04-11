@@ -7,13 +7,13 @@
 //! # Model tensor specification (verified from silero_vad.onnx)
 //!
 //! Inputs:
-//!   - `input`:  f32[batch, window_size]  — audio samples
-//!   - `state`:  f32[2, batch, 128]       — LSTM state (hidden + cell combined)
-//!   - `sr`:     i64 scalar               — sample rate
+//!   - `input`:  f32[batch, window_size]  (audio samples)
+//!   - `state`:  f32[2, batch, 128]       (LSTM state, hidden + cell combined)
+//!   - `sr`:     i64 scalar               (sample rate)
 //!
 //! Outputs:
-//!   - `output`: f32[batch, 1]            — speech probability
-//!   - `stateN`: f32[2, batch, 128]       — updated LSTM state
+//!   - `output`: f32[batch, 1]            (speech probability)
+//!   - `stateN`: f32[2, batch, 128]       (updated LSTM state)
 
 #[cfg(feature = "vad")]
 use std::path::PathBuf;
@@ -181,8 +181,8 @@ impl SileroVad {
             .map_err(|e| DecibriError::Other(format!("Silero VAD inference failed: {e}")))?;
 
         // Read outputs using actual model tensor names:
-        //   output: f32[1, 1] — speech probability
-        //   stateN: f32[2, 1, 128] — updated state
+        //   output: f32[1, 1] (speech probability)
+        //   stateN: f32[2, 1, 128] (updated state)
         let prob_tensor = outputs["output"]
             .try_extract_tensor::<f32>()
             .map_err(|e| DecibriError::Other(format!("Failed to extract output tensor: {e}")))?;
@@ -295,7 +295,7 @@ mod tests {
     fn test_vad_small_chunk() {
         let mut vad = SileroVad::new(default_config()).unwrap();
 
-        // Less than one window — no inference should run
+        // Less than one window, so no inference should run
         let samples = vec![0.0f32; 100];
         let result = vad.process(&samples).unwrap();
         assert_eq!(result.probability, 0.0);

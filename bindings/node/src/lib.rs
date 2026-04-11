@@ -179,7 +179,7 @@ impl DecibriBridge {
                         }
                     }
                     Err(_) => {
-                        // Channel closed — capture stopped.
+                        // Channel closed. Capture stopped.
                         // Discard partial buffer (matches C++ PortAudio behaviour).
                         break;
                     }
@@ -300,7 +300,7 @@ fn to_napi_error(e: decibri::error::DecibriError) -> Error {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
-// DecibriOutputBridge — audio playback
+// DecibriOutputBridge: audio playback
 // ═══════════════════════════════════════════════════════════════════════════════
 
 /// Options passed from JS constructor for output.

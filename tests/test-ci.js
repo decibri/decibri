@@ -1,7 +1,7 @@
 'use strict';
 
 /**
- * CI-safe tests — no microphone or speaker required.
+ * CI-safe tests. No microphone or speaker required.
  *
  * Extracts non-hardware assertions from test-api.js, test-capture.js,
  * test-output.js, and test-vad-silero.js. Safe to run on CI runners
@@ -108,7 +108,7 @@ assert(ver.portaudio.includes('cpal'), `version().portaudio contains "cpal", got
 
 const devices = Decibri.devices();
 assert(Array.isArray(devices), 'devices() returns array');
-// CI may have 0 devices — verify structure if any exist
+// CI may have 0 devices. Verify structure if any exist.
 if (devices.length > 0) {
   const d = devices[0];
   assert(typeof d.index === 'number', 'device.index is number');
@@ -117,7 +117,7 @@ if (devices.length > 0) {
   assert(typeof d.defaultSampleRate === 'number', 'device.defaultSampleRate is number');
   assert(typeof d.isDefault === 'boolean', 'device.isDefault is boolean');
 } else {
-  console.log('  (no audio devices found — skipping structure check)');
+  console.log('  (no audio devices found, skipping structure check)');
 }
 
 console.log('  Group 2 done\n');

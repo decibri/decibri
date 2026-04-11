@@ -6,22 +6,22 @@
 - **License:** MIT
 - **Source:** https://github.com/snakers4/silero-vad
 - **Size:** ~2.2 MB
-- **Purpose:** Voice Activity Detection — determines whether an audio frame contains human speech
+- **Purpose:** Voice Activity Detection. Determines whether an audio frame contains human speech
 
 ### Input/Output Specification
 
 **Inputs:**
-- `input`: f32[batch, window_size] — audio samples (512 at 16kHz, 256 at 8kHz)
-- `sr`: i64[batch] — sample rate
-- `h`: f32[2, batch, 64] — LSTM hidden state
-- `c`: f32[2, batch, 64] — LSTM cell state
+- `input`: f32[batch, window_size]: audio samples (512 at 16kHz, 256 at 8kHz)
+- `sr`: i64[batch]: sample rate
+- `h`: f32[2, batch, 64]: LSTM hidden state
+- `c`: f32[2, batch, 64]: LSTM cell state
 
 **Outputs:**
-- `output`: f32[batch, 1] — speech probability (0.0 to 1.0)
-- `hn`: f32[2, batch, 64] — updated hidden state
-- `cn`: f32[2, batch, 64] — updated cell state
+- `output`: f32[batch, 1]: speech probability (0.0 to 1.0)
+- `hn`: f32[2, batch, 64]: updated hidden state
+- `cn`: f32[2, batch, 64]: updated cell state
 
-Note: Exact tensor names may differ — verified at build time from the model file.
+Note: Exact tensor names may differ. Verified at build time from the model file.
 
 ### License Notice
 

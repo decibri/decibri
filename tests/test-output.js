@@ -151,7 +151,7 @@ async function testDeviceEnumeration() {
     assert(typeof d.isDefault === 'boolean', 'device has isDefault');
     // Verify it's NOT maxInputChannels
     assert(d.maxInputChannels === undefined, 'output device does NOT have maxInputChannels');
-    console.log(`  [${d.index}] ${d.name} — ${d.maxOutputChannels}ch @ ${d.defaultSampleRate}Hz${d.isDefault ? ' (default)' : ''}`);
+    console.log(`  [${d.index}] ${d.name} - ${d.maxOutputChannels}ch @ ${d.defaultSampleRate}Hz${d.isDefault ? ' (default)' : ''}`);
   }
 
   // version() works

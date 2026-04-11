@@ -114,7 +114,7 @@ async function testEnergyRegression() {
 async function testDefaultVadMode() {
   console.log('--- Group 3: Default vadMode is energy ---');
 
-  // No vadMode specified — should default to energy
+  // No vadMode specified, should default to energy
   const mic = new Decibri({
     sampleRate: 16000,
     channels: 1,
