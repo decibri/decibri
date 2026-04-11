@@ -160,10 +160,12 @@ impl SileroVad {
         //   input: f32[1, window_size]
         //   state: f32[2, 1, 128]
         //   sr:    i64 scalar
-        let input_tensor = ort::value::Tensor::from_array(([1i64, self.window_size as i64], window.to_vec()))
-            .map_err(|e| DecibriError::Other(format!("Failed to create input tensor: {e}")))?;
-        let state_tensor = ort::value::Tensor::from_array(([2i64, 1i64, 128i64], self.state.clone()))
-            .map_err(|e| DecibriError::Other(format!("Failed to create state tensor: {e}")))?;
+        let input_tensor =
+            ort::value::Tensor::from_array(([1i64, self.window_size as i64], window.to_vec()))
+                .map_err(|e| DecibriError::Other(format!("Failed to create input tensor: {e}")))?;
+        let state_tensor =
+            ort::value::Tensor::from_array(([2i64, 1i64, 128i64], self.state.clone()))
+                .map_err(|e| DecibriError::Other(format!("Failed to create state tensor: {e}")))?;
         let sr_tensor = ort::value::Tensor::from_array(([1i64], vec![self.sample_rate as i64]))
             .map_err(|e| DecibriError::Other(format!("Failed to create sr tensor: {e}")))?;
 
@@ -255,7 +257,10 @@ mod tests {
         vad.process(&samples).unwrap();
 
         // State should have changed after inference
-        assert_ne!(vad.state, initial_state, "State should change after inference");
+        assert_ne!(
+            vad.state, initial_state,
+            "State should change after inference"
+        );
     }
 
     #[test]

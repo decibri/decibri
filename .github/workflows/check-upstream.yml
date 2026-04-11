@@ -1,0 +1,91 @@
+name: Check Upstream Dependencies
+
+on:
+  schedule:
+    - cron: "0 22 * * 0"  # Monday 8:00 AM AEST (Sunday 10 PM UTC)
+  workflow_dispatch:
+
+permissions:
+  issues: write
+  contents: read
+
+jobs:
+  check-cpal:
+    name: Check cpal
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - run: cargo generate-lockfile
+
+      - name: Get pinned version
+        id: pinned
+        run: |
+          VERSION=$(grep -A1 'name = "cpal"' Cargo.lock | grep version | head -1 | grep -oP '\d+\.\d+\.\d+')
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+
+      - name: Get latest version
+        id: latest
+        run: |
+          VERSION=$(curl -s https://crates.io/api/v1/crates/cpal | python3 -c "import sys,json; print(json.load(sys.stdin)['crate']['max_version'])")
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+
+      - name: Create issue if behind
+        if: steps.pinned.outputs.version != steps.latest.outputs.version
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          COUNT=$(gh issue list --label "dependency-update" --state open --search "cpal" --json number --jq 'length')
+          if [ "$COUNT" = "0" ]; then
+            gh issue create \
+              --title "cpal ${{ steps.latest.outputs.version }} available (pinned: ${{ steps.pinned.outputs.version }})" \
+              --label "dependency-update" \
+              --body "A new version of **cpal** is available on crates.io.
+
+          **Pinned:** ${{ steps.pinned.outputs.version }}
+          **Latest:** ${{ steps.latest.outputs.version }}
+
+          **Changelog:** https://github.com/RustAudio/cpal/releases
+
+          Review the release notes for security fixes, bug fixes, or new features relevant to decibri."
+          fi
+
+  check-ort:
+    name: Check ort
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - run: cargo generate-lockfile
+
+      - name: Get pinned version
+        id: pinned
+        run: |
+          VERSION=$(grep -A1 'name = "ort"' Cargo.lock | grep version | head -1 | grep -oP '[\d\.\-a-z]+' | head -1)
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+
+      - name: Get latest version
+        id: latest
+        run: |
+          VERSION=$(curl -s https://crates.io/api/v1/crates/ort | python3 -c "import sys,json; print(json.load(sys.stdin)['crate']['max_version'])")
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+
+      - name: Create issue if behind
+        if: steps.pinned.outputs.version != steps.latest.outputs.version
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          COUNT=$(gh issue list --label "dependency-update" --state open --search "ort" --json number --jq 'length')
+          if [ "$COUNT" = "0" ]; then
+            gh issue create \
+              --title "ort ${{ steps.latest.outputs.version }} available (pinned: ${{ steps.pinned.outputs.version }})" \
+              --label "dependency-update" \
+              --body "A new version of **ort** is available on crates.io.
+
+          **Pinned:** ${{ steps.pinned.outputs.version }}
+          **Latest:** ${{ steps.latest.outputs.version }}
+
+          **Changelog:** https://github.com/pykeio/ort/releases
+
+          ort is pinned to an RC version. Check if stable 2.0.0 has been released."
+          fi

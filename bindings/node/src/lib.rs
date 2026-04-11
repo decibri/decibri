@@ -83,7 +83,10 @@ impl DecibriBridge {
         let vad_mode = opts.vad_mode.as_deref().unwrap_or("energy");
         let vad = if vad_mode == "silero" {
             let model_path = opts.model_path.ok_or_else(|| {
-                Error::new(Status::InvalidArg, "modelPath is required when vadMode is 'silero'")
+                Error::new(
+                    Status::InvalidArg,
+                    "modelPath is required when vadMode is 'silero'",
+                )
             })?;
             let vad_config = VadConfig {
                 model_path: std::path::PathBuf::from(model_path),
@@ -109,9 +112,7 @@ impl DecibriBridge {
     }
 
     /// Start capturing audio. The callback receives `(err, chunk)` for each buffer.
-    #[napi(
-        ts_args_type = "callback: (err: Error | null, chunk: Buffer) => void"
-    )]
+    #[napi(ts_args_type = "callback: (err: Error | null, chunk: Buffer) => void")]
     pub fn start(&mut self, callback: Function<Buffer, ()>) -> Result<()> {
         if self.running.load(Ordering::Relaxed) {
             return Err(Error::new(
@@ -120,9 +121,10 @@ impl DecibriBridge {
             ));
         }
 
-        let capture = self.capture.as_ref().ok_or_else(|| {
-            Error::new(Status::GenericFailure, "Capture not initialized")
-        })?;
+        let capture = self
+            .capture
+            .as_ref()
+            .ok_or_else(|| Error::new(Status::GenericFailure, "Capture not initialized"))?;
 
         let stream = capture.start().map_err(to_napi_error)?;
         let receiver = stream.receiver().clone();
@@ -137,7 +139,8 @@ impl DecibriBridge {
         let mut vad = self.vad.take();
 
         // Create a threadsafe function to call back into JS from the pump thread.
-        let tsfn = callback.build_threadsafe_function()
+        let tsfn = callback
+            .build_threadsafe_function()
             .callee_handled::<true>()
             .build()?;
 
@@ -160,10 +163,8 @@ impl DecibriBridge {
                             // Run Silero VAD on the f32 frame (before format conversion)
                             if let Some(ref mut v) = vad {
                                 if let Ok(result) = v.process(&frame) {
-                                    vad_probability.store(
-                                        result.probability.to_bits(),
-                                        Ordering::Relaxed,
-                                    );
+                                    vad_probability
+                                        .store(result.probability.to_bits(), Ordering::Relaxed);
                                 }
                             }
 
@@ -171,7 +172,10 @@ impl DecibriBridge {
                                 SampleFormat::Int16 => sample::f32_to_i16_le_bytes(&frame),
                                 SampleFormat::Float32 => sample::f32_to_f32_le_bytes(&frame),
                             };
-                            tsfn.call(Ok(Buffer::from(bytes)), ThreadsafeFunctionCallMode::NonBlocking);
+                            tsfn.call(
+                                Ok(Buffer::from(bytes)),
+                                ThreadsafeFunctionCallMode::NonBlocking,
+                            );
                         }
                     }
                     Err(_) => {
@@ -267,7 +271,10 @@ fn resolve_device_option(device: &Option<serde_json::Value>) -> Result<DeviceSel
         None | Some(serde_json::Value::Null) => Ok(DeviceSelector::Default),
         Some(serde_json::Value::Number(n)) => {
             let idx = n.as_u64().ok_or_else(|| {
-                Error::new(Status::InvalidArg, "device index must be a non-negative integer")
+                Error::new(
+                    Status::InvalidArg,
+                    "device index must be a non-negative integer",
+                )
             })? as usize;
             Ok(DeviceSelector::Index(idx))
         }
@@ -282,7 +289,9 @@ fn resolve_device_option(device: &Option<serde_json::Value>) -> Result<DeviceSel
 fn to_napi_error(e: decibri::error::DecibriError) -> Error {
     use decibri::error::DecibriError::*;
     let status = match &e {
-        SampleRateOutOfRange | ChannelsOutOfRange | FramesPerBufferOutOfRange
+        SampleRateOutOfRange
+        | ChannelsOutOfRange
+        | FramesPerBufferOutOfRange
         | DeviceIndexOutOfRange => Status::InvalidArg,
         InvalidFormat | DeviceNotFound(_) | MultipleDevicesMatch { .. } => Status::InvalidArg,
         _ => Status::GenericFailure,
@@ -370,9 +379,10 @@ impl DecibriOutputBridge {
 
         // Start stream on first write
         if self.stream.is_none() {
-            let output = self.output.as_ref().ok_or_else(|| {
-                Error::new(Status::GenericFailure, "Output not initialized")
-            })?;
+            let output = self
+                .output
+                .as_ref()
+                .ok_or_else(|| Error::new(Status::GenericFailure, "Output not initialized"))?;
             let stream = output.start().map_err(to_napi_error)?;
             self.stream = Some(stream);
         }
@@ -409,9 +419,7 @@ impl DecibriOutputBridge {
     /// Whether audio is currently being output.
     #[napi(getter)]
     pub fn is_playing(&self) -> bool {
-        self.stream
-            .as_ref()
-            .is_some_and(|s| s.is_playing())
+        self.stream.as_ref().is_some_and(|s| s.is_playing())
     }
 
     /// List all available audio output devices.
