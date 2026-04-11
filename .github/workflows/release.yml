@@ -28,6 +28,10 @@ jobs:
             target: x86_64-unknown-linux-gnu
             artifact: linux-x64-gnu
             setup: sudo apt-get update && sudo apt-get install -y libasound2-dev
+          - os: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-gnu
+            artifact: linux-arm64-gnu
+            setup: sudo apt-get update && sudo apt-get install -y libasound2-dev
 
     steps:
       - uses: actions/checkout@v6
@@ -96,6 +100,7 @@ jobs:
           cp artifacts/decibri-win32-x64-msvc/decibri.win32-x64-msvc.node npm/win32-x64-msvc/
           cp artifacts/decibri-darwin-arm64/decibri.darwin-arm64.node npm/darwin-arm64/
           cp artifacts/decibri-linux-x64-gnu/decibri.linux-x64-gnu.node npm/linux-x64-gnu/
+          cp artifacts/decibri-linux-arm64-gnu/decibri.linux-arm64-gnu.node npm/linux-arm64-gnu/
 
       - name: Generate napi loader
         run: |
@@ -123,6 +128,11 @@ jobs:
 
       - name: Publish @decibri/linux-x64-gnu
         run: cd npm/linux-x64-gnu && npm publish --access public --provenance
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+
+      - name: Publish @decibri/linux-arm64-gnu
+        run: cd npm/linux-arm64-gnu && npm publish --access public --provenance
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
 
