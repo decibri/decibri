@@ -76,6 +76,16 @@ jobs:
           path: npm/decibri/decibri.*.node
           if-no-files-found: error
 
+      - name: Upload napi loader (Linux x64 only)
+        if: matrix.artifact == 'linux-x64-gnu'
+        uses: actions/upload-artifact@v7
+        with:
+          name: decibri-loader
+          path: |
+            npm/decibri/index.js
+            npm/decibri/index.d.ts
+          if-no-files-found: error
+
   publish:
     name: Publish
     runs-on: ubuntu-latest
@@ -113,19 +123,16 @@ jobs:
           ls -la npm/linux-x64-gnu/decibri.*.node
           ls -la npm/linux-arm64-gnu/decibri.*.node
 
-      - name: Generate napi loader
+      - name: Stage napi loader
         shell: bash
         run: |
-          cd npm/decibri
-          npm install --ignore-optional
-          find ../../artifacts/ -name "decibri.linux-x64-gnu.node" -exec cp {} . \;
-          npx napi build --platform --release \
-            -p decibri-node \
-            --manifest-path ../../bindings/node/Cargo.toml \
-            -o . || true
-        # The napi build may fail on publish runner (no ALSA), but index.js
-        # should already exist from the build step. If not, the publish will
-        # fail and we'll know.
+          find artifacts/ -path "*/decibri-loader/npm/decibri/index.js" -exec cp {} npm/decibri/ \;
+          find artifacts/ -path "*/decibri-loader/npm/decibri/index.d.ts" -exec cp {} npm/decibri/ \;
+
+      - name: Verify loader exists
+        run: |
+          ls -la npm/decibri/index.js
+          ls -la npm/decibri/index.d.ts
 
       # Publish platform packages FIRST (main package depends on them)
       - name: Publish @decibri/win32-x64-msvc
