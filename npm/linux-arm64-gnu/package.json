@@ -1,10 +1,14 @@
 {
   "name": "@decibri/linux-arm64-gnu",
-  "version": "3.0.0",
+  "version": "3.0.0-rc.1",
   "os": ["linux"],
   "cpu": ["arm64"],
   "main": "decibri.linux-arm64-gnu.node",
   "files": ["decibri.linux-arm64-gnu.node"],
   "license": "Apache-2.0",
-  "description": "decibri native binary for Linux arm64"
+  "description": "decibri native binary for Linux arm64",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/decibri/decibri"
+  }
 }
