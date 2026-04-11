@@ -1,6 +1,6 @@
 {
   "name": "@decibri/linux-x64-gnu",
-  "version": "3.0.0-rc.4",
+  "version": "3.0.0-rc.5",
   "os": ["linux"],
   "cpu": ["x64"],
   "main": "decibri.linux-x64-gnu.node",
