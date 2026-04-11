@@ -1,0 +1,66 @@
+name: Feature request
+description: Suggest a new feature, improvement, or integration for decibri
+labels: ["enhancement", "needs-triage"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for suggesting a feature. Please describe what you want and why it would be useful so we can evaluate it.
+
+        Before submitting, please check [existing issues](https://github.com/decibri/decibri/issues?q=is%3Aissue+label%3Aenhancement) to see if your idea has already been proposed.
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem or use case
+      description: What problem are you trying to solve? What are you trying to build? Describe the context that led you to want this feature.
+      placeholder: I am building a realtime voice assistant and need to detect when the user stops speaking so I can send the audio buffer to my STT service...
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed solution
+      description: What would you like decibri to do? Describe the feature or API as you imagine it.
+      placeholder: |
+        A new event or method like `mic.on('silence', (duration) => {...})` that fires when VAD detects a pause longer than a configurable threshold.
+    validations:
+      required: true
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+      description: Have you tried other approaches or workarounds? What did and did not work?
+      placeholder: I tried polling the VAD probability every 100ms from the data event, but that feels hacky and adds unnecessary overhead...
+
+  - type: dropdown
+    id: runtime
+    attributes:
+      label: Which runtime would this apply to?
+      description: Is this feature for Node.js, the browser, the Rust crate, or all of them?
+      multiple: true
+      options:
+        - Node.js
+        - Browser
+        - Rust (crate)
+    validations:
+      required: true
+
+  - type: dropdown
+    id: priority
+    attributes:
+      label: How important is this to you?
+      options:
+        - Nice to have
+        - Important for my use case
+        - Blocking my project
+    validations:
+      required: true
+
+  - type: textarea
+    id: additional-context
+    attributes:
+      label: Additional context
+      description: Links to related projects, papers, standards, or other references that would help us understand the request.
