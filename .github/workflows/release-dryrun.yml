@@ -47,6 +47,7 @@ jobs:
           npx napi build --platform --release \
             -p decibri-node \
             --manifest-path ../../bindings/node/Cargo.toml \
+            --js-package-name @decibri/decibri \
             --target ${{ matrix.target }} \
             -o .
 

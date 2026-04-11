@@ -1,6 +1,6 @@
 {
   "name": "decibri",
-  "version": "3.0.0-rc.6",
+  "version": "3.0.0-rc.7",
   "description": "Cross-platform audio capture, output, and processing for Node.js and browsers",
   "main": "src/decibri.js",
   "types": "src/decibri.d.ts",
@@ -69,16 +69,16 @@
     "README.md"
   ],
   "optionalDependencies": {
-    "decibri-win32-x64-msvc": "3.0.0-rc.6",
-    "decibri-darwin-arm64": "3.0.0-rc.6",
-    "decibri-linux-x64-gnu": "3.0.0-rc.6",
-    "decibri-linux-arm64-gnu": "3.0.0-rc.6"
+    "@decibri/decibri-win32-x64-msvc": "3.0.0-rc.7",
+    "@decibri/decibri-darwin-arm64": "3.0.0-rc.7",
+    "@decibri/decibri-linux-x64-gnu": "3.0.0-rc.7",
+    "@decibri/decibri-linux-arm64-gnu": "3.0.0-rc.7"
   },
   "devDependencies": {
     "@napi-rs/cli": "^3.0.0"
   },
   "scripts": {
-    "build": "napi build --platform --release -p decibri-node --manifest-path ../../bindings/node/Cargo.toml -o .",
+    "build": "napi build --platform --release -p decibri-node --manifest-path ../../bindings/node/Cargo.toml --js-package-name @decibri/decibri -o .",
     "artifacts": "napi artifacts",
     "version": "napi version"
   }
