@@ -38,6 +38,7 @@ jobs:
         run: cd npm/decibri && npm install --ignore-optional
 
       - name: Build native addon
+        shell: bash
         run: |
           cd npm/decibri
           npx napi build --platform --release \
