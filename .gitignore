@@ -14,10 +14,10 @@ npm/decibri/index.js
 npm/decibri/index.d.ts
 
 # Platform binary packages
-npm/win32-x64-msvc/*.node
-npm/darwin-arm64/*.node
-npm/linux-x64-gnu/*.node
-npm/linux-arm64-gnu/*.node
+npm/decibri-win32-x64-msvc/*.node
+npm/decibri-darwin-arm64/*.node
+npm/decibri-linux-x64-gnu/*.node
+npm/decibri-linux-arm64-gnu/*.node
 
 # Claude Code local settings
 .claude/

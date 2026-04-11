@@ -5,6 +5,7 @@ edition.workspace = true
 license.workspace = true
 repository.workspace = true
 description = "Cross-platform audio capture, output, and processing"
+readme = "../../README.md"
 keywords = ["audio", "microphone", "capture", "sound", "voice"]
 categories = ["multimedia::audio"]
 
