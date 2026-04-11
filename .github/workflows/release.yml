@@ -105,8 +105,8 @@ jobs:
         with:
           path: artifacts/
 
-      - name: List downloaded artifacts
-        run: find artifacts/ -type f
+      - name: Debug artifact structure
+        run: find artifacts/ -type f | sort
 
       - name: Stage platform binaries
         shell: bash
@@ -124,10 +124,9 @@ jobs:
           ls -la npm/linux-arm64-gnu/decibri.*.node
 
       - name: Stage napi loader
-        shell: bash
         run: |
-          find artifacts/ -path "*/decibri-loader/npm/decibri/index.js" -exec cp {} npm/decibri/ \;
-          find artifacts/ -path "*/decibri-loader/npm/decibri/index.d.ts" -exec cp {} npm/decibri/ \;
+          cp artifacts/decibri-loader/index.js npm/decibri/
+          cp artifacts/decibri-loader/index.d.ts npm/decibri/
 
       - name: Verify loader exists
         run: |
