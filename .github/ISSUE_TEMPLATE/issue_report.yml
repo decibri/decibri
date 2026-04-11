@@ -1,0 +1,119 @@
+name: Report an issue
+description: Something is wrong, broken, crashing, or behaving unexpectedly
+labels: ["needs-triage"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for taking the time to report an issue. Please fill out the details below so we can reproduce and diagnose the problem quickly.
+
+        Before submitting, please check [existing issues](https://github.com/decibri/decibri/issues?q=is%3Aissue) to see if your issue has already been reported.
+
+  - type: textarea
+    id: summary
+    attributes:
+      label: Summary
+      description: A clear and concise description of what the issue is.
+      placeholder: When I call `new Decibri({...}).start()`, the process crashes with...
+    validations:
+      required: true
+
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Steps to reproduce
+      description: Minimal code sample or steps that trigger the issue. The smaller the example, the faster we can help.
+      placeholder: |
+        1. Install decibri v3.0.0
+        2. Run this script: ...
+        3. Observe the error
+      render: shell
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+      description: What did you expect to happen?
+    validations:
+      required: true
+
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behavior
+      description: What actually happened? Include the full error message and stack trace if applicable.
+      render: shell
+    validations:
+      required: true
+
+  - type: dropdown
+    id: runtime
+    attributes:
+      label: Runtime
+      description: Where are you running decibri?
+      options:
+        - Node.js
+        - Browser
+        - Rust (crate)
+        - Multiple (specify in summary)
+    validations:
+      required: true
+
+  - type: input
+    id: decibri-version
+    attributes:
+      label: decibri version
+      description: The version of decibri you are using (check `package.json` or `Cargo.toml`).
+      placeholder: 3.0.0
+    validations:
+      required: true
+
+  - type: input
+    id: node-version
+    attributes:
+      label: Node.js version
+      description: Run `node --version` if using Node.js. Leave blank if not applicable.
+      placeholder: v20.11.0
+
+  - type: input
+    id: rust-version
+    attributes:
+      label: Rust version
+      description: Run `rustc --version` if using the Rust crate directly. Leave blank if not applicable.
+      placeholder: rustc 1.84.0
+
+  - type: dropdown
+    id: os
+    attributes:
+      label: Operating system
+      options:
+        - Windows (x64)
+        - macOS (ARM64 / Apple Silicon)
+        - macOS (x64 / Intel)
+        - Linux (x64)
+        - Linux (ARM64)
+        - Other (specify in summary)
+    validations:
+      required: true
+
+  - type: input
+    id: os-version
+    attributes:
+      label: OS version
+      description: Specific OS version, e.g. "Windows 11 23H2", "macOS Sonoma 14.4", "Ubuntu 22.04".
+      placeholder: Windows 11 23H2
+
+  - type: input
+    id: audio-hardware
+    attributes:
+      label: Audio hardware
+      description: What microphone or audio interface are you using? Relevant for capture issues.
+      placeholder: Built-in MacBook microphone / USB Blue Yeti / etc.
+
+  - type: textarea
+    id: additional-context
+    attributes:
+      label: Additional context
+      description: Screenshots, logs, related issues, or anything else that might help us diagnose the problem.
