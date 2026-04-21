@@ -84,10 +84,10 @@ To build from source you will need:
 
 ### Workspace layout
 
-- `crates/decibri/` — Rust crate
-- `bindings/node/` — Node.js bindings
-- `npm/decibri/` — JavaScript package (Node.js + browser)
-- `npm/platform-*/` — platform-specific binary packages
+- `crates/decibri/`: Rust crate
+- `bindings/node/`: Node.js bindings
+- `npm/decibri/`: JavaScript package (Node.js + browser)
+- `npm/platform-*/`: platform-specific binary packages
 
 ### Reporting a bug
 

@@ -37,7 +37,7 @@ enum SampleFormat {
 ///
 /// Users who need to override ORT resolution (e.g. point at a system ORT, or
 /// A/B between bundled and custom builds) should set the `ORT_DYLIB_PATH`
-/// environment variable before Node starts — that's the supported public
+/// environment variable before Node starts. That's the supported public
 /// mechanism.
 ///
 /// If this field is `None` (the default when not injected by the wrapper),
@@ -245,7 +245,7 @@ impl DecibriBridge {
         self.running.load(Ordering::Relaxed)
     }
 
-    /// Latest VAD speech probability (0.0–1.0). Updated by pump thread.
+    /// Latest VAD speech probability (0.0 to 1.0). Updated by pump thread.
     /// Returns 0.0 if VAD is not active.
     #[napi(getter)]
     pub fn vad_probability(&self) -> f64 {

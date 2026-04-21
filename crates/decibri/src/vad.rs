@@ -29,7 +29,7 @@ pub struct VadConfig {
     pub model_path: PathBuf,
     /// Sample rate: 8000 or 16000 Hz.
     pub sample_rate: u32,
-    /// Speech probability threshold (0.0–1.0). Default: 0.5.
+    /// Speech probability threshold (0.0 to 1.0). Default: 0.5.
     pub threshold: f32,
     /// Optional absolute path to the ONNX Runtime shared library.
     ///
@@ -103,7 +103,7 @@ fn wrap_init_error<E: std::fmt::Display>(path: Option<&Path>, err: E) -> Decibri
             "decibri: failed to load ONNX Runtime from {}: {}. \
              If ORT_DYLIB_PATH is set, verify it points to a valid ONNX Runtime \
              library for your platform. Otherwise the bundled ORT may be missing \
-             from your platform package — try reinstalling decibri.",
+             from your platform package. Try reinstalling decibri.",
             p.display(),
             err
         )),
@@ -123,7 +123,7 @@ fn wrap_init_error<E: std::fmt::Display>(path: Option<&Path>, err: E) -> Decibri
 /// Under `ort-load-dynamic`: `ort::init_from(path)` is available and is
 /// fallible (validates the dylib up-front).
 ///
-/// Under `ort-download-binaries`: `ort::init_from` does NOT exist — ORT is
+/// Under `ort-download-binaries`: `ort::init_from` does NOT exist. ORT is
 /// statically linked into the binary and any path argument is meaningless.
 /// The path is ignored; we call `ort::init()` to commit an
 /// `EnvironmentBuilder` so our OnceLock bookkeeping fires.
@@ -143,14 +143,14 @@ fn do_ort_init(_path: Option<&Path>) -> Result<bool, ort::Error> {
 /// Initialize ORT exactly once per process.
 ///
 /// - If ORT is already initialized (by this or any prior caller), returns
-///   immediately. The `path` argument is silently ignored — ORT's global
+///   immediately. The `path` argument is silently ignored. ORT's global
 ///   state cannot be re-initialized. See `VadConfig::ort_library_path` docs.
 /// - Otherwise delegates to the feature-gated `do_ort_init` helper.
 /// - On failure, the `OnceLock` is NOT set, so a subsequent caller can retry.
 ///
 /// Note: `e` in the error-wrapping path below is always an `ort::Error` (ORT's
 /// own error type), never a `DecibriError`. This function is the single place
-/// where ORT errors enter decibri's error hierarchy — do NOT apply the same
+/// where ORT errors enter decibri's error hierarchy. Do NOT apply the same
 /// wrapping pattern elsewhere or the `decibri:` prefix and guidance string
 /// will be duplicated in the message users see.
 #[cfg(feature = "vad")]

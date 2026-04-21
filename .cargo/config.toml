@@ -12,7 +12,7 @@
 # error wrapped by decibri.
 #
 # This alias swaps `ort-load-dynamic` for `ort-download-binaries` for the test
-# run only. The tests exercise identical VAD code paths — they don't care which
+# run only. The tests exercise identical VAD code paths. They don't care which
 # distribution mode supplies libonnxruntime. Side benefit: the escape-hatch
 # feature gets exercised end-to-end by CI.
 #

@@ -177,7 +177,7 @@ jobs:
           # cp -L follows the symlink chain (libonnxruntime.so -> .so.1 ->
           # .so.1.24.4) and copies the real file as libonnxruntime.so. This
           # avoids repeating the version in the filename. libonnxruntime_
-          # providers_shared.so keeps its exact upstream name — the main
+          # providers_shared.so keeps its exact upstream name. The main
           # dylib dlopens it by that basename via $ORIGIN RUNPATH.
           cp -L "$SRC/lib/libonnxruntime.so" npm/decibri/libonnxruntime.so
           cp "$SRC/lib/libonnxruntime_providers_shared.so" npm/decibri/
@@ -191,7 +191,7 @@ jobs:
           Invoke-WebRequest -Uri $url -OutFile ort.zip -MaximumRetryCount 3 -RetryIntervalSec 2
           Expand-Archive -Path ort.zip -DestinationPath .
           $src = "onnxruntime-${{ matrix.ort_platform_slug }}-$env:ORT_VERSION"
-          # Upstream DLL is already named onnxruntime.dll — no rename.
+          # Upstream DLL is already named onnxruntime.dll. No rename.
           Copy-Item "$src/lib/onnxruntime.dll" npm/decibri/
 
       - name: Inspect onnxruntime.dll imports (Windows, diagnostic)
@@ -322,7 +322,7 @@ jobs:
           ls -la npm/decibri/index.d.ts
 
       # Publish platform packages FIRST (main package depends on them)
-      # Uses npm Trusted Publishing (OIDC) — no token needed, provenance is automatic
+      # Uses npm Trusted Publishing (OIDC). No token needed, provenance is automatic
       - name: Publish @decibri/decibri-win32-x64-msvc
         run: cd npm/platform-win32-x64-msvc && npm publish --access public
 
@@ -352,7 +352,7 @@ jobs:
         # v3.1.0-beta.1, etc). Semver defines pre-releases as anything
         # containing `-` after the version. Stable tags like v3.1.0 contain
         # no `-` so the condition is true and the step runs. Safety net for
-        # any future RC flows — under Path A (direct stable publish) this
+        # any future RC flows. Under Path A (direct stable publish) this
         # is a no-op for v3.1.0.
         if: startsWith(github.ref, 'refs/tags/v') && !contains(github.ref, '-')
         run: cargo publish -p decibri

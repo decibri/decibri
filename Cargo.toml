@@ -46,13 +46,13 @@ crossbeam-channel = "0.5"
 #      `api-24` in the `features = [...]` list below to match the new api-N.
 #   2. Update the bundled ORT version to match (e.g. api-25 -> ORT 1.25.x).
 #   3. Update the single `env.ORT_VERSION` declaration in .github/workflows/release.yml
-#      (workflow-level env block, not a per-job bash assignment — one source of truth).
+#      (workflow-level env block, not a per-job bash assignment: one source of truth).
 #   4. Update the `api_n` baseline in .github/workflows/check-upstream.yml.
 #   5. Re-run the release-dryrun workflow to confirm the tarball URL pattern still
 #      resolves.
-# Steps 1-4 MUST move together — leaving any one out produces an ABI mismatch that
+# Steps 1-4 MUST move together. Leaving any one out produces an ABI mismatch that
 # either fails to compile (step 1 skipped) or fails at runtime dylib-load time
-# (step 2 skipped — pyke/ort performs a version-string check in load_dylib_from_path
+# (step 2 skipped, because pyke/ort performs a version-string check in load_dylib_from_path
 # and returns Err for too-old ORT minors).
 ort = { version = "=2.0.0-rc.12", default-features = false, features = ["std", "api-24"] }
 

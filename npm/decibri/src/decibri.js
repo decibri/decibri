@@ -131,7 +131,7 @@ class Decibri extends Readable {
     } else if (typeof options.device === 'number') {
       const devices = DecibriBridge.devices();
       if (options.device < 0 || options.device >= devices.length) {
-        throw new RangeError('device index out of range — call Decibri.devices() to list available devices');
+        throw new RangeError('device index out of range. Call Decibri.devices() to list available devices');
       }
       resolvedDevice = options.device;
     }

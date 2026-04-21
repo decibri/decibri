@@ -52,7 +52,7 @@ struct ComputedRow {
 /// Given a list of `(id, name, channels, sample_rate)` tuples representing
 /// enumerated devices and an optional default-device id, produce one
 /// `ComputedRow` per input with `is_default` resolved by identity comparison
-/// (NOT by name-equality — see [#14](https://github.com/decibri/decibri/issues/14)).
+/// (NOT by name-equality. See [#14](https://github.com/decibri/decibri/issues/14) for context.)
 ///
 /// Semantics:
 /// - A row's `id` of `None` (caller couldn't fetch a cpal `DeviceId` for that
@@ -295,7 +295,7 @@ pub fn resolve_output_device(selector: &DeviceSelector) -> Result<cpal::Device, 
 mod tests {
     use super::*;
 
-    // Synthetic id type for testing — any `PartialEq` works because
+    // Synthetic id type for testing. Any `PartialEq` works because
     // `compute_is_default` is generic over the id type. Using String keeps the
     // tests readable and avoids any dependency on a live cpal host.
     fn row(id: Option<&str>, name: &str) -> (Option<String>, String, u16, u32) {
@@ -321,7 +321,7 @@ mod tests {
             result[1].is_default,
             "second duplicate-named mic (matching default id) must be flagged"
         );
-        // Both rows keep their shared display name — the bug was never about
+        // Both rows keep their shared display name. The bug was never about
         // renaming devices, only about misattribution of is_default.
         assert_eq!(result[0].name, "Microphone");
         assert_eq!(result[1].name, "Microphone");

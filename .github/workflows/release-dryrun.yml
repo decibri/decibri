@@ -85,7 +85,7 @@ jobs:
       - name: Verify libonnxruntime.dylib codesign (macOS, diagnostic)
         if: runner.os == 'macOS'
         continue-on-error: true
-        # Non-gating diagnostic — byte-identical to the same step in
+        # Non-gating diagnostic. Byte-identical to the same step in
         # release.yml. Surfaces codesign's assessment of the renamed
         # dylib in CI logs before a release.
         run: codesign -v --verbose=2 npm/decibri/libonnxruntime.dylib
@@ -116,7 +116,7 @@ jobs:
         if: runner.os == 'Windows'
         continue-on-error: true
         shell: pwsh
-        # Non-gating diagnostic — byte-identical to the same step in
+        # Non-gating diagnostic. Byte-identical to the same step in
         # release.yml. Logs the DLL's import table so peer-DLL
         # dependencies are visible pre-release.
         run: |
