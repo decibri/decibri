@@ -119,7 +119,10 @@ impl DecibriBridge {
                 // Populated by the JS wrapper from require.resolve on the
                 // resolved platform package. When `None`, Rust falls through
                 // to `ort::init()` which honours the `ORT_DYLIB_PATH` env var.
-                ort_library_path: opts.ort_library_path.as_deref().map(std::path::PathBuf::from),
+                ort_library_path: opts
+                    .ort_library_path
+                    .as_deref()
+                    .map(std::path::PathBuf::from),
             };
             Some(SileroVad::new(vad_config).map_err(to_napi_error)?)
         } else {
