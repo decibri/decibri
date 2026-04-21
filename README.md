@@ -60,6 +60,49 @@ Requires Node.js >= 18. TypeScript definitions are bundled.
 
 ---
 
+## Using from Rust
+
+Most users want the npm package above. If you're building a Rust
+application directly against the [`decibri`](https://crates.io/crates/decibri) crate on crates.io:
+
+```bash
+cargo add decibri
+```
+
+The `vad` feature (enabled by default) uses ONNX Runtime via the
+[`ort`](https://crates.io/crates/ort) crate. From 3.1.0 onwards, `ort` is
+configured with `load-dynamic` by default, meaning ONNX Runtime is loaded
+from a shared library at runtime. Choose one of:
+
+- **Zero-config builds.** Opt into the download-binaries mode:
+
+  ```toml
+  decibri = { version = "3.1", features = ["ort-download-binaries"], default-features = false }
+  ```
+
+  Add back any other features you need (`capture`, `output`, `vad`,
+  `denoise`, `gain`). ORT is downloaded during `cargo build` and embedded
+  in your binary (the 3.0.x behaviour).
+
+- **Production deployments with bundled ORT.** Take default features,
+  then either set `ORT_DYLIB_PATH=/path/to/libonnxruntime.{so,dylib,dll}`
+  before first use, or call `ort::init_from(path).commit()` at startup.
+  ONNX Runtime is initialized once per process. If your app creates
+  multiple `SileroVad` instances with different paths, the first one
+  wins and later paths are silently ignored. Pick one path and reuse it.
+
+If you only need capture, output, or DSP (no Silero VAD), you won't pull
+in `ort` at all:
+
+```toml
+decibri = { version = "3.1", features = ["capture", "output"], default-features = false }
+```
+
+See the [`ort` crate linking docs](https://ort.pyke.io/setup/linking)
+for runtime-loading details.
+
+---
+
 ## Quick Start
 
 ### Capture audio

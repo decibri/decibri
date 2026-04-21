@@ -1,3 +1,10 @@
+#[cfg(all(feature = "ort-load-dynamic", feature = "ort-download-binaries"))]
+compile_error!(
+    "features `ort-load-dynamic` and `ort-download-binaries` are mutually exclusive; \
+     select exactly one. The default feature set enables `ort-load-dynamic`; \
+     if you want `ort-download-binaries`, disable default features first."
+);
+
 pub mod error;
 pub mod sample;
 

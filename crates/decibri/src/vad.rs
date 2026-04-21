@@ -16,7 +16,9 @@
 //!   - `stateN`: f32[2, batch, 128]       (updated LSTM state)
 
 #[cfg(feature = "vad")]
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+#[cfg(feature = "vad")]
+use std::sync::OnceLock;
 
 use crate::error::DecibriError;
 
@@ -27,8 +29,19 @@ pub struct VadConfig {
     pub model_path: PathBuf,
     /// Sample rate: 8000 or 16000 Hz.
     pub sample_rate: u32,
-    /// Speech probability threshold (0.0–1.0). Default: 0.5.
+    /// Speech probability threshold (0.0 to 1.0). Default: 0.5.
     pub threshold: f32,
+    /// Optional absolute path to the ONNX Runtime shared library.
+    ///
+    /// When `Some(path)`, ORT is initialized from the given library path via
+    /// `ort::init_from`. When `None`, `ort::init()` is called and ORT honours
+    /// the `ORT_DYLIB_PATH` environment variable if set.
+    ///
+    /// ORT is initialized exactly once per process. If multiple `SileroVad`
+    /// instances are constructed with different `ort_library_path` values,
+    /// the first path wins and later paths are silently ignored. This matches
+    /// ORT's own single-global-runtime model.
+    pub ort_library_path: Option<PathBuf>,
 }
 
 impl Default for VadConfig {
@@ -37,6 +50,7 @@ impl Default for VadConfig {
             model_path: PathBuf::from("silero_vad.onnx"),
             sample_rate: 16000,
             threshold: 0.5,
+            ort_library_path: None,
         }
     }
 }
@@ -71,6 +85,92 @@ pub struct SileroVad {
 /// State size: 2 (hidden + cell layers) × batch(1) × hidden_dim(128).
 const STATE_SIZE: usize = 256;
 
+/// Process-global ORT init tracker. Stores the library path used on first
+/// successful init (None if init used `ort::init()` with env-var fallback).
+/// Subsequent `init_ort_once` calls see this as populated and return immediately.
+#[cfg(feature = "vad")]
+static ORT_INIT: OnceLock<Option<PathBuf>> = OnceLock::new();
+
+/// Wrap an ORT init failure with a decibri-specific actionable message.
+///
+/// Kept as a standalone generic function (rather than an inline closure in
+/// `init_ort_once`) so it can be unit-tested without triggering a real ORT
+/// init failure. Tests pass a synthetic `err` value.
+#[cfg(feature = "vad")]
+fn wrap_init_error<E: std::fmt::Display>(path: Option<&Path>, err: E) -> DecibriError {
+    match path {
+        Some(p) => DecibriError::Other(format!(
+            "decibri: failed to load ONNX Runtime from {}: {}. \
+             If ORT_DYLIB_PATH is set, verify it points to a valid ONNX Runtime \
+             library for your platform. Otherwise the bundled ORT may be missing \
+             from your platform package. Try reinstalling decibri.",
+            p.display(),
+            err
+        )),
+        None => DecibriError::Other(format!(
+            "decibri: failed to initialize ONNX Runtime: {}. \
+             Either pass ort_library_path in VadConfig, set ORT_DYLIB_PATH to \
+             point to a valid ONNX Runtime library, or enable the \
+             `ort-download-binaries` feature for zero-config builds.",
+            err
+        )),
+    }
+}
+
+/// Perform the actual ORT init call. Split out by distribution-mode feature
+/// so `init_ort_once` stays single-path.
+///
+/// Under `ort-load-dynamic`: `ort::init_from(path)` is available and is
+/// fallible (validates the dylib up-front).
+///
+/// Under `ort-download-binaries`: `ort::init_from` does NOT exist. ORT is
+/// statically linked into the binary and any path argument is meaningless.
+/// The path is ignored; we call `ort::init()` to commit an
+/// `EnvironmentBuilder` so our OnceLock bookkeeping fires.
+#[cfg(all(feature = "vad", feature = "ort-load-dynamic"))]
+fn do_ort_init(path: Option<&Path>) -> Result<bool, ort::Error> {
+    match path {
+        Some(p) => ort::init_from(p).map(|b| b.with_name("decibri").commit()),
+        None => Ok(ort::init().with_name("decibri").commit()),
+    }
+}
+
+#[cfg(all(feature = "vad", not(feature = "ort-load-dynamic")))]
+fn do_ort_init(_path: Option<&Path>) -> Result<bool, ort::Error> {
+    Ok(ort::init().with_name("decibri").commit())
+}
+
+/// Initialize ORT exactly once per process.
+///
+/// - If ORT is already initialized (by this or any prior caller), returns
+///   immediately. The `path` argument is silently ignored. ORT's global
+///   state cannot be re-initialized. See `VadConfig::ort_library_path` docs.
+/// - Otherwise delegates to the feature-gated `do_ort_init` helper.
+/// - On failure, the `OnceLock` is NOT set, so a subsequent caller can retry.
+///
+/// Note: `e` in the error-wrapping path below is always an `ort::Error` (ORT's
+/// own error type), never a `DecibriError`. This function is the single place
+/// where ORT errors enter decibri's error hierarchy. Do NOT apply the same
+/// wrapping pattern elsewhere or the `decibri:` prefix and guidance string
+/// will be duplicated in the message users see.
+#[cfg(feature = "vad")]
+fn init_ort_once(path: Option<&Path>) -> Result<(), DecibriError> {
+    // Fast path: ORT already initialized.
+    if ORT_INIT.get().is_some() {
+        return Ok(());
+    }
+
+    match do_ort_init(path) {
+        Ok(_committed) => {
+            // First-caller-wins. If another thread set it first, discard ours;
+            // ORT's own global init is idempotent (first takes effect).
+            let _ = ORT_INIT.set(path.map(|p| p.to_path_buf()));
+            Ok(())
+        }
+        Err(e) => Err(wrap_init_error(path, e)),
+    }
+}
+
 #[cfg(feature = "vad")]
 impl SileroVad {
     /// Create a new Silero VAD instance by loading the ONNX model.
@@ -90,6 +190,10 @@ impl SileroVad {
                 "VAD threshold must be between 0.0 and 1.0".to_string(),
             ));
         }
+
+        // Initialize ORT exactly once per process. Subsequent SileroVad
+        // instances pass through immediately regardless of their ort_library_path.
+        init_ort_once(config.ort_library_path.as_deref())?;
 
         let session = ort::session::Session::builder()
             .map_err(|e| DecibriError::Other(format!("Failed to create ort session builder: {e}")))?
@@ -217,7 +321,54 @@ mod tests {
             model_path: model_path(),
             sample_rate: 16000,
             threshold: 0.5,
+            ort_library_path: None,
         }
+    }
+
+    #[test]
+    fn test_wrap_init_error_with_path() {
+        use std::env;
+
+        // Platform-agnostic invalid path (guaranteed to not exist on any OS).
+        let bogus_path = env::temp_dir().join("does-not-exist-onnxruntime-xyz-test");
+        let err = wrap_init_error(Some(bogus_path.as_path()), "simulated ort loader failure");
+        let msg = err.to_string();
+
+        assert!(
+            msg.contains(&bogus_path.display().to_string()),
+            "error message should contain the attempted path, got: {msg}"
+        );
+        assert!(
+            msg.contains("If ORT_DYLIB_PATH is set"),
+            "error message should contain actionable guidance phrase, got: {msg}"
+        );
+        assert!(
+            msg.contains("simulated ort loader failure"),
+            "error message should include the underlying ort error, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn test_wrap_init_error_without_path() {
+        let err = wrap_init_error(None, "simulated ort init failure");
+        let msg = err.to_string();
+
+        assert!(
+            msg.contains("ort_library_path"),
+            "None-path error should mention the VadConfig field, got: {msg}"
+        );
+        assert!(
+            msg.contains("ORT_DYLIB_PATH"),
+            "None-path error should mention the env var, got: {msg}"
+        );
+        assert!(
+            msg.contains("ort-download-binaries"),
+            "None-path error should mention the opt-out feature, got: {msg}"
+        );
+        assert!(
+            msg.contains("simulated ort init failure"),
+            "error message should include the underlying ort error, got: {msg}"
+        );
     }
 
     #[test]

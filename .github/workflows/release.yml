@@ -10,10 +10,79 @@ permissions:
   id-token: write
   attestations: write
 
+# Single source of truth for the bundled ONNX Runtime version, read by
+# every platform job's preflight/download step. Also parsed by the
+# check-onnxruntime job in .github/workflows/check-upstream.yml via:
+#   grep -oP '^\s+ORT_VERSION:\s*\K[0-9]+\.[0-9]+\.[0-9]+' release.yml
+# Updating this value is step 3 of the ort-crate upgrade procedure
+# documented in the workspace Cargo.toml maintainer comment.
+env:
+  ORT_VERSION: 1.24.4
+
 jobs:
+  preflight:
+    name: Preflight (version match)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Assert tag version matches workspace and package manifests
+        shell: bash
+        run: |
+          # Tag form: refs/tags/v3.1.0 -> TAG_VERSION=3.1.0
+          # Pre-release tags (v3.1.0-rc.1) are allowed; the suffix is preserved
+          # and must match across every manifest if used.
+          TAG_VERSION="${GITHUB_REF#refs/tags/v}"
+          echo "Tag version: ${TAG_VERSION}"
+
+          # Workspace Cargo.toml: the `[workspace.package]` block's
+          # `version = "..."` line sits at column 0. Per-crate Cargo.toml
+          # files use `version.workspace = true` and have no literal version
+          # string, so the first unindented `version = "..."` match is
+          # always the workspace version.
+          CARGO_VERSION=$(grep -oP '^version\s*=\s*"\K[^"]+' Cargo.toml | head -1)
+          if [ -z "$CARGO_VERSION" ]; then
+            echo "ERROR: could not extract workspace version from Cargo.toml"
+            exit 1
+          fi
+          echo "Cargo.toml workspace version: ${CARGO_VERSION}"
+
+          MISMATCH=0
+          if [ "$TAG_VERSION" != "$CARGO_VERSION" ]; then
+            echo "ERROR: tag v${TAG_VERSION} does not match Cargo.toml version ${CARGO_VERSION}"
+            MISMATCH=1
+          fi
+
+          # Every package.json must match the tag. jq is preinstalled on
+          # ubuntu-latest runners; no setup needed.
+          for pkg in \
+            npm/decibri/package.json \
+            npm/platform-darwin-arm64/package.json \
+            npm/platform-linux-arm64-gnu/package.json \
+            npm/platform-linux-x64-gnu/package.json \
+            npm/platform-win32-x64-msvc/package.json
+          do
+            PKG_VERSION=$(jq -r .version "$pkg")
+            echo "${pkg}: ${PKG_VERSION}"
+            if [ "$TAG_VERSION" != "$PKG_VERSION" ]; then
+              echo "ERROR: tag v${TAG_VERSION} does not match ${pkg} version ${PKG_VERSION}"
+              MISMATCH=1
+            fi
+          done
+
+          if [ "$MISMATCH" = "1" ]; then
+            echo ""
+            echo "Release aborted: version mismatch detected."
+            echo "Bump Cargo.toml and all 5 package.json files to ${TAG_VERSION}, then re-tag."
+            exit 1
+          fi
+
+          echo "OK: tag, Cargo.toml, and all 5 package.json files agree on ${TAG_VERSION}"
+
   build:
     name: Build ${{ matrix.target }}
     runs-on: ${{ matrix.os }}
+    needs: preflight
     strategy:
       fail-fast: false
       matrix:
@@ -21,17 +90,25 @@ jobs:
           - os: windows-latest
             target: x86_64-pc-windows-msvc
             artifact: win32-x64-msvc
+            ort_platform_slug: win-x64
+            ort_ext: zip
           - os: macos-14
             target: aarch64-apple-darwin
             artifact: darwin-arm64
+            ort_platform_slug: osx-arm64
+            ort_ext: tgz
           - os: ubuntu-latest
             target: x86_64-unknown-linux-gnu
             artifact: linux-x64-gnu
             setup: sudo apt-get update && sudo apt-get install -y libasound2-dev
+            ort_platform_slug: linux-x64
+            ort_ext: tgz
           - os: ubuntu-24.04-arm
             target: aarch64-unknown-linux-gnu
             artifact: linux-arm64-gnu
             setup: sudo apt-get update && sudo apt-get install -y libasound2-dev
+            ort_platform_slug: linux-aarch64
+            ort_ext: tgz
 
     steps:
       - uses: actions/checkout@v6
@@ -50,6 +127,94 @@ jobs:
 
       - name: Install npm dependencies
         run: cd npm/decibri && npm install --ignore-optional
+
+      - name: Verify ONNX Runtime tarball availability
+        shell: bash
+        run: |
+          URL="https://github.com/microsoft/onnxruntime/releases/download/v${ORT_VERSION}/onnxruntime-${{ matrix.ort_platform_slug }}-${ORT_VERSION}.${{ matrix.ort_ext }}"
+          echo "Verifying: $URL"
+          if ! curl -sIfL --retry 3 --retry-delay 2 -o /dev/null "$URL"; then
+            echo "ERROR: expected ONNX Runtime tarball not available at $URL"
+            echo "This may mean Microsoft renamed release assets, delayed a release,"
+            echo "or the pinned ORT_VERSION no longer exists upstream."
+            echo "Check: https://github.com/microsoft/onnxruntime/releases/tag/v${ORT_VERSION}"
+            exit 1
+          fi
+          echo "OK: tarball is available"
+
+      - name: Download and extract ONNX Runtime (macOS)
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          URL="https://github.com/microsoft/onnxruntime/releases/download/v${ORT_VERSION}/onnxruntime-${{ matrix.ort_platform_slug }}-${ORT_VERSION}.tgz"
+          curl -sL --retry 3 --retry-delay 2 -o ort.tgz "$URL"
+          tar -xzf ort.tgz
+          SRC="onnxruntime-${{ matrix.ort_platform_slug }}-${ORT_VERSION}"
+          # Upstream ships libonnxruntime.<version>.dylib; rename to unversioned
+          # to match the JS wrapper's PLATFORM_DYLIB table expectation.
+          cp -L "$SRC/lib/libonnxruntime.${ORT_VERSION}.dylib" npm/decibri/libonnxruntime.dylib
+
+      - name: Verify libonnxruntime.dylib codesign (macOS, diagnostic)
+        if: runner.os == 'macOS'
+        continue-on-error: true
+        # Non-gating: `cp -L` on a real file (not symlink) preserves the
+        # signed bytes, but does not preserve the original filename the
+        # signature may be scoped to. Microsoft's upstream dylib is signed;
+        # we want to see in the log whether the renamed file still
+        # validates. On failure the step is marked red but the workflow
+        # proceeds. Revisit making this gating once we have data from
+        # several releases.
+        run: codesign -v --verbose=2 npm/decibri/libonnxruntime.dylib
+
+      - name: Download and extract ONNX Runtime (Linux)
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          URL="https://github.com/microsoft/onnxruntime/releases/download/v${ORT_VERSION}/onnxruntime-${{ matrix.ort_platform_slug }}-${ORT_VERSION}.tgz"
+          curl -sL --retry 3 --retry-delay 2 -o ort.tgz "$URL"
+          tar -xzf ort.tgz
+          SRC="onnxruntime-${{ matrix.ort_platform_slug }}-${ORT_VERSION}"
+          # cp -L follows the symlink chain (libonnxruntime.so -> .so.1 ->
+          # .so.1.24.4) and copies the real file as libonnxruntime.so. This
+          # avoids repeating the version in the filename. libonnxruntime_
+          # providers_shared.so keeps its exact upstream name. The main
+          # dylib dlopens it by that basename via $ORIGIN RUNPATH.
+          cp -L "$SRC/lib/libonnxruntime.so" npm/decibri/libonnxruntime.so
+          cp "$SRC/lib/libonnxruntime_providers_shared.so" npm/decibri/
+
+      - name: Download and extract ONNX Runtime (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $ProgressPreference = 'SilentlyContinue'  # speeds up Invoke-WebRequest
+          $url = "https://github.com/microsoft/onnxruntime/releases/download/v$env:ORT_VERSION/onnxruntime-${{ matrix.ort_platform_slug }}-$env:ORT_VERSION.zip"
+          Invoke-WebRequest -Uri $url -OutFile ort.zip -MaximumRetryCount 3 -RetryIntervalSec 2
+          Expand-Archive -Path ort.zip -DestinationPath .
+          $src = "onnxruntime-${{ matrix.ort_platform_slug }}-$env:ORT_VERSION"
+          # Upstream DLL is already named onnxruntime.dll. No rename.
+          Copy-Item "$src/lib/onnxruntime.dll" npm/decibri/
+
+      - name: Inspect onnxruntime.dll imports (Windows, diagnostic)
+        if: runner.os == 'Windows'
+        continue-on-error: true
+        shell: pwsh
+        # Non-gating: `dumpbin` ships with MSVC under the Visual Studio
+        # install path and is NOT on the default PATH on windows-latest
+        # runners. We locate it via a glob over the VS install directory
+        # rather than pulling in a third-party dev-env action for a
+        # one-shot inspection. Output (the DLL's import table) goes to
+        # the log so unexpected DLL dependencies (odd MSVC runtime,
+        # Windows SDK DLLs not on a user's box, etc) are visible before
+        # users hit "cannot find library X" at runtime. On failure the
+        # step is marked red but the workflow proceeds.
+        run: |
+          $dumpbin = Get-ChildItem "C:\Program Files*\Microsoft Visual Studio\*\*\VC\Tools\MSVC\*\bin\Hostx64\x64\dumpbin.exe" -ErrorAction SilentlyContinue | Select-Object -First 1
+          if (-not $dumpbin) {
+            Write-Host "dumpbin.exe not found under the Visual Studio install path"
+            exit 1
+          }
+          Write-Host "Using dumpbin: $($dumpbin.FullName)"
+          & $dumpbin.FullName /imports npm/decibri/onnxruntime.dll
 
       - name: Build native addon
         shell: bash
@@ -74,7 +239,16 @@ jobs:
       - uses: actions/upload-artifact@v7
         with:
           name: decibri-${{ matrix.artifact }}
-          path: npm/decibri/decibri.*.node
+          # Only one of the libonnxruntime.* / onnxruntime.dll patterns matches
+          # per platform; non-matching patterns are silently skipped. The
+          # `.node` pattern always matches, so `if-no-files-found: error`
+          # still correctly catches the real failure (missing build output).
+          path: |
+            npm/decibri/decibri.*.node
+            npm/decibri/libonnxruntime.dylib
+            npm/decibri/libonnxruntime.so
+            npm/decibri/libonnxruntime_providers_shared.so
+            npm/decibri/onnxruntime.dll
           if-no-files-found: error
 
       - name: Upload napi loader (Linux x64 only)
@@ -115,17 +289,27 @@ jobs:
       - name: Stage platform binaries
         shell: bash
         run: |
-          find artifacts/ -name "decibri.win32-x64-msvc.node" -exec cp {} npm/platform-win32-x64-msvc/ \;
-          find artifacts/ -name "decibri.darwin-arm64.node" -exec cp {} npm/platform-darwin-arm64/ \;
-          find artifacts/ -name "decibri.linux-x64-gnu.node" -exec cp {} npm/platform-linux-x64-gnu/ \;
-          find artifacts/ -name "decibri.linux-arm64-gnu.node" -exec cp {} npm/platform-linux-arm64-gnu/ \;
+          # macOS (darwin-arm64)
+          find artifacts/decibri-darwin-arm64 -name "decibri.darwin-arm64.node" -exec cp {} npm/platform-darwin-arm64/ \;
+          find artifacts/decibri-darwin-arm64 -name "libonnxruntime.dylib"      -exec cp {} npm/platform-darwin-arm64/ \;
+          # Linux x64
+          find artifacts/decibri-linux-x64-gnu -name "decibri.linux-x64-gnu.node"         -exec cp {} npm/platform-linux-x64-gnu/ \;
+          find artifacts/decibri-linux-x64-gnu -name "libonnxruntime.so"                  -exec cp {} npm/platform-linux-x64-gnu/ \;
+          find artifacts/decibri-linux-x64-gnu -name "libonnxruntime_providers_shared.so" -exec cp {} npm/platform-linux-x64-gnu/ \;
+          # Linux arm64
+          find artifacts/decibri-linux-arm64-gnu -name "decibri.linux-arm64-gnu.node"         -exec cp {} npm/platform-linux-arm64-gnu/ \;
+          find artifacts/decibri-linux-arm64-gnu -name "libonnxruntime.so"                    -exec cp {} npm/platform-linux-arm64-gnu/ \;
+          find artifacts/decibri-linux-arm64-gnu -name "libonnxruntime_providers_shared.so"   -exec cp {} npm/platform-linux-arm64-gnu/ \;
+          # Windows
+          find artifacts/decibri-win32-x64-msvc -name "decibri.win32-x64-msvc.node" -exec cp {} npm/platform-win32-x64-msvc/ \;
+          find artifacts/decibri-win32-x64-msvc -name "onnxruntime.dll"             -exec cp {} npm/platform-win32-x64-msvc/ \;
 
       - name: Verify staged binaries
         run: |
-          ls -la npm/platform-win32-x64-msvc/decibri.*.node
-          ls -la npm/platform-darwin-arm64/decibri.*.node
-          ls -la npm/platform-linux-x64-gnu/decibri.*.node
-          ls -la npm/platform-linux-arm64-gnu/decibri.*.node
+          ls -la npm/platform-win32-x64-msvc/decibri.*.node   npm/platform-win32-x64-msvc/onnxruntime.dll
+          ls -la npm/platform-darwin-arm64/decibri.*.node     npm/platform-darwin-arm64/libonnxruntime.dylib
+          ls -la npm/platform-linux-x64-gnu/decibri.*.node    npm/platform-linux-x64-gnu/libonnxruntime.so    npm/platform-linux-x64-gnu/libonnxruntime_providers_shared.so
+          ls -la npm/platform-linux-arm64-gnu/decibri.*.node  npm/platform-linux-arm64-gnu/libonnxruntime.so  npm/platform-linux-arm64-gnu/libonnxruntime_providers_shared.so
 
       - name: Stage napi loader
         run: |
@@ -138,7 +322,7 @@ jobs:
           ls -la npm/decibri/index.d.ts
 
       # Publish platform packages FIRST (main package depends on them)
-      # Uses npm Trusted Publishing (OIDC) — no token needed, provenance is automatic
+      # Uses npm Trusted Publishing (OIDC). No token needed, provenance is automatic
       - name: Publish @decibri/decibri-win32-x64-msvc
         run: cd npm/platform-win32-x64-msvc && npm publish --access public
 
@@ -164,6 +348,13 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y libasound2-dev
 
       - name: Publish to crates.io
+        # Skip crates.io publish for any pre-release tag (v3.1.0-rc.1,
+        # v3.1.0-beta.1, etc). Semver defines pre-releases as anything
+        # containing `-` after the version. Stable tags like v3.1.0 contain
+        # no `-` so the condition is true and the step runs. Safety net for
+        # any future RC flows. Under Path A (direct stable publish) this
+        # is a no-op for v3.1.0.
+        if: startsWith(github.ref, 'refs/tags/v') && !contains(github.ref, '-')
         run: cargo publish -p decibri
         env:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}

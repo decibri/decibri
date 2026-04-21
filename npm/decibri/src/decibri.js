@@ -5,6 +5,61 @@ const path = require('path');
 const fs = require('fs');
 const { DecibriBridge } = require('../index.js');
 
+// ─── Bundled ONNX Runtime path resolution ────────────────────────────────────
+
+/**
+ * Map (process.platform, process.arch) → { pkg: npm platform package name,
+ *                                           file: bundled ORT dylib filename }
+ *
+ * Dylib filenames are unversioned across all platforms for consistency. The
+ * release workflow (.github/workflows/release.yml) copies Microsoft's
+ * versioned upstream tarball file (e.g. libonnxruntime.1.24.4.dylib) into the
+ * platform package with the unversioned name listed here.
+ *
+ * If you add a new platform, update this table AND the matching platform job
+ * in release.yml.
+ */
+const PLATFORM_DYLIB = {
+  'darwin-arm64': { pkg: '@decibri/decibri-darwin-arm64',    file: 'libonnxruntime.dylib' },
+  'linux-x64':    { pkg: '@decibri/decibri-linux-x64-gnu',   file: 'libonnxruntime.so' },
+  'linux-arm64':  { pkg: '@decibri/decibri-linux-arm64-gnu', file: 'libonnxruntime.so' },
+  'win32-x64':    { pkg: '@decibri/decibri-win32-x64-msvc',  file: 'onnxruntime.dll' },
+};
+
+/**
+ * Resolve the absolute path to the bundled ONNX Runtime shared library for
+ * this platform.
+ *
+ * Returns a string path on success. Returns undefined when:
+ *   - the platform/arch pair is not in PLATFORM_DYLIB (unsupported target);
+ *   - the platform package is not installed (MODULE_NOT_FOUND from
+ *     require.resolve, e.g. during pre-publish development);
+ *   - any other path-resolution error occurs.
+ *
+ * When this returns undefined, the Rust layer falls back to the
+ * ORT_DYLIB_PATH environment variable via ort::init(); if that is also
+ * missing, the first Silero VAD construction fails with a decibri-specific
+ * error message telling the user what to do.
+ *
+ * This function deliberately does NOT check that the dylib file exists on
+ * disk. If the platform package was installed but is missing the dylib,
+ * that's a packaging bug that should surface loudly via the Rust error path,
+ * not be silently masked here.
+ */
+function resolveBundledOrtPath() {
+  const entry = PLATFORM_DYLIB[`${process.platform}-${process.arch}`];
+  if (!entry) return undefined;
+  try {
+    // require.resolve on the package name gives us the absolute path of its
+    // main entry (the .node binary). path.dirname() yields the package dir
+    // where the bundled ORT dylib sits alongside.
+    const nodeBinaryPath = require.resolve(entry.pkg);
+    return path.join(path.dirname(nodeBinaryPath), entry.file);
+  } catch (_) {
+    return undefined;
+  }
+}
+
 // ─── RMS helper ──────────────────────────────────────────────────────────────
 
 function computeRMS(chunk, format) {
@@ -76,7 +131,7 @@ class Decibri extends Readable {
     } else if (typeof options.device === 'number') {
       const devices = DecibriBridge.devices();
       if (options.device < 0 || options.device >= devices.length) {
-        throw new RangeError('device index out of range — call Decibri.devices() to list available devices');
+        throw new RangeError('device index out of range. Call Decibri.devices() to list available devices');
       }
       resolvedDevice = options.device;
     }
@@ -89,11 +144,17 @@ class Decibri extends Readable {
     }
 
     let modelPath = undefined;
+    let ortLibraryPath = undefined;
     if (vadMode === 'silero' && options.vad) {
       modelPath = options.modelPath || path.join(__dirname, '..', 'models', 'silero_vad.onnx');
       if (!fs.existsSync(modelPath)) {
         throw new Error(`Silero VAD model not found at ${modelPath}. Ensure the models/ directory is included in your installation.`);
       }
+      // Internal plumbing: inject the bundled ORT dylib path into the napi
+      // constructor. If resolution fails (unknown platform, platform package
+      // not installed), leaves ortLibraryPath as undefined and lets Rust fall
+      // through to ORT_DYLIB_PATH or surface a decibri-specific init error.
+      ortLibraryPath = resolveBundledOrtPath();
     }
 
     // ── Store config ───────────────────────────────────────────────────────
@@ -117,6 +178,7 @@ class Decibri extends Readable {
       device: resolvedDevice,
       vadMode: (options.vad && vadMode === 'silero') ? 'silero' : 'energy',
       modelPath,
+      ortLibraryPath,
     });
   }
 

@@ -10,12 +10,28 @@ keywords = ["audio", "microphone", "capture", "sound", "voice"]
 categories = ["multimedia::audio"]
 
 [features]
-default = ["capture", "output", "vad", "denoise", "gain"]
+# Default stack for consumers who want the full decibri experience on Node/Python bindings.
+# `ort-load-dynamic` is the distribution mode used by npm platform packages and P3 Python wheels.
+default = ["capture", "output", "vad", "denoise", "gain", "ort-load-dynamic"]
+
+# Core feature set (unchanged from 3.0.x).
 capture = ["dep:cpal", "dep:crossbeam-channel"]
 output = ["dep:cpal", "dep:crossbeam-channel"]
 vad = ["dep:ort"]
 denoise = []
 gain = []
+
+# ORT distribution mode (mutually exclusive; pick exactly one).
+# A compile_error! guard in src/lib.rs enforces the exclusivity.
+ort-load-dynamic = ["ort?/load-dynamic"]
+ort-download-binaries = ["ort?/download-binaries", "ort?/tls-native"]
+
+# Execution-provider passthrough features. Off by default.
+# Enabled by bindings that want GPU acceleration on specific platforms.
+coreml = ["ort?/coreml"]
+cuda = ["ort?/cuda"]
+directml = ["ort?/directml"]
+rocm = ["ort?/rocm"]
 
 [dependencies]
 cpal = { workspace = true, optional = true }

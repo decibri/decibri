@@ -89,3 +89,106 @@ jobs:
 
           ort is pinned to an RC version. Check if stable 2.0.0 has been released."
           fi
+
+  check-onnxruntime:
+    name: Check ONNX Runtime upstream
+    runs-on: ubuntu-latest
+    # No per-job `permissions` block: inherits file-level
+    # `issues: write, contents: read` declared at top of this workflow
+    # (same pattern as the existing check-cpal and check-ort jobs).
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Ensure dependency-update label exists
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          # Idempotent: `gh label create` returns non-zero if the label
+          # already exists, which we swallow. First-run in a fresh repo
+          # (or after a manual label deletion) will create it.
+          gh label create dependency-update \
+            --color "0366d6" \
+            --description "Upstream dependency version drift detected by check-upstream.yml" \
+            2>/dev/null || true
+
+      - name: Get decibri's pinned ORT_VERSION
+        id: pinned
+        run: |
+          # Anchored to the workflow-level `env:` declaration in release.yml,
+          # which is the single source of truth for ORT_VERSION. The anchor
+          # `^  ORT_VERSION:` (two-space indent) matches the env block line
+          # exactly and rejects any stray per-job bash assignments that might
+          # sneak in later.
+          VERSION=$(grep -oP '^\s+ORT_VERSION:\s*\K[0-9]+\.[0-9]+\.[0-9]+' .github/workflows/release.yml | head -1)
+          if [ -z "$VERSION" ]; then
+            echo "ERROR: could not extract ORT_VERSION from release.yml env block"
+            echo "Expected a workflow-level env: block containing 'ORT_VERSION: X.Y.Z'"
+            exit 1
+          fi
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+          MINOR=$(echo "$VERSION" | cut -d. -f2)
+          echo "minor=${MINOR}" >> "$GITHUB_OUTPUT"
+
+      - name: Get latest Microsoft ORT release
+        id: latest
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TAG=$(gh api repos/microsoft/onnxruntime/releases/latest --jq '.tag_name')
+          VERSION="${TAG#v}"
+          DATE=$(gh api repos/microsoft/onnxruntime/releases/latest --jq '.published_at')
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+          echo "date=${DATE}" >> "$GITHUB_OUTPUT"
+          MINOR=$(echo "$VERSION" | cut -d. -f2)
+          echo "minor=${MINOR}" >> "$GITHUB_OUTPUT"
+
+      - name: Get decibri's ort crate api-N baseline
+        id: baseline
+        run: |
+          # ort 2.0.0-rc.12 defaults to api-24. Hardcoded here to avoid
+          # a second Cargo.toml parse.
+          #
+          # IMPORTANT: when upgrading the ort crate, update this number to
+          # match the new crate's target api-N. See the maintainer comment
+          # in the workspace root Cargo.toml for the full upgrade procedure
+          # (step 4 of that comment lists this file explicitly).
+          echo "api_n=24" >> "$GITHUB_OUTPUT"
+
+      - name: Create or update issue if upstream advanced
+        if: steps.pinned.outputs.version != steps.latest.outputs.version
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          PINNED="${{ steps.pinned.outputs.version }}"
+          LATEST="${{ steps.latest.outputs.version }}"
+          LATEST_MINOR="${{ steps.latest.outputs.minor }}"
+          API_N="${{ steps.baseline.outputs.api_n }}"
+          DATE="${{ steps.latest.outputs.date }}"
+
+          ABI_WARNING=""
+          if [ "$LATEST_MINOR" -gt "$API_N" ]; then
+            ABI_WARNING="
+
+          ⚠️ **ABI mismatch**: Microsoft released ORT 1.${LATEST_MINOR}.x but the \`ort\` crate is pinned to an \`api-${API_N}\` target (ONNX Runtime 1.${API_N}.x ABI). **Upgrading the bundled ORT to 1.${LATEST_MINOR}.x requires first upgrading the \`ort\` crate to a version that targets api-${LATEST_MINOR}**. Do NOT bump \`ORT_VERSION\` in \`release.yml\` until the crate upgrade is complete."
+          fi
+
+          TITLE="ONNX Runtime ${LATEST} available (pinned: ${PINNED})"
+          COUNT=$(gh issue list --label "dependency-update" --state open --search "ONNX Runtime" --json number --jq 'length')
+          BODY="Microsoft released **ONNX Runtime v${LATEST}** on ${DATE}.
+
+          **decibri pinned:** ${PINNED}
+          **Upstream latest:** ${LATEST}
+          **Release notes:** https://github.com/microsoft/onnxruntime/releases/tag/v${LATEST}
+
+          **Review upgrade path:**
+          1. Check that the current \`ort\` crate version still supports \`api-${LATEST_MINOR}\` (compare against [ort.pyke.io/setup/multiversion](https://ort.pyke.io/setup/multiversion)).
+          2. Update \`ORT_VERSION\` in \`.github/workflows/release.yml\`.
+          3. Update the \`api_n\` baseline in \`.github/workflows/check-upstream.yml\` if the ort crate was also upgraded.
+          4. Trigger \`release-dryrun.yml\` manually to confirm the new tarball URLs resolve and the bundled dylib loads across all four platforms.${ABI_WARNING}"
+
+          if [ "$COUNT" = "0" ]; then
+            gh issue create \
+              --title "$TITLE" \
+              --label "dependency-update" \
+              --body "$BODY"
+          fi

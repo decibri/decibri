@@ -21,7 +21,7 @@ pub enum DecibriError {
     #[error("Multiple devices match \"{name}\":\n{matches}")]
     MultipleDevicesMatch { name: String, matches: String },
 
-    #[error("device index out of range — call Decibri.devices() to list available devices")]
+    #[error("device index out of range. Call Decibri.devices() to list available devices")]
     DeviceIndexOutOfRange,
 
     #[error("No microphone found. Check system audio input settings.")]

@@ -50,7 +50,7 @@ class DecibriOutput extends Writable {
     } else if (typeof options.device === 'number') {
       const devices = DecibriOutputBridge.devices();
       if (options.device < 0 || options.device >= devices.length) {
-        throw new RangeError('device index out of range — call DecibriOutput.devices() to list available devices');
+        throw new RangeError('device index out of range. Call DecibriOutput.devices() to list available devices');
       }
       resolvedDevice = options.device;
     }

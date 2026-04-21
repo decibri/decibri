@@ -1,10 +1,13 @@
 {
   "name": "@decibri/decibri-win32-x64-msvc",
-  "version": "3.0.0",
+  "version": "3.1.0",
   "os": ["win32"],
   "cpu": ["x64"],
   "main": "decibri.win32-x64-msvc.node",
-  "files": ["decibri.win32-x64-msvc.node"],
+  "files": [
+    "decibri.win32-x64-msvc.node",
+    "onnxruntime.dll"
+  ],
   "license": "Apache-2.0",
   "description": "decibri native binary for Windows x64",
   "repository": {

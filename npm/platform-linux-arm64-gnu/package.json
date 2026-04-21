@@ -1,10 +1,14 @@
 {
   "name": "@decibri/decibri-linux-arm64-gnu",
-  "version": "3.0.0",
+  "version": "3.1.0",
   "os": ["linux"],
   "cpu": ["arm64"],
   "main": "decibri.linux-arm64-gnu.node",
-  "files": ["decibri.linux-arm64-gnu.node"],
+  "files": [
+    "decibri.linux-arm64-gnu.node",
+    "libonnxruntime.so",
+    "libonnxruntime_providers_shared.so"
+  ],
   "license": "Apache-2.0",
   "description": "decibri native binary for Linux arm64",
   "repository": {

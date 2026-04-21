@@ -1,0 +1,26 @@
+# Cargo configuration for decibri workspace.
+#
+# Aliases defined here work with any `cargo <alias>` invocation in this workspace.
+
+[alias]
+# Test the decibri crate under the `ort-download-binaries` feature.
+#
+# The default feature set selects `ort-load-dynamic`, which requires ORT to be
+# available at runtime (either via an ORT_DYLIB_PATH env var or a bundled dylib
+# from an npm platform package). Neither is present during plain `cargo test`,
+# which would cause every model-loading test to fail with a dylib-not-found
+# error wrapped by decibri.
+#
+# This alias swaps `ort-load-dynamic` for `ort-download-binaries` for the test
+# run only. The tests exercise identical VAD code paths. They don't care which
+# distribution mode supplies libonnxruntime. Side benefit: the escape-hatch
+# feature gets exercised end-to-end by CI.
+#
+# The load-dynamic code path itself is covered by Node-level tests
+# (tests/test-vad-silero.js) against the built .node file with the bundled ORT,
+# which is the real production path.
+#
+# If you specifically want to test load-dynamic from Rust, set
+# `ORT_DYLIB_PATH=/path/to/libonnxruntime.{so,dylib,dll}` and run the plain
+# `cargo test -p decibri` instead.
+test-decibri = "test -p decibri --no-default-features --features capture,output,vad,denoise,gain,ort-download-binaries"

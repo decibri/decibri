@@ -2,9 +2,9 @@ name: CI
 
 on:
   push:
-    branches: [main]
+    branches: [main, development]
   pull_request:
-    branches: [main]
+    branches: [main, development]
 
 concurrency:
   group: ci-${{ github.ref }}
@@ -52,7 +52,7 @@ jobs:
         with:
           shared-key: "rust"
       - run: sudo apt-get update && sudo apt-get install -y libasound2-dev
-      - run: cargo test -p decibri
+      - run: cargo test-decibri
 
   test-node:
     name: Node.js Tests
