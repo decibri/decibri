@@ -20,6 +20,28 @@ enum SampleFormat {
 }
 
 /// Options passed from JS constructor.
+///
+/// Note on `ort_library_path` (exposed to JS as `ortLibraryPath`): this is an
+/// internal plumbing field used by the JS wrapper in
+/// `npm/decibri/src/decibri.js`. The wrapper auto-resolves the bundled ORT
+/// dylib path via `require.resolve('@decibri/decibri-<platform>')` and passes
+/// the absolute path through to here so Rust's `ort::init_from` can load the
+/// correct library for the user's platform.
+///
+/// The field is hidden from the auto-generated TypeScript definitions via
+/// `#[napi(skip_typescript)]` so TS/JS consumers do not see `ortLibraryPath`
+/// on the public options surface. It is still marshaled at runtime, so the
+/// JS wrapper can pass it through. Rationale: adding a typed public option
+/// later is non-breaking; removing one is breaking, so we default to not
+/// exposing it until a concrete use case arises.
+///
+/// Users who need to override ORT resolution (e.g. point at a system ORT, or
+/// A/B between bundled and custom builds) should set the `ORT_DYLIB_PATH`
+/// environment variable before Node starts — that's the supported public
+/// mechanism.
+///
+/// If this field is `None` (the default when not injected by the wrapper),
+/// Rust calls `ort::init()` which honours `ORT_DYLIB_PATH`.
 #[napi(object)]
 #[derive(Default)]
 pub struct DecibriOptions {
@@ -30,6 +52,8 @@ pub struct DecibriOptions {
     pub device: Option<serde_json::Value>,
     pub vad_mode: Option<String>,
     pub model_path: Option<String>,
+    #[napi(skip_typescript)]
+    pub ort_library_path: Option<String>,
 }
 
 /// Native bridge class exposed to Node.js via napi-rs.
@@ -92,6 +116,10 @@ impl DecibriBridge {
                 model_path: std::path::PathBuf::from(model_path),
                 sample_rate,
                 threshold: 0.5, // JS wrapper controls the actual threshold
+                // Populated by the JS wrapper from require.resolve on the
+                // resolved platform package. When `None`, Rust falls through
+                // to `ort::init()` which honours the `ORT_DYLIB_PATH` env var.
+                ort_library_path: opts.ort_library_path.as_deref().map(std::path::PathBuf::from),
             };
             Some(SileroVad::new(vad_config).map_err(to_napi_error)?)
         } else {

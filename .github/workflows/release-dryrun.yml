@@ -3,6 +3,12 @@ name: Release Dry Run
 on:
   workflow_dispatch:
 
+# Must stay in sync with release.yml's ORT_VERSION. If the two diverge, dryrun
+# is no longer a valid pre-release validation gate. See the upgrade procedure
+# in the workspace Cargo.toml maintainer comment.
+env:
+  ORT_VERSION: 1.24.4
+
 jobs:
   build:
     name: Build ${{ matrix.target }}
@@ -13,14 +19,26 @@ jobs:
         include:
           - os: windows-latest
             target: x86_64-pc-windows-msvc
+            artifact: win32-x64-msvc
+            ort_platform_slug: win-x64
+            ort_ext: zip
           - os: macos-14
             target: aarch64-apple-darwin
+            artifact: darwin-arm64
+            ort_platform_slug: osx-arm64
+            ort_ext: tgz
           - os: ubuntu-latest
             target: x86_64-unknown-linux-gnu
             setup: sudo apt-get update && sudo apt-get install -y libasound2-dev
+            artifact: linux-x64-gnu
+            ort_platform_slug: linux-x64
+            ort_ext: tgz
           - os: ubuntu-24.04-arm
             target: aarch64-unknown-linux-gnu
             setup: sudo apt-get update && sudo apt-get install -y libasound2-dev
+            artifact: linux-arm64-gnu
+            ort_platform_slug: linux-aarch64
+            ort_ext: tgz
 
     steps:
       - uses: actions/checkout@v6
@@ -40,6 +58,76 @@ jobs:
       - name: Install npm dependencies
         run: cd npm/decibri && npm install --ignore-optional
 
+      - name: Verify ONNX Runtime tarball availability
+        shell: bash
+        run: |
+          URL="https://github.com/microsoft/onnxruntime/releases/download/v${ORT_VERSION}/onnxruntime-${{ matrix.ort_platform_slug }}-${ORT_VERSION}.${{ matrix.ort_ext }}"
+          echo "Verifying: $URL"
+          if ! curl -sIfL --retry 3 --retry-delay 2 -o /dev/null "$URL"; then
+            echo "ERROR: expected ONNX Runtime tarball not available at $URL"
+            echo "This may mean Microsoft renamed release assets, delayed a release,"
+            echo "or the pinned ORT_VERSION no longer exists upstream."
+            echo "Check: https://github.com/microsoft/onnxruntime/releases/tag/v${ORT_VERSION}"
+            exit 1
+          fi
+          echo "OK: tarball is available"
+
+      - name: Download and extract ONNX Runtime (macOS)
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          URL="https://github.com/microsoft/onnxruntime/releases/download/v${ORT_VERSION}/onnxruntime-${{ matrix.ort_platform_slug }}-${ORT_VERSION}.tgz"
+          curl -sL --retry 3 --retry-delay 2 -o ort.tgz "$URL"
+          tar -xzf ort.tgz
+          SRC="onnxruntime-${{ matrix.ort_platform_slug }}-${ORT_VERSION}"
+          cp -L "$SRC/lib/libonnxruntime.${ORT_VERSION}.dylib" npm/decibri/libonnxruntime.dylib
+
+      - name: Verify libonnxruntime.dylib codesign (macOS, diagnostic)
+        if: runner.os == 'macOS'
+        continue-on-error: true
+        # Non-gating diagnostic — byte-identical to the same step in
+        # release.yml. Surfaces codesign's assessment of the renamed
+        # dylib in CI logs before a release.
+        run: codesign -v --verbose=2 npm/decibri/libonnxruntime.dylib
+
+      - name: Download and extract ONNX Runtime (Linux)
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          URL="https://github.com/microsoft/onnxruntime/releases/download/v${ORT_VERSION}/onnxruntime-${{ matrix.ort_platform_slug }}-${ORT_VERSION}.tgz"
+          curl -sL --retry 3 --retry-delay 2 -o ort.tgz "$URL"
+          tar -xzf ort.tgz
+          SRC="onnxruntime-${{ matrix.ort_platform_slug }}-${ORT_VERSION}"
+          cp -L "$SRC/lib/libonnxruntime.so" npm/decibri/libonnxruntime.so
+          cp "$SRC/lib/libonnxruntime_providers_shared.so" npm/decibri/
+
+      - name: Download and extract ONNX Runtime (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $ProgressPreference = 'SilentlyContinue'
+          $url = "https://github.com/microsoft/onnxruntime/releases/download/v$env:ORT_VERSION/onnxruntime-${{ matrix.ort_platform_slug }}-$env:ORT_VERSION.zip"
+          Invoke-WebRequest -Uri $url -OutFile ort.zip -MaximumRetryCount 3 -RetryIntervalSec 2
+          Expand-Archive -Path ort.zip -DestinationPath .
+          $src = "onnxruntime-${{ matrix.ort_platform_slug }}-$env:ORT_VERSION"
+          Copy-Item "$src/lib/onnxruntime.dll" npm/decibri/
+
+      - name: Inspect onnxruntime.dll imports (Windows, diagnostic)
+        if: runner.os == 'Windows'
+        continue-on-error: true
+        shell: pwsh
+        # Non-gating diagnostic — byte-identical to the same step in
+        # release.yml. Logs the DLL's import table so peer-DLL
+        # dependencies are visible pre-release.
+        run: |
+          $dumpbin = Get-ChildItem "C:\Program Files*\Microsoft Visual Studio\*\*\VC\Tools\MSVC\*\bin\Hostx64\x64\dumpbin.exe" -ErrorAction SilentlyContinue | Select-Object -First 1
+          if (-not $dumpbin) {
+            Write-Host "dumpbin.exe not found under the Visual Studio install path"
+            exit 1
+          }
+          Write-Host "Using dumpbin: $($dumpbin.FullName)"
+          & $dumpbin.FullName /imports npm/decibri/onnxruntime.dll
+
       - name: Build native addon
         shell: bash
         run: |
@@ -53,7 +141,13 @@ jobs:
 
       - name: Verify binary exists
         shell: bash
-        run: ls -la npm/decibri/decibri.*.node
+        run: |
+          ls -la npm/decibri/decibri.*.node
+          # Verify the bundled ORT dylib was extracted next to the addon.
+          # Glob pattern matches whichever platform-specific file exists.
+          ls -la npm/decibri/libonnxruntime.* npm/decibri/onnxruntime.dll 2>/dev/null || \
+            ls -la npm/decibri/libonnxruntime.* 2>/dev/null || \
+            ls -la npm/decibri/onnxruntime.dll
 
       - name: Smoke test require()
         shell: bash
@@ -61,7 +155,175 @@ jobs:
 
       - uses: actions/upload-artifact@v7
         with:
-          name: decibri-${{ matrix.target }}
-          path: npm/decibri/decibri.*.node
+          name: decibri-${{ matrix.artifact }}
+          # Matches .node + whichever platform-specific ORT files exist.
+          # Non-matching patterns are silently skipped per upload-artifact
+          # v7 semantics; if-no-files-found still catches real failures
+          # because the .node pattern always matches.
+          path: |
+            npm/decibri/decibri.*.node
+            npm/decibri/libonnxruntime.dylib
+            npm/decibri/libonnxruntime.so
+            npm/decibri/libonnxruntime_providers_shared.so
+            npm/decibri/onnxruntime.dll
           retention-days: 7
           if-no-files-found: error
+
+      - name: Upload napi loader (Linux x64 only)
+        if: matrix.artifact == 'linux-x64-gnu'
+        uses: actions/upload-artifact@v7
+        with:
+          name: decibri-loader
+          path: |
+            npm/decibri/index.js
+            npm/decibri/index.d.ts
+          retention-days: 7
+          if-no-files-found: error
+
+  stage-and-verify:
+    name: Stage artifacts and verify package contents
+    runs-on: ubuntu-latest
+    needs: build
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: '20'
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v8
+        with:
+          path: artifacts/
+
+      - name: Debug artifact structure
+        run: find artifacts/ -type f | sort
+
+      # This staging block is intentionally BYTE-IDENTICAL to the "Stage
+      # platform binaries" step in .github/workflows/release.yml. The whole
+      # point of stage-and-verify is to catch bugs in release.yml's staging
+      # logic, which requires the two to stay in sync. If you update one,
+      # update the other.
+      - name: Stage platform binaries
+        shell: bash
+        run: |
+          # macOS (darwin-arm64)
+          find artifacts/decibri-darwin-arm64 -name "decibri.darwin-arm64.node" -exec cp {} npm/platform-darwin-arm64/ \;
+          find artifacts/decibri-darwin-arm64 -name "libonnxruntime.dylib"      -exec cp {} npm/platform-darwin-arm64/ \;
+          # Linux x64
+          find artifacts/decibri-linux-x64-gnu -name "decibri.linux-x64-gnu.node"         -exec cp {} npm/platform-linux-x64-gnu/ \;
+          find artifacts/decibri-linux-x64-gnu -name "libonnxruntime.so"                  -exec cp {} npm/platform-linux-x64-gnu/ \;
+          find artifacts/decibri-linux-x64-gnu -name "libonnxruntime_providers_shared.so" -exec cp {} npm/platform-linux-x64-gnu/ \;
+          # Linux arm64
+          find artifacts/decibri-linux-arm64-gnu -name "decibri.linux-arm64-gnu.node"         -exec cp {} npm/platform-linux-arm64-gnu/ \;
+          find artifacts/decibri-linux-arm64-gnu -name "libonnxruntime.so"                    -exec cp {} npm/platform-linux-arm64-gnu/ \;
+          find artifacts/decibri-linux-arm64-gnu -name "libonnxruntime_providers_shared.so"   -exec cp {} npm/platform-linux-arm64-gnu/ \;
+          # Windows
+          find artifacts/decibri-win32-x64-msvc -name "decibri.win32-x64-msvc.node" -exec cp {} npm/platform-win32-x64-msvc/ \;
+          find artifacts/decibri-win32-x64-msvc -name "onnxruntime.dll"             -exec cp {} npm/platform-win32-x64-msvc/ \;
+
+      - name: Verify staged binaries
+        run: |
+          ls -la npm/platform-win32-x64-msvc/decibri.*.node   npm/platform-win32-x64-msvc/onnxruntime.dll
+          ls -la npm/platform-darwin-arm64/decibri.*.node     npm/platform-darwin-arm64/libonnxruntime.dylib
+          ls -la npm/platform-linux-x64-gnu/decibri.*.node    npm/platform-linux-x64-gnu/libonnxruntime.so    npm/platform-linux-x64-gnu/libonnxruntime_providers_shared.so
+          ls -la npm/platform-linux-arm64-gnu/decibri.*.node  npm/platform-linux-arm64-gnu/libonnxruntime.so  npm/platform-linux-arm64-gnu/libonnxruntime_providers_shared.so
+
+      - name: Stage napi loader
+        run: |
+          cp artifacts/decibri-loader/index.js npm/decibri/
+          cp artifacts/decibri-loader/index.d.ts npm/decibri/
+
+      # Name matches release.yml's "Copy README for npm package" step so the
+      # two workflows remain byte-identical on README handling.
+      - name: Copy README for npm package
+        run: cp README.md npm/decibri/README.md
+
+      - name: Verify pack contents for each package
+        shell: bash
+        run: |
+          set -o pipefail
+          FAIL=0
+
+          verify_pack() {
+            local pkg_dir="$1"
+            local label="$2"
+            shift 2
+            # Remaining args: required files prefixed with ':',
+            #                 forbidden regex patterns prefixed with '~'.
+            local required=()
+            local forbidden=()
+            for arg in "$@"; do
+              case "$arg" in
+                :*) required+=("${arg#:}") ;;
+                ~*) forbidden+=("${arg#~}") ;;
+              esac
+            done
+
+            echo ""
+            echo "=== $label ($pkg_dir) ==="
+            local files
+            files=$(cd "$pkg_dir" && npm pack --dry-run --json | jq -r '.[0].files[].path')
+            echo "Would pack:"
+            echo "$files" | sort | sed 's/^/  * /'
+
+            for f in "${required[@]}"; do
+              if echo "$files" | grep -Fxq "$f"; then
+                echo "  [OK]   required present: $f"
+              else
+                echo "  [FAIL] required MISSING: $f"
+                FAIL=1
+              fi
+            done
+
+            for p in "${forbidden[@]}"; do
+              local matches
+              matches=$(echo "$files" | grep -E "$p" || true)
+              if [ -n "$matches" ]; then
+                echo "  [FAIL] forbidden pattern '$p' matched:"
+                echo "$matches" | sed 's/^/         /'
+                FAIL=1
+              else
+                echo "  [OK]   forbidden absent: $p"
+              fi
+            done
+          }
+
+          # Main package: should carry JS source, models, README, napi loader;
+          # must NOT carry the native .node file or any ORT dylib (those belong
+          # in the platform packages).
+          verify_pack npm/decibri "main package (decibri)" \
+            :package.json \
+            :README.md \
+            :src/decibri.js \
+            :index.js \
+            :models/silero_vad.onnx \
+            '~\.node$' \
+            '~onnxruntime'
+
+          verify_pack npm/platform-darwin-arm64 "@decibri/decibri-darwin-arm64" \
+            :decibri.darwin-arm64.node \
+            :libonnxruntime.dylib
+
+          verify_pack npm/platform-linux-x64-gnu "@decibri/decibri-linux-x64-gnu" \
+            :decibri.linux-x64-gnu.node \
+            :libonnxruntime.so \
+            :libonnxruntime_providers_shared.so
+
+          verify_pack npm/platform-linux-arm64-gnu "@decibri/decibri-linux-arm64-gnu" \
+            :decibri.linux-arm64-gnu.node \
+            :libonnxruntime.so \
+            :libonnxruntime_providers_shared.so
+
+          verify_pack npm/platform-win32-x64-msvc "@decibri/decibri-win32-x64-msvc" \
+            :decibri.win32-x64-msvc.node \
+            :onnxruntime.dll
+
+          echo ""
+          if [ "$FAIL" -ne 0 ]; then
+            echo "================================================"
+            echo "  VERIFICATION FAILED - not publish-ready"
+            echo "================================================"
+            exit 1
+          fi
+          echo "All 5 packages pass verification."

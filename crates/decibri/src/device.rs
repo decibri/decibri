@@ -34,45 +34,100 @@ pub enum DeviceSelector {
     Name(String),
 }
 
+/// Internal: enumerated device row with `is_default` already resolved.
+/// Used as the output of the pure `compute_is_default` helper so both input
+/// and output enumeration can share the same device-identity matching logic
+/// (and so the logic is testable without mocking `cpal::Host`).
+#[cfg(any(feature = "capture", feature = "output"))]
+struct ComputedRow {
+    index: usize,
+    name: String,
+    channels: u16,
+    sample_rate: u32,
+    is_default: bool,
+}
+
+/// Pure helper for Issue #14 fix.
+///
+/// Given a list of `(id, name, channels, sample_rate)` tuples representing
+/// enumerated devices and an optional default-device id, produce one
+/// `ComputedRow` per input with `is_default` resolved by identity comparison
+/// (NOT by name-equality — see [#14](https://github.com/decibri/decibri/issues/14)).
+///
+/// Semantics:
+/// - A row's `id` of `None` (caller couldn't fetch a cpal `DeviceId` for that
+///   device) is treated as "not default".
+/// - A `default_id` of `None` (no default device reported by the host) means
+///   no row is flagged default.
+/// - Otherwise, a row is default iff its id equals `default_id`. With a stable
+///   per-host id (WASAPI endpoint ID, CoreAudio UID, ALSA pcm_id) exactly one
+///   row matches even when multiple devices share a display name.
+///
+/// Generic over `Id: PartialEq` so unit tests can use `String` ids and verify
+/// the matching logic without depending on a live cpal host.
+#[cfg(any(feature = "capture", feature = "output"))]
+fn compute_is_default<Id: PartialEq>(
+    rows: Vec<(Option<Id>, String, u16, u32)>,
+    default_id: Option<Id>,
+) -> Vec<ComputedRow> {
+    rows.into_iter()
+        .enumerate()
+        .map(|(index, (id, name, channels, sample_rate))| {
+            let is_default = match (id.as_ref(), default_id.as_ref()) {
+                (Some(row_id), Some(default)) => row_id == default,
+                _ => false,
+            };
+            ComputedRow {
+                index,
+                name,
+                channels,
+                sample_rate,
+                is_default,
+            }
+        })
+        .collect()
+}
+
 /// Enumerate all available audio input devices.
 #[cfg(any(feature = "capture", feature = "output"))]
 pub fn enumerate_input_devices() -> Result<Vec<DeviceInfo>, DecibriError> {
     let host = cpal::default_host();
 
-    let default_device_name = host
-        .default_input_device()
-        .and_then(|d| d.description().ok())
-        .map(|desc| desc.name().to_string());
+    // Stable per-host id (WASAPI endpoint ID / CoreAudio UID / ALSA pcm_id)
+    // for the OS default device. `.id()` is fallible on rare host backends;
+    // treat a failure as "no default" rather than propagating.
+    let default_id = host.default_input_device().and_then(|d| d.id().ok());
 
     let devices = host
         .input_devices()
         .map_err(|e| DecibriError::Other(format!("Failed to enumerate devices: {e}")))?;
 
-    let mut result = Vec::new();
-    for (index, device) in devices.enumerate() {
-        let name = device
-            .description()
-            .map(|d| d.name().to_string())
-            .unwrap_or_else(|_| format!("Unknown Device {index}"));
+    let rows: Vec<(Option<cpal::DeviceId>, String, u16, u32)> = devices
+        .enumerate()
+        .map(|(index, device)| {
+            let id = device.id().ok();
+            let name = device
+                .description()
+                .map(|d| d.name().to_string())
+                .unwrap_or_else(|_| format!("Unknown Device {index}"));
+            let (channels, sample_rate) = match device.default_input_config() {
+                Ok(config) => (config.channels(), config.sample_rate()),
+                Err(_) => (0, 0),
+            };
+            (id, name, channels, sample_rate)
+        })
+        .collect();
 
-        let default_config = device.default_input_config();
-        let (max_channels, default_rate) = match default_config {
-            Ok(config) => (config.channels(), config.sample_rate()),
-            Err(_) => (0, 0),
-        };
-
-        let is_default = default_device_name.as_ref() == Some(&name);
-
-        result.push(DeviceInfo {
-            index,
-            name,
-            max_input_channels: max_channels,
-            default_sample_rate: default_rate,
-            is_default,
-        });
-    }
-
-    Ok(result)
+    Ok(compute_is_default(rows, default_id)
+        .into_iter()
+        .map(|r| DeviceInfo {
+            index: r.index,
+            name: r.name,
+            max_input_channels: r.channels,
+            default_sample_rate: r.sample_rate,
+            is_default: r.is_default,
+        })
+        .collect())
 }
 
 /// Resolve a device selector to a cpal Device.
@@ -140,40 +195,40 @@ pub fn resolve_device(selector: &DeviceSelector) -> Result<cpal::Device, Decibri
 pub fn enumerate_output_devices() -> Result<Vec<OutputDeviceInfo>, DecibriError> {
     let host = cpal::default_host();
 
-    let default_device_name = host
-        .default_output_device()
-        .and_then(|d| d.description().ok())
-        .map(|desc| desc.name().to_string());
+    // Stable per-host id for the OS default output device; see
+    // `enumerate_input_devices` for rationale (same Issue #14 fix pattern).
+    let default_id = host.default_output_device().and_then(|d| d.id().ok());
 
     let devices = host
         .output_devices()
         .map_err(|e| DecibriError::Other(format!("Failed to enumerate devices: {e}")))?;
 
-    let mut result = Vec::new();
-    for (index, device) in devices.enumerate() {
-        let name = device
-            .description()
-            .map(|d| d.name().to_string())
-            .unwrap_or_else(|_| format!("Unknown Device {index}"));
+    let rows: Vec<(Option<cpal::DeviceId>, String, u16, u32)> = devices
+        .enumerate()
+        .map(|(index, device)| {
+            let id = device.id().ok();
+            let name = device
+                .description()
+                .map(|d| d.name().to_string())
+                .unwrap_or_else(|_| format!("Unknown Device {index}"));
+            let (channels, sample_rate) = match device.default_output_config() {
+                Ok(config) => (config.channels(), config.sample_rate()),
+                Err(_) => (0, 0),
+            };
+            (id, name, channels, sample_rate)
+        })
+        .collect();
 
-        let default_config = device.default_output_config();
-        let (max_channels, default_rate) = match default_config {
-            Ok(config) => (config.channels(), config.sample_rate()),
-            Err(_) => (0, 0),
-        };
-
-        let is_default = default_device_name.as_ref() == Some(&name);
-
-        result.push(OutputDeviceInfo {
-            index,
-            name,
-            max_output_channels: max_channels,
-            default_sample_rate: default_rate,
-            is_default,
-        });
-    }
-
-    Ok(result)
+    Ok(compute_is_default(rows, default_id)
+        .into_iter()
+        .map(|r| OutputDeviceInfo {
+            index: r.index,
+            name: r.name,
+            max_output_channels: r.channels,
+            default_sample_rate: r.sample_rate,
+            is_default: r.is_default,
+        })
+        .collect())
 }
 
 /// Resolve an output device selector to a cpal Device.
@@ -233,5 +288,89 @@ pub fn resolve_output_device(selector: &DeviceSelector) -> Result<cpal::Device, 
                 }
             }
         }
+    }
+}
+
+#[cfg(all(test, any(feature = "capture", feature = "output")))]
+mod tests {
+    use super::*;
+
+    // Synthetic id type for testing — any `PartialEq` works because
+    // `compute_is_default` is generic over the id type. Using String keeps the
+    // tests readable and avoids any dependency on a live cpal host.
+    fn row(id: Option<&str>, name: &str) -> (Option<String>, String, u16, u32) {
+        (id.map(String::from), name.to_string(), 2, 48_000)
+    }
+
+    /// Issue #14: two devices with the same display name but different per-host
+    /// IDs; only the device whose id matches the default is flagged.
+    #[test]
+    fn test_is_default_two_devices_same_name_different_ids() {
+        let rows = vec![
+            row(Some("usb-mic-A"), "Microphone"),
+            row(Some("usb-mic-B"), "Microphone"),
+        ];
+        let result = compute_is_default(rows, Some("usb-mic-B".to_string()));
+
+        assert_eq!(result.len(), 2);
+        assert!(
+            !result[0].is_default,
+            "first duplicate-named mic must NOT be flagged when default is the second"
+        );
+        assert!(
+            result[1].is_default,
+            "second duplicate-named mic (matching default id) must be flagged"
+        );
+        // Both rows keep their shared display name — the bug was never about
+        // renaming devices, only about misattribution of is_default.
+        assert_eq!(result[0].name, "Microphone");
+        assert_eq!(result[1].name, "Microphone");
+    }
+
+    /// Host reports no default device (rare but possible on headless Linux /
+    /// CI runners with no audio devices): no row is flagged.
+    #[test]
+    fn test_is_default_no_default_reported() {
+        let rows = vec![row(Some("mic-A"), "Mic A"), row(Some("mic-B"), "Mic B")];
+        let result = compute_is_default::<String>(rows, None);
+
+        assert_eq!(result.len(), 2);
+        assert!(
+            result.iter().all(|r| !r.is_default),
+            "no row may be flagged when host reports no default"
+        );
+    }
+
+    /// A device whose `id()` call failed (represented as `None` in the helper
+    /// input) is never flagged default, even if the host reports some default.
+    #[test]
+    fn test_is_default_row_with_failed_id() {
+        let rows = vec![
+            row(None, "Mystery device with unavailable id"),
+            row(Some("mic-B"), "Mic B"),
+        ];
+        let result = compute_is_default(rows, Some("mic-B".to_string()));
+
+        assert_eq!(result.len(), 2);
+        assert!(
+            !result[0].is_default,
+            "row with id() == None must never be flagged default"
+        );
+        assert!(
+            result[1].is_default,
+            "row whose id matches the default must be flagged"
+        );
+    }
+
+    /// Empty device list produces an empty result, regardless of what the
+    /// host reports as the default.
+    #[test]
+    fn test_is_default_empty_device_list() {
+        let rows: Vec<(Option<String>, String, u16, u32)> = vec![];
+        let result_no_default = compute_is_default::<String>(rows.clone(), None);
+        let result_with_default = compute_is_default(rows, Some("phantom-mic".to_string()));
+
+        assert!(result_no_default.is_empty());
+        assert!(result_with_default.is_empty());
     }
 }

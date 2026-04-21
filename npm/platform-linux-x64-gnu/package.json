@@ -4,7 +4,11 @@
   "os": ["linux"],
   "cpu": ["x64"],
   "main": "decibri.linux-x64-gnu.node",
-  "files": ["decibri.linux-x64-gnu.node"],
+  "files": [
+    "decibri.linux-x64-gnu.node",
+    "libonnxruntime.so",
+    "libonnxruntime_providers_shared.so"
+  ],
   "license": "Apache-2.0",
   "description": "decibri native binary for Linux x64",
   "repository": {

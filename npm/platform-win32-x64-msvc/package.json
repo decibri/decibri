@@ -4,7 +4,10 @@
   "os": ["win32"],
   "cpu": ["x64"],
   "main": "decibri.win32-x64-msvc.node",
-  "files": ["decibri.win32-x64-msvc.node"],
+  "files": [
+    "decibri.win32-x64-msvc.node",
+    "onnxruntime.dll"
+  ],
   "license": "Apache-2.0",
   "description": "decibri native binary for Windows x64",
   "repository": {

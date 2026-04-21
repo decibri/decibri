@@ -17,7 +17,44 @@ dasp_sample = "0.11"
 thiserror = "2"
 parking_lot = "0.12"
 crossbeam-channel = "0.5"
-ort = { version = "=2.0.0-rc.12", default-features = false, features = ["std", "download-binaries", "tls-native"] }
+# ort 2.0.0-rc.12 targets ONNX Runtime C API version 24 (ORT_API_VERSION = 24).
+# We bundle ONNX Runtime 1.24.4 tarballs into each npm platform package.
+# Verified via:
+#   - https://raw.githubusercontent.com/pykeio/ort/v2.0.0-rc.12/ort-sys/src/version.rs
+#   - https://ort.pyke.io/setup/multiversion
+#   - https://github.com/microsoft/onnxruntime/releases/tag/v1.24.1 (ORT_API_VERSION bump)
+#
+# Feature rationale:
+#   - `std`:     required for non-no_std targets (all of ours).
+#   - `api-24`:  matches the ORT 1.24.x ABI we bundle in npm platform packages.
+#                Must be kept in sync with the bundled ORT tarball version.
+#                If omitted, ort silently falls back to api-17 (the baseline) and its
+#                own EP modules fail to compile against the older OrtApi struct.
+# We deliberately exclude ort's other defaults (`download-binaries`, `tls-native`,
+# `copy-dylibs`, `ndarray`, `tracing`) because:
+#   - `download-binaries` / `tls-native` / `copy-dylibs` are the old embedding path
+#     we're migrating away from in 3.1.0 (available opt-in via
+#     `ort-download-binaries` feature on crates/decibri for pure-Rust consumers).
+#   - `ndarray` / `tracing` are optional integrations decibri doesn't use.
+#
+# Distribution mode (load-dynamic vs download-binaries) is selected by crates/decibri
+# via the `ort-load-dynamic` / `ort-download-binaries` features.
+#
+# When upgrading the ort crate (e.g. 2.0.0-rc.12 -> 2.0.0 stable -> future versions):
+#   1. Inspect the new ort's Cargo.toml `description` and `default` features for the
+#      new api-N (pyke bumps the default with each minor ORT target). Update the
+#      `api-24` in the `features = [...]` list below to match the new api-N.
+#   2. Update the bundled ORT version to match (e.g. api-25 -> ORT 1.25.x).
+#   3. Update the single `env.ORT_VERSION` declaration in .github/workflows/release.yml
+#      (workflow-level env block, not a per-job bash assignment — one source of truth).
+#   4. Update the `api_n` baseline in .github/workflows/check-upstream.yml.
+#   5. Re-run the release-dryrun workflow to confirm the tarball URL pattern still
+#      resolves.
+# Steps 1-4 MUST move together — leaving any one out produces an ABI mismatch that
+# either fails to compile (step 1 skipped) or fails at runtime dylib-load time
+# (step 2 skipped — pyke/ort performs a version-string check in load_dylib_from_path
+# and returns Err for too-old ORT minors).
+ort = { version = "=2.0.0-rc.12", default-features = false, features = ["std", "api-24"] }
 
 [profile.release]
 lto = true

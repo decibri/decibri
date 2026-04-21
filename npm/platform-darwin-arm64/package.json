@@ -4,7 +4,10 @@
   "os": ["darwin"],
   "cpu": ["arm64"],
   "main": "decibri.darwin-arm64.node",
-  "files": ["decibri.darwin-arm64.node"],
+  "files": [
+    "decibri.darwin-arm64.node",
+    "libonnxruntime.dylib"
+  ],
   "license": "Apache-2.0",
   "description": "decibri native binary for macOS arm64",
   "repository": {
