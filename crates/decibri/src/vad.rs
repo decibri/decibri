@@ -179,6 +179,27 @@ fn init_ort_once(path: Option<&Path>) -> Result<(), DecibriError> {
         return Ok(());
     }
 
+    // Defensive pre-check (load-dynamic only): verify the path points at a
+    // regular file before handing it to `ort::init_from`. A nonexistent path
+    // or a path that points at a directory causes `ort::init_from` on Windows
+    // to hang indefinitely (reproduced 2026-04-22 against pyke/ort
+    // 2.0.0-rc.12 + onnxruntime 1.24.4). Failing fast here turns that hang
+    // into a clean typed error that Node, Python, and mobile consumers can
+    // surface to users.
+    //
+    // The check is intentionally scoped to `load-dynamic`: under
+    // `download-binaries`, ORT is statically linked and the path argument
+    // is ignored, so there is nothing to pre-validate.
+    #[cfg(feature = "ort-load-dynamic")]
+    if let Some(p) = path {
+        if !p.is_file() {
+            return Err(DecibriError::OrtLoadFailed {
+                path: p.display().to_string(),
+                message: "path does not exist or is not a regular file".to_string(),
+            });
+        }
+    }
+
     match do_ort_init(path) {
         Ok(_committed) => {
             // First-caller-wins. If another thread set it first, discard ours;
