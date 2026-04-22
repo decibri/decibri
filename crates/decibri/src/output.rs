@@ -56,8 +56,32 @@ pub struct OutputStream {
 
 #[cfg(feature = "output")]
 impl OutputStream {
-    /// Send f32 samples for playback. Blocks if the internal buffer is full
-    /// (backpressure propagates to the caller).
+    /// Send f32 samples for playback.
+    ///
+    /// Samples are queued into an internal bounded channel feeding the cpal
+    /// output callback. If the channel is full, this method **blocks** the
+    /// calling thread until the callback consumes enough samples to make
+    /// room, so that backpressure propagates naturally to the producer.
+    ///
+    /// Empty `samples` vectors are treated as a no-op and return `Ok(())`
+    /// without touching the channel.
+    ///
+    /// # Returns
+    /// - `Ok(())` — samples accepted into the playback queue (or buffer was
+    ///   empty).
+    /// - `Err(DecibriError::OutputStreamClosed)` — the output stream has
+    ///   been stopped or dropped; no further samples can be played.
+    ///
+    /// # Thread safety
+    /// `&self`-taking: may be called concurrently from multiple threads, but
+    /// the interleaving of their samples in the playback stream is not
+    /// defined. For deterministic output, serialize calls from a single
+    /// producer thread.
+    ///
+    /// # Stability
+    /// Part of decibri's stable FFI-consumer API surface. Signature and
+    /// three-state semantics (ok / empty-noop / closed) are guaranteed
+    /// stable across 3.x; any change will be a breaking version bump.
     pub fn send(&self, samples: Vec<f32>) -> Result<(), DecibriError> {
         if samples.is_empty() {
             return Ok(());
