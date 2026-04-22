@@ -8,6 +8,13 @@ members = [
 [workspace.package]
 version = "3.1.0"
 edition = "2021"
+# MSRV empirically verified 2026-04-22: rustc 1.88 is the minimum version
+# that compiles the workspace. Floors: ort 2.0.0-rc.12 declares
+# `rust-version = "1.88"` and `edition = "2024"`, which dominates our own
+# MSRV. Other direct deps (napi-rs v3 ~1.74, cpal 0.17 ~1.70,
+# crossbeam-channel 0.5 ~1.60) are below this floor. Bump when dependencies
+# force it; otherwise hold.
+rust-version = "1.88"
 license = "Apache-2.0"
 repository = "https://github.com/decibri/decibri"
 
