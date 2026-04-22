@@ -350,6 +350,7 @@ fn to_napi_error(e: decibri::error::DecibriError) -> Error {
         | OutputStreamClosed
         | OrtInitFailed { .. }
         | OrtLoadFailed { .. }
+        | OrtPathInvalid { .. }
         | OrtSessionBuildFailed(_)
         | OrtThreadsConfigFailed(_)
         | VadModelLoadFailed { .. }

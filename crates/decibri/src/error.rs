@@ -1,3 +1,5 @@
+use std::path::PathBuf;
+
 use thiserror::Error;
 
 /// Errors produced by decibri operations.
@@ -79,37 +81,84 @@ pub enum DecibriError {
     VadThresholdOutOfRange(f32),
 
     // ── ORT and VAD model errors ───────────────────────────────────────
+    //
+    // These variants carry a structured `ort::Error` via `#[source]` so
+    // downstream consumers can walk `error.source()` to the underlying
+    // ORT error for programmatic handling. Paths are `PathBuf` (not
+    // `String`) so consumers retain path semantics without re-parsing.
     #[error(
-        "decibri: failed to initialize ONNX Runtime: {message}. \
+        "decibri: failed to initialize ONNX Runtime: {source}. \
          Either pass ort_library_path in VadConfig, set ORT_DYLIB_PATH to \
          point to a valid ONNX Runtime library, or enable the \
          `ort-download-binaries` feature for zero-config builds."
     )]
-    OrtInitFailed { message: String },
+    OrtInitFailed {
+        #[source]
+        source: ort::Error,
+    },
 
     #[error(
-        "decibri: failed to load ONNX Runtime from {path}: {message}. \
+        "decibri: failed to load ONNX Runtime from {}: {source}. \
          If ORT_DYLIB_PATH is set, verify it points to a valid ONNX Runtime \
          library for your platform. Otherwise the bundled ORT may be missing \
-         from your platform package. Try reinstalling decibri."
+         from your platform package. Try reinstalling decibri.",
+        path.display()
     )]
-    OrtLoadFailed { path: String, message: String },
+    OrtLoadFailed {
+        path: PathBuf,
+        #[source]
+        source: ort::Error,
+    },
+
+    /// The `ort_library_path` in `VadConfig` failed a pre-check before it
+    /// could be handed to `ort::init_from`. Used only by the Windows
+    /// hang-prevention pre-check in `init_ort_once`.
+    ///
+    /// Intentionally does *not* carry an `ort::Error` source, because
+    /// constructing an `ort::Error` under `ort-load-dynamic` calls into the
+    /// ORT C API (`ortsys![CreateStatus]`) — which is exactly the hang this
+    /// pre-check is designed to prevent. Keeping this variant string-only
+    /// means the pre-check never touches ORT symbols.
+    ///
+    /// Display message matches [`Self::OrtLoadFailed`] so Node, Python, and
+    /// future FFI consumers see the same actionable hint regardless of which
+    /// failure path was taken.
+    #[error(
+        "decibri: failed to load ONNX Runtime from {}: {reason}. \
+         If ORT_DYLIB_PATH is set, verify it points to a valid ONNX Runtime \
+         library for your platform. Otherwise the bundled ORT may be missing \
+         from your platform package. Try reinstalling decibri.",
+        path.display()
+    )]
+    OrtPathInvalid { path: PathBuf, reason: &'static str },
 
     #[error("Failed to create ort session builder: {0}")]
-    OrtSessionBuildFailed(String),
+    OrtSessionBuildFailed(#[source] ort::Error),
 
     #[error("Failed to set ort threads: {0}")]
-    OrtThreadsConfigFailed(String),
+    OrtThreadsConfigFailed(#[source] ort::Error),
 
-    #[error("Failed to load Silero VAD model from {path}: {message}")]
-    VadModelLoadFailed { path: String, message: String },
+    #[error("Failed to load Silero VAD model from {}: {source}", path.display())]
+    VadModelLoadFailed {
+        path: PathBuf,
+        #[source]
+        source: ort::Error,
+    },
 
     #[error("Silero VAD inference failed: {0}")]
-    OrtInferenceFailed(String),
+    OrtInferenceFailed(#[source] ort::Error),
 
-    #[error("Failed to create {kind} tensor: {message}")]
-    OrtTensorCreateFailed { kind: &'static str, message: String },
+    #[error("Failed to create {kind} tensor: {source}")]
+    OrtTensorCreateFailed {
+        kind: &'static str,
+        #[source]
+        source: ort::Error,
+    },
 
-    #[error("Failed to extract {kind} tensor: {message}")]
-    OrtTensorExtractFailed { kind: &'static str, message: String },
+    #[error("Failed to extract {kind} tensor: {source}")]
+    OrtTensorExtractFailed {
+        kind: &'static str,
+        #[source]
+        source: ort::Error,
+    },
 }

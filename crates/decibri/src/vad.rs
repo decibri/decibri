@@ -116,23 +116,23 @@ static ORT_INIT: OnceLock<Option<PathBuf>> = OnceLock::new();
 
 /// Wrap an ORT init failure with a decibri-specific actionable message.
 ///
-/// Kept as a standalone generic function (rather than an inline closure in
+/// Kept as a standalone function (rather than an inline closure in
 /// `init_ort_once`) so it can be unit-tested without triggering a real ORT
-/// init failure. Tests pass a synthetic `err` value.
+/// init failure. Tests construct a synthetic `ort::Error` via
+/// [`ort::Error::new`].
 ///
 /// Returns one of two typed variants depending on whether a path was provided:
 /// [`DecibriError::OrtLoadFailed`] when `path.is_some()`, or
-/// [`DecibriError::OrtInitFailed`] otherwise.
+/// [`DecibriError::OrtInitFailed`] otherwise. The inner `ort::Error` is
+/// carried via `#[source]` so consumers can walk the error chain.
 #[cfg(feature = "vad")]
-fn wrap_init_error<E: std::fmt::Display>(path: Option<&Path>, err: E) -> DecibriError {
+fn wrap_init_error(path: Option<&Path>, err: ort::Error) -> DecibriError {
     match path {
         Some(p) => DecibriError::OrtLoadFailed {
-            path: p.display().to_string(),
-            message: err.to_string(),
+            path: p.to_path_buf(),
+            source: err,
         },
-        None => DecibriError::OrtInitFailed {
-            message: err.to_string(),
-        },
+        None => DecibriError::OrtInitFailed { source: err },
     }
 }
 
@@ -193,9 +193,14 @@ fn init_ort_once(path: Option<&Path>) -> Result<(), DecibriError> {
     #[cfg(feature = "ort-load-dynamic")]
     if let Some(p) = path {
         if !p.is_file() {
-            return Err(DecibriError::OrtLoadFailed {
-                path: p.display().to_string(),
-                message: "path does not exist or is not a regular file".to_string(),
+            // Use `OrtPathInvalid`, not `OrtLoadFailed`, precisely because
+            // constructing an `ort::Error` here would call `ortsys![
+            // CreateStatus]` — which triggers the ORT dylib load that this
+            // pre-check is designed to prevent. `OrtPathInvalid` is
+            // string-only and never touches ORT symbols.
+            return Err(DecibriError::OrtPathInvalid {
+                path: p.to_path_buf(),
+                reason: "path does not exist or is not a regular file",
             });
         }
     }
@@ -229,13 +234,16 @@ impl SileroVad {
         init_ort_once(config.ort_library_path.as_deref())?;
 
         let session = ort::session::Session::builder()
-            .map_err(|e| DecibriError::OrtSessionBuildFailed(e.to_string()))?
+            .map_err(DecibriError::OrtSessionBuildFailed)?
+            // `with_intra_threads` returns `ort::Error<SessionBuilder>`; use a
+            // closure with `.into()` to convert to `ort::Error<()>` via the
+            // upstream `From<Error<SessionBuilder>> for Error<()>` impl.
             .with_intra_threads(1)
-            .map_err(|e| DecibriError::OrtThreadsConfigFailed(e.to_string()))?
+            .map_err(|e| DecibriError::OrtThreadsConfigFailed(e.into()))?
             .commit_from_file(&config.model_path)
             .map_err(|e| DecibriError::VadModelLoadFailed {
-                path: config.model_path.display().to_string(),
-                message: e.to_string(),
+                path: config.model_path.clone(),
+                source: e,
             })?;
 
         Ok(Self {
@@ -299,19 +307,19 @@ impl SileroVad {
             ort::value::Tensor::from_array(([1i64, self.window_size as i64], window.to_vec()))
                 .map_err(|e| DecibriError::OrtTensorCreateFailed {
                     kind: "input",
-                    message: e.to_string(),
+                    source: e,
                 })?;
         let state_tensor =
             ort::value::Tensor::from_array(([2i64, 1i64, 128i64], self.state.clone())).map_err(
                 |e| DecibriError::OrtTensorCreateFailed {
                     kind: "state",
-                    message: e.to_string(),
+                    source: e,
                 },
             )?;
         let sr_tensor = ort::value::Tensor::from_array(([1i64], vec![self.sample_rate as i64]))
             .map_err(|e| DecibriError::OrtTensorCreateFailed {
                 kind: "sr",
-                message: e.to_string(),
+                source: e,
             })?;
 
         let input_values = ort::inputs![
@@ -323,7 +331,7 @@ impl SileroVad {
         let outputs = self
             .session
             .run(input_values)
-            .map_err(|e| DecibriError::OrtInferenceFailed(e.to_string()))?;
+            .map_err(DecibriError::OrtInferenceFailed)?;
 
         // Read outputs using actual model tensor names:
         //   output: f32[1, 1] (speech probability)
@@ -331,7 +339,7 @@ impl SileroVad {
         let prob_tensor = outputs["output"].try_extract_tensor::<f32>().map_err(|e| {
             DecibriError::OrtTensorExtractFailed {
                 kind: "output",
-                message: e.to_string(),
+                source: e,
             }
         })?;
         let probability = prob_tensor.1[0];
@@ -339,7 +347,7 @@ impl SileroVad {
         let state_tensor = outputs["stateN"].try_extract_tensor::<f32>().map_err(|e| {
             DecibriError::OrtTensorExtractFailed {
                 kind: "state",
-                message: e.to_string(),
+                source: e,
             }
         })?;
         self.state.copy_from_slice(state_tensor.1);
@@ -378,7 +386,10 @@ mod tests {
 
         // Platform-agnostic invalid path (guaranteed to not exist on any OS).
         let bogus_path = env::temp_dir().join("does-not-exist-onnxruntime-xyz-test");
-        let err = wrap_init_error(Some(bogus_path.as_path()), "simulated ort loader failure");
+        let err = wrap_init_error(
+            Some(bogus_path.as_path()),
+            ort::Error::new("simulated ort loader failure"),
+        );
         let msg = err.to_string();
 
         assert!(
@@ -397,7 +408,7 @@ mod tests {
 
     #[test]
     fn test_wrap_init_error_without_path() {
-        let err = wrap_init_error(None, "simulated ort init failure");
+        let err = wrap_init_error(None, ort::Error::new("simulated ort init failure"));
         let msg = err.to_string();
 
         assert!(

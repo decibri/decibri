@@ -57,9 +57,8 @@ fn test_vad_model_load_fails_for_missing_file() {
     match err {
         DecibriError::VadModelLoadFailed { path, .. } => {
             assert_eq!(
-                path,
-                bogus.display().to_string(),
-                "VadModelLoadFailed.path should match the input"
+                path, bogus,
+                "VadModelLoadFailed.path should match the input PathBuf"
             );
         }
         other => panic!("expected VadModelLoadFailed, got {other:?}"),

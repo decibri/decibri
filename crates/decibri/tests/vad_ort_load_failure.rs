@@ -12,7 +12,11 @@
 //! provided `ort_library_path` points at a regular file before handing it
 //! to `ort::init_from`. Without that pre-check, Windows hangs indefinitely
 //! inside `ort::init_from` on a nonexistent path (reproduced 2026-04-22
-//! against pyke/ort 2.0.0-rc.12 + onnxruntime 1.24.4).
+//! against pyke/ort 2.0.0-rc.12 + onnxruntime 1.24.4). The pre-check
+//! returns [`DecibriError::OrtPathInvalid`] — deliberately a string-only
+//! variant that does *not* construct an `ort::Error`, because
+//! `ort::Error::new` itself calls `ortsys![CreateStatus]` and would
+//! re-trigger the very dylib load we're avoiding.
 //!
 //! Gated behind `feature = "ort-load-dynamic"` because the tests are
 //! meaningful only under the dynamic-load distribution mode: under
@@ -44,11 +48,11 @@ fn bundled_model_path() -> PathBuf {
         .join("silero_vad.onnx")
 }
 
-/// A nonexistent `ort_library_path` must fail fast with `OrtLoadFailed`.
+/// A nonexistent `ort_library_path` must fail fast with `OrtPathInvalid`.
 ///
 /// Prior to the defensive pre-check this test hung on Windows because
 /// `ort::init_from` does not return for a nonexistent path; the pre-check
-/// short-circuits that case.
+/// short-circuits that case without constructing an `ort::Error`.
 #[test]
 fn test_ort_load_fails_with_nonexistent_path() {
     let bogus = std::env::temp_dir().join("does-not-exist-onnxruntime-dylib-xyz");
@@ -60,19 +64,25 @@ fn test_ort_load_fails_with_nonexistent_path() {
     };
     let err = SileroVad::new(config)
         .err()
-        .expect("expected OrtLoadFailed");
+        .expect("expected OrtPathInvalid");
 
     match &err {
-        DecibriError::OrtLoadFailed { path, .. } => {
+        DecibriError::OrtPathInvalid { path, reason } => {
             assert!(
                 path.ends_with("does-not-exist-onnxruntime-dylib-xyz"),
-                "OrtLoadFailed.path should end with the bogus filename, got {path}"
+                "OrtPathInvalid.path should end with the bogus filename, got {}",
+                path.display()
+            );
+            assert!(
+                reason.contains("does not exist"),
+                "OrtPathInvalid.reason should mention 'does not exist', got: {reason}"
             );
         }
-        other => panic!("expected OrtLoadFailed, got {other:?}"),
+        other => panic!("expected OrtPathInvalid, got {other:?}"),
     }
 
-    // Display message should carry the actionable guidance string.
+    // Display message should carry the actionable guidance string — same
+    // wording as `OrtLoadFailed` so consumers see a uniform message.
     let msg = err.to_string();
     assert!(
         msg.contains("ORT_DYLIB_PATH"),
@@ -82,7 +92,7 @@ fn test_ort_load_fails_with_nonexistent_path() {
 
 /// An `ort_library_path` that points at a directory (e.g. a user mistakenly
 /// passing the directory containing the dylib instead of the dylib itself)
-/// must also fail fast with `OrtLoadFailed`. Without the pre-check, pyke/ort
+/// must also fail fast with `OrtPathInvalid`. Without the pre-check, pyke/ort
 /// likely hangs here on Windows as well because its dylib-load path does
 /// not validate the input is a regular file.
 #[test]
@@ -97,16 +107,15 @@ fn test_ort_load_fails_when_path_is_directory() {
     };
     let err = SileroVad::new(config)
         .err()
-        .expect("expected OrtLoadFailed when path is a directory");
+        .expect("expected OrtPathInvalid when path is a directory");
 
     match &err {
-        DecibriError::OrtLoadFailed { path, .. } => {
+        DecibriError::OrtPathInvalid { path, .. } => {
             assert_eq!(
-                path,
-                &dir_path.display().to_string(),
-                "OrtLoadFailed.path should match the passed directory"
+                path, &dir_path,
+                "OrtPathInvalid.path should match the passed directory PathBuf"
             );
         }
-        other => panic!("expected OrtLoadFailed, got {other:?}"),
+        other => panic!("expected OrtPathInvalid, got {other:?}"),
     }
 }
