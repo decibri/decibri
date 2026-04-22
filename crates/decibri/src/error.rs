@@ -162,3 +162,28 @@ pub enum DecibriError {
         source: ort::Error,
     },
 }
+
+impl DecibriError {
+    /// Returns true if this error represents a failure to use a specific
+    /// ORT library path.
+    ///
+    /// Consumers handling "the `ort_library_path` is wrong" logic should
+    /// match on this rather than enumerating [`Self::OrtLoadFailed`] and
+    /// [`Self::OrtPathInvalid`] separately:
+    ///
+    /// - [`Self::OrtLoadFailed`] fires when ORT tried to load the path and
+    ///   failed (e.g. wrong ORT version, corrupted dylib).
+    /// - [`Self::OrtPathInvalid`] fires when decibri's filesystem pre-check
+    ///   rejected the path before ORT saw it (nonexistent, directory, etc).
+    ///
+    /// Both represent the same user-facing failure mode: "this path cannot
+    /// be used to load ORT." The split is a mechanical necessity (see the
+    /// rustdoc on [`Self::OrtPathInvalid`]), not a categorization users
+    /// need to care about.
+    pub fn is_ort_path_error(&self) -> bool {
+        matches!(
+            self,
+            Self::OrtLoadFailed { .. } | Self::OrtPathInvalid { .. }
+        )
+    }
+}

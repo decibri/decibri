@@ -56,25 +56,36 @@ impl Default for VadConfig {
 }
 
 impl VadConfig {
-    /// Validate configuration values.
+    /// Validate configuration values and return the Silero VAD window size
+    /// derived from the sample rate.
     ///
     /// Called automatically by [`SileroVad::new`]; exposed publicly so
     /// callers can fail-fast before paying the cost of ORT init and
-    /// ONNX model load.
+    /// ONNX model load. The returned `usize` is the `window_size` the
+    /// VAD model operates on (512 for 16 kHz, 256 for 8 kHz). Direct
+    /// consumers that only care about pass/fail can use `.is_ok()` or
+    /// `.map(|_| ())`.
+    ///
+    /// Pairing the window-size derivation with the sample-rate validation
+    /// means a future extension to `validate()` that accepts new sample
+    /// rates must also yield a corresponding window size, turning a
+    /// potential runtime `unreachable!` panic into a compile error.
     ///
     /// # Errors
     /// - [`DecibriError::VadSampleRateUnsupported`] if `sample_rate` is not
     ///   8000 or 16000.
     /// - [`DecibriError::VadThresholdOutOfRange`] if `threshold` is outside
     ///   `[0.0, 1.0]`.
-    pub fn validate(&self) -> Result<(), DecibriError> {
-        if self.sample_rate != 8000 && self.sample_rate != 16000 {
-            return Err(DecibriError::VadSampleRateUnsupported(self.sample_rate));
-        }
+    pub fn validate(&self) -> Result<usize, DecibriError> {
+        let window_size = match self.sample_rate {
+            8000 => 256,
+            16000 => 512,
+            _ => return Err(DecibriError::VadSampleRateUnsupported(self.sample_rate)),
+        };
         if !(0.0..=1.0).contains(&self.threshold) {
             return Err(DecibriError::VadThresholdOutOfRange(self.threshold));
         }
-        Ok(())
+        Ok(window_size)
     }
 }
 
@@ -220,14 +231,10 @@ fn init_ort_once(path: Option<&Path>) -> Result<(), DecibriError> {
 impl SileroVad {
     /// Create a new Silero VAD instance by loading the ONNX model.
     pub fn new(config: VadConfig) -> Result<Self, DecibriError> {
-        config.validate()?;
-
-        // Safe to unwrap-via-unreachable: validate() rejected anything else.
-        let window_size = match config.sample_rate {
-            16000 => 512,
-            8000 => 256,
-            _ => unreachable!("VadConfig::validate accepts only 8000 and 16000"),
-        };
+        // `validate` returns the `window_size` for the accepted sample rate,
+        // so `SileroVad::new` does not need its own match — and cannot panic
+        // if future `validate` extensions accept new sample rates.
+        let window_size = config.validate()?;
 
         // Initialize ORT exactly once per process. Subsequent SileroVad
         // instances pass through immediately regardless of their ort_library_path.
@@ -436,6 +443,78 @@ mod tests {
             ..default_config()
         };
         assert!(SileroVad::new(bad_rate).is_err());
+    }
+
+    /// Core guarantee of the commit 3.8 structured-error refactor:
+    /// `err.source()` walks to the underlying `ort::Error` for the wrapped
+    /// variants, and deliberately returns `None` for `OrtPathInvalid` (which
+    /// has no underlying ORT error because constructing one would trigger
+    /// the hang the pre-check prevents).
+    #[test]
+    fn test_ort_error_source_chain_preserved() {
+        use std::error::Error;
+
+        // OrtInitFailed (no path) carries an ort::Error source.
+        let inner = ort::Error::new("simulated underlying ort error");
+        let err = wrap_init_error(None, inner);
+        assert!(
+            err.source().is_some(),
+            "OrtInitFailed should carry an ort::Error source"
+        );
+
+        // OrtLoadFailed (with path) carries an ort::Error source.
+        let inner_with_path = ort::Error::new("another simulated error");
+        let path_err = wrap_init_error(Some(Path::new("/tmp/bogus")), inner_with_path);
+        assert!(
+            path_err.source().is_some(),
+            "OrtLoadFailed should carry an ort::Error source"
+        );
+
+        // OrtPathInvalid intentionally does NOT carry a source (documented
+        // asymmetry — see OrtPathInvalid's rustdoc in error.rs).
+        let path_invalid = DecibriError::OrtPathInvalid {
+            path: PathBuf::from("/tmp/nope"),
+            reason: "test",
+        };
+        assert!(
+            path_invalid.source().is_none(),
+            "OrtPathInvalid intentionally has no source (constructing ort::Error \
+             would trigger the hang the pre-check prevents)"
+        );
+    }
+
+    /// `DecibriError::is_ort_path_error` groups the two path-level ORT
+    /// failure variants so consumers handling "the path is wrong" logic
+    /// can match one predicate instead of enumerating both.
+    #[test]
+    fn test_is_ort_path_error() {
+        let load_failed = DecibriError::OrtLoadFailed {
+            path: PathBuf::from("/tmp/x"),
+            source: ort::Error::new("test"),
+        };
+        assert!(load_failed.is_ort_path_error());
+
+        let path_invalid = DecibriError::OrtPathInvalid {
+            path: PathBuf::from("/tmp/x"),
+            reason: "test",
+        };
+        assert!(path_invalid.is_ort_path_error());
+
+        // Other variants return false.
+        let init_failed = DecibriError::OrtInitFailed {
+            source: ort::Error::new("test"),
+        };
+        assert!(!init_failed.is_ort_path_error());
+
+        // `SampleRateOutOfRange` is a unit variant (applies to capture/output
+        // configs, not VAD); Ross's draft had `(999999)` which wouldn't
+        // compile. Using the correct unit form.
+        let sample_rate = DecibriError::SampleRateOutOfRange;
+        assert!(!sample_rate.is_ort_path_error());
+
+        // VAD-specific config error also false.
+        let vad_rate = DecibriError::VadSampleRateUnsupported(44_100);
+        assert!(!vad_rate.is_ort_path_error());
     }
 
     #[test]
