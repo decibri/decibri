@@ -321,6 +321,107 @@ jobs:
           ls -la npm/decibri/index.js
           ls -la npm/decibri/index.d.ts
 
+      # Copy README into npm package directory before publish. Relocated
+      # upward from its previous position (between platform-package and
+      # main-package publishes) so the `Verify npm package contents` gate
+      # below sees the main package fully staged — otherwise verify_pack
+      # would fail on the main package with ":README.md missing".
+      - name: Copy README for npm package
+        run: cp README.md npm/decibri/README.md
+
+      # Defense-in-depth: verify npm package contents one final time before
+      # publishing. release-dryrun.yml runs the same check, but this ensures
+      # the gate fires even if someone skips dryrun before tagging.
+      # Ports verify_pack function from release-dryrun.yml verbatim.
+      - name: Verify npm package contents (pre-publish gate)
+        shell: bash
+        run: |
+          set -o pipefail
+          FAIL=0
+
+          verify_pack() {
+            local pkg_dir="$1"
+            local label="$2"
+            shift 2
+            # Remaining args: required files prefixed with ':',
+            #                 forbidden regex patterns prefixed with '~'.
+            local required=()
+            local forbidden=()
+            for arg in "$@"; do
+              case "$arg" in
+                :*) required+=("${arg#:}") ;;
+                ~*) forbidden+=("${arg#~}") ;;
+              esac
+            done
+
+            echo ""
+            echo "=== $label ($pkg_dir) ==="
+            local files
+            files=$(cd "$pkg_dir" && npm pack --dry-run --json | jq -r '.[0].files[].path')
+            echo "Would pack:"
+            echo "$files" | sort | sed 's/^/  * /'
+
+            for f in "${required[@]}"; do
+              if echo "$files" | grep -Fxq "$f"; then
+                echo "  [OK]   required present: $f"
+              else
+                echo "  [FAIL] required MISSING: $f"
+                FAIL=1
+              fi
+            done
+
+            for p in "${forbidden[@]}"; do
+              local matches
+              matches=$(echo "$files" | grep -E "$p" || true)
+              if [ -n "$matches" ]; then
+                echo "  [FAIL] forbidden pattern '$p' matched:"
+                echo "$matches" | sed 's/^/         /'
+                FAIL=1
+              else
+                echo "  [OK]   forbidden absent: $p"
+              fi
+            done
+          }
+
+          # Main package: should carry JS source, models, README, napi loader;
+          # must NOT carry the native .node file or any ORT dylib (those belong
+          # in the platform packages).
+          verify_pack npm/decibri "main package (decibri)" \
+            :package.json \
+            :README.md \
+            :src/decibri.js \
+            :index.js \
+            :models/silero_vad.onnx \
+            '~\.node$' \
+            '~onnxruntime'
+
+          verify_pack npm/platform-darwin-arm64 "@decibri/decibri-darwin-arm64" \
+            :decibri.darwin-arm64.node \
+            :libonnxruntime.dylib
+
+          verify_pack npm/platform-linux-x64-gnu "@decibri/decibri-linux-x64-gnu" \
+            :decibri.linux-x64-gnu.node \
+            :libonnxruntime.so \
+            :libonnxruntime_providers_shared.so
+
+          verify_pack npm/platform-linux-arm64-gnu "@decibri/decibri-linux-arm64-gnu" \
+            :decibri.linux-arm64-gnu.node \
+            :libonnxruntime.so \
+            :libonnxruntime_providers_shared.so
+
+          verify_pack npm/platform-win32-x64-msvc "@decibri/decibri-win32-x64-msvc" \
+            :decibri.win32-x64-msvc.node \
+            :onnxruntime.dll
+
+          echo ""
+          if [ "$FAIL" -ne 0 ]; then
+            echo "================================================"
+            echo "  VERIFICATION FAILED - not publish-ready"
+            echo "================================================"
+            exit 1
+          fi
+          echo "All 5 packages pass verification."
+
       # Publish platform packages FIRST (main package depends on them)
       # Uses npm Trusted Publishing (OIDC). No token needed, provenance is automatic
       - name: Publish @decibri/decibri-win32-x64-msvc
@@ -334,10 +435,6 @@ jobs:
 
       - name: Publish @decibri/decibri-linux-arm64-gnu
         run: cd npm/platform-linux-arm64-gnu && npm publish --access public
-
-      # Copy README into npm package directory before publish
-      - name: Copy README for npm package
-        run: cp README.md npm/decibri/README.md
 
       # Publish main package (after platform packages are available)
       - name: Publish decibri

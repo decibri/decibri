@@ -55,6 +55,40 @@ impl Default for VadConfig {
     }
 }
 
+impl VadConfig {
+    /// Validate configuration values and return the Silero VAD window size
+    /// derived from the sample rate.
+    ///
+    /// Called automatically by [`SileroVad::new`]; exposed publicly so
+    /// callers can fail-fast before paying the cost of ORT init and
+    /// ONNX model load. The returned `usize` is the `window_size` the
+    /// VAD model operates on (512 for 16 kHz, 256 for 8 kHz). Direct
+    /// consumers that only care about pass/fail can use `.is_ok()` or
+    /// `.map(|_| ())`.
+    ///
+    /// Pairing the window-size derivation with the sample-rate validation
+    /// means a future extension to `validate()` that accepts new sample
+    /// rates must also yield a corresponding window size, turning a
+    /// potential runtime `unreachable!` panic into a compile error.
+    ///
+    /// # Errors
+    /// - [`DecibriError::VadSampleRateUnsupported`] if `sample_rate` is not
+    ///   8000 or 16000.
+    /// - [`DecibriError::VadThresholdOutOfRange`] if `threshold` is outside
+    ///   `[0.0, 1.0]`.
+    pub fn validate(&self) -> Result<usize, DecibriError> {
+        let window_size = match self.sample_rate {
+            8000 => 256,
+            16000 => 512,
+            _ => return Err(DecibriError::VadSampleRateUnsupported(self.sample_rate)),
+        };
+        if !(0.0..=1.0).contains(&self.threshold) {
+            return Err(DecibriError::VadThresholdOutOfRange(self.threshold));
+        }
+        Ok(window_size)
+    }
+}
+
 /// Result of processing an audio chunk through Silero VAD.
 #[derive(Debug, Clone)]
 pub struct VadResult {
@@ -93,27 +127,23 @@ static ORT_INIT: OnceLock<Option<PathBuf>> = OnceLock::new();
 
 /// Wrap an ORT init failure with a decibri-specific actionable message.
 ///
-/// Kept as a standalone generic function (rather than an inline closure in
+/// Kept as a standalone function (rather than an inline closure in
 /// `init_ort_once`) so it can be unit-tested without triggering a real ORT
-/// init failure. Tests pass a synthetic `err` value.
+/// init failure. Tests construct a synthetic `ort::Error` via
+/// [`ort::Error::new`].
+///
+/// Returns one of two typed variants depending on whether a path was provided:
+/// [`DecibriError::OrtLoadFailed`] when `path.is_some()`, or
+/// [`DecibriError::OrtInitFailed`] otherwise. The inner `ort::Error` is
+/// carried via `#[source]` so consumers can walk the error chain.
 #[cfg(feature = "vad")]
-fn wrap_init_error<E: std::fmt::Display>(path: Option<&Path>, err: E) -> DecibriError {
+fn wrap_init_error(path: Option<&Path>, err: ort::Error) -> DecibriError {
     match path {
-        Some(p) => DecibriError::Other(format!(
-            "decibri: failed to load ONNX Runtime from {}: {}. \
-             If ORT_DYLIB_PATH is set, verify it points to a valid ONNX Runtime \
-             library for your platform. Otherwise the bundled ORT may be missing \
-             from your platform package. Try reinstalling decibri.",
-            p.display(),
-            err
-        )),
-        None => DecibriError::Other(format!(
-            "decibri: failed to initialize ONNX Runtime: {}. \
-             Either pass ort_library_path in VadConfig, set ORT_DYLIB_PATH to \
-             point to a valid ONNX Runtime library, or enable the \
-             `ort-download-binaries` feature for zero-config builds.",
-            err
-        )),
+        Some(p) => DecibriError::OrtLoadFailed {
+            path: p.to_path_buf(),
+            source: err,
+        },
+        None => DecibriError::OrtInitFailed { source: err },
     }
 }
 
@@ -160,6 +190,32 @@ fn init_ort_once(path: Option<&Path>) -> Result<(), DecibriError> {
         return Ok(());
     }
 
+    // Defensive pre-check (load-dynamic only): verify the path points at a
+    // regular file before handing it to `ort::init_from`. A nonexistent path
+    // or a path that points at a directory causes `ort::init_from` on Windows
+    // to hang indefinitely (reproduced 2026-04-22 against pyke/ort
+    // 2.0.0-rc.12 + onnxruntime 1.24.4). Failing fast here turns that hang
+    // into a clean typed error that Node, Python, and mobile consumers can
+    // surface to users.
+    //
+    // The check is intentionally scoped to `load-dynamic`: under
+    // `download-binaries`, ORT is statically linked and the path argument
+    // is ignored, so there is nothing to pre-validate.
+    #[cfg(feature = "ort-load-dynamic")]
+    if let Some(p) = path {
+        if !p.is_file() {
+            // Use `OrtPathInvalid`, not `OrtLoadFailed`, precisely because
+            // constructing an `ort::Error` here would call `ortsys![
+            // CreateStatus]` — which triggers the ORT dylib load that this
+            // pre-check is designed to prevent. `OrtPathInvalid` is
+            // string-only and never touches ORT symbols.
+            return Err(DecibriError::OrtPathInvalid {
+                path: p.to_path_buf(),
+                reason: "path does not exist or is not a regular file",
+            });
+        }
+    }
+
     match do_ort_init(path) {
         Ok(_committed) => {
             // First-caller-wins. If another thread set it first, discard ours;
@@ -175,36 +231,26 @@ fn init_ort_once(path: Option<&Path>) -> Result<(), DecibriError> {
 impl SileroVad {
     /// Create a new Silero VAD instance by loading the ONNX model.
     pub fn new(config: VadConfig) -> Result<Self, DecibriError> {
-        let window_size = match config.sample_rate {
-            16000 => 512,
-            8000 => 256,
-            _ => {
-                return Err(DecibriError::Other(
-                    "Silero VAD only supports sample rates 8000 and 16000".to_string(),
-                ))
-            }
-        };
-
-        if config.threshold < 0.0 || config.threshold > 1.0 {
-            return Err(DecibriError::Other(
-                "VAD threshold must be between 0.0 and 1.0".to_string(),
-            ));
-        }
+        // `validate` returns the `window_size` for the accepted sample rate,
+        // so `SileroVad::new` does not need its own match — and cannot panic
+        // if future `validate` extensions accept new sample rates.
+        let window_size = config.validate()?;
 
         // Initialize ORT exactly once per process. Subsequent SileroVad
         // instances pass through immediately regardless of their ort_library_path.
         init_ort_once(config.ort_library_path.as_deref())?;
 
         let session = ort::session::Session::builder()
-            .map_err(|e| DecibriError::Other(format!("Failed to create ort session builder: {e}")))?
+            .map_err(DecibriError::OrtSessionBuildFailed)?
+            // `with_intra_threads` returns `ort::Error<SessionBuilder>`; use a
+            // closure with `.into()` to convert to `ort::Error<()>` via the
+            // upstream `From<Error<SessionBuilder>> for Error<()>` impl.
             .with_intra_threads(1)
-            .map_err(|e| DecibriError::Other(format!("Failed to set ort threads: {e}")))?
+            .map_err(|e| DecibriError::OrtThreadsConfigFailed(e.into()))?
             .commit_from_file(&config.model_path)
-            .map_err(|e| {
-                DecibriError::Other(format!(
-                    "Failed to load Silero VAD model from {}: {e}",
-                    config.model_path.display()
-                ))
+            .map_err(|e| DecibriError::VadModelLoadFailed {
+                path: config.model_path.clone(),
+                source: e,
             })?;
 
         Ok(Self {
@@ -266,12 +312,22 @@ impl SileroVad {
         //   sr:    i64 scalar
         let input_tensor =
             ort::value::Tensor::from_array(([1i64, self.window_size as i64], window.to_vec()))
-                .map_err(|e| DecibriError::Other(format!("Failed to create input tensor: {e}")))?;
+                .map_err(|e| DecibriError::OrtTensorCreateFailed {
+                    kind: "input",
+                    source: e,
+                })?;
         let state_tensor =
-            ort::value::Tensor::from_array(([2i64, 1i64, 128i64], self.state.clone()))
-                .map_err(|e| DecibriError::Other(format!("Failed to create state tensor: {e}")))?;
+            ort::value::Tensor::from_array(([2i64, 1i64, 128i64], self.state.clone())).map_err(
+                |e| DecibriError::OrtTensorCreateFailed {
+                    kind: "state",
+                    source: e,
+                },
+            )?;
         let sr_tensor = ort::value::Tensor::from_array(([1i64], vec![self.sample_rate as i64]))
-            .map_err(|e| DecibriError::Other(format!("Failed to create sr tensor: {e}")))?;
+            .map_err(|e| DecibriError::OrtTensorCreateFailed {
+                kind: "sr",
+                source: e,
+            })?;
 
         let input_values = ort::inputs![
             "input" => input_tensor,
@@ -282,19 +338,25 @@ impl SileroVad {
         let outputs = self
             .session
             .run(input_values)
-            .map_err(|e| DecibriError::Other(format!("Silero VAD inference failed: {e}")))?;
+            .map_err(DecibriError::OrtInferenceFailed)?;
 
         // Read outputs using actual model tensor names:
         //   output: f32[1, 1] (speech probability)
         //   stateN: f32[2, 1, 128] (updated state)
-        let prob_tensor = outputs["output"]
-            .try_extract_tensor::<f32>()
-            .map_err(|e| DecibriError::Other(format!("Failed to extract output tensor: {e}")))?;
+        let prob_tensor = outputs["output"].try_extract_tensor::<f32>().map_err(|e| {
+            DecibriError::OrtTensorExtractFailed {
+                kind: "output",
+                source: e,
+            }
+        })?;
         let probability = prob_tensor.1[0];
 
-        let state_tensor = outputs["stateN"]
-            .try_extract_tensor::<f32>()
-            .map_err(|e| DecibriError::Other(format!("Failed to extract state tensor: {e}")))?;
+        let state_tensor = outputs["stateN"].try_extract_tensor::<f32>().map_err(|e| {
+            DecibriError::OrtTensorExtractFailed {
+                kind: "state",
+                source: e,
+            }
+        })?;
         self.state.copy_from_slice(state_tensor.1);
 
         Ok(probability)
@@ -331,7 +393,10 @@ mod tests {
 
         // Platform-agnostic invalid path (guaranteed to not exist on any OS).
         let bogus_path = env::temp_dir().join("does-not-exist-onnxruntime-xyz-test");
-        let err = wrap_init_error(Some(bogus_path.as_path()), "simulated ort loader failure");
+        let err = wrap_init_error(
+            Some(bogus_path.as_path()),
+            ort::Error::new("simulated ort loader failure"),
+        );
         let msg = err.to_string();
 
         assert!(
@@ -350,7 +415,7 @@ mod tests {
 
     #[test]
     fn test_wrap_init_error_without_path() {
-        let err = wrap_init_error(None, "simulated ort init failure");
+        let err = wrap_init_error(None, ort::Error::new("simulated ort init failure"));
         let msg = err.to_string();
 
         assert!(
@@ -378,6 +443,78 @@ mod tests {
             ..default_config()
         };
         assert!(SileroVad::new(bad_rate).is_err());
+    }
+
+    /// Core guarantee of the commit 3.8 structured-error refactor:
+    /// `err.source()` walks to the underlying `ort::Error` for the wrapped
+    /// variants, and deliberately returns `None` for `OrtPathInvalid` (which
+    /// has no underlying ORT error because constructing one would trigger
+    /// the hang the pre-check prevents).
+    #[test]
+    fn test_ort_error_source_chain_preserved() {
+        use std::error::Error;
+
+        // OrtInitFailed (no path) carries an ort::Error source.
+        let inner = ort::Error::new("simulated underlying ort error");
+        let err = wrap_init_error(None, inner);
+        assert!(
+            err.source().is_some(),
+            "OrtInitFailed should carry an ort::Error source"
+        );
+
+        // OrtLoadFailed (with path) carries an ort::Error source.
+        let inner_with_path = ort::Error::new("another simulated error");
+        let path_err = wrap_init_error(Some(Path::new("/tmp/bogus")), inner_with_path);
+        assert!(
+            path_err.source().is_some(),
+            "OrtLoadFailed should carry an ort::Error source"
+        );
+
+        // OrtPathInvalid intentionally does NOT carry a source (documented
+        // asymmetry — see OrtPathInvalid's rustdoc in error.rs).
+        let path_invalid = DecibriError::OrtPathInvalid {
+            path: PathBuf::from("/tmp/nope"),
+            reason: "test",
+        };
+        assert!(
+            path_invalid.source().is_none(),
+            "OrtPathInvalid intentionally has no source (constructing ort::Error \
+             would trigger the hang the pre-check prevents)"
+        );
+    }
+
+    /// `DecibriError::is_ort_path_error` groups the two path-level ORT
+    /// failure variants so consumers handling "the path is wrong" logic
+    /// can match one predicate instead of enumerating both.
+    #[test]
+    fn test_is_ort_path_error() {
+        let load_failed = DecibriError::OrtLoadFailed {
+            path: PathBuf::from("/tmp/x"),
+            source: ort::Error::new("test"),
+        };
+        assert!(load_failed.is_ort_path_error());
+
+        let path_invalid = DecibriError::OrtPathInvalid {
+            path: PathBuf::from("/tmp/x"),
+            reason: "test",
+        };
+        assert!(path_invalid.is_ort_path_error());
+
+        // Other variants return false.
+        let init_failed = DecibriError::OrtInitFailed {
+            source: ort::Error::new("test"),
+        };
+        assert!(!init_failed.is_ort_path_error());
+
+        // `SampleRateOutOfRange` is a unit variant (applies to capture/output
+        // configs, not VAD); Ross's draft had `(999999)` which wouldn't
+        // compile. Using the correct unit form.
+        let sample_rate = DecibriError::SampleRateOutOfRange;
+        assert!(!sample_rate.is_ort_path_error());
+
+        // VAD-specific config error also false.
+        let vad_rate = DecibriError::VadSampleRateUnsupported(44_100);
+        assert!(!vad_rate.is_ort_path_error());
     }
 
     #[test]
@@ -461,7 +598,6 @@ mod tests {
         let samples = vec![0.0f32; 512];
         vad.process(&samples).unwrap();
         vad.accumulator.extend_from_slice(&[0.0; 100]); // add some leftover
-
         vad.reset();
 
         assert!(vad.state.iter().all(|&v| v == 0.0), "State should be zeros");

@@ -2,12 +2,30 @@
 name = "decibri"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 description = "Cross-platform audio capture, output, and processing"
 readme = "../../README.md"
 keywords = ["audio", "microphone", "capture", "sound", "voice"]
 categories = ["multimedia::audio"]
+
+[package.metadata.docs.rs]
+# Build docs for all production targets to show platform-specific behavior.
+# cpal backends (WASAPI on Windows, CoreAudio on macOS, ALSA on Linux) and
+# ort loading paths differ per platform. Without explicit targets, docs.rs
+# after 2026-05-01 would only build x86_64-unknown-linux-gnu.
+targets = [
+    "x86_64-unknown-linux-gnu",
+    "aarch64-unknown-linux-gnu",
+    "aarch64-apple-darwin",
+    "x86_64-pc-windows-msvc",
+]
+# docs.rs uses ort-download-binaries since ort-load-dynamic requires a runtime
+# dylib that docs.rs builders don't have. Mutually exclusive with ort-load-dynamic
+# per the compile_error! guard in lib.rs.
+features = ["capture", "output", "vad", "denoise", "gain", "ort-download-binaries"]
+no-default-features = true
 
 [features]
 # Default stack for consumers who want the full decibri experience on Node/Python bindings.

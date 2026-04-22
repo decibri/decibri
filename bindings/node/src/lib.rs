@@ -319,12 +319,50 @@ fn resolve_device_option(device: &Option<serde_json::Value>) -> Result<DeviceSel
 
 fn to_napi_error(e: decibri::error::DecibriError) -> Error {
     use decibri::error::DecibriError::*;
+    // Every variant is listed explicitly so the grep check in our release
+    // procedure can confirm coverage. A trailing `_ =>` arm is required
+    // because `DecibriError` is `#[non_exhaustive]`; it catches future
+    // variants added upstream and maps them to the safe default.
     let status = match &e {
+        // Config validation (bad caller input)
         SampleRateOutOfRange
         | ChannelsOutOfRange
         | FramesPerBufferOutOfRange
-        | DeviceIndexOutOfRange => Status::InvalidArg,
-        InvalidFormat | DeviceNotFound(_) | MultipleDevicesMatch { .. } => Status::InvalidArg,
+        | InvalidFormat
+        | VadSampleRateUnsupported(_)
+        | VadThresholdOutOfRange(_) => Status::InvalidArg,
+
+        // Device selection (bad caller input)
+        DeviceNotFound(_)
+        | MultipleDevicesMatch { .. }
+        | DeviceIndexOutOfRange
+        | NotAnInputDevice => Status::InvalidArg,
+
+        // Runtime / environmental failures
+        NoMicrophoneFound
+        | NoOutputDeviceFound
+        | DeviceEnumerationFailed(_)
+        | AlreadyRunning
+        | StreamOpenFailed(_)
+        | StreamStartFailed(_)
+        | PermissionDenied
+        | CaptureStreamClosed
+        | OutputStreamClosed
+        | OrtInitFailed { .. }
+        | OrtLoadFailed { .. }
+        | OrtPathInvalid { .. }
+        | OrtSessionBuildFailed(_)
+        | OrtThreadsConfigFailed(_)
+        | VadModelLoadFailed { .. }
+        | OrtInferenceFailed(_)
+        | OrtTensorCreateFailed { .. }
+        | OrtTensorExtractFailed { .. } => Status::GenericFailure,
+
+        // `DecibriError` is `#[non_exhaustive]`. A new variant added upstream
+        // without a corresponding arm here falls through to `GenericFailure`
+        // at runtime rather than failing to compile. Variant coverage was
+        // compiler-enforced during the 3.2.0 refactor by temporarily removing
+        // both `#[non_exhaustive]` and this arm; both have been restored.
         _ => Status::GenericFailure,
     };
     Error::new(status, e.to_string())

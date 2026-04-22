@@ -2,11 +2,13 @@
 use std::sync::atomic::{AtomicBool, Ordering};
 #[cfg(feature = "capture")]
 use std::sync::Arc;
+#[cfg(feature = "capture")]
+use std::time::{Duration, Instant};
 
 #[cfg(feature = "capture")]
 use cpal::traits::{DeviceTrait, StreamTrait};
 #[cfg(feature = "capture")]
-use crossbeam_channel::{Receiver, Sender};
+use crossbeam_channel::{Receiver, RecvTimeoutError, Sender, TryRecvError};
 
 use crate::device::DeviceSelector;
 use crate::error::DecibriError;
@@ -65,7 +67,12 @@ pub struct AudioChunk {
 /// Handle to an active audio capture session.
 #[cfg(feature = "capture")]
 pub struct CaptureStream {
-    _stream: cpal::Stream,
+    /// Holds the cpal stream alive for the lifetime of this handle. Wrapped
+    /// in `Option` purely so the test-only `tests::test_stream()` helper can
+    /// construct a `CaptureStream` without a real audio device. Production
+    /// code always stores `Some(stream)`; drop semantics are identical (the
+    /// `Option`'s drop runs the inner `cpal::Stream`'s drop).
+    _stream: Option<cpal::Stream>,
     receiver: Receiver<AudioChunk>,
     running: Arc<AtomicBool>,
     #[allow(dead_code)]
@@ -76,9 +83,135 @@ pub struct CaptureStream {
 
 #[cfg(feature = "capture")]
 impl CaptureStream {
-    /// Get a reference to the receiver for reading audio chunks.
+    /// Direct access to the underlying `crossbeam_channel::Receiver`.
+    ///
+    /// Intended for **in-process Rust consumers** and for bindings (like the
+    /// decibri Node.js addon) that integrate the channel into their own
+    /// drain pump or event loop.
+    ///
+    /// FFI bindings targeting languages without native `crossbeam_channel`
+    /// support, such as Python and the eventual mobile platforms, should
+    /// prefer [`try_next_chunk`](Self::try_next_chunk) and
+    /// [`next_chunk`](Self::next_chunk): they expose the same data with a
+    /// three-state return (`Some` / `None` / `Err(CaptureStreamClosed)`)
+    /// that maps cleanly across a language boundary.
     pub fn receiver(&self) -> &Receiver<AudioChunk> {
         &self.receiver
+    }
+
+    /// Attempt to read the next audio chunk without blocking.
+    ///
+    /// # Returns
+    /// - `Ok(Some(chunk))` — a chunk was immediately available and has been
+    ///   dequeued.
+    /// - `Ok(None)` — the stream is open and running, but no chunk is
+    ///   currently buffered. Try again shortly, or call
+    ///   [`next_chunk`](Self::next_chunk) to block.
+    /// - `Err(DecibriError::CaptureStreamClosed)` — the stream is closed
+    ///   (either by explicit [`stop`](Self::stop) or by an audio-driver
+    ///   error reported via the cpal error callback). No further chunks
+    ///   will ever be available.
+    ///
+    /// Any chunks that were buffered before the stream closed are delivered
+    /// first; the closed signal is only returned once the buffer is empty.
+    ///
+    /// # Thread safety
+    /// May be called from any thread. Internally uses a lock-free
+    /// `crossbeam_channel::try_recv` and an atomic load.
+    ///
+    /// # Stability
+    /// Part of decibri's stable FFI-consumer API surface, alongside
+    /// [`next_chunk`](Self::next_chunk). Guaranteed signature-stable across
+    /// 3.x; any change will be a breaking version bump.
+    pub fn try_next_chunk(&self) -> Result<Option<AudioChunk>, DecibriError> {
+        match self.receiver.try_recv() {
+            Ok(chunk) => Ok(Some(chunk)),
+            Err(TryRecvError::Empty) => {
+                if self.is_open() {
+                    Ok(None)
+                } else {
+                    Err(DecibriError::CaptureStreamClosed)
+                }
+            }
+            Err(TryRecvError::Disconnected) => Err(DecibriError::CaptureStreamClosed),
+        }
+    }
+
+    /// Read the next audio chunk, blocking the calling thread until one
+    /// arrives, the stream closes, or `timeout` elapses.
+    ///
+    /// # Arguments
+    /// - `timeout = None` — block indefinitely until a chunk arrives or the
+    ///   stream closes.
+    /// - `timeout = Some(dur)` — block at most `dur`; return `Ok(None)` if
+    ///   the deadline passes with no chunk.
+    ///
+    /// # Returns
+    /// - `Ok(Some(chunk))` — chunk received within the deadline.
+    /// - `Ok(None)` — `timeout` elapsed without a chunk arriving. The stream
+    ///   is still open.
+    /// - `Err(DecibriError::CaptureStreamClosed)` — stream closed before a
+    ///   chunk could be delivered. Any chunks that were buffered at the time
+    ///   of close are delivered first; this error is only returned once the
+    ///   buffer is empty.
+    ///
+    /// # Thread safety
+    /// May be called from any thread. Blocks only the calling thread; other
+    /// threads can call [`stop`](Self::stop) concurrently to unblock this
+    /// call within approximately 20 ms.
+    ///
+    /// Implementation note: `stop()` does not disconnect the underlying
+    /// channel (the cpal `Stream` still holds the sender until the
+    /// `CaptureStream` is dropped), so this method internally polls both
+    /// the channel and [`is_open`](Self::is_open) at a short interval
+    /// rather than relying on channel disconnection alone to wake up.
+    ///
+    /// # Stability
+    /// Part of decibri's stable FFI-consumer API surface.
+    pub fn next_chunk(
+        &self,
+        timeout: Option<Duration>,
+    ) -> Result<Option<AudioChunk>, DecibriError> {
+        // Poll both the channel and `is_open` at this cadence so concurrent
+        // `stop()` calls unblock a waiter within one interval. 20 ms is well
+        // below a typical audio frame period (100 ms at 16 kHz / 1600
+        // frames) so the extra wakeups cost negligible CPU.
+        const POLL_INTERVAL: Duration = Duration::from_millis(20);
+
+        let deadline = timeout.map(|t| Instant::now() + t);
+
+        loop {
+            let wait = match deadline {
+                Some(dl) => {
+                    let now = Instant::now();
+                    if now >= dl {
+                        // Timeout elapsed without a chunk. Drain any
+                        // last-moment arrival before reporting None.
+                        return Ok(self.receiver.try_recv().ok());
+                    }
+                    std::cmp::min(dl - now, POLL_INTERVAL)
+                }
+                None => POLL_INTERVAL,
+            };
+
+            match self.receiver.recv_timeout(wait) {
+                Ok(chunk) => return Ok(Some(chunk)),
+                Err(RecvTimeoutError::Timeout) => {
+                    // Re-check whether `stop()` fired while we waited.
+                    if !self.is_open() {
+                        // Drain any buffered chunk (stop() does not flush).
+                        return match self.receiver.try_recv() {
+                            Ok(chunk) => Ok(Some(chunk)),
+                            Err(_) => Err(DecibriError::CaptureStreamClosed),
+                        };
+                    }
+                    // Stream still alive; loop with whatever deadline remains.
+                }
+                Err(RecvTimeoutError::Disconnected) => {
+                    return Err(DecibriError::CaptureStreamClosed);
+                }
+            }
+        }
     }
 
     /// Check whether the stream is still actively capturing.
@@ -87,6 +220,14 @@ impl CaptureStream {
     }
 
     /// Stop capturing audio.
+    ///
+    /// Signals the capture callback to stop producing chunks. Already-buffered
+    /// chunks remain readable via [`try_next_chunk`](Self::try_next_chunk) or
+    /// [`next_chunk`](Self::next_chunk) until the buffer is drained, at which
+    /// point those methods return `Err(CaptureStreamClosed)`.
+    ///
+    /// May be called from any thread; wakes a concurrent
+    /// [`next_chunk`](Self::next_chunk) waiter within approximately 20 ms.
     pub fn stop(&self) {
         self.running.store(false, Ordering::Relaxed);
     }
@@ -157,11 +298,152 @@ impl AudioCapture {
             .map_err(|e| DecibriError::StreamStartFailed(e.to_string()))?;
 
         Ok(CaptureStream {
-            _stream: stream,
+            _stream: Some(stream),
             receiver,
             running,
             sample_rate,
             channels,
         })
+    }
+}
+
+#[cfg(all(test, feature = "capture"))]
+mod tests {
+    use super::*;
+    use std::thread;
+
+    /// Construct a synthetic `CaptureStream` with no underlying cpal device
+    /// for unit-testing the channel-reading methods. Returns the stream
+    /// plus test-side handles to inject chunks and flip the running flag.
+    fn test_stream() -> (CaptureStream, Sender<AudioChunk>, Arc<AtomicBool>) {
+        let (sender, receiver) = crossbeam_channel::unbounded::<AudioChunk>();
+        let running = Arc::new(AtomicBool::new(true));
+        let stream = CaptureStream {
+            _stream: None,
+            receiver,
+            running: running.clone(),
+            sample_rate: 16000,
+            channels: 1,
+        };
+        (stream, sender, running)
+    }
+
+    fn make_chunk(first_sample: f32) -> AudioChunk {
+        AudioChunk {
+            data: vec![first_sample],
+            sample_rate: 16000,
+            channels: 1,
+        }
+    }
+
+    #[test]
+    fn test_try_next_chunk_returns_none_when_empty() {
+        let (stream, _sender, _running) = test_stream();
+        let result = stream.try_next_chunk().unwrap();
+        assert!(
+            result.is_none(),
+            "try_next_chunk on empty open stream should return Ok(None)"
+        );
+    }
+
+    #[test]
+    fn test_try_next_chunk_returns_chunk_when_available() {
+        let (stream, sender, _running) = test_stream();
+        sender.send(make_chunk(0.42)).unwrap();
+
+        let result = stream.try_next_chunk().unwrap();
+        let chunk = result.expect("should have received the injected chunk");
+        assert_eq!(chunk.data, vec![0.42]);
+    }
+
+    #[test]
+    fn test_try_next_chunk_returns_err_when_closed() {
+        let (stream, sender, running) = test_stream();
+        drop(sender); // simulate cpal stream dropping the sender
+        running.store(false, Ordering::Relaxed);
+
+        let err = stream.try_next_chunk().unwrap_err();
+        assert!(matches!(err, DecibriError::CaptureStreamClosed));
+    }
+
+    #[test]
+    fn test_next_chunk_blocks_until_chunk_arrives() {
+        let (stream, sender, _running) = test_stream();
+
+        let producer = thread::spawn(move || {
+            thread::sleep(Duration::from_millis(50));
+            sender.send(make_chunk(0.77)).unwrap();
+        });
+
+        let result = stream.next_chunk(None).unwrap();
+        let chunk = result.expect("should have received the eventually-pushed chunk");
+        assert_eq!(chunk.data, vec![0.77]);
+
+        producer.join().unwrap();
+    }
+
+    #[test]
+    fn test_next_chunk_timeout_returns_none() {
+        let (stream, _sender, _running) = test_stream();
+        let start = Instant::now();
+        let result = stream.next_chunk(Some(Duration::from_millis(50))).unwrap();
+        let elapsed = start.elapsed();
+
+        assert!(
+            result.is_none(),
+            "next_chunk with timeout and no arrivals should return Ok(None)"
+        );
+        // Lower bound: at least the requested timeout.
+        assert!(
+            elapsed >= Duration::from_millis(40),
+            "next_chunk returned too early: {elapsed:?}"
+        );
+    }
+
+    #[test]
+    fn test_next_chunk_flushes_buffered_before_closed_err() {
+        let (stream, sender, running) = test_stream();
+        sender.send(make_chunk(1.0)).unwrap();
+        sender.send(make_chunk(2.0)).unwrap();
+        drop(sender); // simulate cpal stream drop
+        running.store(false, Ordering::Relaxed);
+
+        // First two calls drain the buffer, third reports closed.
+        let c1 = stream.next_chunk(Some(Duration::from_millis(100))).unwrap();
+        assert_eq!(c1.unwrap().data, vec![1.0]);
+
+        let c2 = stream.next_chunk(Some(Duration::from_millis(100))).unwrap();
+        assert_eq!(c2.unwrap().data, vec![2.0]);
+
+        let err = stream
+            .next_chunk(Some(Duration::from_millis(100)))
+            .unwrap_err();
+        assert!(matches!(err, DecibriError::CaptureStreamClosed));
+    }
+
+    #[test]
+    fn test_next_chunk_returns_closed_within_polling_interval_after_stop() {
+        let (stream, _sender, running) = test_stream();
+
+        let r = running.clone();
+        let stopper = thread::spawn(move || {
+            thread::sleep(Duration::from_millis(30));
+            r.store(false, Ordering::Relaxed);
+        });
+
+        // next_chunk with no timeout should wake up on the next 20 ms poll
+        // after stop() flips the running flag. Give a generous 250 ms ceiling
+        // to absorb scheduler jitter on loaded CI runners.
+        let start = Instant::now();
+        let err = stream.next_chunk(None).unwrap_err();
+        let elapsed = start.elapsed();
+
+        assert!(matches!(err, DecibriError::CaptureStreamClosed));
+        assert!(
+            elapsed < Duration::from_millis(250),
+            "next_chunk took too long to detect stop(): {elapsed:?}"
+        );
+
+        stopper.join().unwrap();
     }
 }

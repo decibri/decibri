@@ -6,14 +6,12 @@ Before making any type of contribution, please read our [Code of Conduct](https:
 
 This guide walks through the contribution workflow, from opening an issue to submitting a pull request.
 
-
 ## New contributor resources
 
 For a good overview of the project, please first read the [README](https://github.com/decibri/decibri/blob/main/README.md). General resources for getting started with open-source contributions:
 
 - [Finding ways to contribute to open source on GitHub](https://docs.github.com/en/get-started/exploring-projects-on-github/finding-ways-to-contribute-to-open-source-on-github)
 - [Collaborating with pull requests](https://docs.github.com/en/pull-requests/collaborating-with-pull-requests)
-
 
 ## Ways to contribute
 
@@ -26,7 +24,6 @@ There are multiple ways you can contribute to this project:
 - Adding or improving integration guides
 - Improving test coverage
 - Anything else we may have forgotten
-
 
 ## Getting started
 
@@ -44,18 +41,21 @@ To build from source you will need:
 ### Setting up the development environment
 
 1. Fork this repository to your own account and clone it to your local machine:
+
    ```bash
    git clone https://github.com/YOUR_USERNAME/decibri.git
    cd decibri
    ```
 
 2. Build the Rust crate and run its tests:
+
    ```bash
    cargo build --workspace
    cargo test-decibri
    ```
 
 3. Build the Node.js native addon:
+
    ```bash
    cd npm/decibri
    npm install --ignore-optional
@@ -63,12 +63,14 @@ To build from source you will need:
    ```
 
 4. Run the CI-safe Node.js test suite (no hardware required):
+
    ```bash
    cd ../..
    node tests/test-ci.js
    ```
 
 5. (Optional) Run the live capture, output, and VAD tests if you have a microphone and speakers connected:
+
    ```bash
    node tests/test-capture.js
    node tests/test-output.js
@@ -77,6 +79,7 @@ To build from source you will need:
    ```
 
 6. (Optional) Run the browser unit tests (mocked, no hardware required):
+
    ```bash
    npm install
    npx vitest run
@@ -135,7 +138,6 @@ Our team will review your PR and provide feedback. We may ask for additional cha
 Every pull request runs an automated CI pipeline covering lint, format, security audit, and test suites across Rust, Node.js, and browser targets. Your PR must pass CI before it can be merged. Details of the pipeline live in `.github/workflows/ci.yml`.
 
 We appreciate your contributions and thank you for your time in submitting a pull request.
-
 
 ## License
 
