@@ -88,21 +88,119 @@ fn compute_is_default<Id: PartialEq>(
         .collect()
 }
 
-/// Enumerate all available audio input devices.
+/// Internal trait abstracting the input vs output differences in cpal's
+/// device enumeration and resolution APIs. Allows one generic implementation
+/// of `enumerate_devices` and `resolve_device` to cover both directions.
+///
+/// Not part of the public API; lives here only to deduplicate the per-direction
+/// code paths. Each `impl` is a small table of function pointers into cpal.
 #[cfg(any(feature = "capture", feature = "output"))]
-pub fn enumerate_input_devices() -> Result<Vec<DeviceInfo>, DecibriError> {
+trait DeviceDirection {
+    type Info;
+
+    fn default_device(host: &cpal::Host) -> Option<cpal::Device>;
+    fn list_devices(host: &cpal::Host) -> Result<Vec<cpal::Device>, DecibriError>;
+    /// Returns `(channels, sample_rate)`; `(0, 0)` on config failure (matches
+    /// the pre-consolidation behaviour of surfacing an "unknown" device
+    /// rather than propagating the error).
+    fn default_config(device: &cpal::Device) -> (u16, u32);
+    fn build_info(row: ComputedRow) -> Self::Info;
+    fn no_device_error() -> DecibriError;
+}
+
+#[cfg(any(feature = "capture", feature = "output"))]
+struct Input;
+
+#[cfg(any(feature = "capture", feature = "output"))]
+struct Output;
+
+#[cfg(any(feature = "capture", feature = "output"))]
+impl DeviceDirection for Input {
+    type Info = DeviceInfo;
+
+    fn default_device(host: &cpal::Host) -> Option<cpal::Device> {
+        host.default_input_device()
+    }
+
+    fn list_devices(host: &cpal::Host) -> Result<Vec<cpal::Device>, DecibriError> {
+        host.input_devices()
+            .map(|it| it.collect())
+            .map_err(|e| DecibriError::DeviceEnumerationFailed(e.to_string()))
+    }
+
+    fn default_config(device: &cpal::Device) -> (u16, u32) {
+        match device.default_input_config() {
+            Ok(config) => (config.channels(), config.sample_rate()),
+            Err(_) => (0, 0),
+        }
+    }
+
+    fn build_info(row: ComputedRow) -> Self::Info {
+        DeviceInfo {
+            index: row.index,
+            name: row.name,
+            max_input_channels: row.channels,
+            default_sample_rate: row.sample_rate,
+            is_default: row.is_default,
+        }
+    }
+
+    fn no_device_error() -> DecibriError {
+        DecibriError::NoMicrophoneFound
+    }
+}
+
+#[cfg(any(feature = "capture", feature = "output"))]
+impl DeviceDirection for Output {
+    type Info = OutputDeviceInfo;
+
+    fn default_device(host: &cpal::Host) -> Option<cpal::Device> {
+        host.default_output_device()
+    }
+
+    fn list_devices(host: &cpal::Host) -> Result<Vec<cpal::Device>, DecibriError> {
+        host.output_devices()
+            .map(|it| it.collect())
+            .map_err(|e| DecibriError::DeviceEnumerationFailed(e.to_string()))
+    }
+
+    fn default_config(device: &cpal::Device) -> (u16, u32) {
+        match device.default_output_config() {
+            Ok(config) => (config.channels(), config.sample_rate()),
+            Err(_) => (0, 0),
+        }
+    }
+
+    fn build_info(row: ComputedRow) -> Self::Info {
+        OutputDeviceInfo {
+            index: row.index,
+            name: row.name,
+            max_output_channels: row.channels,
+            default_sample_rate: row.sample_rate,
+            is_default: row.is_default,
+        }
+    }
+
+    fn no_device_error() -> DecibriError {
+        DecibriError::NoOutputDeviceFound
+    }
+}
+
+/// Shared implementation for `enumerate_input_devices` / `enumerate_output_devices`.
+/// Direction-generic via the `DeviceDirection` trait.
+#[cfg(any(feature = "capture", feature = "output"))]
+fn enumerate_devices<D: DeviceDirection>() -> Result<Vec<D::Info>, DecibriError> {
     let host = cpal::default_host();
 
     // Stable per-host id (WASAPI endpoint ID / CoreAudio UID / ALSA pcm_id)
     // for the OS default device. `.id()` is fallible on rare host backends;
     // treat a failure as "no default" rather than propagating.
-    let default_id = host.default_input_device().and_then(|d| d.id().ok());
+    let default_id = D::default_device(&host).and_then(|d| d.id().ok());
 
-    let devices = host
-        .input_devices()
-        .map_err(|e| DecibriError::Other(format!("Failed to enumerate devices: {e}")))?;
+    let devices = D::list_devices(&host)?;
 
     let rows: Vec<(Option<cpal::DeviceId>, String, u16, u32)> = devices
+        .into_iter()
         .enumerate()
         .map(|(index, device)| {
             let id = device.id().ok();
@@ -110,56 +208,38 @@ pub fn enumerate_input_devices() -> Result<Vec<DeviceInfo>, DecibriError> {
                 .description()
                 .map(|d| d.name().to_string())
                 .unwrap_or_else(|_| format!("Unknown Device {index}"));
-            let (channels, sample_rate) = match device.default_input_config() {
-                Ok(config) => (config.channels(), config.sample_rate()),
-                Err(_) => (0, 0),
-            };
+            let (channels, sample_rate) = D::default_config(&device);
             (id, name, channels, sample_rate)
         })
         .collect();
 
     Ok(compute_is_default(rows, default_id)
         .into_iter()
-        .map(|r| DeviceInfo {
-            index: r.index,
-            name: r.name,
-            max_input_channels: r.channels,
-            default_sample_rate: r.sample_rate,
-            is_default: r.is_default,
-        })
+        .map(D::build_info)
         .collect())
 }
 
-/// Resolve a device selector to a cpal Device.
+/// Shared implementation for `resolve_device` / `resolve_output_device`.
 #[cfg(any(feature = "capture", feature = "output"))]
-pub fn resolve_device(selector: &DeviceSelector) -> Result<cpal::Device, DecibriError> {
+fn resolve_device_generic<D: DeviceDirection>(
+    selector: &DeviceSelector,
+) -> Result<cpal::Device, DecibriError> {
     let host = cpal::default_host();
 
     match selector {
-        DeviceSelector::Default => host
-            .default_input_device()
-            .ok_or(DecibriError::NoMicrophoneFound),
+        DeviceSelector::Default => D::default_device(&host).ok_or_else(D::no_device_error),
 
-        DeviceSelector::Index(idx) => {
-            let devices: Vec<_> = host
-                .input_devices()
-                .map_err(|e| DecibriError::Other(format!("Failed to enumerate devices: {e}")))?
-                .collect();
-
-            devices
-                .into_iter()
-                .nth(*idx)
-                .ok_or(DecibriError::DeviceIndexOutOfRange)
-        }
+        DeviceSelector::Index(idx) => D::list_devices(&host)?
+            .into_iter()
+            .nth(*idx)
+            .ok_or(DecibriError::DeviceIndexOutOfRange),
 
         DeviceSelector::Name(query) => {
             let query_lower = query.to_lowercase();
-            let devices = host
-                .input_devices()
-                .map_err(|e| DecibriError::Other(format!("Failed to enumerate devices: {e}")))?;
+            let devices = D::list_devices(&host)?;
 
             let mut matches: Vec<(usize, String, cpal::Device)> = Vec::new();
-            for (index, device) in devices.enumerate() {
+            for (index, device) in devices.into_iter().enumerate() {
                 let name = device
                     .description()
                     .map(|d| d.name().to_string())
@@ -188,107 +268,30 @@ pub fn resolve_device(selector: &DeviceSelector) -> Result<cpal::Device, Decibri
             }
         }
     }
+}
+
+/// Enumerate all available audio input devices.
+#[cfg(any(feature = "capture", feature = "output"))]
+pub fn enumerate_input_devices() -> Result<Vec<DeviceInfo>, DecibriError> {
+    enumerate_devices::<Input>()
 }
 
 /// Enumerate all available audio output devices.
 #[cfg(any(feature = "capture", feature = "output"))]
 pub fn enumerate_output_devices() -> Result<Vec<OutputDeviceInfo>, DecibriError> {
-    let host = cpal::default_host();
+    enumerate_devices::<Output>()
+}
 
-    // Stable per-host id for the OS default output device; see
-    // `enumerate_input_devices` for rationale (same Issue #14 fix pattern).
-    let default_id = host.default_output_device().and_then(|d| d.id().ok());
-
-    let devices = host
-        .output_devices()
-        .map_err(|e| DecibriError::Other(format!("Failed to enumerate devices: {e}")))?;
-
-    let rows: Vec<(Option<cpal::DeviceId>, String, u16, u32)> = devices
-        .enumerate()
-        .map(|(index, device)| {
-            let id = device.id().ok();
-            let name = device
-                .description()
-                .map(|d| d.name().to_string())
-                .unwrap_or_else(|_| format!("Unknown Device {index}"));
-            let (channels, sample_rate) = match device.default_output_config() {
-                Ok(config) => (config.channels(), config.sample_rate()),
-                Err(_) => (0, 0),
-            };
-            (id, name, channels, sample_rate)
-        })
-        .collect();
-
-    Ok(compute_is_default(rows, default_id)
-        .into_iter()
-        .map(|r| OutputDeviceInfo {
-            index: r.index,
-            name: r.name,
-            max_output_channels: r.channels,
-            default_sample_rate: r.sample_rate,
-            is_default: r.is_default,
-        })
-        .collect())
+/// Resolve a device selector to a cpal Device.
+#[cfg(any(feature = "capture", feature = "output"))]
+pub fn resolve_device(selector: &DeviceSelector) -> Result<cpal::Device, DecibriError> {
+    resolve_device_generic::<Input>(selector)
 }
 
 /// Resolve an output device selector to a cpal Device.
 #[cfg(any(feature = "capture", feature = "output"))]
 pub fn resolve_output_device(selector: &DeviceSelector) -> Result<cpal::Device, DecibriError> {
-    let host = cpal::default_host();
-
-    match selector {
-        DeviceSelector::Default => host
-            .default_output_device()
-            .ok_or(DecibriError::NoOutputDeviceFound),
-
-        DeviceSelector::Index(idx) => {
-            let devices: Vec<_> = host
-                .output_devices()
-                .map_err(|e| DecibriError::Other(format!("Failed to enumerate devices: {e}")))?
-                .collect();
-
-            devices
-                .into_iter()
-                .nth(*idx)
-                .ok_or(DecibriError::DeviceIndexOutOfRange)
-        }
-
-        DeviceSelector::Name(query) => {
-            let query_lower = query.to_lowercase();
-            let devices = host
-                .output_devices()
-                .map_err(|e| DecibriError::Other(format!("Failed to enumerate devices: {e}")))?;
-
-            let mut matches: Vec<(usize, String, cpal::Device)> = Vec::new();
-            for (index, device) in devices.enumerate() {
-                let name = device
-                    .description()
-                    .map(|d| d.name().to_string())
-                    .unwrap_or_default();
-                if name.to_lowercase().contains(&query_lower) {
-                    matches.push((index, name, device));
-                }
-            }
-
-            match matches.len() {
-                0 => Err(DecibriError::DeviceNotFound(query.clone())),
-                1 => Ok(matches.into_iter().next().unwrap().2),
-                _ => {
-                    let match_list = matches
-                        .iter()
-                        .map(|(idx, name, _)| format!("  [{idx}] {name}"))
-                        .collect::<Vec<_>>()
-                        .join("\n");
-                    Err(DecibriError::MultipleDevicesMatch {
-                        name: query.clone(),
-                        matches: format!(
-                            "{match_list}\nUse a more specific name or pass the device index directly."
-                        ),
-                    })
-                }
-            }
-        }
-    }
+    resolve_device_generic::<Output>(selector)
 }
 
 #[cfg(all(test, any(feature = "capture", feature = "output")))]

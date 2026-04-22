@@ -55,6 +55,29 @@ impl Default for VadConfig {
     }
 }
 
+impl VadConfig {
+    /// Validate configuration values.
+    ///
+    /// Called automatically by [`SileroVad::new`]; exposed publicly so
+    /// callers can fail-fast before paying the cost of ORT init and
+    /// ONNX model load.
+    ///
+    /// # Errors
+    /// - [`DecibriError::VadSampleRateUnsupported`] if `sample_rate` is not
+    ///   8000 or 16000.
+    /// - [`DecibriError::VadThresholdOutOfRange`] if `threshold` is outside
+    ///   `[0.0, 1.0]`.
+    pub fn validate(&self) -> Result<(), DecibriError> {
+        if self.sample_rate != 8000 && self.sample_rate != 16000 {
+            return Err(DecibriError::VadSampleRateUnsupported(self.sample_rate));
+        }
+        if !(0.0..=1.0).contains(&self.threshold) {
+            return Err(DecibriError::VadThresholdOutOfRange(self.threshold));
+        }
+        Ok(())
+    }
+}
+
 /// Result of processing an audio chunk through Silero VAD.
 #[derive(Debug, Clone)]
 pub struct VadResult {
@@ -96,24 +119,20 @@ static ORT_INIT: OnceLock<Option<PathBuf>> = OnceLock::new();
 /// Kept as a standalone generic function (rather than an inline closure in
 /// `init_ort_once`) so it can be unit-tested without triggering a real ORT
 /// init failure. Tests pass a synthetic `err` value.
+///
+/// Returns one of two typed variants depending on whether a path was provided:
+/// [`DecibriError::OrtLoadFailed`] when `path.is_some()`, or
+/// [`DecibriError::OrtInitFailed`] otherwise.
 #[cfg(feature = "vad")]
 fn wrap_init_error<E: std::fmt::Display>(path: Option<&Path>, err: E) -> DecibriError {
     match path {
-        Some(p) => DecibriError::Other(format!(
-            "decibri: failed to load ONNX Runtime from {}: {}. \
-             If ORT_DYLIB_PATH is set, verify it points to a valid ONNX Runtime \
-             library for your platform. Otherwise the bundled ORT may be missing \
-             from your platform package. Try reinstalling decibri.",
-            p.display(),
-            err
-        )),
-        None => DecibriError::Other(format!(
-            "decibri: failed to initialize ONNX Runtime: {}. \
-             Either pass ort_library_path in VadConfig, set ORT_DYLIB_PATH to \
-             point to a valid ONNX Runtime library, or enable the \
-             `ort-download-binaries` feature for zero-config builds.",
-            err
-        )),
+        Some(p) => DecibriError::OrtLoadFailed {
+            path: p.display().to_string(),
+            message: err.to_string(),
+        },
+        None => DecibriError::OrtInitFailed {
+            message: err.to_string(),
+        },
     }
 }
 
@@ -175,36 +194,27 @@ fn init_ort_once(path: Option<&Path>) -> Result<(), DecibriError> {
 impl SileroVad {
     /// Create a new Silero VAD instance by loading the ONNX model.
     pub fn new(config: VadConfig) -> Result<Self, DecibriError> {
+        config.validate()?;
+
+        // Safe to unwrap-via-unreachable: validate() rejected anything else.
         let window_size = match config.sample_rate {
             16000 => 512,
             8000 => 256,
-            _ => {
-                return Err(DecibriError::Other(
-                    "Silero VAD only supports sample rates 8000 and 16000".to_string(),
-                ))
-            }
+            _ => unreachable!("VadConfig::validate accepts only 8000 and 16000"),
         };
-
-        if config.threshold < 0.0 || config.threshold > 1.0 {
-            return Err(DecibriError::Other(
-                "VAD threshold must be between 0.0 and 1.0".to_string(),
-            ));
-        }
 
         // Initialize ORT exactly once per process. Subsequent SileroVad
         // instances pass through immediately regardless of their ort_library_path.
         init_ort_once(config.ort_library_path.as_deref())?;
 
         let session = ort::session::Session::builder()
-            .map_err(|e| DecibriError::Other(format!("Failed to create ort session builder: {e}")))?
+            .map_err(|e| DecibriError::OrtSessionBuildFailed(e.to_string()))?
             .with_intra_threads(1)
-            .map_err(|e| DecibriError::Other(format!("Failed to set ort threads: {e}")))?
+            .map_err(|e| DecibriError::OrtThreadsConfigFailed(e.to_string()))?
             .commit_from_file(&config.model_path)
-            .map_err(|e| {
-                DecibriError::Other(format!(
-                    "Failed to load Silero VAD model from {}: {e}",
-                    config.model_path.display()
-                ))
+            .map_err(|e| DecibriError::VadModelLoadFailed {
+                path: config.model_path.display().to_string(),
+                message: e.to_string(),
             })?;
 
         Ok(Self {
@@ -266,12 +276,22 @@ impl SileroVad {
         //   sr:    i64 scalar
         let input_tensor =
             ort::value::Tensor::from_array(([1i64, self.window_size as i64], window.to_vec()))
-                .map_err(|e| DecibriError::Other(format!("Failed to create input tensor: {e}")))?;
+                .map_err(|e| DecibriError::OrtTensorCreateFailed {
+                    kind: "input",
+                    message: e.to_string(),
+                })?;
         let state_tensor =
-            ort::value::Tensor::from_array(([2i64, 1i64, 128i64], self.state.clone()))
-                .map_err(|e| DecibriError::Other(format!("Failed to create state tensor: {e}")))?;
+            ort::value::Tensor::from_array(([2i64, 1i64, 128i64], self.state.clone())).map_err(
+                |e| DecibriError::OrtTensorCreateFailed {
+                    kind: "state",
+                    message: e.to_string(),
+                },
+            )?;
         let sr_tensor = ort::value::Tensor::from_array(([1i64], vec![self.sample_rate as i64]))
-            .map_err(|e| DecibriError::Other(format!("Failed to create sr tensor: {e}")))?;
+            .map_err(|e| DecibriError::OrtTensorCreateFailed {
+                kind: "sr",
+                message: e.to_string(),
+            })?;
 
         let input_values = ort::inputs![
             "input" => input_tensor,
@@ -282,19 +302,25 @@ impl SileroVad {
         let outputs = self
             .session
             .run(input_values)
-            .map_err(|e| DecibriError::Other(format!("Silero VAD inference failed: {e}")))?;
+            .map_err(|e| DecibriError::OrtInferenceFailed(e.to_string()))?;
 
         // Read outputs using actual model tensor names:
         //   output: f32[1, 1] (speech probability)
         //   stateN: f32[2, 1, 128] (updated state)
-        let prob_tensor = outputs["output"]
-            .try_extract_tensor::<f32>()
-            .map_err(|e| DecibriError::Other(format!("Failed to extract output tensor: {e}")))?;
+        let prob_tensor = outputs["output"].try_extract_tensor::<f32>().map_err(|e| {
+            DecibriError::OrtTensorExtractFailed {
+                kind: "output",
+                message: e.to_string(),
+            }
+        })?;
         let probability = prob_tensor.1[0];
 
-        let state_tensor = outputs["stateN"]
-            .try_extract_tensor::<f32>()
-            .map_err(|e| DecibriError::Other(format!("Failed to extract state tensor: {e}")))?;
+        let state_tensor = outputs["stateN"].try_extract_tensor::<f32>().map_err(|e| {
+            DecibriError::OrtTensorExtractFailed {
+                kind: "state",
+                message: e.to_string(),
+            }
+        })?;
         self.state.copy_from_slice(state_tensor.1);
 
         Ok(probability)
@@ -461,7 +487,6 @@ mod tests {
         let samples = vec![0.0f32; 512];
         vad.process(&samples).unwrap();
         vad.accumulator.extend_from_slice(&[0.0; 100]); // add some leftover
-
         vad.reset();
 
         assert!(vad.state.iter().all(|&v| v == 0.0), "State should be zeros");

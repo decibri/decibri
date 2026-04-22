@@ -64,7 +64,7 @@ impl OutputStream {
         }
         self.sender
             .send(samples)
-            .map_err(|_| DecibriError::Other("Output stream closed".to_string()))
+            .map_err(|_| DecibriError::OutputStreamClosed)
     }
 
     /// Graceful drain: sends a sentinel (empty vec), then blocks until the
