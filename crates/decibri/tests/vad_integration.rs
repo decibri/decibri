@@ -6,7 +6,7 @@
 //! require audio hardware.
 //!
 //! The load-failure test for a bogus `ort_library_path` lives in
-//! `vad_ort_load_failure.rs` — a separate binary — because ORT
+//! `vad_ort_load_failure.rs` (a separate binary) because ORT
 //! initialization is process-global: once any test in this binary
 //! successfully initializes ORT, the `OnceLock` guard inside
 //! `init_ort_once` short-circuits later callers and the load-failure

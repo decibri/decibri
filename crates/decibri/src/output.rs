@@ -67,9 +67,9 @@ impl OutputStream {
     /// without touching the channel.
     ///
     /// # Returns
-    /// - `Ok(())` — samples accepted into the playback queue (or buffer was
+    /// - `Ok(())`: samples accepted into the playback queue (or buffer was
     ///   empty).
-    /// - `Err(DecibriError::OutputStreamClosed)` — the output stream has
+    /// - `Err(DecibriError::OutputStreamClosed)`: the output stream has
     ///   been stopped or dropped; no further samples can be played.
     ///
     /// # Thread safety

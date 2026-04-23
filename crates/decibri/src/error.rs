@@ -27,6 +27,15 @@ pub enum DecibriError {
     #[error("No audio input device found matching \"{0}\"")]
     DeviceNotFound(String),
 
+    /// No output device matched a `Name` or `Id` selector.
+    ///
+    /// The split from [`Self::DeviceNotFound`] exists because the display
+    /// message needs to say "output" when the lookup was against output
+    /// devices, not "input". Issued by [`crate::device::resolve_output_device`]
+    /// via the internal direction-specific `not_found_error` hook.
+    #[error("No audio output device found matching \"{0}\"")]
+    OutputDeviceNotFound(String),
+
     #[error("Multiple devices match \"{name}\":\n{matches}")]
     MultipleDevicesMatch { name: String, matches: String },
 
@@ -116,7 +125,7 @@ pub enum DecibriError {
     ///
     /// Intentionally does *not* carry an `ort::Error` source, because
     /// constructing an `ort::Error` under `ort-load-dynamic` calls into the
-    /// ORT C API (`ortsys![CreateStatus]`) — which is exactly the hang this
+    /// ORT C API (`ortsys![CreateStatus]`), which is exactly the hang this
     /// pre-check is designed to prevent. Keeping this variant string-only
     /// means the pre-check never touches ORT symbols.
     ///

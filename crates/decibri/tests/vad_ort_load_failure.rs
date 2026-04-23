@@ -13,7 +13,7 @@
 //! to `ort::init_from`. Without that pre-check, Windows hangs indefinitely
 //! inside `ort::init_from` on a nonexistent path (reproduced 2026-04-22
 //! against pyke/ort 2.0.0-rc.12 + onnxruntime 1.24.4). The pre-check
-//! returns [`DecibriError::OrtPathInvalid`] — deliberately a string-only
+//! returns [`DecibriError::OrtPathInvalid`], deliberately a string-only
 //! variant that does *not* construct an `ort::Error`, because
 //! `ort::Error::new` itself calls `ortsys![CreateStatus]` and would
 //! re-trigger the very dylib load we're avoiding.
@@ -81,7 +81,7 @@ fn test_ort_load_fails_with_nonexistent_path() {
         other => panic!("expected OrtPathInvalid, got {other:?}"),
     }
 
-    // Display message should carry the actionable guidance string — same
+    // Display message should carry the actionable guidance string: same
     // wording as `OrtLoadFailed` so consumers see a uniform message.
     let msg = err.to_string();
     assert!(

@@ -80,6 +80,20 @@ assertThrows(
   'device index out of range'
 );
 
+// device by id, not found
+assertThrows(
+  () => new Decibri({ device: { id: '__nonexistent_id__' } }),
+  TypeError,
+  'No audio input device found matching "__nonexistent_id__"'
+);
+
+// device by id, wrong id type
+assertThrows(
+  () => new Decibri({ device: { id: 123 } }),
+  TypeError,
+  'device.id must be a string'
+);
+
 // boundary values that SHOULD work
 try { const m = new Decibri({ sampleRate: 1000 }); m.stop(); passed++; }
 catch (e) { console.log(`  FAIL: sampleRate 1000 rejected: ${e.message}`); failed++; }
@@ -113,6 +127,7 @@ if (devices.length > 0) {
   const d = devices[0];
   assert(typeof d.index === 'number', 'device.index is number');
   assert(typeof d.name === 'string', 'device.name is string');
+  assert(typeof d.id === 'string', 'device.id is string');
   assert(typeof d.maxInputChannels === 'number', 'device.maxInputChannels is number');
   assert(typeof d.defaultSampleRate === 'number', 'device.defaultSampleRate is number');
   assert(typeof d.isDefault === 'boolean', 'device.isDefault is boolean');
@@ -144,6 +159,20 @@ assertThrows(
   'device index out of range'
 );
 
+// device by id, not found
+assertThrows(
+  () => new DecibriOutput({ device: { id: '__nonexistent_id__' } }),
+  TypeError,
+  'No audio output device found matching "__nonexistent_id__"'
+);
+
+// device by id, wrong id type
+assertThrows(
+  () => new DecibriOutput({ device: { id: 123 } }),
+  TypeError,
+  'device.id must be a string'
+);
+
 // zero-byte write is a no-op
 try {
   const s = new DecibriOutput({ sampleRate: 16000, channels: 1 });
@@ -170,6 +199,7 @@ const outDevices = DecibriOutput.devices();
 assert(Array.isArray(outDevices), 'DecibriOutput.devices() returns array');
 if (outDevices.length > 0) {
   const d = outDevices[0];
+  assert(typeof d.id === 'string', 'output device.id is string');
   assert(typeof d.maxOutputChannels === 'number', 'output device has maxOutputChannels');
   assert(d.maxInputChannels === undefined, 'output device does NOT have maxInputChannels');
 }

@@ -16,8 +16,9 @@ All commits, tags, and registry publishes are performed manually. If a task appe
 
 ## Code Quality
 
-- Run `cargo clippy --workspace` before committing Rust changes. Fix all warnings. Do not suppress with `#[allow]`.
-- Run `cargo test -p decibri` after any Rust changes to verify no regressions.
+- Run `cargo clippy --workspace -- -D warnings` before committing Rust changes. Fix all warnings. Do not suppress with `#[allow]`.
+- Run `cargo fmt --all -- --check` before committing. If it reports formatting drift, run `cargo fmt --all` and stage the result.
+- Run `cargo test-decibri` after any Rust changes to verify no regressions. This alias (defined in `.cargo/config.toml`) builds with `ort-download-binaries` so VAD tests run without a pre-staged ORT dylib; plain `cargo test -p decibri` hangs on VAD tests in a fresh workspace.
 - Run `node tests/test-capture.js`, `node tests/test-api.js`, `node tests/test-output.js`, `node tests/test-vad-silero.js` after JS or napi binding changes.
 - Run `npx vitest run` after browser source changes.
 - Rebuild the native addon (`cd npm/decibri && npm run build`) after any Rust changes before running Node.js tests.
@@ -40,5 +41,5 @@ All commits, tags, and registry publishes are performed manually. If a task appe
 ## Changelog
 
 - Update `CHANGELOG.md` when adding features, fixing bugs, or making breaking changes.
-- Add entries under the `## [3.0.0] - Unreleased` section in the appropriate subsection (Added, Changed, Fixed, Removed).
+- Add entries under the `## [<next-version>] - Unreleased` section in the appropriate subsection (Added, Changed, Fixed, Removed).
 - Use [Keep a Changelog](https://keepachangelog.com) format. One bullet per change, concise.

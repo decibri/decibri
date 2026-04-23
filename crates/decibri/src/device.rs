@@ -5,9 +5,27 @@ use crate::error::DecibriError;
 
 /// Information about an audio input device.
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub struct DeviceInfo {
     pub index: usize,
     pub name: String,
+    /// Stable per-host device ID, suitable for passing to
+    /// [`DeviceSelector::Id`] for selection that survives across
+    /// enumerations.
+    ///
+    /// The string is cpal's `DeviceId` [`Display`] output:
+    /// - Windows (WASAPI): endpoint ID (e.g. `{0.0.1.00000000}.{...}`)
+    /// - macOS (CoreAudio): device UID
+    /// - Linux (ALSA): PCM identifier
+    ///
+    /// Empty string if cpal could not produce a stable ID for this
+    /// device (rare; some host backends cannot assign IDs to every
+    /// enumerated device). A device with an empty `id` cannot be
+    /// selected by [`DeviceSelector::Id`] and must be selected via
+    /// [`DeviceSelector::Index`] or [`DeviceSelector::Name`] instead.
+    ///
+    /// [`Display`]: std::fmt::Display
+    pub id: String,
     pub max_input_channels: u16,
     pub default_sample_rate: u32,
     pub is_default: bool,
@@ -15,9 +33,13 @@ pub struct DeviceInfo {
 
 /// Information about an audio output device.
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub struct OutputDeviceInfo {
     pub index: usize,
     pub name: String,
+    /// Stable per-host device ID. See [`DeviceInfo::id`] for format and
+    /// fallback semantics; the rules are identical for output devices.
+    pub id: String,
     pub max_output_channels: u16,
     pub default_sample_rate: u32,
     pub is_default: bool,
@@ -25,6 +47,7 @@ pub struct OutputDeviceInfo {
 
 /// How to select an audio device.
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub enum DeviceSelector {
     /// Use the system default device.
     Default,
@@ -32,6 +55,21 @@ pub enum DeviceSelector {
     Index(usize),
     /// Select by case-insensitive name substring match.
     Name(String),
+    /// Select by stable per-host device ID.
+    ///
+    /// The ID is the string produced by `cpal::DeviceId`'s [`Display`] impl
+    /// (WASAPI endpoint ID on Windows, CoreAudio UID on macOS, ALSA pcm_id
+    /// on Linux). Matching is exact string equality, not substring.
+    ///
+    /// Obtain an ID from [`DeviceInfo::id`] / [`OutputDeviceInfo::id`]
+    /// returned by [`enumerate_input_devices`] / [`enumerate_output_devices`].
+    ///
+    /// Prefer `Id` over [`Self::Name`] when you need stable device selection
+    /// across enumerations: display names can shift across OS versions or
+    /// when other devices are plugged in, but per-host IDs don't.
+    ///
+    /// [`Display`]: std::fmt::Display
+    Id(String),
 }
 
 /// Internal: enumerated device row with `is_default` already resolved.
@@ -42,6 +80,9 @@ pub enum DeviceSelector {
 struct ComputedRow {
     index: usize,
     name: String,
+    /// Stable per-host device ID as a string, or empty if the device has no
+    /// cpal-assignable ID. Forwarded to `DeviceInfo.id` / `OutputDeviceInfo.id`.
+    id: String,
     channels: u16,
     sample_rate: u32,
     is_default: bool,
@@ -66,7 +107,7 @@ struct ComputedRow {
 /// Generic over `Id: PartialEq` so unit tests can use `String` ids and verify
 /// the matching logic without depending on a live cpal host.
 #[cfg(any(feature = "capture", feature = "output"))]
-fn compute_is_default<Id: PartialEq>(
+fn compute_is_default<Id: PartialEq + ToString>(
     rows: Vec<(Option<Id>, String, u16, u32)>,
     default_id: Option<Id>,
 ) -> Vec<ComputedRow> {
@@ -77,9 +118,15 @@ fn compute_is_default<Id: PartialEq>(
                 (Some(row_id), Some(default)) => row_id == default,
                 _ => false,
             };
+            // `cpal::DeviceId` implements `Display`, so `.to_string()` gives
+            // a stable per-host identifier. `None` (device has no assignable
+            // id on this host) becomes an empty string: the enumeration still
+            // includes the device but it cannot be selected by `DeviceSelector::Id`.
+            let id = id.map(|x| x.to_string()).unwrap_or_default();
             ComputedRow {
                 index,
                 name,
+                id,
                 channels,
                 sample_rate,
                 is_default,
@@ -106,6 +153,12 @@ trait DeviceDirection {
     fn default_config(device: &cpal::Device) -> (u16, u32);
     fn build_info(row: ComputedRow) -> Self::Info;
     fn no_device_error() -> DecibriError;
+    /// Direction-specific "not found" error for a `Name` / `Id` lookup miss.
+    /// Input returns [`DecibriError::DeviceNotFound`]; Output returns
+    /// [`DecibriError::OutputDeviceNotFound`]. Keeping this on the trait
+    /// avoids hardcoding the input-oriented variant in the shared
+    /// `resolve_device_generic` body.
+    fn not_found_error(query: String) -> DecibriError;
 }
 
 #[cfg(any(feature = "capture", feature = "output"))]
@@ -139,6 +192,7 @@ impl DeviceDirection for Input {
         DeviceInfo {
             index: row.index,
             name: row.name,
+            id: row.id,
             max_input_channels: row.channels,
             default_sample_rate: row.sample_rate,
             is_default: row.is_default,
@@ -147,6 +201,10 @@ impl DeviceDirection for Input {
 
     fn no_device_error() -> DecibriError {
         DecibriError::NoMicrophoneFound
+    }
+
+    fn not_found_error(query: String) -> DecibriError {
+        DecibriError::DeviceNotFound(query)
     }
 }
 
@@ -175,6 +233,7 @@ impl DeviceDirection for Output {
         OutputDeviceInfo {
             index: row.index,
             name: row.name,
+            id: row.id,
             max_output_channels: row.channels,
             default_sample_rate: row.sample_rate,
             is_default: row.is_default,
@@ -183,6 +242,10 @@ impl DeviceDirection for Output {
 
     fn no_device_error() -> DecibriError {
         DecibriError::NoOutputDeviceFound
+    }
+
+    fn not_found_error(query: String) -> DecibriError {
+        DecibriError::OutputDeviceNotFound(query)
     }
 }
 
@@ -250,7 +313,7 @@ fn resolve_device_generic<D: DeviceDirection>(
             }
 
             match matches.len() {
-                0 => Err(DecibriError::DeviceNotFound(query.clone())),
+                0 => Err(D::not_found_error(query.clone())),
                 1 => Ok(matches.into_iter().next().unwrap().2),
                 _ => {
                     let match_list = matches
@@ -266,6 +329,26 @@ fn resolve_device_generic<D: DeviceDirection>(
                     })
                 }
             }
+        }
+
+        DeviceSelector::Id(query) => {
+            // Exact match on cpal::DeviceId's `Display` representation.
+            // Device IDs are unique per host, so at most one device matches.
+            // A device whose `id()` call fails (rare; some hosts cannot
+            // produce a stable id for every enumerated device) is silently
+            // skipped; the scenario is treated as "not found" rather than
+            // surfacing a cpal-level error. This matches `enumerate_devices`,
+            // which assigns such a device an empty `id` string that no query
+            // can match.
+            let devices = D::list_devices(&host)?;
+            for device in devices {
+                if let Ok(id) = device.id() {
+                    if id.to_string() == *query {
+                        return Ok(device);
+                    }
+                }
+            }
+            Err(D::not_found_error(query.clone()))
         }
     }
 }
@@ -375,5 +458,62 @@ mod tests {
 
         assert!(result_no_default.is_empty());
         assert!(result_with_default.is_empty());
+    }
+
+    /// The `id` field on `ComputedRow` is populated from the input `Option<Id>`
+    /// via `ToString`, with `None` becoming an empty string. This field flows
+    /// through to `DeviceInfo.id` / `OutputDeviceInfo.id` and backs
+    /// `DeviceSelector::Id` selection.
+    #[test]
+    fn test_id_is_propagated_to_computed_row() {
+        let rows = vec![
+            row(Some("mic-with-id"), "Microphone A"),
+            row(None, "Microphone without id"),
+        ];
+        let result = compute_is_default(rows, Some("mic-with-id".to_string()));
+
+        assert_eq!(result.len(), 2);
+        assert_eq!(
+            result[0].id, "mic-with-id",
+            "Some(id) must be preserved as a non-empty string"
+        );
+        assert_eq!(
+            result[1].id, "",
+            "None id must map to an empty string so the device is unreachable via DeviceSelector::Id"
+        );
+    }
+
+    /// Verifies that the direction-specific `not_found_error` trait method
+    /// produces the correct `DecibriError` variant and display string for
+    /// each direction. Input lookups must say "input" in the message;
+    /// output lookups must say "output". This catches the regression that
+    /// motivated adding `OutputDeviceNotFound`: before the split, both
+    /// directions produced `DeviceNotFound` whose hardcoded message said
+    /// "input" regardless of whether the lookup was against input or
+    /// output devices.
+    #[test]
+    fn test_not_found_error_produces_direction_correct_variant() {
+        let input_err = Input::not_found_error("nonexistent-input".to_string());
+        let output_err = Output::not_found_error("nonexistent-output".to_string());
+
+        assert!(
+            matches!(input_err, DecibriError::DeviceNotFound(ref s) if s == "nonexistent-input"),
+            "Input direction must return DecibriError::DeviceNotFound"
+        );
+        assert!(
+            matches!(output_err, DecibriError::OutputDeviceNotFound(ref s) if s == "nonexistent-output"),
+            "Output direction must return DecibriError::OutputDeviceNotFound"
+        );
+
+        assert_eq!(
+            input_err.to_string(),
+            "No audio input device found matching \"nonexistent-input\"",
+            "Input variant's Display must say \"input\""
+        );
+        assert_eq!(
+            output_err.to_string(),
+            "No audio output device found matching \"nonexistent-output\"",
+            "Output variant's Display must say \"output\""
+        );
     }
 }

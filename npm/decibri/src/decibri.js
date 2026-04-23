@@ -4,6 +4,7 @@ const { Readable } = require('stream');
 const path = require('path');
 const fs = require('fs');
 const { DecibriBridge } = require('../index.js');
+const { wrapNativeError } = require('./errors');
 
 // ─── Bundled ONNX Runtime path resolution ────────────────────────────────────
 
@@ -134,6 +135,18 @@ class Decibri extends Readable {
         throw new RangeError('device index out of range. Call Decibri.devices() to list available devices');
       }
       resolvedDevice = options.device;
+    } else if (
+      options.device !== null &&
+      typeof options.device === 'object' &&
+      !Array.isArray(options.device)
+    ) {
+      // Object form: { id: string } selects by stable per-host device ID
+      // (cpal DeviceId). Pass through to Rust; Rust's resolve_device_option
+      // matches against cpal's DeviceId Display output.
+      if (typeof options.device.id !== 'string') {
+        throw new TypeError('device.id must be a string');
+      }
+      resolvedDevice = options.device;
     }
 
     // ── Validate VAD options ─────────────────────────────────────────────────
@@ -170,16 +183,20 @@ class Decibri extends Readable {
 
     // ── Create native bridge ───────────────────────────────────────────────
 
-    this._native = new DecibriBridge({
-      sampleRate,
-      channels,
-      framesPerBuffer,
-      format,
-      device: resolvedDevice,
-      vadMode: (options.vad && vadMode === 'silero') ? 'silero' : 'energy',
-      modelPath,
-      ortLibraryPath,
-    });
+    try {
+      this._native = new DecibriBridge({
+        sampleRate,
+        channels,
+        framesPerBuffer,
+        format,
+        device: resolvedDevice,
+        vadMode: (options.vad && vadMode === 'silero') ? 'silero' : 'energy',
+        modelPath,
+        ortLibraryPath,
+      });
+    } catch (err) {
+      throw wrapNativeError(err);
+    }
   }
 
   /** @internal */
