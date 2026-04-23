@@ -66,6 +66,52 @@
 //! with a different [`vad::VadConfig::ort_library_path`] silently reuse the
 //! first path. See [`vad::VadConfig`] for details.
 //!
+//! # ORT error construction has FFI side effects
+//!
+//! Under `ort-load-dynamic`, constructing any [`ort::Error`] calls into the
+//! ORT C API (`ortsys![CreateStatus]`), which in turn triggers ORT dylib
+//! loading. If the dylib path is invalid (missing file, a directory, or a
+//! wrong-arch binary), this load can hang indefinitely on some hosts
+//! (reproduced on Windows with pyke/ort 2.0.0-rc.12 and onnxruntime 1.24.4).
+//!
+//! For authors writing FFI bindings on top of decibri: when you need to
+//! surface a "this ORT path is wrong" failure from a pre-load check, use
+//! [`DecibriError::OrtPathInvalid`](error::DecibriError::OrtPathInvalid)
+//! (carries `path: PathBuf` and `reason: &'static str`, never touches ORT
+//! symbols) rather than reconstructing an `ort::Error`. decibri's internal
+//! `init_ort_once` follows this pattern: it performs a filesystem-level
+//! `Path::is_file()` check first and returns
+//! [`OrtPathInvalid`](error::DecibriError::OrtPathInvalid) on rejection,
+//! only handing the path to `ort::init_from` once the check passes.
+//!
+//! This constraint is why [`DecibriError`](error::DecibriError) splits
+//! "ORT path failure" across two variants:
+//! [`OrtLoadFailed`](error::DecibriError::OrtLoadFailed) carries an
+//! `ort::Error` source (reached after `ort::init_from` genuinely failed,
+//! by which point ORT is loaded and constructing errors is safe), and
+//! [`OrtPathInvalid`](error::DecibriError::OrtPathInvalid) does not
+//! (reached before any ORT symbol is touched). The
+//! [`is_ort_path_error`](error::DecibriError::is_ort_path_error) helper
+//! groups both so consumers don't need to match the variant distinction.
+//!
+//! # Fork safety
+//!
+//! Once ORT has been initialized in a process (via the first
+//! [`SileroVad::new`](vad::SileroVad::new) call), that process's ORT
+//! state survives across `fork()`. ORT is not designed to have its
+//! runtime state cloned into a forked child: internal threads, memory
+//! pools, and device handles belonging to the parent may misbehave in
+//! the child.
+//!
+//! Python consumers using
+//! [`multiprocessing`](https://docs.python.org/3/library/multiprocessing.html)
+//! should call `multiprocessing.set_start_method('spawn', force=True)`
+//! before importing `decibri`. This gives each child its own fresh ORT
+//! state rather than inheriting the parent's.
+//!
+//! Node.js consumers using `child_process` or `worker_threads` are
+//! unaffected; those mechanisms do not share ORT state across workers.
+//!
 //! # Thread safety
 //!
 //! All public types are `Send` and suitable for cross-thread handoff.
