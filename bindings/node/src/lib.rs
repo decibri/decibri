@@ -317,10 +317,7 @@ fn resolve_device_option(device: &Option<serde_json::Value>) -> Result<DeviceSel
         Some(serde_json::Value::String(s)) => Ok(DeviceSelector::Name(s.clone())),
         Some(serde_json::Value::Object(map)) => match map.get("id") {
             Some(serde_json::Value::String(s)) => Ok(DeviceSelector::Id(s.clone())),
-            Some(_) => Err(Error::new(
-                Status::InvalidArg,
-                "device.id must be a string",
-            )),
+            Some(_) => Err(Error::new(Status::InvalidArg, "device.id must be a string")),
             None => Err(Error::new(
                 Status::InvalidArg,
                 "device object must have an 'id' string property",
