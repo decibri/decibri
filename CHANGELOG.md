@@ -5,6 +5,132 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.3.0] - 2026-04-23
+
+Groundwork release for upcoming P3 Python bindings. Adds a stable-ID form
+for audio device selection (`DeviceSelector::Id`), fixes a long-standing
+direction bug in `DecibriError::DeviceNotFound` when resolving output
+devices, exposes both in the Node binding, and extends the reference
+documentation with a Cargo feature flag guide plus additional crate-level
+rustdoc. No Node.js or browser API break. Direct Rust crate consumers
+pattern-matching on `DeviceSelector` or struct-literal-constructing
+`DeviceInfo` / `OutputDeviceInfo` need to update for the new
+`#[non_exhaustive]` attributes (see Migration notes below).
+
+### Changed
+
+- `DeviceSelector`, `DeviceInfo`, and `OutputDeviceInfo` are now
+  `#[non_exhaustive]`. External Rust consumers pattern-matching on
+  `DeviceSelector` must add a `_ =>` catch-all arm; consumers
+  constructing `DeviceInfo` or `OutputDeviceInfo` via struct literal
+  from outside the crate must switch to reading fields off instances
+  returned by `enumerate_input_devices` / `enumerate_output_devices`.
+  Field names and display strings are unchanged. This future-proofs
+  the API: subsequent variant or field additions are source-compatible
+  for consumers who include the catch-all.
+
+### Added
+
+- `DeviceSelector::Id(String)` for selecting audio devices by stable
+  per-host identifier (WASAPI endpoint ID on Windows, CoreAudio UID on
+  macOS, ALSA pcm_id on Linux). Unlike `DeviceSelector::Name`
+  (case-insensitive substring) and `DeviceSelector::Index` (positional),
+  `Id` survives across enumerations: display names can shift when other
+  devices are plugged in but per-host IDs do not.
+- `id: String` field on `DeviceInfo` and `OutputDeviceInfo`, populated
+  from `cpal::DeviceId`'s `Display` output. Empty string if cpal cannot
+  produce a stable ID for a given device (rare; some host backends
+  cannot assign IDs to every enumerated device). Obtain the ID from
+  these fields and pass to `DeviceSelector::Id`.
+- `DecibriError::OutputDeviceNotFound(String)` variant, the output-device
+  equivalent of `DeviceNotFound`. See Fixed below for the motivating
+  bug.
+- Node binding accepts `device: { id: string }` as a third form
+  alongside `device: <number>` (index) and `device: <string>` (name
+  substring). The JS wrapper passes it through to Rust unchanged; Rust
+  resolves via cpal's `DeviceId`.
+- `DeviceInfoJs.id` and `OutputDeviceInfoJs.id` fields on the Node
+  binding types, mirroring the Rust `DeviceInfo.id` / `OutputDeviceInfo.id`
+  additions. Visible in the auto-regenerated `npm/decibri/index.d.ts`
+  and in the hand-authored `npm/decibri/src/decibri.d.ts`.
+- `npm/decibri/src/errors.js` helper that re-wraps plain `Error`
+  instances thrown from the native boundary as `TypeError` or
+  `RangeError`, matching the JS wrapper's existing validation error
+  classes. Brought in by `decibri.js` and `decibri-output.js`
+  constructors to align Rust-originated errors with the JS wrapper's
+  error class contract. Triggered only by code paths that reach Rust's
+  `to_napi_error` (currently only `device: { id: ... }` selection); all
+  other validation paths continue to throw from the JS wrapper directly
+  with no behavior change.
+- `docs/features.md`: comprehensive Cargo feature reference covering
+  ORT distribution mode tradeoffs, execution-provider features,
+  binding-author guidance, and feature compatibility constraints.
+  Targeted at Rust crate consumers and FFI binding authors; lib.rs
+  rustdoc now links to it for deep-dive reference.
+
+### Fixed
+
+- `DecibriError::DeviceNotFound`'s display string hardcoded
+  "No audio input device found matching..." regardless of whether
+  the lookup was against input or output devices. Direct Rust
+  consumers and the new `device: { id: ... }` Node path now receive
+  the correct direction via `DecibriError::OutputDeviceNotFound`
+  for output-device misses. No change visible through the Node
+  binding for existing name- and index-based lookups: those are
+  intercepted by the JS wrapper and always threw direction-correct
+  messages from JS before reaching Rust.
+
+### Internal
+
+- `DeviceDirection` trait gains a `not_found_error(String) -> DecibriError`
+  method so `resolve_device_generic`'s `Name` and `Id` arms produce
+  direction-correct errors via the `Input` / `Output` impls.
+- Unit tests for `Arc<Mutex<CaptureStream>>` confirming the wrapping is
+  `Send + Sync` (compile-time assertion) and serializes concurrent
+  access across two threads (runtime test with `Barrier`). Documents
+  the wrapping strategy the P3 Python binding will apply to share
+  `!Sync` capture streams across Python threads.
+- Crate-level rustdoc additions in `lib.rs`: a section on ORT error
+  construction FFI side effects (the `ortsys![CreateStatus]` dylib-load
+  trigger that motivates the `OrtPathInvalid` split from
+  `OrtLoadFailed`) and a section on fork safety (guidance for Python
+  `multiprocessing` consumers to use `spawn` start method).
+- `lib.rs` rustdoc "Feature flags" section cross-references
+  `docs/features.md` for consumers wanting the deep-dive reference.
+- Em-dash cleanup across 19 code locations in `lib.rs`, `capture.rs`,
+  `output.rs`, `vad.rs`, `error.rs`, `vad_integration.rs`, and
+  `vad_ort_load_failure.rs`. Per CLAUDE.md, the codebase forbids em
+  dashes; these were pre-existing violations.
+- CLAUDE.md corrections: validation-gate commands updated to the
+  canonical set (`cargo clippy --workspace -- -D warnings`,
+  `cargo fmt --all -- --check`, `cargo test-decibri`); stale
+  `## [3.0.0] - Unreleased` reference replaced with a template
+  placeholder.
+- `ort` crate version unchanged at `2.0.0-rc.12`.
+- Bundled ONNX Runtime version unchanged at `1.24.4`.
+- No Node.js API signatures, event names, or error messages changed.
+- TypeScript declaration files in both `bindings/node/index.d.ts`
+  (auto-generated) and `npm/decibri/src/decibri.d.ts` (hand-authored)
+  updated for the new `id` field and extended `device` option type.
+
+### Migration notes for direct Rust crate consumers
+
+- Exhaustive matches on `DeviceSelector` will stop compiling. Add a
+  `_ =>` catch-all arm. Display strings and existing variant names
+  are unchanged; code using `to_string()` or only constructing variants
+  (not matching them) continues to work unaffected.
+- Struct literal construction of `DeviceInfo` and `OutputDeviceInfo`
+  from outside the `decibri` crate will stop compiling (added
+  `#[non_exhaustive]`, added `id: String` field). External consumers
+  should read these structs from `enumerate_input_devices()` /
+  `enumerate_output_devices()` rather than constructing them directly.
+- Consumers matching specifically on `DecibriError::DeviceNotFound`
+  for output-device misses should now also match
+  `DecibriError::OutputDeviceNotFound`. The convenience predicate
+  `DecibriError::is_ort_path_error` remains unchanged and already
+  groups only ORT-path variants.
+- MSRV unchanged at rustc 1.88.
+
 ## [3.2.0] - 2026-04-22
 
 Refactor release. Public Node.js and browser APIs are unchanged. Direct

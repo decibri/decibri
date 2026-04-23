@@ -125,7 +125,7 @@ pub enum DecibriError {
     ///
     /// Intentionally does *not* carry an `ort::Error` source, because
     /// constructing an `ort::Error` under `ort-load-dynamic` calls into the
-    /// ORT C API (`ortsys![CreateStatus]`) — which is exactly the hang this
+    /// ORT C API (`ortsys![CreateStatus]`), which is exactly the hang this
     /// pre-check is designed to prevent. Keeping this variant string-only
     /// means the pre-check never touches ORT symbols.
     ///

@@ -206,7 +206,7 @@ fn init_ort_once(path: Option<&Path>) -> Result<(), DecibriError> {
         if !p.is_file() {
             // Use `OrtPathInvalid`, not `OrtLoadFailed`, precisely because
             // constructing an `ort::Error` here would call `ortsys![
-            // CreateStatus]` — which triggers the ORT dylib load that this
+            // CreateStatus]`, which triggers the ORT dylib load that this
             // pre-check is designed to prevent. `OrtPathInvalid` is
             // string-only and never touches ORT symbols.
             return Err(DecibriError::OrtPathInvalid {
@@ -232,7 +232,7 @@ impl SileroVad {
     /// Create a new Silero VAD instance by loading the ONNX model.
     pub fn new(config: VadConfig) -> Result<Self, DecibriError> {
         // `validate` returns the `window_size` for the accepted sample rate,
-        // so `SileroVad::new` does not need its own match — and cannot panic
+        // so `SileroVad::new` does not need its own match, and cannot panic
         // if future `validate` extensions accept new sample rates.
         let window_size = config.validate()?;
 
@@ -471,7 +471,7 @@ mod tests {
         );
 
         // OrtPathInvalid intentionally does NOT carry a source (documented
-        // asymmetry — see OrtPathInvalid's rustdoc in error.rs).
+        // asymmetry; see OrtPathInvalid's rustdoc in error.rs).
         let path_invalid = DecibriError::OrtPathInvalid {
             path: PathBuf::from("/tmp/nope"),
             reason: "test",

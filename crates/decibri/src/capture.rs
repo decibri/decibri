@@ -102,12 +102,12 @@ impl CaptureStream {
     /// Attempt to read the next audio chunk without blocking.
     ///
     /// # Returns
-    /// - `Ok(Some(chunk))` — a chunk was immediately available and has been
+    /// - `Ok(Some(chunk))`: a chunk was immediately available and has been
     ///   dequeued.
-    /// - `Ok(None)` — the stream is open and running, but no chunk is
+    /// - `Ok(None)`: the stream is open and running, but no chunk is
     ///   currently buffered. Try again shortly, or call
     ///   [`next_chunk`](Self::next_chunk) to block.
-    /// - `Err(DecibriError::CaptureStreamClosed)` — the stream is closed
+    /// - `Err(DecibriError::CaptureStreamClosed)`: the stream is closed
     ///   (either by explicit [`stop`](Self::stop) or by an audio-driver
     ///   error reported via the cpal error callback). No further chunks
     ///   will ever be available.
@@ -141,16 +141,16 @@ impl CaptureStream {
     /// arrives, the stream closes, or `timeout` elapses.
     ///
     /// # Arguments
-    /// - `timeout = None` — block indefinitely until a chunk arrives or the
+    /// - `timeout = None`: block indefinitely until a chunk arrives or the
     ///   stream closes.
-    /// - `timeout = Some(dur)` — block at most `dur`; return `Ok(None)` if
+    /// - `timeout = Some(dur)`: block at most `dur`; return `Ok(None)` if
     ///   the deadline passes with no chunk.
     ///
     /// # Returns
-    /// - `Ok(Some(chunk))` — chunk received within the deadline.
-    /// - `Ok(None)` — `timeout` elapsed without a chunk arriving. The stream
+    /// - `Ok(Some(chunk))`: chunk received within the deadline.
+    /// - `Ok(None)`: `timeout` elapsed without a chunk arriving. The stream
     ///   is still open.
-    /// - `Err(DecibriError::CaptureStreamClosed)` — stream closed before a
+    /// - `Err(DecibriError::CaptureStreamClosed)`: stream closed before a
     ///   chunk could be delivered. Any chunks that were buffered at the time
     ///   of close are delivered first; this error is only returned once the
     ///   buffer is empty.

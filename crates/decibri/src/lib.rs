@@ -26,6 +26,10 @@
 //! `ort-load-dynamic` and `ort-download-binaries` are mutually exclusive;
 //! selecting both is a compile error.
 //!
+//! See [`docs/features.md`](https://github.com/decibri/decibri/blob/main/docs/features.md)
+//! for a comprehensive reference including execution-provider features,
+//! tradeoff analysis, and guidance for FFI binding authors.
+//!
 //! # Example: capture and run VAD
 //!
 //! [`CaptureStream::next_chunk`](capture::CaptureStream::next_chunk) is the
@@ -124,12 +128,12 @@
 //! Within 3.x, the following FFI-consumer surface is declared stable and
 //! will not change signature without a breaking version bump:
 //!
-//! - [`capture::CaptureStream`][] —
+//! - [`capture::CaptureStream`][]:
 //!   [`try_next_chunk`](capture::CaptureStream::try_next_chunk),
 //!   [`next_chunk`](capture::CaptureStream::next_chunk),
 //!   [`is_open`](capture::CaptureStream::is_open),
 //!   [`stop`](capture::CaptureStream::stop).
-//! - [`output::OutputStream`][] —
+//! - [`output::OutputStream`][]:
 //!   [`send`](output::OutputStream::send),
 //!   [`drain`](output::OutputStream::drain),
 //!   [`is_playing`](output::OutputStream::is_playing),
