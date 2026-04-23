@@ -446,4 +446,65 @@ mod tests {
 
         stopper.join().unwrap();
     }
+
+    /// Compile-time assertion that `Arc<Mutex<CaptureStream>>` is `Send + Sync`,
+    /// which requires `CaptureStream: Send`. This is the wrapping strategy PyO3
+    /// will document for Python consumers needing shared access from multiple
+    /// threads.
+    ///
+    /// If `CaptureStream` ever becomes `!Send` (for example by adding an `Rc<_>`
+    /// or `RefCell<_>` field), this test fails to compile, catching the
+    /// regression at build time rather than at a PyO3 wrap call site.
+    #[test]
+    fn test_arc_mutex_capture_stream_is_send_and_sync() {
+        fn assert_send_sync<T: Send + Sync>() {}
+        assert_send_sync::<Arc<std::sync::Mutex<CaptureStream>>>();
+    }
+
+    /// `Arc<Mutex<CaptureStream>>` exercised from two threads racing for
+    /// the lock: each thread reads one injected chunk, the Mutex
+    /// serializes access, and together they consume exactly the chunks
+    /// injected (no duplicates, no losses, no deadlock).
+    ///
+    /// `Barrier` forces both threads to attempt the lock acquisition
+    /// simultaneously so the test exercises contention rather than
+    /// sequential non-overlapping access.
+    #[test]
+    fn test_arc_mutex_capture_stream_serializes_two_threads() {
+        use std::sync::{Barrier, Mutex};
+
+        let (stream, sender, _running) = test_stream();
+        sender.send(make_chunk(1.0)).unwrap();
+        sender.send(make_chunk(2.0)).unwrap();
+
+        let shared = Arc::new(Mutex::new(stream));
+        let barrier = Arc::new(Barrier::new(2));
+
+        let s1 = shared.clone();
+        let b1 = barrier.clone();
+        let t1 = thread::spawn(move || {
+            b1.wait();
+            let guard = s1.lock().unwrap();
+            guard.try_next_chunk().unwrap()
+        });
+
+        let s2 = shared.clone();
+        let b2 = barrier.clone();
+        let t2 = thread::spawn(move || {
+            b2.wait();
+            let guard = s2.lock().unwrap();
+            guard.try_next_chunk().unwrap()
+        });
+
+        let c1 = t1.join().unwrap().expect("thread 1 must receive a chunk");
+        let c2 = t2.join().unwrap().expect("thread 2 must receive a chunk");
+
+        let mut vals = [c1.data[0], c2.data[0]];
+        vals.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        assert_eq!(
+            vals,
+            [1.0, 2.0],
+            "both chunks must be consumed exactly once with no duplicates or losses"
+        );
+    }
 }
