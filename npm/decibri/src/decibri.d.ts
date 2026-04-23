@@ -6,6 +6,15 @@ export interface DeviceInfo {
   index: number;
   /** Human-readable device name from the OS. */
   name: string;
+  /**
+   * Stable per-host device ID. Pass via `device: { id: ... }` for selection
+   * that survives across enumerations.
+   * - Windows (WASAPI): endpoint ID
+   * - macOS (CoreAudio): device UID
+   * - Linux (ALSA): PCM identifier
+   * Empty string if cpal cannot produce a stable ID for this device.
+   */
+  id: string;
   /** Maximum number of input channels the device supports. */
   maxInputChannels: number;
   /** Device's preferred sample rate in Hz. */
@@ -47,10 +56,14 @@ export interface DecibriOptions extends ReadableOptions {
   framesPerBuffer?: number;
 
   /**
-   * Audio input device. Pass a numeric index or a case-insensitive name
-   * substring. Omit to use the system default input device.
+   * Audio input device. One of:
+   * - numeric index (from `DeviceInfo.index`)
+   * - case-insensitive name substring
+   * - `{ id: string }` for stable per-host device ID from `DeviceInfo.id`
+   *
+   * Omit to use the system default input device.
    */
-  device?: number | string;
+  device?: number | string | { id: string };
 
   /**
    * Sample encoding format.
@@ -154,6 +167,11 @@ export interface OutputDeviceInfo {
   index: number;
   /** Human-readable device name from the OS. */
   name: string;
+  /**
+   * Stable per-host device ID. See `DeviceInfo.id` for format and fallback
+   * semantics; identical rules for output devices.
+   */
+  id: string;
   /** Maximum number of output channels the device supports. */
   maxOutputChannels: number;
   /** Device's preferred sample rate in Hz. */
@@ -187,10 +205,14 @@ export interface DecibriOutputOptions extends WritableOptions {
   format?: 'int16' | 'float32';
 
   /**
-   * Audio output device. Pass a numeric index or a case-insensitive name
-   * substring. Omit to use the system default output device.
+   * Audio output device. One of:
+   * - numeric index (from `OutputDeviceInfo.index`)
+   * - case-insensitive name substring
+   * - `{ id: string }` for stable per-host device ID from `OutputDeviceInfo.id`
+   *
+   * Omit to use the system default output device.
    */
-  device?: number | string;
+  device?: number | string | { id: string };
 }
 
 /**

@@ -2,6 +2,7 @@
 
 const { Writable } = require('stream');
 const { DecibriOutputBridge } = require('../index.js');
+const { wrapNativeError } = require('./errors');
 
 // ─── DecibriOutput (Writable) ───────────────────────────────────────────────
 
@@ -53,6 +54,17 @@ class DecibriOutput extends Writable {
         throw new RangeError('device index out of range. Call DecibriOutput.devices() to list available devices');
       }
       resolvedDevice = options.device;
+    } else if (
+      options.device !== null &&
+      typeof options.device === 'object' &&
+      !Array.isArray(options.device)
+    ) {
+      // Object form: { id: string } selects by stable per-host device ID.
+      // See decibri.js for details; same pass-through semantics.
+      if (typeof options.device.id !== 'string') {
+        throw new TypeError('device.id must be a string');
+      }
+      resolvedDevice = options.device;
     }
 
     // ── Store config ───────────────────────────────────────────────────────
@@ -62,12 +74,16 @@ class DecibriOutput extends Writable {
 
     // ── Create native bridge ───────────────────────────────────────────────
 
-    this._native = new DecibriOutputBridge({
-      sampleRate,
-      channels,
-      format,
-      device: resolvedDevice,
-    });
+    try {
+      this._native = new DecibriOutputBridge({
+        sampleRate,
+        channels,
+        format,
+        device: resolvedDevice,
+      });
+    } catch (err) {
+      throw wrapNativeError(err);
+    }
   }
 
   /** @internal */

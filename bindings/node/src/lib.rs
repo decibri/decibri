@@ -261,6 +261,7 @@ impl DecibriBridge {
             .map(|d| DeviceInfoJs {
                 index: d.index as u32,
                 name: d.name,
+                id: d.id,
                 max_input_channels: d.max_input_channels as u32,
                 default_sample_rate: d.default_sample_rate,
                 is_default: d.is_default,
@@ -283,6 +284,10 @@ impl DecibriBridge {
 pub struct DeviceInfoJs {
     pub index: u32,
     pub name: String,
+    /// Stable per-host device ID suitable for `device: { id: ... }` selection.
+    /// WASAPI endpoint ID on Windows, CoreAudio UID on macOS, ALSA pcm_id on
+    /// Linux. Empty string if cpal cannot produce a stable ID for this device.
+    pub id: String,
     pub max_input_channels: u32,
     pub default_sample_rate: u32,
     pub is_default: bool,
@@ -310,9 +315,20 @@ fn resolve_device_option(device: &Option<serde_json::Value>) -> Result<DeviceSel
             Ok(DeviceSelector::Index(idx))
         }
         Some(serde_json::Value::String(s)) => Ok(DeviceSelector::Name(s.clone())),
+        Some(serde_json::Value::Object(map)) => match map.get("id") {
+            Some(serde_json::Value::String(s)) => Ok(DeviceSelector::Id(s.clone())),
+            Some(_) => Err(Error::new(
+                Status::InvalidArg,
+                "device.id must be a string",
+            )),
+            None => Err(Error::new(
+                Status::InvalidArg,
+                "device object must have an 'id' string property",
+            )),
+        },
         _ => Err(Error::new(
             Status::InvalidArg,
-            "device must be a number (index) or string (name)",
+            "device must be a number (index), string (name), or object with 'id' property",
         )),
     }
 }
@@ -388,6 +404,9 @@ pub struct DecibriOutputOptions {
 pub struct OutputDeviceInfoJs {
     pub index: u32,
     pub name: String,
+    /// Stable per-host device ID. See `DeviceInfoJs.id` for format and
+    /// fallback semantics; identical rules for output devices.
+    pub id: String,
     pub max_output_channels: u32,
     pub default_sample_rate: u32,
     pub is_default: bool,
@@ -501,6 +520,7 @@ impl DecibriOutputBridge {
             .map(|d| OutputDeviceInfoJs {
                 index: d.index as u32,
                 name: d.name,
+                id: d.id,
                 max_output_channels: d.max_output_channels as u32,
                 default_sample_rate: d.default_sample_rate,
                 is_default: d.is_default,

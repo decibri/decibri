@@ -215,6 +215,46 @@ async function testDeviceByIndex() {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
+// Group 4B: Device selection by id (stable per-host DeviceId)
+// ═══════════════════════════════════════════════════════════════════════════════
+
+async function testDeviceById() {
+  console.log('--- Group 4B: Device selection by id (1 second) ---');
+
+  const devices = Decibri.devices();
+  const defaultDev = devices.find(d => d.isDefault);
+  if (!defaultDev) {
+    console.log('  SKIP: no default device found');
+    skipped++;
+    console.log('  Group 4B done\n');
+    return;
+  }
+  if (!defaultDev.id) {
+    console.log('  SKIP: default device has no cpal-assignable id on this host');
+    skipped++;
+    console.log('  Group 4B done\n');
+    return;
+  }
+
+  console.log(`  Using device id: "${defaultDev.id}" (from "${defaultDev.name}")`);
+
+  try {
+    const mic = new Decibri({
+      sampleRate: 16000,
+      channels: 1,
+      device: { id: defaultDev.id },
+    });
+    const chunks = await captureFor(mic, 1000);
+    assert(chunks.length > 0, `captured ${chunks.length} chunks via device id`);
+  } catch (e) {
+    console.log(`  FAIL: ${e.message}`);
+    failed++;
+  }
+
+  console.log('  Group 4B done\n');
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
 // Group 5: Non-default framesPerBuffer
 // ═══════════════════════════════════════════════════════════════════════════════
 
@@ -328,6 +368,7 @@ async function main() {
   await testFloat32();
   await testDeviceByName();
   await testDeviceByIndex();
+  await testDeviceById();
   await testFramesPerBuffer();
   await testVAD();
   await testMultipleInstances();
