@@ -153,6 +153,12 @@ trait DeviceDirection {
     fn default_config(device: &cpal::Device) -> (u16, u32);
     fn build_info(row: ComputedRow) -> Self::Info;
     fn no_device_error() -> DecibriError;
+    /// Direction-specific "not found" error for a `Name` / `Id` lookup miss.
+    /// Input returns [`DecibriError::DeviceNotFound`]; Output returns
+    /// [`DecibriError::OutputDeviceNotFound`]. Keeping this on the trait
+    /// avoids hardcoding the input-oriented variant in the shared
+    /// `resolve_device_generic` body.
+    fn not_found_error(query: String) -> DecibriError;
 }
 
 #[cfg(any(feature = "capture", feature = "output"))]
@@ -196,6 +202,10 @@ impl DeviceDirection for Input {
     fn no_device_error() -> DecibriError {
         DecibriError::NoMicrophoneFound
     }
+
+    fn not_found_error(query: String) -> DecibriError {
+        DecibriError::DeviceNotFound(query)
+    }
 }
 
 #[cfg(any(feature = "capture", feature = "output"))]
@@ -232,6 +242,10 @@ impl DeviceDirection for Output {
 
     fn no_device_error() -> DecibriError {
         DecibriError::NoOutputDeviceFound
+    }
+
+    fn not_found_error(query: String) -> DecibriError {
+        DecibriError::OutputDeviceNotFound(query)
     }
 }
 
@@ -299,7 +313,7 @@ fn resolve_device_generic<D: DeviceDirection>(
             }
 
             match matches.len() {
-                0 => Err(DecibriError::DeviceNotFound(query.clone())),
+                0 => Err(D::not_found_error(query.clone())),
                 1 => Ok(matches.into_iter().next().unwrap().2),
                 _ => {
                     let match_list = matches
@@ -334,7 +348,7 @@ fn resolve_device_generic<D: DeviceDirection>(
                     }
                 }
             }
-            Err(DecibriError::DeviceNotFound(query.clone()))
+            Err(D::not_found_error(query.clone()))
         }
     }
 }
@@ -466,6 +480,40 @@ mod tests {
         assert_eq!(
             result[1].id, "",
             "None id must map to an empty string so the device is unreachable via DeviceSelector::Id"
+        );
+    }
+
+    /// Verifies that the direction-specific `not_found_error` trait method
+    /// produces the correct `DecibriError` variant and display string for
+    /// each direction. Input lookups must say "input" in the message;
+    /// output lookups must say "output". This catches the regression that
+    /// motivated adding `OutputDeviceNotFound`: before the split, both
+    /// directions produced `DeviceNotFound` whose hardcoded message said
+    /// "input" regardless of whether the lookup was against input or
+    /// output devices.
+    #[test]
+    fn test_not_found_error_produces_direction_correct_variant() {
+        let input_err = Input::not_found_error("nonexistent-input".to_string());
+        let output_err = Output::not_found_error("nonexistent-output".to_string());
+
+        assert!(
+            matches!(input_err, DecibriError::DeviceNotFound(ref s) if s == "nonexistent-input"),
+            "Input direction must return DecibriError::DeviceNotFound"
+        );
+        assert!(
+            matches!(output_err, DecibriError::OutputDeviceNotFound(ref s) if s == "nonexistent-output"),
+            "Output direction must return DecibriError::OutputDeviceNotFound"
+        );
+
+        assert_eq!(
+            input_err.to_string(),
+            "No audio input device found matching \"nonexistent-input\"",
+            "Input variant's Display must say \"input\""
+        );
+        assert_eq!(
+            output_err.to_string(),
+            "No audio output device found matching \"nonexistent-output\"",
+            "Output variant's Display must say \"output\""
         );
     }
 }

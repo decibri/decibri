@@ -27,6 +27,15 @@ pub enum DecibriError {
     #[error("No audio input device found matching \"{0}\"")]
     DeviceNotFound(String),
 
+    /// No output device matched a `Name` or `Id` selector.
+    ///
+    /// The split from [`Self::DeviceNotFound`] exists because the display
+    /// message needs to say "output" when the lookup was against output
+    /// devices, not "input". Issued by [`crate::device::resolve_output_device`]
+    /// via the internal direction-specific `not_found_error` hook.
+    #[error("No audio output device found matching \"{0}\"")]
+    OutputDeviceNotFound(String),
+
     #[error("Multiple devices match \"{name}\":\n{matches}")]
     MultipleDevicesMatch { name: String, matches: String },
 

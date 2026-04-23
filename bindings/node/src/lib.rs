@@ -334,6 +334,7 @@ fn to_napi_error(e: decibri::error::DecibriError) -> Error {
 
         // Device selection (bad caller input)
         DeviceNotFound(_)
+        | OutputDeviceNotFound(_)
         | MultipleDevicesMatch { .. }
         | DeviceIndexOutOfRange
         | NotAnInputDevice => Status::InvalidArg,
