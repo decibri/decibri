@@ -9,7 +9,7 @@
 //! - **Voice activity detection** ([`vad`]): Silero VAD v5 inference via
 //!   ONNX Runtime, per-call stateful.
 //! - **Device enumeration** ([`device`]): list and select audio devices
-//!   by index or case-insensitive name substring.
+//!   by index, case-insensitive name substring, or stable per-host ID.
 //!
 //! # Feature flags
 //!

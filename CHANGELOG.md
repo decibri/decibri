@@ -109,8 +109,8 @@ pattern-matching on `DeviceSelector` or struct-literal-constructing
 - `ort` crate version unchanged at `2.0.0-rc.12`.
 - Bundled ONNX Runtime version unchanged at `1.24.4`.
 - No Node.js API signatures, event names, or error messages changed.
-- TypeScript declaration files in both `bindings/node/index.d.ts`
-  (auto-generated) and `npm/decibri/src/decibri.d.ts` (hand-authored)
+- TypeScript declaration files in both `npm/decibri/index.d.ts`
+  (auto-regenerated) and `npm/decibri/src/decibri.d.ts` (hand-authored)
   updated for the new `id` field and extended `device` option type.
 
 ### Migration notes for direct Rust crate consumers
