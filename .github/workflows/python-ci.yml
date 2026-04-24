@@ -1,0 +1,99 @@
+name: Python CI
+
+on:
+  push:
+    branches: [main, development]
+    paths:
+      - 'bindings/python/**'
+      - 'crates/decibri/**'
+      - 'Cargo.toml'
+      - '.cargo/config.toml'
+      - '.github/workflows/python-ci.yml'
+  pull_request:
+    branches: [main, development]
+    paths:
+      - 'bindings/python/**'
+      - 'crates/decibri/**'
+      - 'Cargo.toml'
+      - '.cargo/config.toml'
+      - '.github/workflows/python-ci.yml'
+  workflow_dispatch:
+
+concurrency:
+  # Distinct from ci.yml's `ci-${{ github.ref }}` group so Rust-side CI and
+  # Python-side CI run in parallel per ref, cancelling only their own
+  # in-progress runs when a new push lands.
+  group: python-ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  python-ci:
+    name: Build & Test (ubuntu-latest, Python 3.10)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      # abi3 floor. If the wheel works on 3.10 it works on 3.11 through 3.14
+      # by the abi3 contract (one wheel, many runtimes). Phase 4 will add an
+      # independent cross-version matrix (3.10, 3.12, 3.14) to verify that
+      # contract against actual interpreters.
+      UV_PYTHON: "3.10"
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install libasound2-dev
+        # cpal (transitive via decibri core) needs ALSA dev headers on Linux.
+        # Same system dep the Rust test-rust job in ci.yml installs.
+        run: sudo apt-get update && sudo apt-get install -y libasound2-dev
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          # Distinct from ci.yml's "rust" shared-key. The two workflows'
+          # target graphs diverge (napi cdylib vs pyo3 cdylib + python3-dll-a
+          # + abi3 import-lib generation), so isolated caches reach steady
+          # state independently without write contention.
+          shared-key: "rust-python"
+
+      - uses: astral-sh/setup-uv@v8
+        with:
+          enable-cache: true
+          cache-dependency-glob: "bindings/python/uv.lock"
+
+      - name: Install Python 3.10
+        # Pinned explicitly to the abi3 floor. The committed
+        # `bindings/python/.python-version` (3.14) is the dev-machine pin;
+        # CI intentionally deviates to exercise the stable-ABI contract at
+        # its lowest supported runtime.
+        run: uv python install 3.10
+
+      - name: Sync dev environment (locked)
+        working-directory: bindings/python
+        # --locked fails the build if uv.lock is out of sync with
+        # pyproject.toml, surfacing lockfile drift as a loud CI error
+        # rather than silently regenerating. Local devs use plain
+        # `uv sync --dev` (no --locked) per CLAUDE.md Gate 6.
+        run: uv sync --dev --locked
+
+      - name: Build extension (maturin develop, dev profile)
+        working-directory: bindings/python
+        # Installs the extension into the synced venv for pytest.
+        run: uv run maturin develop --uv
+
+      - name: Run pytest
+        working-directory: bindings/python
+        run: uv run pytest -v
+
+      - name: Run mypy --strict
+        working-directory: bindings/python
+        run: uv run mypy --strict python/
+
+      - name: Build release wheel (smoke; not uploaded)
+        working-directory: bindings/python
+        # Validates the release-profile abi3 wheel builds end-to-end,
+        # separate from the dev-profile `maturin develop` above. Catches
+        # release-only issues (lto, strip, codegen-units = 1) before they'd
+        # surface during Phase 5 TestPyPI publish. Adds ~30s; acceptable
+        # cost for the pre-publish insurance. Artifact not uploaded;
+        # Phase 3 adds the cross-platform wheel upload matrix.
+        run: uv run maturin build --release
