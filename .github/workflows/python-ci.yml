@@ -37,8 +37,24 @@ jobs:
       # independent cross-version matrix (3.10, 3.12, 3.14) to verify that
       # contract against actual interpreters.
       UV_PYTHON: "3.10"
+    # Action pin policy: third-party actions pinned to immutable commit SHAs
+    # with a `# vX.Y.Z` version comment that dependabot parses for updates.
+    # Floating major tags (@v6, @v8) were the attack vector for the 2025
+    # tj-actions/changed-files supply-chain compromise; SHA pins eliminate
+    # that class of risk. setup-uv v8 explicitly stopped publishing major
+    # tags for this reason, which is what surfaced this hardening pass.
+    #
+    # Exception: `dtolnay/rust-toolchain` is documented to use the rolling
+    # `@stable` / `@nightly` / `@1.83.0` form; the maintainer explicitly
+    # warns against SHA pinning (orphan-GC risk on the rolling branches).
+    # Acceptable because the action is a thin shell wrapper around rustup;
+    # the security boundary is rustup itself, not the action.
+    #
+    # The existing ci.yml workflow uses floating major tags (v6 / v2 etc).
+    # Pinning that workflow to SHAs is deferred to Phase 5 CI hardening
+    # (see Phase 1 plan §7.7).
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
 
       - name: Install libasound2-dev
         # cpal (transitive via decibri core) needs ALSA dev headers on Linux.
@@ -47,7 +63,7 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@stable
 
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@23869a5bd66c73db3c0ac40331f3206eb23791dc # v2.9.1
         with:
           # Distinct from ci.yml's "rust" shared-key. The two workflows'
           # target graphs diverge (napi cdylib vs pyo3 cdylib + python3-dll-a
@@ -55,7 +71,7 @@ jobs:
           # state independently without write contention.
           shared-key: "rust-python"
 
-      - uses: astral-sh/setup-uv@v8
+      - uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
         with:
           enable-cache: true
           cache-dependency-glob: "bindings/python/uv.lock"
