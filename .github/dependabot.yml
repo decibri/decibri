@@ -2,6 +2,7 @@ version: 2
 updates:
   - package-ecosystem: cargo
     directory: "/"
+    target-branch: development
     schedule:
       interval: weekly
     groups:
@@ -10,6 +11,7 @@ updates:
 
   - package-ecosystem: npm
     directory: "/npm/decibri"
+    target-branch: development
     schedule:
       interval: weekly
     groups:
@@ -18,8 +20,18 @@ updates:
 
   - package-ecosystem: github-actions
     directory: "/"
+    target-branch: development
     schedule:
       interval: weekly
     groups:
       github-actions:
+        patterns: ["*"]
+
+  - package-ecosystem: uv
+    directory: "/bindings/python"
+    target-branch: development
+    schedule:
+      interval: weekly
+    groups:
+      python-deps:
         patterns: ["*"]

@@ -149,6 +149,34 @@ compile_error!(
 pub mod error;
 pub mod sample;
 
+/// Resolved cpal version (major.minor) extracted at build time from the
+/// workspace `Cargo.lock`.
+///
+/// Populated by `build.rs` scanning Cargo.lock for the `cpal` package entry
+/// and truncating the resolved version to major.minor. Used by binding
+/// layers (Node, Python) as the value of the `portaudio` field in their
+/// version-info responses:
+///
+/// ```text
+/// portaudio: format!("cpal {}", decibri::CPAL_VERSION)
+/// // -> "cpal 0.17"
+/// ```
+///
+/// Single source of truth: bumping cpal in the workspace `Cargo.toml`
+/// regenerates `Cargo.lock`, which re-triggers the build script, which
+/// updates this constant, which updates every binding that reads it. No
+/// manual sync required across crates.
+///
+/// Format: `"0.17"`. Bindings prefix with `"cpal "` when reporting to users.
+/// If future work wants finer granularity (e.g. full `"0.17.3"`), update
+/// `truncate_to_major_minor` in `build.rs`.
+///
+/// Always present, regardless of which decibri features are enabled. The
+/// string is emitted unconditionally by the build script; Rust consumers
+/// who build without cpal features can ignore this constant or leave it
+/// unused without cost.
+pub const CPAL_VERSION: &str = env!("DECIBRI_CPAL_VERSION");
+
 #[cfg(any(feature = "capture", feature = "output"))]
 pub mod device;
 

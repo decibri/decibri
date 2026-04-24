@@ -3,6 +3,7 @@ resolver = "2"
 members = [
   "crates/decibri",
   "bindings/node",
+  "bindings/python",
 ]
 
 [workspace.package]

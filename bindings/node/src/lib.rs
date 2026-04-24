@@ -11,6 +11,7 @@ use decibri::device::{self, DeviceSelector};
 use decibri::output::{AudioOutput, OutputConfig, OutputStream};
 use decibri::sample;
 use decibri::vad::{SileroVad, VadConfig};
+use decibri::CPAL_VERSION;
 
 /// Audio sample format.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -274,7 +275,7 @@ impl DecibriBridge {
     pub fn version() -> VersionInfoJs {
         VersionInfoJs {
             decibri: env!("CARGO_PKG_VERSION").to_string(),
-            portaudio: "cpal 0.17".to_string(),
+            portaudio: format!("cpal {}", CPAL_VERSION),
         }
     }
 }
@@ -530,7 +531,7 @@ impl DecibriOutputBridge {
     pub fn version() -> VersionInfoJs {
         VersionInfoJs {
             decibri: env!("CARGO_PKG_VERSION").to_string(),
-            portaudio: "cpal 0.17".to_string(),
+            portaudio: format!("cpal {}", CPAL_VERSION),
         }
     }
 }
