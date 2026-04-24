@@ -32,9 +32,38 @@ decibri = { version = "3.3.0", path = "../../crates/decibri" }
 
 # PyO3 0.28 is the first MSRV-1.83 release line with the attach / detach /
 # initialize API renames; aligns with workspace MSRV 1.88 (headroom preserved).
-# abi3-py310 produces a single wheel per platform that serves 3.10 through
-# 3.14 and is forward-compatible with future CPython versions.
-pyo3 = { version = "0.28", features = ["abi3-py310", "extension-module"] }
+#
+# Feature choices (all three required for cross-platform abi3 extension crates):
+#
+# - `abi3-py310`: targets the Python stable ABI at the 3.10 floor. One wheel
+#   per platform serves 3.10 through 3.14 and is forward-compatible with
+#   future CPython versions.
+#
+# - `extension-module`: tells pyo3 we're building an importable module, not
+#   embedding a Python interpreter. Skips linking libpython on Linux (lazy
+#   symbol resolution at import time).
+#
+# - `generate-import-lib`: the canonical pattern for cross-platform abi3 on
+#   Windows. Pulls in `python3-dll-a` as a build dep, which synthesizes
+#   `python3.lib` at build time from the abi3 ABI definition without needing
+#   a Python interpreter on the build host. On native Windows MSVC,
+#   `python3-dll-a` uses `cc::windows_registry::find` to locate MSVC's
+#   `lib.exe` (the same mechanism napi-rs already relies on). On Linux CI
+#   cross-compiling to Windows (Phase 3), `python3-dll-a` falls back to
+#   `llvm-dlltool` which Ubuntu runners get via `apt-get install llvm` or
+#   via PyO3/maturin-action. Industry pattern: polars, pydantic-core,
+#   orjson, and PyO3's own abi3 examples all enable this feature.
+#
+# Do NOT set `[env] PYO3_NO_PYTHON = "1"` in `.cargo/config.toml` to try to
+# skip pyo3's Python interpreter probe. On Windows that setting prevents
+# pyo3-build-config from emitting the `cargo:rustc-link-search` directive
+# that the PE linker needs, and the build fails with LNK1181. See the Phase
+# 1 plan file §7.6 for the full incident writeup.
+pyo3 = { version = "0.28", features = [
+    "abi3-py310",
+    "extension-module",
+    "generate-import-lib",
+] }
 
 # pyo3-async-runtimes: deferred to Phase 3 per plan §7.2 decision 6. Phase 3
 # Claude: add `pyo3-async-runtimes = { version = "0.28", features =

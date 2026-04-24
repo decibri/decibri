@@ -21,7 +21,9 @@ All commits, tags, and registry publishes are performed manually. If a task appe
 - Run `cargo test-decibri` after any Rust changes to verify no regressions. This alias (defined in `.cargo/config.toml`) builds with `ort-download-binaries` so VAD tests run without a pre-staged ORT dylib; plain `cargo test -p decibri` hangs on VAD tests in a fresh workspace.
 - Run `node tests/test-capture.js`, `node tests/test-api.js`, `node tests/test-output.js`, `node tests/test-vad-silero.js` after JS or napi binding changes.
 - Run `npx vitest run` after browser source changes.
+- Run `cd bindings/python && uv run maturin develop --uv && uv run pytest && uv run mypy --strict python/` after any Python binding changes. Requires [uv](https://docs.astral.sh/uv/) and Python 3.10 or newer (uv auto-manages the Python interpreter via `.python-version`).
 - Rebuild the native addon (`cd npm/decibri && npm run build`) after any Rust changes before running Node.js tests.
+- Rebuild the Python extension (`cd bindings/python && uv run maturin develop --uv`) after any Rust changes to `crates/decibri` or `bindings/python` before running Python tests.
 - Do not use em dashes (the long dash character) anywhere in the codebase. Rewrite sentences using periods, commas, colons, or parentheses instead.
 
 ## API Compatibility

@@ -31,3 +31,29 @@ npm/platform-linux-arm64-gnu/*.node
 # OS
 .DS_Store
 Thumbs.db
+
+# Python bytecode and caches
+__pycache__/
+*.pyc
+*.pyo
+
+# Python virtual environments (uv defaults to .venv/)
+.venv/
+venv/
+
+# Python packaging metadata
+*.egg-info/
+
+# Windows Python compiled extensions and MSVC debug symbols. Always build
+# artifacts, never source. Safe to ignore globally because no legitimate
+# tracked files use these extensions anywhere in the workspace.
+*.pyd
+*.pdb
+
+# Maturin-built Python extension module binaries on non-Windows platforms.
+# Scoped (not global) because `.so` and `.dylib` could legitimately be
+# tracked elsewhere in future phases (e.g. bundled ORT runtimes under
+# npm/platform-*/). Restrict the ignore to the exact path where `maturin
+# develop` drops the `_decibri` editable install.
+bindings/python/python/decibri/_decibri.so
+bindings/python/python/decibri/_decibri.dylib
