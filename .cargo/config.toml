@@ -24,3 +24,25 @@
 # `ORT_DYLIB_PATH=/path/to/libonnxruntime.{so,dylib,dll}` and run the plain
 # `cargo test -p decibri` instead.
 test-decibri = "test -p decibri --no-default-features --features capture,output,vad,denoise,gain,ort-download-binaries"
+
+[env]
+# Standard configuration for abi3 + extension-module workspaces.
+#
+# With abi3-py310 + extension-module features, decibri-python's Rust code
+# never links against libpython at compile time. Python loads the extension
+# dynamically at import time via the stable ABI contract (PEP 384).
+# pyo3-build-config's interpreter probe is therefore unnecessary for our
+# build and can fail spuriously if the system has multiple Python
+# installations, stale registry entries (Windows), or mismatched paths.
+#
+# Maturin sets PYO3_NO_PYTHON=1 automatically when building abi3 wheels
+# (see PyO3 PR #2293). This setting makes non-maturin cargo invocations
+# (clippy, check, test, build) use the same interpreter-free build path
+# that maturin uses. When maturin runs, it sets PYO3_PYTHON explicitly
+# from the uv-managed venv, which overrides this setting for actual wheel
+# packaging.
+#
+# Safe because the env var only affects crates that USE pyo3-build-config
+# (bindings/python and its transitive consumers). decibri core and
+# bindings/node don't use pyo3, so this setting is a no-op for them.
+PYO3_NO_PYTHON = "1"

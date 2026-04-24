@@ -1,0 +1,42 @@
+[package]
+name = "decibri-python"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[lib]
+# Python extension module. `name = "_decibri"` makes cargo output
+# `_decibri.{pyd,so}` matching `module-name = "decibri._decibri"` in
+# pyproject.toml; maturin packages it into `python/decibri/_decibri.{pyd,so}`
+# under the mixed-mode layout. Without this, cargo would output
+# `decibri_python.{pyd,so}` (derived from crate name) and maturin would
+# have to rename during wheel packaging.
+#
+# `cdylib` only. `rlib` would let other Rust crates depend on us; we're a
+# terminal binding crate, so cdylib is the sole output.
+name = "_decibri"
+crate-type = ["cdylib"]
+
+[dependencies]
+# Dual path+version dep: path wins for workspace dev (no crates.io round-trip),
+# version pins for eventual registry publish if we ever ship this standalone.
+# Matches the polars-style convention; see P3 plan §10.2.
+#
+# IMPORTANT: do NOT add a `features = [...]` override here without matching
+# changes in `bindings/node/Cargo.toml`. Cargo's workspace resolver unifies
+# features across both bindings silently; diverging overrides produce a build
+# that neither binding tests in isolation. Both bindings inherit decibri's
+# default features (capture, output, vad, denoise, gain, ort-load-dynamic).
+decibri = { version = "3.3.0", path = "../../crates/decibri" }
+
+# PyO3 0.28 is the first MSRV-1.83 release line with the attach / detach /
+# initialize API renames; aligns with workspace MSRV 1.88 (headroom preserved).
+# abi3-py310 produces a single wheel per platform that serves 3.10 through
+# 3.14 and is forward-compatible with future CPython versions.
+pyo3 = { version = "0.28", features = ["abi3-py310", "extension-module"] }
+
+# pyo3-async-runtimes: deferred to Phase 3 per plan §7.2 decision 6. Phase 3
+# Claude: add `pyo3-async-runtimes = { version = "0.28", features =
+# ["tokio-runtime"] }` in the first commit that introduces an async method.
+# Version pin must match pyo3 minor at that time.
