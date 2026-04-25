@@ -5,13 +5,14 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [3.3.2] - Unreleased
+## [3.3.2] - 2026-04-26
 
 ### Changed
 
 - **`crates/decibri/build.rs` rewrite to use Cargo.toml as primary source.** The previous build script (introduced in 3.3.1 to source the cpal version from a single point of truth) read the workspace `Cargo.lock` via a path traversal that worked in workspace builds but panicked in `cargo publish` verify because the published tarball is flat (`decibri-X.Y.Z/Cargo.toml` and `decibri-X.Y.Z/Cargo.lock` are siblings, not in workspace structure). The traversal landed at `target/Cargo.lock` (nonexistent) and aborted the build. **3.3.1's crates.io publish failed on this defect; 3.3.1 shipped to npm but not to crates.io.** 3.3.2 fixes the build.rs to read `CARGO_MANIFEST_DIR / Cargo.toml` directly, with belt-and-suspenders fallbacks: env-var override (`DECIBRI_CPAL_VERSION`), workspace `Cargo.toml` fallback for `{ workspace = true }` inherit form, hardcoded `"0.17"` constant fallback (with `cargo:warning=`) for unforeseen build contexts. Cargo.toml is unambiguously present in every build context because cargo guarantees `CARGO_MANIFEST_DIR` always points at the manifest's directory.
 - **No functional change to user-visible API or error messages.** All 5 message refinements from 3.3.1 (`SampleRateOutOfRange`, `FramesPerBufferOutOfRange`, `AlreadyRunning`, `OrtInitFailed`, `OrtLoadFailed` / `OrtPathInvalid`, `PermissionDenied`) are preserved unchanged.
 - **`decibri::CPAL_VERSION` byte-identity preserved across all four cargo-emitted dep forms.** Verified 2026-04-26 by walking through `find_cpal_in_dependencies` + `truncate_to_major_minor` against on-disk Cargo.toml content: Form 1 (`cpal = "0.17"` workspace.dependencies) -> `"0.17"`; Form 2 (`cpal = { version = "0.17", optional = true }` hypothetical inline-table) -> `"0.17"`; Form 3 (`cpal = { workspace = true, optional = true }` source crate) -> workspace fallback -> `"0.17"`; Form 4 (`[dependencies.cpal] version = "0.17"` published normalized) -> `"0.17"`. All four forms produce identical output to the v3.3.1 build.rs's Cargo.lock-resolved truncation because the workspace pin is at major.minor granularity already (`cpal = "0.17"` in `[workspace.dependencies]`).
+- **`release-dryrun.yml` extended to exercise `cargo publish -p decibri --dry-run`.** The previous dryrun workflow ran the npm-side build matrix and `verify_pack` packaging gate but had no crates.io publish path coverage. The new step catches build.rs failures and any other publish-time issues that affect the Rust crate publish but not the npm packaging. Closes the procedural gap that allowed 3.3.1's defect to ship through CI green.
 
 ### Migration notes
 
