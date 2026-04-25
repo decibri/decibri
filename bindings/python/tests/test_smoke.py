@@ -31,9 +31,9 @@ def test_version_returns_version_info() -> None:
 
 def test_version_decibri_matches_rust_core() -> None:
     # Literal equality per Phase 1 plan. When the Rust workspace bumps past
-    # 3.3.0 this assertion breaks deliberately: force a conscious update of
+    # 3.3.1 this assertion breaks deliberately: force a conscious update of
     # the Python test expectation alongside the Rust version bump.
-    assert decibri.DecibriBridge.version().decibri == "3.3.0"
+    assert decibri.DecibriBridge.version().decibri == "3.3.1"
 
 
 def test_version_portaudio_matches_node_binding() -> None:
@@ -46,7 +46,7 @@ def test_version_portaudio_matches_node_binding() -> None:
 def test_version_info_repr() -> None:
     info = decibri.DecibriBridge.version()
     rep = repr(info)
-    assert rep == "VersionInfo(decibri='3.3.0', portaudio='cpal 0.17')"
+    assert rep == "VersionInfo(decibri='3.3.1', portaudio='cpal 0.17')"
 
 
 def test_version_info_is_frozen() -> None:
