@@ -150,10 +150,11 @@ pub mod error;
 pub mod sample;
 
 /// Resolved cpal version (major.minor) extracted at build time from the
-/// workspace `Cargo.lock`.
+/// crate's `Cargo.toml`.
 ///
-/// Populated by `build.rs` scanning Cargo.lock for the `cpal` package entry
-/// and truncating the resolved version to major.minor. Used by binding
+/// Populated by `build.rs` parsing the cpal entry from the crate's
+/// `Cargo.toml` (with workspace fallback for `{ workspace = true }`
+/// inherits) and truncating to major.minor. Used by binding
 /// layers (Node, Python) as the value of the `portaudio` field in their
 /// version-info responses:
 ///
@@ -163,9 +164,9 @@ pub mod sample;
 /// ```
 ///
 /// Single source of truth: bumping cpal in the workspace `Cargo.toml`
-/// regenerates `Cargo.lock`, which re-triggers the build script, which
-/// updates this constant, which updates every binding that reads it. No
-/// manual sync required across crates.
+/// re-triggers the build script (via `cargo:rerun-if-changed=Cargo.toml`),
+/// which updates this constant, which updates every binding that reads it.
+/// No manual sync required across crates.
 ///
 /// Format: `"0.17"`. Bindings prefix with `"cpal "` when reporting to users.
 /// If future work wants finer granularity (e.g. full `"0.17.3"`), update
