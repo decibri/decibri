@@ -2,6 +2,26 @@ use std::path::PathBuf;
 
 use thiserror::Error;
 
+// Per-platform guidance for `PermissionDenied`. Attribute-gated so each
+// platform's binary embeds only its own hint string. The attribute-gated
+// pattern matches the crate's existing conditional-compilation idiom: 52
+// `#[cfg(...)]` attribute sites across the crate (all feature-predicates),
+// 0 `cfg!()` macro sites. The `not(any(...))` fallback covers BSDs and
+// any future target-os values uncategorized at compile time.
+
+#[cfg(target_os = "macos")]
+const PERMISSION_HINT: &str = "Enable in System Preferences > Security & Privacy > Microphone.";
+
+#[cfg(target_os = "windows")]
+const PERMISSION_HINT: &str = "Enable in Settings > Privacy & Security > Microphone.";
+
+#[cfg(target_os = "linux")]
+const PERMISSION_HINT: &str =
+    "Check your distribution's audio permissions (PulseAudio / PipeWire).";
+
+#[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
+const PERMISSION_HINT: &str = "Check your system audio permissions.";
+
 /// Errors produced by decibri operations.
 ///
 /// This enum is `#[non_exhaustive]`: consumers pattern-matching on it must
@@ -11,13 +31,13 @@ use thiserror::Error;
 #[non_exhaustive]
 pub enum DecibriError {
     // ── Config validation ──────────────────────────────────────────────
-    #[error("sampleRate must be between 1000 and 384000")]
+    #[error("sample rate must be between 1000 and 384000")]
     SampleRateOutOfRange,
 
     #[error("channels must be between 1 and 32")]
     ChannelsOutOfRange,
 
-    #[error("framesPerBuffer must be between 64 and 65536")]
+    #[error("frames per buffer must be between 64 and 65536")]
     FramesPerBufferOutOfRange,
 
     #[error("format must be 'int16' or 'float32'")]
@@ -55,7 +75,7 @@ pub enum DecibriError {
     DeviceEnumerationFailed(String),
 
     // ── Stream errors ──────────────────────────────────────────────────
-    #[error("Decibri is already running. Call stop() first.")]
+    #[error("audio stream is already running. Call stop() first.")]
     AlreadyRunning,
 
     #[error("Failed to open audio stream: {0}")]
@@ -64,7 +84,7 @@ pub enum DecibriError {
     #[error("Failed to start audio stream: {0}")]
     StreamStartFailed(String),
 
-    #[error("Microphone permission denied. Enable in System Preferences > Security & Privacy.")]
+    #[error("Microphone permission denied. {}", PERMISSION_HINT)]
     PermissionDenied,
 
     /// Capture stream has closed (stopped explicitly or by driver error).
@@ -97,9 +117,9 @@ pub enum DecibriError {
     // `String`) so consumers retain path semantics without re-parsing.
     #[error(
         "decibri: failed to initialize ONNX Runtime: {source}. \
-         Either pass ort_library_path in VadConfig, set ORT_DYLIB_PATH to \
-         point to a valid ONNX Runtime library, or enable the \
-         `ort-download-binaries` feature for zero-config builds."
+         Either pass ort_library_path when constructing the VAD, set \
+         ORT_DYLIB_PATH to point to a valid ONNX Runtime library, or \
+         enable the `ort-download-binaries` feature for zero-config builds."
     )]
     OrtInitFailed {
         #[source]
@@ -109,8 +129,8 @@ pub enum DecibriError {
     #[error(
         "decibri: failed to load ONNX Runtime from {}: {source}. \
          If ORT_DYLIB_PATH is set, verify it points to a valid ONNX Runtime \
-         library for your platform. Otherwise the bundled ORT may be missing \
-         from your platform package. Try reinstalling decibri.",
+         library for your platform. Otherwise the bundled ONNX Runtime may \
+         be missing from your installation. Try reinstalling decibri.",
         path.display()
     )]
     OrtLoadFailed {
@@ -135,8 +155,8 @@ pub enum DecibriError {
     #[error(
         "decibri: failed to load ONNX Runtime from {}: {reason}. \
          If ORT_DYLIB_PATH is set, verify it points to a valid ONNX Runtime \
-         library for your platform. Otherwise the bundled ORT may be missing \
-         from your platform package. Try reinstalling decibri.",
+         library for your platform. Otherwise the bundled ONNX Runtime may \
+         be missing from your installation. Try reinstalling decibri.",
         path.display()
     )]
     OrtPathInvalid { path: PathBuf, reason: &'static str },

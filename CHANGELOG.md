@@ -5,6 +5,27 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.3.1] - Unreleased
+
+### Changed
+
+- **Audience-neutral error message pass.** Five `DecibriError` `Display` strings refined to remove cross-binding and platform-specific awkwardness. No variant identity, layout, or count change; no API-surface change. Strict patch release.
+  - `SampleRateOutOfRange`: `"sampleRate must be between 1000 and 384000"` -> `"sample rate must be between 1000 and 384000"`. The previous camelCase form was Node-API-targeting and matched no other field-name convention in the rest of the Rust crate (snake_case fields throughout, natural-language rustdoc voice).
+  - `FramesPerBufferOutOfRange`: `"framesPerBuffer must be between 64 and 65536"` -> `"frames per buffer must be between 64 and 65536"`. Same rationale.
+  - `AlreadyRunning`: `"Decibri is already running. Call stop() first."` -> `"audio stream is already running. Call stop() first."`. Hardcoded class name was misleading when raised from `DecibriOutput`; "audio stream" matches the existing `error.rs` vocabulary ("capture stream", "output stream", "audio stream").
+  - `OrtInitFailed`: `"Either pass ort_library_path in VadConfig, ..."` -> `"Either pass ort_library_path when constructing the VAD, ..."`. Drops Rust-internal `VadConfig` type reference; phrasing now correct for Node, Python, and direct-Rust crate consumers alike.
+  - `OrtLoadFailed` and `OrtPathInvalid`: `"the bundled ORT may be missing from your platform package"` -> `"the bundled ONNX Runtime may be missing from your installation"`. Drops npm-internal "platform package" phrasing; "installation" works for npm platform packages, Python wheels, and direct-Rust crate use.
+  - `PermissionDenied`: macOS-specific `"Enable in System Preferences > Security & Privacy."` replaced with attribute-gated per-platform guidance. macOS hint extended to specifically reference `> Microphone`. Windows hint references the modern `Settings > Privacy & Security > Microphone` UX. Linux hint references PulseAudio / PipeWire (the user-facing audio control layer over cpal's ALSA backend).
+- Lockstep updates to `bindings/node/src/lib.rs` (one duplicate `AlreadyRunning` message in the napi `start()` pre-running check), `npm/decibri/src/errors.js` (two prefix-match strings in the typed-error shim), `npm/decibri/src/decibri.js` (two thrown messages in client-side validation; line 101's `channels` message is already natural-language and unchanged), `npm/decibri/src/decibri-output.js` (one thrown message), `npm/decibri/src/browser/decibri-browser.js` (two thrown messages in browser-side validation), `tests/test-ci.js`, `tests/test-api.js`, `tests/test-output.js` (15 hardcoded message-substring assertions).
+
+### Migration notes
+
+Error message wording on shipped `DecibriError` variants has historically been stable across the 3.x line. 3.3.1 explicitly refines five messages to remove audience-leak issues identified during P3 Phase 2 planning: Node-API-targeted camelCase parameter names, class-name hardcoding in `AlreadyRunning`, a Rust-internal type reference (`VadConfig`) in `OrtInitFailed`, npm-internal phrasing ("platform package") in `OrtLoadFailed` / `OrtPathInvalid`, and macOS-only platform guidance in `PermissionDenied`. Future releases re-establish wording stability; 3.3.1 is the consolidation point.
+
+- **Direct Rust crate consumers** asserting on `DecibriError::Display` strings should update assertions for the five refined messages. Type-level matching on `DecibriError` variants is unaffected; only string-text assertions need updating.
+- **Node consumers** using `e.message.includes(prefix)` or `e.message.startsWith(prefix)` patterns should update for `sampleRate` -> `sample rate`, `framesPerBuffer` -> `frames per buffer`, and the `AlreadyRunning` message text. Type-level matching on `RangeError` / `TypeError` is unaffected.
+- **Python consumers**: P3 Phase 2's first wheel (still pre-release) consumes `decibri@3.3.1`, so the messages it sees are the corrected forms from day one. No migration needed (Phase 1 wheel was scaffold-only with no error message surface).
+
 ## [3.3.0] - 2026-04-23
 
 Groundwork release for upcoming P3 Python bindings. Adds a stable-ID form

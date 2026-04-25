@@ -149,7 +149,7 @@ impl DecibriBridge {
         if self.running.load(Ordering::Relaxed) {
             return Err(Error::new(
                 Status::GenericFailure,
-                "Decibri is already running. Call stop() first.",
+                "audio stream is already running. Call stop() first.",
             ));
         }
 
