@@ -127,13 +127,13 @@ describe('Decibri constructor', () => {
 
 describe('Decibri constructor validation', () => {
   it('throws on invalid sampleRate', () => {
-    expect(() => new Decibri({ sampleRate: 0 })).toThrow('sampleRate');
-    expect(() => new Decibri({ sampleRate: 500000 })).toThrow('sampleRate');
+    expect(() => new Decibri({ sampleRate: 0 })).toThrow('sample rate');
+    expect(() => new Decibri({ sampleRate: 500000 })).toThrow('sample rate');
   });
 
   it('throws on invalid framesPerBuffer', () => {
-    expect(() => new Decibri({ framesPerBuffer: 0 })).toThrow('framesPerBuffer');
-    expect(() => new Decibri({ framesPerBuffer: 100000 })).toThrow('framesPerBuffer');
+    expect(() => new Decibri({ framesPerBuffer: 0 })).toThrow('frames per buffer');
+    expect(() => new Decibri({ framesPerBuffer: 100000 })).toThrow('frames per buffer');
   });
 
   it('throws on invalid channels', () => {

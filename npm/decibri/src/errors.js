@@ -24,9 +24,9 @@ function wrapNativeError(err) {
 
   const msg = err.message;
   const isRange =
-    msg.startsWith('sampleRate must be between') ||
+    msg.startsWith('sample rate must be between') ||
     msg.startsWith('channels must be between') ||
-    msg.startsWith('framesPerBuffer must be between') ||
+    msg.startsWith('frames per buffer must be between') ||
     msg.startsWith('Silero VAD only supports') ||
     msg.startsWith('VAD threshold must be between') ||
     msg.startsWith('device index out of range');

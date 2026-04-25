@@ -17,7 +17,7 @@ class DecibriOutput extends Writable {
 
     const sampleRate = options.sampleRate ?? 16000;
     if (sampleRate < 1000 || sampleRate > 384000) {
-      throw new RangeError('sampleRate must be between 1000 and 384000');
+      throw new RangeError('sample rate must be between 1000 and 384000');
     }
 
     const channels = options.channels ?? 1;

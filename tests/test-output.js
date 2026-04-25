@@ -75,9 +75,9 @@ async function testErrors() {
   console.log('--- Group 1: Error messages ---');
 
   // sampleRate
-  assertThrows(() => new DecibriOutput({ sampleRate: 0 }), RangeError, 'sampleRate must be between 1000 and 384000');
-  assertThrows(() => new DecibriOutput({ sampleRate: 999 }), RangeError, 'sampleRate must be between 1000 and 384000');
-  assertThrows(() => new DecibriOutput({ sampleRate: 384001 }), RangeError, 'sampleRate must be between 1000 and 384000');
+  assertThrows(() => new DecibriOutput({ sampleRate: 0 }), RangeError, 'sample rate must be between 1000 and 384000');
+  assertThrows(() => new DecibriOutput({ sampleRate: 999 }), RangeError, 'sample rate must be between 1000 and 384000');
+  assertThrows(() => new DecibriOutput({ sampleRate: 384001 }), RangeError, 'sample rate must be between 1000 and 384000');
 
   // channels
   assertThrows(() => new DecibriOutput({ channels: 0 }), RangeError, 'channels must be between 1 and 32');

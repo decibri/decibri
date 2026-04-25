@@ -51,17 +51,17 @@ function assert(condition, label) {
 console.log('--- Group 1: Decibri error messages ---');
 
 // sampleRate
-assertThrows(() => new Decibri({ sampleRate: 0 }), RangeError, 'sampleRate must be between 1000 and 384000');
-assertThrows(() => new Decibri({ sampleRate: 999 }), RangeError, 'sampleRate must be between 1000 and 384000');
-assertThrows(() => new Decibri({ sampleRate: 384001 }), RangeError, 'sampleRate must be between 1000 and 384000');
+assertThrows(() => new Decibri({ sampleRate: 0 }), RangeError, 'sample rate must be between 1000 and 384000');
+assertThrows(() => new Decibri({ sampleRate: 999 }), RangeError, 'sample rate must be between 1000 and 384000');
+assertThrows(() => new Decibri({ sampleRate: 384001 }), RangeError, 'sample rate must be between 1000 and 384000');
 
 // channels
 assertThrows(() => new Decibri({ channels: 0 }), RangeError, 'channels must be between 1 and 32');
 assertThrows(() => new Decibri({ channels: 33 }), RangeError, 'channels must be between 1 and 32');
 
 // framesPerBuffer
-assertThrows(() => new Decibri({ framesPerBuffer: 63 }), RangeError, 'framesPerBuffer must be between 64 and 65536');
-assertThrows(() => new Decibri({ framesPerBuffer: 65537 }), RangeError, 'framesPerBuffer must be between 64 and 65536');
+assertThrows(() => new Decibri({ framesPerBuffer: 63 }), RangeError, 'frames per buffer must be between 64 and 65536');
+assertThrows(() => new Decibri({ framesPerBuffer: 65537 }), RangeError, 'frames per buffer must be between 64 and 65536');
 
 // format
 assertThrows(() => new Decibri({ format: 'wav' }), TypeError, "format must be 'int16' or 'float32'");
@@ -143,8 +143,8 @@ console.log('  Group 2 done\n');
 
 console.log('--- Group 3: DecibriOutput error messages ---');
 
-assertThrows(() => new DecibriOutput({ sampleRate: 0 }), RangeError, 'sampleRate must be between 1000 and 384000');
-assertThrows(() => new DecibriOutput({ sampleRate: 384001 }), RangeError, 'sampleRate must be between 1000 and 384000');
+assertThrows(() => new DecibriOutput({ sampleRate: 0 }), RangeError, 'sample rate must be between 1000 and 384000');
+assertThrows(() => new DecibriOutput({ sampleRate: 384001 }), RangeError, 'sample rate must be between 1000 and 384000');
 assertThrows(() => new DecibriOutput({ channels: 0 }), RangeError, 'channels must be between 1 and 32');
 assertThrows(() => new DecibriOutput({ channels: 33 }), RangeError, 'channels must be between 1 and 32');
 assertThrows(() => new DecibriOutput({ format: 'wav' }), TypeError, "format must be 'int16' or 'float32'");

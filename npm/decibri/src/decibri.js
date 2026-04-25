@@ -93,7 +93,7 @@ class Decibri extends Readable {
 
     const sampleRate = options.sampleRate ?? 16000;
     if (sampleRate < 1000 || sampleRate > 384000) {
-      throw new RangeError('sampleRate must be between 1000 and 384000');
+      throw new RangeError('sample rate must be between 1000 and 384000');
     }
 
     const channels = options.channels ?? 1;
@@ -103,7 +103,7 @@ class Decibri extends Readable {
 
     const framesPerBuffer = options.framesPerBuffer ?? 1600;
     if (framesPerBuffer < 64 || framesPerBuffer > 65536) {
-      throw new RangeError('framesPerBuffer must be between 64 and 65536');
+      throw new RangeError('frames per buffer must be between 64 and 65536');
     }
 
     const format = options.format ?? 'int16';

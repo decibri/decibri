@@ -53,13 +53,13 @@ class Decibri extends Emitter {
 
     // ── Validate ──────────────────────────────────────────────────────────
     if (this._sampleRate < 1000 || this._sampleRate > 384000) {
-      throw new TypeError(`sampleRate must be between 1000 and 384000, got ${this._sampleRate}`);
+      throw new TypeError(`sample rate must be between 1000 and 384000, got ${this._sampleRate}`);
     }
     if (this._channels < 1 || this._channels > 32) {
       throw new TypeError(`channels must be between 1 and 32, got ${this._channels}`);
     }
     if (this._framesPerBuffer < 64 || this._framesPerBuffer > 65536) {
-      throw new TypeError(`framesPerBuffer must be between 64 and 65536, got ${this._framesPerBuffer}`);
+      throw new TypeError(`frames per buffer must be between 64 and 65536, got ${this._framesPerBuffer}`);
     }
     if (this._format !== 'int16' && this._format !== 'float32') {
       throw new TypeError("format must be 'int16' or 'float32'");
