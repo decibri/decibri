@@ -3,25 +3,156 @@
 Matches the Rust surface in ``bindings/python/src/lib.rs``. Kept alongside
 the compiled ``.pyd`` / ``.so`` so mypy and IDEs see types without loading
 the extension. Update this file when the Rust surface changes.
+
+Exception classes are NOT re-exported on this module. They live exclusively
+at ``decibri.exceptions``; ``to_py_err`` in the Rust binding raises instances
+of those pure-Python classes via ``PyErr::from_type``. Consumers should
+import exceptions from ``decibri`` (after Commit 6 re-export) or directly
+from ``decibri.exceptions``.
 """
+
+from pathlib import Path
+
+__all__ = [
+    "DecibriBridge",
+    "DecibriOutputBridge",
+    "DeviceInfo",
+    "OutputDeviceInfo",
+    "VersionInfo",
+]
+
 
 class VersionInfo:
     """Version information for the decibri core and its audio runtime.
 
     The ``decibri`` field is the Rust core version (``CARGO_PKG_VERSION``
-    at build time), not the Python wheel version. For the wheel version,
-    use :data:`decibri.__version__`.
+    at build time), not the Python wheel version. The ``binding`` field
+    is the Python wheel version. The ``portaudio`` field is the cpal
+    crate version, prefixed with ``"cpal "`` for compatibility with the
+    Node binding's identical field.
     """
 
     @property
     def decibri(self) -> str: ...
     @property
     def portaudio(self) -> str: ...
+    @property
+    def binding(self) -> str: ...
     def __repr__(self) -> str: ...
 
-class DecibriBridge:
-    """Internal bridge class. Public ``Decibri`` / ``AsyncDecibri`` wrappers
-    ship in Phase 2 / Phase 3."""
 
+class DeviceInfo:
+    """Audio input device metadata. Returned by ``DecibriBridge.devices()``."""
+
+    @property
+    def index(self) -> int: ...
+    @property
+    def name(self) -> str: ...
+    @property
+    def id(self) -> str: ...
+    @property
+    def max_input_channels(self) -> int: ...
+    @property
+    def default_sample_rate(self) -> int: ...
+    @property
+    def is_default(self) -> bool: ...
+    def __repr__(self) -> str: ...
+
+
+class OutputDeviceInfo:
+    """Audio output device metadata. Returned by ``DecibriOutputBridge.devices()``."""
+
+    @property
+    def index(self) -> int: ...
+    @property
+    def name(self) -> str: ...
+    @property
+    def id(self) -> str: ...
+    @property
+    def max_output_channels(self) -> int: ...
+    @property
+    def default_sample_rate(self) -> int: ...
+    @property
+    def is_default(self) -> bool: ...
+    def __repr__(self) -> str: ...
+
+
+class DecibriBridge:
+    """Internal capture bridge. Public ``Decibri`` wrapper lives in
+    ``decibri._classes``; consumers should construct ``Decibri``, not
+    ``DecibriBridge``, directly.
+
+    The bridge is a thin inference primitive. VAD policy (threshold
+    application, holdoff state machine, mode dispatch) lives in the
+    wrapper layer; the bridge exposes the raw Silero probability via
+    ``vad_probability`` and stores ``vad_holdoff_ms`` as inert state.
+    """
+
+    def __init__(
+        self,
+        sample_rate: int,
+        channels: int,
+        frames_per_buffer: int,
+        format: str,
+        device: int | str | None = None,
+        vad: bool = False,
+        vad_threshold: float = 0.5,
+        vad_mode: str = "silero",
+        vad_holdoff: int = 0,
+        model_path: str | Path | None = None,
+        numpy: bool = False,
+        ort_library_path: str | Path | None = None,
+    ) -> None: ...
+    def start(self) -> None: ...
+    def stop(self) -> None: ...
+    def read(self, timeout_ms: int | None = None) -> bytes | None: ...
+    def __iter__(self) -> DecibriBridge: ...
+    def __next__(self) -> bytes: ...
+    def __enter__(self) -> DecibriBridge: ...
+    def __exit__(
+        self,
+        exc_type: object,
+        exc_value: object,
+        traceback: object,
+    ) -> bool: ...
+    @property
+    def is_open(self) -> bool: ...
+    @property
+    def vad_probability(self) -> float: ...
+    @property
+    def vad_holdoff_ms(self) -> int: ...
+    @staticmethod
+    def devices() -> list[DeviceInfo]: ...
     @staticmethod
     def version() -> VersionInfo: ...
+
+
+class DecibriOutputBridge:
+    """Internal output bridge. Public ``DecibriOutput`` wrapper lives in
+    ``decibri._classes``; consumers should construct ``DecibriOutput``,
+    not ``DecibriOutputBridge``, directly.
+    """
+
+    def __init__(
+        self,
+        sample_rate: int,
+        channels: int,
+        format: str,
+        device: int | str | None = None,
+    ) -> None: ...
+    def start(self) -> None: ...
+    def stop(self) -> None: ...
+    def close(self) -> None: ...
+    def write(self, samples: bytes) -> None: ...
+    def drain(self) -> None: ...
+    def __enter__(self) -> DecibriOutputBridge: ...
+    def __exit__(
+        self,
+        exc_type: object,
+        exc_value: object,
+        traceback: object,
+    ) -> bool: ...
+    @property
+    def is_playing(self) -> bool: ...
+    @staticmethod
+    def devices() -> list[OutputDeviceInfo]: ...

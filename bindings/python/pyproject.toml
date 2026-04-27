@@ -50,6 +50,9 @@ dev = [
 python-source = "python"
 module-name = "decibri._decibri"
 bindings = "pyo3"
+include = [
+    { path = "python/decibri/models/silero_vad.onnx", format = ["sdist", "wheel"] },
+]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
