@@ -6,6 +6,7 @@ Phase 1 scaffold. Public surface grows through Phases 2-4. Use
 """
 
 from decibri._decibri import DecibriBridge, VersionInfo
+from decibri._classes import Decibri, DecibriOutput
 
-__all__ = ["DecibriBridge", "VersionInfo"]
+__all__ = ["Decibri", "DecibriBridge", "DecibriOutput", "VersionInfo"]
 __version__ = "0.1.0a1"
