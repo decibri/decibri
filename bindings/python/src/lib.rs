@@ -26,10 +26,12 @@
 use std::path::PathBuf;
 use std::time::Duration;
 
-use pyo3::create_exception;
-use pyo3::exceptions::{PyException, PyNotImplementedError, PyValueError};
+use std::collections::HashMap;
+
+use pyo3::exceptions::{PyNotImplementedError, PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
-use pyo3::types::{PyBytes, PyModule};
+use pyo3::sync::PyOnceLock;
+use pyo3::types::{PyBytes, PyModule, PyType};
 
 use decibri::capture::{AudioCapture, AudioChunk, CaptureConfig, CaptureStream};
 use decibri::device::{
@@ -45,63 +47,87 @@ use decibri::vad::{SileroVad, VadConfig};
 use decibri::CPAL_VERSION;
 
 // ---------------------------------------------------------------------------
-// Exception class declarations (31 classes total).
+// Exception class lookup.
 //
-// Hierarchy (mirrors python/decibri/exceptions.py from Commit 1):
-//   DecibriError (base, subclass of Exception)
-//     |- 20 direct subclasses (config, device, stream, format, lifecycle)
-//     |- OrtError                            [catch-target]
-//          |- OrtInitFailed
-//          |- OrtSessionBuildFailed
-//          |- OrtThreadsConfigFailed
-//          |- VadModelLoadFailed             [carries path attribute]
-//          |- OrtTensorCreateFailed
-//          |- OrtTensorExtractFailed
-//          |- OrtInferenceFailed
-//          |- OrtPathError                   [catch-target, no instances]
-//                |- OrtLoadFailed            [carries path attribute]
-//                |- OrtPathInvalid           [carries path + reason]
+// The 31-class hierarchy is defined once in pure Python at
+// decibri.exceptions. The `__init__` overrides on OrtLoadFailed,
+// OrtPathInvalid, and VadModelLoadFailed unpack tuple args into named
+// `path` and `reason` attributes per CPython OSError convention.
+//
+// to_py_err raises instances of those pure-Python classes via
+// PyErr::from_type, so consumers catching decibri.exceptions.<X>
+// (or the re-exported decibri.<X>) catch what Rust raises. Class
+// objects are imported once on first use and cached in EXCEPTION_CLASSES.
 // ---------------------------------------------------------------------------
 
-create_exception!(_decibri, DecibriError, PyException);
+static EXCEPTION_CLASSES: PyOnceLock<HashMap<&'static str, Py<PyType>>> = PyOnceLock::new();
 
-// 20 direct subclasses of DecibriError (alphabetical within logical group).
-create_exception!(_decibri, AlreadyRunning, DecibriError);
-create_exception!(_decibri, CaptureStreamClosed, DecibriError);
-create_exception!(_decibri, ChannelsOutOfRange, DecibriError);
-create_exception!(_decibri, DeviceEnumerationFailed, DecibriError);
-create_exception!(_decibri, DeviceIndexOutOfRange, DecibriError);
-create_exception!(_decibri, DeviceNotFound, DecibriError);
-create_exception!(_decibri, FramesPerBufferOutOfRange, DecibriError);
-create_exception!(_decibri, InvalidFormat, DecibriError);
-create_exception!(_decibri, MultipleDevicesMatch, DecibriError);
-create_exception!(_decibri, NoMicrophoneFound, DecibriError);
-create_exception!(_decibri, NoOutputDeviceFound, DecibriError);
-create_exception!(_decibri, NotAnInputDevice, DecibriError);
-create_exception!(_decibri, OutputDeviceNotFound, DecibriError);
-create_exception!(_decibri, OutputStreamClosed, DecibriError);
-create_exception!(_decibri, PermissionDenied, DecibriError);
-create_exception!(_decibri, SampleRateOutOfRange, DecibriError);
-create_exception!(_decibri, StreamOpenFailed, DecibriError);
-create_exception!(_decibri, StreamStartFailed, DecibriError);
-create_exception!(_decibri, VadSampleRateUnsupported, DecibriError);
-create_exception!(_decibri, VadThresholdOutOfRange, DecibriError);
+const EXCEPTION_NAMES: &[&str] = &[
+    "DecibriError",
+    "AlreadyRunning",
+    "CaptureStreamClosed",
+    "ChannelsOutOfRange",
+    "DeviceEnumerationFailed",
+    "DeviceIndexOutOfRange",
+    "DeviceNotFound",
+    "FramesPerBufferOutOfRange",
+    "InvalidFormat",
+    "MultipleDevicesMatch",
+    "NoMicrophoneFound",
+    "NoOutputDeviceFound",
+    "NotAnInputDevice",
+    "OutputDeviceNotFound",
+    "OutputStreamClosed",
+    "PermissionDenied",
+    "SampleRateOutOfRange",
+    "StreamOpenFailed",
+    "StreamStartFailed",
+    "VadSampleRateUnsupported",
+    "VadThresholdOutOfRange",
+    "VadModelLoadFailed",
+    "OrtError",
+    "OrtInitFailed",
+    "OrtSessionBuildFailed",
+    "OrtThreadsConfigFailed",
+    "OrtTensorCreateFailed",
+    "OrtTensorExtractFailed",
+    "OrtInferenceFailed",
+    "OrtPathError",
+    "OrtLoadFailed",
+    "OrtPathInvalid",
+];
 
-// ORT family. VadModelLoadFailed is an OrtError subclass per Commit 1's
-// Python hierarchy (since the failure path runs through ORT's session loader).
-create_exception!(_decibri, OrtError, DecibriError);
-create_exception!(_decibri, OrtInitFailed, OrtError);
-create_exception!(_decibri, OrtSessionBuildFailed, OrtError);
-create_exception!(_decibri, OrtThreadsConfigFailed, OrtError);
-create_exception!(_decibri, VadModelLoadFailed, OrtError);
-create_exception!(_decibri, OrtTensorCreateFailed, OrtError);
-create_exception!(_decibri, OrtTensorExtractFailed, OrtError);
-create_exception!(_decibri, OrtInferenceFailed, OrtError);
+/// Construct a PyErr for the named pure-Python exception class with a single
+/// message argument. Used at sites where the binding raises an exception
+/// directly (not via to_py_err's CoreDecibriError mapping).
+fn raise_named(py: Python<'_>, name: &'static str, msg: impl Into<String>) -> PyErr {
+    match exception_class(py, name) {
+        Ok(cls) => PyErr::from_type(cls, (msg.into(),)),
+        Err(lookup_err) => lookup_err,
+    }
+}
 
-// OrtPathError catch-target plus its two path-bearing leaves.
-create_exception!(_decibri, OrtPathError, OrtError);
-create_exception!(_decibri, OrtLoadFailed, OrtPathError);
-create_exception!(_decibri, OrtPathInvalid, OrtPathError);
+fn exception_class<'py>(py: Python<'py>, name: &'static str) -> PyResult<Bound<'py, PyType>> {
+    let map = EXCEPTION_CLASSES.get_or_try_init(py, || -> PyResult<_> {
+        let module = py.import("decibri.exceptions")?;
+        let mut map: HashMap<&'static str, Py<PyType>> =
+            HashMap::with_capacity(EXCEPTION_NAMES.len());
+        for &n in EXCEPTION_NAMES {
+            let cls = module.getattr(n)?.cast_into::<PyType>().map_err(|e| {
+                PyRuntimeError::new_err(format!("decibri.exceptions.{n} is not a class: {e}"))
+            })?;
+            map.insert(n, cls.unbind());
+        }
+        Ok(map)
+    })?;
+
+    let cls = map.get(name).ok_or_else(|| {
+        PyRuntimeError::new_err(format!(
+            "internal error: exception class {name} not registered"
+        ))
+    })?;
+    Ok(cls.bind(py).clone())
+}
 
 // ---------------------------------------------------------------------------
 // Error mapping: DecibriError -> PyErr.
@@ -114,61 +140,168 @@ create_exception!(_decibri, OrtPathInvalid, OrtPathError);
 // __init__ override can store named attributes per F11.
 // ---------------------------------------------------------------------------
 
-fn to_py_err(err: CoreDecibriError) -> PyErr {
+type ExceptionRaiser = Box<dyn FnOnce(Bound<'_, PyType>) -> PyErr>;
+
+fn to_py_err(py: Python<'_>, err: CoreDecibriError) -> PyErr {
     let msg = err.to_string();
 
-    match err {
+    // Determine which exception class to raise plus the args tuple.
+    // The pure-Python __init__ overrides on OrtLoadFailed, OrtPathInvalid,
+    // and VadModelLoadFailed unpack multi-element tuples into named
+    // attributes; other classes accept a single message string.
+    let (name, raise): (&'static str, ExceptionRaiser) = match err {
         // Unit variants (12).
-        CoreDecibriError::SampleRateOutOfRange => SampleRateOutOfRange::new_err(msg),
-        CoreDecibriError::ChannelsOutOfRange => ChannelsOutOfRange::new_err(msg),
-        CoreDecibriError::FramesPerBufferOutOfRange => FramesPerBufferOutOfRange::new_err(msg),
-        CoreDecibriError::InvalidFormat => InvalidFormat::new_err(msg),
-        CoreDecibriError::DeviceIndexOutOfRange => DeviceIndexOutOfRange::new_err(msg),
-        CoreDecibriError::NoMicrophoneFound => NoMicrophoneFound::new_err(msg),
-        CoreDecibriError::NoOutputDeviceFound => NoOutputDeviceFound::new_err(msg),
-        CoreDecibriError::NotAnInputDevice => NotAnInputDevice::new_err(msg),
-        CoreDecibriError::AlreadyRunning => AlreadyRunning::new_err(msg),
-        CoreDecibriError::PermissionDenied => PermissionDenied::new_err(msg),
-        CoreDecibriError::CaptureStreamClosed => CaptureStreamClosed::new_err(msg),
-        CoreDecibriError::OutputStreamClosed => OutputStreamClosed::new_err(msg),
+        CoreDecibriError::SampleRateOutOfRange => (
+            "SampleRateOutOfRange",
+            Box::new(move |cls| PyErr::from_type(cls, (msg,))),
+        ),
+        CoreDecibriError::ChannelsOutOfRange => (
+            "ChannelsOutOfRange",
+            Box::new(move |cls| PyErr::from_type(cls, (msg,))),
+        ),
+        CoreDecibriError::FramesPerBufferOutOfRange => (
+            "FramesPerBufferOutOfRange",
+            Box::new(move |cls| PyErr::from_type(cls, (msg,))),
+        ),
+        CoreDecibriError::InvalidFormat => (
+            "InvalidFormat",
+            Box::new(move |cls| PyErr::from_type(cls, (msg,))),
+        ),
+        CoreDecibriError::DeviceIndexOutOfRange => (
+            "DeviceIndexOutOfRange",
+            Box::new(move |cls| PyErr::from_type(cls, (msg,))),
+        ),
+        CoreDecibriError::NoMicrophoneFound => (
+            "NoMicrophoneFound",
+            Box::new(move |cls| PyErr::from_type(cls, (msg,))),
+        ),
+        CoreDecibriError::NoOutputDeviceFound => (
+            "NoOutputDeviceFound",
+            Box::new(move |cls| PyErr::from_type(cls, (msg,))),
+        ),
+        CoreDecibriError::NotAnInputDevice => (
+            "NotAnInputDevice",
+            Box::new(move |cls| PyErr::from_type(cls, (msg,))),
+        ),
+        CoreDecibriError::AlreadyRunning => (
+            "AlreadyRunning",
+            Box::new(move |cls| PyErr::from_type(cls, (msg,))),
+        ),
+        CoreDecibriError::PermissionDenied => (
+            "PermissionDenied",
+            Box::new(move |cls| PyErr::from_type(cls, (msg,))),
+        ),
+        CoreDecibriError::CaptureStreamClosed => (
+            "CaptureStreamClosed",
+            Box::new(move |cls| PyErr::from_type(cls, (msg,))),
+        ),
+        CoreDecibriError::OutputStreamClosed => (
+            "OutputStreamClosed",
+            Box::new(move |cls| PyErr::from_type(cls, (msg,))),
+        ),
 
-        // Tuple variants with String (5). Destructure but use generated msg
-        // (which already includes the inner string per Display impl).
-        CoreDecibriError::DeviceNotFound(_) => DeviceNotFound::new_err(msg),
-        CoreDecibriError::OutputDeviceNotFound(_) => OutputDeviceNotFound::new_err(msg),
-        CoreDecibriError::DeviceEnumerationFailed(_) => DeviceEnumerationFailed::new_err(msg),
-        CoreDecibriError::StreamOpenFailed(_) => StreamOpenFailed::new_err(msg),
-        CoreDecibriError::StreamStartFailed(_) => StreamStartFailed::new_err(msg),
+        // Tuple variants with String (5).
+        CoreDecibriError::DeviceNotFound(_) => (
+            "DeviceNotFound",
+            Box::new(move |cls| PyErr::from_type(cls, (msg,))),
+        ),
+        CoreDecibriError::OutputDeviceNotFound(_) => (
+            "OutputDeviceNotFound",
+            Box::new(move |cls| PyErr::from_type(cls, (msg,))),
+        ),
+        CoreDecibriError::DeviceEnumerationFailed(_) => (
+            "DeviceEnumerationFailed",
+            Box::new(move |cls| PyErr::from_type(cls, (msg,))),
+        ),
+        CoreDecibriError::StreamOpenFailed(_) => (
+            "StreamOpenFailed",
+            Box::new(move |cls| PyErr::from_type(cls, (msg,))),
+        ),
+        CoreDecibriError::StreamStartFailed(_) => (
+            "StreamStartFailed",
+            Box::new(move |cls| PyErr::from_type(cls, (msg,))),
+        ),
 
         // Tuple variants with primitive (2).
-        CoreDecibriError::VadSampleRateUnsupported(_) => VadSampleRateUnsupported::new_err(msg),
-        CoreDecibriError::VadThresholdOutOfRange(_) => VadThresholdOutOfRange::new_err(msg),
+        CoreDecibriError::VadSampleRateUnsupported(_) => (
+            "VadSampleRateUnsupported",
+            Box::new(move |cls| PyErr::from_type(cls, (msg,))),
+        ),
+        CoreDecibriError::VadThresholdOutOfRange(_) => (
+            "VadThresholdOutOfRange",
+            Box::new(move |cls| PyErr::from_type(cls, (msg,))),
+        ),
 
         // Tuple variants with #[source] ort::Error (3).
-        CoreDecibriError::OrtSessionBuildFailed(_) => OrtSessionBuildFailed::new_err(msg),
-        CoreDecibriError::OrtThreadsConfigFailed(_) => OrtThreadsConfigFailed::new_err(msg),
-        CoreDecibriError::OrtInferenceFailed(_) => OrtInferenceFailed::new_err(msg),
+        CoreDecibriError::OrtSessionBuildFailed(_) => (
+            "OrtSessionBuildFailed",
+            Box::new(move |cls| PyErr::from_type(cls, (msg,))),
+        ),
+        CoreDecibriError::OrtThreadsConfigFailed(_) => (
+            "OrtThreadsConfigFailed",
+            Box::new(move |cls| PyErr::from_type(cls, (msg,))),
+        ),
+        CoreDecibriError::OrtInferenceFailed(_) => (
+            "OrtInferenceFailed",
+            Box::new(move |cls| PyErr::from_type(cls, (msg,))),
+        ),
 
-        // Struct variants (7).
-        CoreDecibriError::MultipleDevicesMatch { .. } => MultipleDevicesMatch::new_err(msg),
-        CoreDecibriError::OrtInitFailed { .. } => OrtInitFailed::new_err(msg),
-        CoreDecibriError::OrtTensorCreateFailed { .. } => OrtTensorCreateFailed::new_err(msg),
-        CoreDecibriError::OrtTensorExtractFailed { .. } => OrtTensorExtractFailed::new_err(msg),
+        // Struct variants without path (4).
+        CoreDecibriError::MultipleDevicesMatch { .. } => (
+            "MultipleDevicesMatch",
+            Box::new(move |cls| PyErr::from_type(cls, (msg,))),
+        ),
+        CoreDecibriError::OrtInitFailed { .. } => (
+            "OrtInitFailed",
+            Box::new(move |cls| PyErr::from_type(cls, (msg,))),
+        ),
+        CoreDecibriError::OrtTensorCreateFailed { .. } => (
+            "OrtTensorCreateFailed",
+            Box::new(move |cls| PyErr::from_type(cls, (msg,))),
+        ),
+        CoreDecibriError::OrtTensorExtractFailed { .. } => (
+            "OrtTensorExtractFailed",
+            Box::new(move |cls| PyErr::from_type(cls, (msg,))),
+        ),
 
-        // Struct variants with path attribute (3 of the 7). Pass tuples so
-        // the Python __init__ overrides can populate named attributes.
+        // Struct variants with path attribute (3). Multi-element args
+        // tuples that the pure-Python __init__ unpacks into named attributes.
         CoreDecibriError::OrtLoadFailed { ref path, .. } => {
-            OrtLoadFailed::new_err((msg.clone(), path_to_string(path)))
+            let path_str = path_to_string(path);
+            (
+                "OrtLoadFailed",
+                Box::new(move |cls| PyErr::from_type(cls, (msg, path_str))),
+            )
         }
         CoreDecibriError::OrtPathInvalid { ref path, reason } => {
-            OrtPathInvalid::new_err((msg.clone(), path_to_string(path), reason.to_string()))
+            let path_str = path_to_string(path);
+            let reason_str = reason.to_string();
+            (
+                "OrtPathInvalid",
+                Box::new(move |cls| PyErr::from_type(cls, (msg, path_str, reason_str))),
+            )
         }
         CoreDecibriError::VadModelLoadFailed { ref path, .. } => {
-            VadModelLoadFailed::new_err((msg.clone(), path_to_string(path)))
+            let path_str = path_to_string(path);
+            (
+                "VadModelLoadFailed",
+                Box::new(move |cls| PyErr::from_type(cls, (msg, path_str))),
+            )
         }
 
-        // #[non_exhaustive] catch-all per F10.
-        _ => DecibriError::new_err(msg),
+        // #[non_exhaustive] catch-all per F10. Fall through to the base class.
+        _ => (
+            "DecibriError",
+            Box::new(move |cls| PyErr::from_type(cls, (msg,))),
+        ),
+    };
+
+    match exception_class(py, name) {
+        Ok(cls) => raise(cls),
+        // Class lookup itself failed (decibri.exceptions module missing or
+        // class missing). Surface the lookup error so the failure mode is
+        // visible rather than silently masking the original error.
+        Err(lookup_err) => lookup_err,
     }
 }
 
@@ -386,6 +519,7 @@ impl DecibriBridge {
     ))]
     #[allow(clippy::too_many_arguments)]
     fn new(
+        py: Python<'_>,
         sample_rate: u32,
         channels: u16,
         frames_per_buffer: u32,
@@ -405,7 +539,7 @@ impl DecibriBridge {
             ));
         }
 
-        let parsed_format = parse_sample_format(&format).map_err(to_py_err)?;
+        let parsed_format = parse_sample_format(&format).map_err(|e| to_py_err(py, e))?;
         let device_selector = build_device_selector(device.as_ref())?;
 
         let capture_config = CaptureConfig {
@@ -429,7 +563,7 @@ impl DecibriBridge {
                 threshold: vad_threshold,
                 ort_library_path,
             };
-            Some(SileroVad::new(vad_config).map_err(to_py_err)?)
+            Some(SileroVad::new(vad_config).map_err(|e| to_py_err(py, e))?)
         } else {
             None
         };
@@ -445,12 +579,17 @@ impl DecibriBridge {
         })
     }
 
-    fn start(&mut self) -> PyResult<()> {
+    fn start(&mut self, py: Python<'_>) -> PyResult<()> {
         if self.stream.is_some() {
-            return Err(AlreadyRunning::new_err("capture is already running"));
+            return Err(raise_named(
+                py,
+                "AlreadyRunning",
+                "capture is already running",
+            ));
         }
-        let capture = AudioCapture::new(self.capture_config.clone()).map_err(to_py_err)?;
-        let stream = capture.start().map_err(to_py_err)?;
+        let capture =
+            AudioCapture::new(self.capture_config.clone()).map_err(|e| to_py_err(py, e))?;
+        let stream = capture.start().map_err(|e| to_py_err(py, e))?;
         self.capture = Some(capture);
         self.stream = Some(stream);
         Ok(())
@@ -474,7 +613,7 @@ impl DecibriBridge {
         let stream = self
             .stream
             .as_mut()
-            .ok_or_else(|| CaptureStreamClosed::new_err("capture is not running"))?;
+            .ok_or_else(|| raise_named(py, "CaptureStreamClosed", "capture is not running"))?;
 
         // Release GIL for the blocking next_chunk call. Run VAD inference
         // inside the same allow_threads region to avoid GIL ping-pong.
@@ -483,14 +622,16 @@ impl DecibriBridge {
             Ok(chunk)
         });
 
-        let Some(chunk) = result.map_err(to_py_err)? else {
+        let Some(chunk) = result.map_err(|e| to_py_err(py, e))? else {
             return Ok(None);
         };
 
         // Run Silero VAD inference if configured. This is also blocking-ish
         // (ONNX inference); release GIL.
         if let Some(vad) = self.vad.as_mut() {
-            let result = py.detach(|| vad.process(&chunk.data)).map_err(to_py_err)?;
+            let result = py
+                .detach(|| vad.process(&chunk.data))
+                .map_err(|e| to_py_err(py, e))?;
             self.last_vad_probability = result.probability;
         }
 
@@ -522,7 +663,8 @@ impl DecibriBridge {
     }
 
     fn __enter__(mut slf: PyRefMut<'_, Self>) -> PyResult<PyRefMut<'_, Self>> {
-        slf.start()?;
+        let py = slf.py();
+        slf.start(py)?;
         Ok(slf)
     }
 
@@ -555,7 +697,9 @@ impl DecibriBridge {
 
     #[staticmethod]
     fn devices(py: Python<'_>) -> PyResult<Vec<DeviceInfo>> {
-        let core_devices = py.detach(enumerate_input_devices).map_err(to_py_err)?;
+        let core_devices = py
+            .detach(enumerate_input_devices)
+            .map_err(|e| to_py_err(py, e))?;
         Ok(core_devices.into_iter().map(DeviceInfo::from).collect())
     }
 
@@ -588,12 +732,13 @@ impl DecibriOutputBridge {
     #[new]
     #[pyo3(signature = (sample_rate, channels, format, device = None))]
     fn new(
+        py: Python<'_>,
         sample_rate: u32,
         channels: u16,
         format: String,
         device: Option<Bound<'_, PyAny>>,
     ) -> PyResult<Self> {
-        let parsed_format = parse_sample_format(&format).map_err(to_py_err)?;
+        let parsed_format = parse_sample_format(&format).map_err(|e| to_py_err(py, e))?;
         let device_selector = build_device_selector(device.as_ref())?;
 
         let output_config = OutputConfig {
@@ -610,12 +755,16 @@ impl DecibriOutputBridge {
         })
     }
 
-    fn start(&mut self) -> PyResult<()> {
+    fn start(&mut self, py: Python<'_>) -> PyResult<()> {
         if self.stream.is_some() {
-            return Err(AlreadyRunning::new_err("output is already running"));
+            return Err(raise_named(
+                py,
+                "AlreadyRunning",
+                "output is already running",
+            ));
         }
-        let output = AudioOutput::new(self.output_config.clone()).map_err(to_py_err)?;
-        let stream = output.start().map_err(to_py_err)?;
+        let output = AudioOutput::new(self.output_config.clone()).map_err(|e| to_py_err(py, e))?;
+        let stream = output.start().map_err(|e| to_py_err(py, e))?;
         self.output = Some(output);
         self.stream = Some(stream);
         Ok(())
@@ -625,7 +774,7 @@ impl DecibriOutputBridge {
         let stream = self
             .stream
             .as_mut()
-            .ok_or_else(|| OutputStreamClosed::new_err("output is not running"))?;
+            .ok_or_else(|| raise_named(py, "OutputStreamClosed", "output is not running"))?;
 
         // Materialize a Vec<u8> from the Python-borrowed slice before entering
         // allow_threads. PyO3's contract requires no Python-borrowed data
@@ -638,7 +787,8 @@ impl DecibriOutputBridge {
             BindingSampleFormat::Float32 => py.detach(|| f32_le_bytes_to_f32(&owned_samples)),
         };
 
-        py.detach(|| stream.send(samples_f32)).map_err(to_py_err)?;
+        py.detach(|| stream.send(samples_f32))
+            .map_err(|e| to_py_err(py, e))?;
         Ok(())
     }
 
@@ -646,7 +796,7 @@ impl DecibriOutputBridge {
         let stream = self
             .stream
             .as_mut()
-            .ok_or_else(|| OutputStreamClosed::new_err("output is not running"))?;
+            .ok_or_else(|| raise_named(py, "OutputStreamClosed", "output is not running"))?;
         py.detach(|| stream.drain());
         Ok(())
     }
@@ -662,7 +812,8 @@ impl DecibriOutputBridge {
     }
 
     fn __enter__(mut slf: PyRefMut<'_, Self>) -> PyResult<PyRefMut<'_, Self>> {
-        slf.start()?;
+        let py = slf.py();
+        slf.start(py)?;
         Ok(slf)
     }
 
@@ -683,7 +834,9 @@ impl DecibriOutputBridge {
 
     #[staticmethod]
     fn devices(py: Python<'_>) -> PyResult<Vec<OutputDeviceInfo>> {
-        let core_devices = py.detach(enumerate_output_devices).map_err(to_py_err)?;
+        let core_devices = py
+            .detach(enumerate_output_devices)
+            .map_err(|e| to_py_err(py, e))?;
         Ok(core_devices
             .into_iter()
             .map(OutputDeviceInfo::from)
@@ -692,103 +845,20 @@ impl DecibriOutputBridge {
 }
 
 // ---------------------------------------------------------------------------
-// Exception registration: bind all 31 classes as module attributes so they
-// are importable as `decibri._decibri.<ClassName>`. The pure-Python
-// `decibri.exceptions` module re-exports these under the public names.
-// ---------------------------------------------------------------------------
-
-fn register_exceptions(py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
-    m.add("DecibriError", py.get_type::<DecibriError>())?;
-
-    m.add("AlreadyRunning", py.get_type::<AlreadyRunning>())?;
-    m.add("CaptureStreamClosed", py.get_type::<CaptureStreamClosed>())?;
-    m.add("ChannelsOutOfRange", py.get_type::<ChannelsOutOfRange>())?;
-    m.add(
-        "DeviceEnumerationFailed",
-        py.get_type::<DeviceEnumerationFailed>(),
-    )?;
-    m.add(
-        "DeviceIndexOutOfRange",
-        py.get_type::<DeviceIndexOutOfRange>(),
-    )?;
-    m.add("DeviceNotFound", py.get_type::<DeviceNotFound>())?;
-    m.add(
-        "FramesPerBufferOutOfRange",
-        py.get_type::<FramesPerBufferOutOfRange>(),
-    )?;
-    m.add("InvalidFormat", py.get_type::<InvalidFormat>())?;
-    m.add(
-        "MultipleDevicesMatch",
-        py.get_type::<MultipleDevicesMatch>(),
-    )?;
-    m.add("NoMicrophoneFound", py.get_type::<NoMicrophoneFound>())?;
-    m.add("NoOutputDeviceFound", py.get_type::<NoOutputDeviceFound>())?;
-    m.add("NotAnInputDevice", py.get_type::<NotAnInputDevice>())?;
-    m.add(
-        "OutputDeviceNotFound",
-        py.get_type::<OutputDeviceNotFound>(),
-    )?;
-    m.add("OutputStreamClosed", py.get_type::<OutputStreamClosed>())?;
-    m.add("PermissionDenied", py.get_type::<PermissionDenied>())?;
-    m.add(
-        "SampleRateOutOfRange",
-        py.get_type::<SampleRateOutOfRange>(),
-    )?;
-    m.add("StreamOpenFailed", py.get_type::<StreamOpenFailed>())?;
-    m.add("StreamStartFailed", py.get_type::<StreamStartFailed>())?;
-    m.add(
-        "VadSampleRateUnsupported",
-        py.get_type::<VadSampleRateUnsupported>(),
-    )?;
-    m.add(
-        "VadThresholdOutOfRange",
-        py.get_type::<VadThresholdOutOfRange>(),
-    )?;
-
-    m.add("VadModelLoadFailed", py.get_type::<VadModelLoadFailed>())?;
-
-    m.add("OrtError", py.get_type::<OrtError>())?;
-    m.add("OrtInitFailed", py.get_type::<OrtInitFailed>())?;
-    m.add(
-        "OrtSessionBuildFailed",
-        py.get_type::<OrtSessionBuildFailed>(),
-    )?;
-    m.add(
-        "OrtThreadsConfigFailed",
-        py.get_type::<OrtThreadsConfigFailed>(),
-    )?;
-    m.add(
-        "OrtTensorCreateFailed",
-        py.get_type::<OrtTensorCreateFailed>(),
-    )?;
-    m.add(
-        "OrtTensorExtractFailed",
-        py.get_type::<OrtTensorExtractFailed>(),
-    )?;
-    m.add("OrtInferenceFailed", py.get_type::<OrtInferenceFailed>())?;
-
-    m.add("OrtPathError", py.get_type::<OrtPathError>())?;
-    m.add("OrtLoadFailed", py.get_type::<OrtLoadFailed>())?;
-    m.add("OrtPathInvalid", py.get_type::<OrtPathInvalid>())?;
-
-    Ok(())
-}
-
-// ---------------------------------------------------------------------------
 // Module entry point.
+//
+// Exception classes are not registered as module attributes here. They live
+// in pure Python at decibri.exceptions; to_py_err looks them up via
+// exception_class() at first use and caches the lookup.
 // ---------------------------------------------------------------------------
 
 #[pymodule]
 fn _decibri(m: &Bound<'_, PyModule>) -> PyResult<()> {
-    let py = m.py();
-
     m.add_class::<VersionInfo>()?;
     m.add_class::<DeviceInfo>()?;
     m.add_class::<OutputDeviceInfo>()?;
     m.add_class::<DecibriBridge>()?;
     m.add_class::<DecibriOutputBridge>()?;
-
-    register_exceptions(py, m)?;
 
     Ok(())
 }

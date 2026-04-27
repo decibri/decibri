@@ -4,89 +4,20 @@ Matches the Rust surface in ``bindings/python/src/lib.rs``. Kept alongside
 the compiled ``.pyd`` / ``.so`` so mypy and IDEs see types without loading
 the extension. Update this file when the Rust surface changes.
 
-Exception classes are re-exported from ``decibri.exceptions`` to keep the
-hierarchy declared in one place. The Rust extension registers exception
-classes by the same names as module attributes via ``create_exception!``
-plus ``register_exceptions``; mypy treats those references as the same
-types as the pure-Python classes for static analysis purposes.
+Exception classes are NOT re-exported on this module. They live exclusively
+at ``decibri.exceptions``; ``to_py_err`` in the Rust binding raises instances
+of those pure-Python classes via ``PyErr::from_type``. Consumers should
+import exceptions from ``decibri`` (after Commit 6 re-export) or directly
+from ``decibri.exceptions``.
 """
 
 from pathlib import Path
 
-# Exception re-exports: 31 classes mirror the runtime hierarchy that
-# the Rust extension registers via register_exceptions in lib.rs.
-from decibri.exceptions import (
-    AlreadyRunning,
-    CaptureStreamClosed,
-    ChannelsOutOfRange,
-    DecibriError,
-    DeviceEnumerationFailed,
-    DeviceIndexOutOfRange,
-    DeviceNotFound,
-    FramesPerBufferOutOfRange,
-    InvalidFormat,
-    MultipleDevicesMatch,
-    NoMicrophoneFound,
-    NoOutputDeviceFound,
-    NotAnInputDevice,
-    OrtError,
-    OrtInferenceFailed,
-    OrtInitFailed,
-    OrtLoadFailed,
-    OrtPathError,
-    OrtPathInvalid,
-    OrtSessionBuildFailed,
-    OrtTensorCreateFailed,
-    OrtTensorExtractFailed,
-    OrtThreadsConfigFailed,
-    OutputDeviceNotFound,
-    OutputStreamClosed,
-    PermissionDenied,
-    SampleRateOutOfRange,
-    StreamOpenFailed,
-    StreamStartFailed,
-    VadModelLoadFailed,
-    VadSampleRateUnsupported,
-    VadThresholdOutOfRange,
-)
-
 __all__ = [
-    "AlreadyRunning",
-    "CaptureStreamClosed",
-    "ChannelsOutOfRange",
     "DecibriBridge",
-    "DecibriError",
     "DecibriOutputBridge",
-    "DeviceEnumerationFailed",
-    "DeviceIndexOutOfRange",
     "DeviceInfo",
-    "DeviceNotFound",
-    "FramesPerBufferOutOfRange",
-    "InvalidFormat",
-    "MultipleDevicesMatch",
-    "NoMicrophoneFound",
-    "NoOutputDeviceFound",
-    "NotAnInputDevice",
-    "OrtError",
-    "OrtInferenceFailed",
-    "OrtInitFailed",
-    "OrtLoadFailed",
-    "OrtPathError",
-    "OrtPathInvalid",
-    "OrtSessionBuildFailed",
-    "OrtTensorCreateFailed",
-    "OrtTensorExtractFailed",
-    "OrtThreadsConfigFailed",
     "OutputDeviceInfo",
-    "OutputDeviceNotFound",
-    "OutputStreamClosed",
-    "PermissionDenied",
-    "SampleRateOutOfRange",
-    "StreamOpenFailed",
-    "StreamStartFailed",
-    "VadModelLoadFailed",
-    "VadSampleRateUnsupported",
-    "VadThresholdOutOfRange",
     "VersionInfo",
 ]
 

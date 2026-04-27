@@ -39,7 +39,7 @@ from typing import Iterator
 
 from typing_extensions import Self
 
-from decibri import _decibri
+from decibri import _decibri, exceptions
 from decibri._decibri import DeviceInfo, OutputDeviceInfo, VersionInfo
 
 __all__ = ["Decibri", "DecibriOutput", "DeviceInfo", "OutputDeviceInfo", "VersionInfo"]
@@ -229,7 +229,7 @@ class Decibri:
         ort_library_path: str | Path | None = None,
     ) -> None:
         if format not in _VALID_FORMATS:
-            raise _decibri.InvalidFormat(
+            raise exceptions.InvalidFormat(
                 f"format must be 'int16' or 'float32'; got {format!r}"
             )
         if vad_mode not in _VALID_MODES:
@@ -417,7 +417,7 @@ class DecibriOutput:
         device: int | str | None = None,
     ) -> None:
         if format not in _VALID_FORMATS:
-            raise _decibri.InvalidFormat(
+            raise exceptions.InvalidFormat(
                 f"format must be 'int16' or 'float32'; got {format!r}"
             )
         self._bridge = _decibri.DecibriOutputBridge(
