@@ -30,6 +30,7 @@ Architectural notes:
 
 from __future__ import annotations
 
+import importlib.resources
 import math
 import struct
 import time
@@ -251,17 +252,38 @@ class Decibri:
             )
 
         # Resolve model_path to an absolute string for the bridge.
+        # User-supplied path takes precedence. When Silero VAD is requested
+        # without an explicit path, fall back to the model bundled with the
+        # wheel via importlib.resources. Mirrors the Node binding's pattern
+        # (decibri.js:159-171) which resolves __dirname/../models/silero_vad.onnx
+        # before passing to the native bridge.
         resolved_model_path: str | None = None
         if model_path is not None:
             resolved_model_path = str(Path(model_path))
         elif vad and vad_mode == "silero":
-            # Silero requires a model. Node auto-resolves a bundled default
-            # via require.resolve(); Python equivalent uses importlib.resources
-            # if a bundled model ships with the wheel. For 0.1.0a1 we require
-            # explicit model_path when vad_mode='silero'.
-            raise ValueError(
-                "model_path is required when vad=True and vad_mode='silero'"
-            )
+            try:
+                model_resource = (
+                    importlib.resources.files("decibri")
+                    / "models"
+                    / "silero_vad.onnx"
+                )
+                # For editable installs and standard wheel installs, this is
+                # a direct filesystem path. Zipped-wheel deployments would
+                # require importlib.resources.as_file() context manager;
+                # deferred until that case becomes relevant for decibri.
+                if not model_resource.is_file():
+                    raise FileNotFoundError(
+                        f"Bundled Silero model resource exists but is not a "
+                        f"file: {model_resource}"
+                    )
+                resolved_model_path = str(model_resource)
+            except (FileNotFoundError, ModuleNotFoundError, AttributeError) as exc:
+                raise ValueError(
+                    "model_path was not provided and the bundled Silero "
+                    "model could not be located in the installed wheel. "
+                    "Ensure the models/ directory was included during "
+                    "installation, or pass model_path explicitly."
+                ) from exc
 
         resolved_ort_path: str | None = None
         if ort_library_path is not None:
