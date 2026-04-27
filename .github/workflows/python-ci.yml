@@ -26,17 +26,49 @@ concurrency:
   group: python-ci-${{ github.ref }}
   cancel-in-progress: true
 
+env:
+  # Required for maturin abi3 builds on Python 3.14 hosts targeting py310 abi3.
+  # See PyO3 issue #5505 (https://github.com/PyO3/pyo3/issues/5505). Without
+  # this opt-in, PyO3 0.28 refuses abi3 wheel builds when the build-host
+  # Python is newer than the abi3 target, even though the abi3 contract
+  # guarantees forward compatibility. Setting this at workflow level applies
+  # to every matrix entry; it is a no-op on Python 3.10 through 3.13 build
+  # hosts and only takes effect for the 3.14 entries.
+  PYO3_USE_ABI3_FORWARD_COMPATIBILITY: "1"
+
 jobs:
   python-ci:
-    name: Build & Test (ubuntu-latest, Python 3.10)
-    runs-on: ubuntu-latest
+    name: Build & Test (${{ matrix.os }}, Python ${{ matrix.python-version }})
+    runs-on: ${{ matrix.os }}
     timeout-minutes: 20
+    strategy:
+      # fail-fast cancels sibling matrix entries on first failure. CI tests a
+      # single unit (does the wheel build and pass tests across the supported
+      # platform / runtime grid?); a failure on any entry is the whole-matrix
+      # signal. Saves runner minutes when one entry surfaces a regression.
+      fail-fast: true
+      matrix:
+        # OS matrix mirrors release.yml's cross-platform precedent:
+        # - ubuntu-latest         (x86_64-unknown-linux-gnu)
+        # - ubuntu-24.04-arm      (aarch64-unknown-linux-gnu)
+        # - windows-latest        (x86_64-pc-windows-msvc)
+        # - macos-14              (aarch64-apple-darwin; Apple Silicon only,
+        #                          no Intel coverage matching release.yml)
+        # macos-14 is pinned (not macos-latest) for consistency with
+        # release.yml; pin-bumping is a deliberate cross-workflow action.
+        # ubuntu-24.04-arm is the explicit pin for native ARM64 runners.
+        os: [ubuntu-latest, ubuntu-24.04-arm, windows-latest, macos-14]
+        # Python version matrix. Floor 3.10 per pyproject.toml requires-python.
+        # 3.14 GA'd 2025-10-07; well-seasoned by Phase 2 ship. abi3 contract
+        # means one wheel covers all five runtimes; the matrix verifies the
+        # contract empirically against actual interpreters.
+        python-version: ["3.10", "3.11", "3.12", "3.13", "3.14"]
     env:
-      # abi3 floor. If the wheel works on 3.10 it works on 3.11 through 3.14
-      # by the abi3 contract (one wheel, many runtimes). Phase 4 will add an
-      # independent cross-version matrix (3.10, 3.12, 3.14) to verify that
-      # contract against actual interpreters.
-      UV_PYTHON: "3.10"
+      # Drives uv's interpreter selection per matrix entry. Replaces the
+      # previous workflow-wide UV_PYTHON: "3.10" pin (single-version CI was
+      # the abi3-floor canary; the matrix now exercises every supported
+      # runtime explicitly).
+      UV_PYTHON: ${{ matrix.python-version }}
     # Action pin policy: third-party actions pinned to immutable commit SHAs
     # with a `# vX.Y.Z` version comment that dependabot parses for updates.
     # Floating major tags (@v6, @v8) were the attack vector for the 2025
@@ -56,9 +88,15 @@ jobs:
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
 
-      - name: Install libasound2-dev
+      - name: Install libasound2-dev (Linux only)
         # cpal (transitive via decibri core) needs ALSA dev headers on Linux.
-        # Same system dep the Rust test-rust job in ci.yml installs.
+        # Same system dep the Rust test-rust job in ci.yml installs. macOS
+        # provides CoreAudio via system frameworks; Windows provides WASAPI
+        # via the Windows SDK; neither needs a system package install.
+        # `runner.os` is one of Linux / Windows / macOS regardless of
+        # architecture, so this single conditional covers both
+        # ubuntu-latest (x64) and ubuntu-24.04-arm (ARM64).
+        if: runner.os == 'Linux'
         run: sudo apt-get update && sudo apt-get install -y libasound2-dev
 
       - uses: dtolnay/rust-toolchain@stable
@@ -76,12 +114,12 @@ jobs:
           enable-cache: true
           cache-dependency-glob: "bindings/python/uv.lock"
 
-      - name: Install Python 3.10
-        # Pinned explicitly to the abi3 floor. The committed
-        # `bindings/python/.python-version` (3.14) is the dev-machine pin;
-        # CI intentionally deviates to exercise the stable-ABI contract at
-        # its lowest supported runtime.
-        run: uv python install 3.10
+      - name: Install Python ${{ matrix.python-version }}
+        # uv ships pre-built Python interpreters for every supported
+        # platform (linux-x64, linux-aarch64, darwin-aarch64, win-x64),
+        # so this single command works across all four matrix OSes
+        # without per-OS conditionals.
+        run: uv python install ${{ matrix.python-version }}
 
       - name: Sync dev environment (locked)
         working-directory: bindings/python
@@ -98,9 +136,19 @@ jobs:
 
       - name: Run pytest
         working-directory: bindings/python
+        # GitHub Actions sets CI=true automatically; conftest.py auto-skips
+        # the requires_audio_input / requires_audio_output / requires_bundled_ort
+        # markers under that signal. CI runs only the no-hardware subset
+        # (~84 tests of the 107 in the suite).
         run: uv run pytest -v
 
-      - name: Run mypy --strict
+      - name: Run mypy --strict (Linux only)
+        # mypy strict is identical regardless of OS; running it on every
+        # matrix entry would surface the same errors four times for no
+        # additional signal. Pinned to Linux (both x64 and ARM64) because
+        # both share the canonical type-check environment; macOS / Windows
+        # entries skip this step.
+        if: runner.os == 'Linux'
         working-directory: bindings/python
         run: uv run mypy --strict python/
 
@@ -109,7 +157,7 @@ jobs:
         # Validates the release-profile abi3 wheel builds end-to-end,
         # separate from the dev-profile `maturin develop` above. Catches
         # release-only issues (lto, strip, codegen-units = 1) before they'd
-        # surface during Phase 5 TestPyPI publish. Adds ~30s; acceptable
-        # cost for the pre-publish insurance. Artifact not uploaded;
-        # Phase 3 adds the cross-platform wheel upload matrix.
+        # surface during Phase 5 TestPyPI publish. Adds ~30s per matrix
+        # entry; acceptable cost for the pre-publish insurance. Artifact
+        # not uploaded; Phase 3 adds the cross-platform wheel upload matrix.
         run: uv run maturin build --release
