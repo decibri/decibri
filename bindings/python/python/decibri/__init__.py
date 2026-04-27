@@ -1,12 +1,98 @@
 """decibri Python bindings.
 
-Phase 1 scaffold. Public surface grows through Phases 2-4. Use
-``decibri.DecibriBridge.version()`` for runtime version information and
-``decibri.__version__`` for the installed wheel version.
+Cross-platform audio capture, output, and voice activity detection.
+
+Phase 2 surface. The full sync API is available; numpy support is held
+for Phase 3, async support held for Phase 3.
 """
 
-from decibri._decibri import DecibriBridge, VersionInfo
 from decibri._classes import Decibri, DecibriOutput
+from decibri._decibri import (
+    DecibriBridge,
+    DecibriOutputBridge,
+    DeviceInfo,
+    OutputDeviceInfo,
+    VersionInfo,
+)
+from decibri.exceptions import (
+    AlreadyRunning,
+    CaptureStreamClosed,
+    ChannelsOutOfRange,
+    DecibriError,
+    DeviceEnumerationFailed,
+    DeviceIndexOutOfRange,
+    DeviceNotFound,
+    FramesPerBufferOutOfRange,
+    InvalidFormat,
+    MultipleDevicesMatch,
+    NoMicrophoneFound,
+    NoOutputDeviceFound,
+    NotAnInputDevice,
+    OrtError,
+    OrtInferenceFailed,
+    OrtInitFailed,
+    OrtLoadFailed,
+    OrtPathError,
+    OrtPathInvalid,
+    OrtSessionBuildFailed,
+    OrtTensorCreateFailed,
+    OrtTensorExtractFailed,
+    OrtThreadsConfigFailed,
+    OutputDeviceNotFound,
+    OutputStreamClosed,
+    PermissionDenied,
+    SampleRateOutOfRange,
+    StreamOpenFailed,
+    StreamStartFailed,
+    VadModelLoadFailed,
+    VadSampleRateUnsupported,
+    VadThresholdOutOfRange,
+)
 
-__all__ = ["Decibri", "DecibriBridge", "DecibriOutput", "VersionInfo"]
 __version__ = "0.1.0a1"
+
+__all__ = [
+    # Public Python wrapper classes
+    "Decibri",
+    "DecibriOutput",
+    # Internal pyclasses (advanced use)
+    "DecibriBridge",
+    "DecibriOutputBridge",
+    # Value types
+    "DeviceInfo",
+    "OutputDeviceInfo",
+    "VersionInfo",
+    # Exception hierarchy (32 classes)
+    "AlreadyRunning",
+    "CaptureStreamClosed",
+    "ChannelsOutOfRange",
+    "DecibriError",
+    "DeviceEnumerationFailed",
+    "DeviceIndexOutOfRange",
+    "DeviceNotFound",
+    "FramesPerBufferOutOfRange",
+    "InvalidFormat",
+    "MultipleDevicesMatch",
+    "NoMicrophoneFound",
+    "NoOutputDeviceFound",
+    "NotAnInputDevice",
+    "OrtError",
+    "OrtInferenceFailed",
+    "OrtInitFailed",
+    "OrtLoadFailed",
+    "OrtPathError",
+    "OrtPathInvalid",
+    "OrtSessionBuildFailed",
+    "OrtTensorCreateFailed",
+    "OrtTensorExtractFailed",
+    "OrtThreadsConfigFailed",
+    "OutputDeviceNotFound",
+    "OutputStreamClosed",
+    "PermissionDenied",
+    "SampleRateOutOfRange",
+    "StreamOpenFailed",
+    "StreamStartFailed",
+    "VadModelLoadFailed",
+    "VadSampleRateUnsupported",
+    "VadThresholdOutOfRange",
+]
