@@ -48,7 +48,10 @@ jobs:
       # signal. Saves runner minutes when one entry surfaces a regression.
       fail-fast: true
       matrix:
-        # OS matrix mirrors release.yml's cross-platform precedent:
+        # PR runs: 1 OS x 3 Python (floor, middle, ceiling) for fast feedback.
+        # Push and workflow_dispatch: full 4 OS x 5 Python matrix.
+        #
+        # OS matrix (full) mirrors release.yml's cross-platform precedent:
         # - ubuntu-latest         (x86_64-unknown-linux-gnu)
         # - ubuntu-24.04-arm      (aarch64-unknown-linux-gnu)
         # - windows-latest        (x86_64-pc-windows-msvc)
@@ -57,12 +60,19 @@ jobs:
         # macos-14 is pinned (not macos-latest) for consistency with
         # release.yml; pin-bumping is a deliberate cross-workflow action.
         # ubuntu-24.04-arm is the explicit pin for native ARM64 runners.
-        os: [ubuntu-latest, ubuntu-24.04-arm, windows-latest, macos-14]
-        # Python version matrix. Floor 3.10 per pyproject.toml requires-python.
-        # 3.14 GA'd 2025-10-07; well-seasoned by Phase 2 ship. abi3 contract
-        # means one wheel covers all five runtimes; the matrix verifies the
-        # contract empirically against actual interpreters.
-        python-version: ["3.10", "3.11", "3.12", "3.13", "3.14"]
+        #
+        # Python version matrix (full): floor 3.10 per pyproject.toml
+        # requires-python. 3.14 GA'd 2025-10-07; well-seasoned by Phase 2
+        # ship. abi3 contract means one wheel covers all five runtimes;
+        # the matrix verifies the contract empirically against actual
+        # interpreters. PR subset (3.10, 3.12, 3.14) covers floor, middle,
+        # and ceiling; abi3 makes the 3.11 and 3.13 columns post-merge
+        # canaries rather than per-PR gates.
+        #
+        # fromJSON(...) wrappers are required: GitHub Actions expression
+        # results are strings, but matrix axes must be arrays.
+        os: ${{ fromJSON(github.event_name == 'pull_request' && '["ubuntu-latest"]' || '["ubuntu-latest", "ubuntu-24.04-arm", "windows-latest", "macos-14"]') }}
+        python-version: ${{ fromJSON(github.event_name == 'pull_request' && '["3.10", "3.12", "3.14"]' || '["3.10", "3.11", "3.12", "3.13", "3.14"]') }}
     env:
       # Drives uv's interpreter selection per matrix entry. Replaces the
       # previous workflow-wide UV_PYTHON: "3.10" pin (single-version CI was
