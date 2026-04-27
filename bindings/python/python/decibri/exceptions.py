@@ -162,6 +162,10 @@ class OrtThreadsConfigFailed(OrtError):
 class VadModelLoadFailed(OrtError):
     """Raised when loading the Silero VAD ONNX model fails."""
 
+    def __init__(self, msg: str, path: str) -> None:
+        super().__init__(msg)
+        self.path = path
+
 
 class OrtInferenceFailed(OrtError):
     """Raised when ORT inference produces an error."""
@@ -206,6 +210,10 @@ class OrtLoadFailed(OrtPathError):
     The `path` attribute on the exception identifies which path failed.
     """
 
+    def __init__(self, msg: str, path: str) -> None:
+        super().__init__(msg)
+        self.path = path
+
 
 class OrtPathInvalid(OrtPathError):
     """Raised when a library path failed decibri's pre-check before ORT saw it.
@@ -218,3 +226,8 @@ class OrtPathInvalid(OrtPathError):
 
     The `path` attribute on the exception identifies which path failed.
     """
+
+    def __init__(self, msg: str, path: str, reason: str) -> None:
+        super().__init__(msg)
+        self.path = path
+        self.reason = reason

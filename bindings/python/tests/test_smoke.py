@@ -43,10 +43,11 @@ def test_version_portaudio_matches_node_binding() -> None:
     assert decibri.DecibriBridge.version().portaudio == "cpal 0.17"
 
 
-def test_version_info_repr() -> None:
+def test_version_info_fields() -> None:
     info = decibri.DecibriBridge.version()
-    rep = repr(info)
-    assert rep == "VersionInfo(decibri='3.3.2', portaudio='cpal 0.17')"
+    assert info.decibri == "3.3.2"
+    assert info.portaudio == "cpal 0.17"
+    assert info.binding == "0.1.0a1"
 
 
 def test_version_info_is_frozen() -> None:
