@@ -33,6 +33,8 @@ use pyo3::prelude::*;
 use pyo3::sync::PyOnceLock;
 use pyo3::types::{PyBytes, PyModule, PyType};
 
+use pyo3_async_runtimes::tokio::future_into_py;
+
 use decibri::capture::{AudioCapture, AudioChunk, CaptureConfig, CaptureStream};
 use decibri::device::{
     enumerate_input_devices, enumerate_output_devices, DeviceInfo as CoreDeviceInfo,
@@ -504,6 +506,32 @@ fn build_device_selector(device: Option<&Bound<'_, PyAny>>) -> PyResult<DeviceSe
 }
 
 // ---------------------------------------------------------------------------
+// Phase 5 Step 1 empirical smoke: pyo3-async-runtimes integration probe.
+//
+// pyo3-async-runtimes' docs assume a binary entry point with
+// #[pyo3_async_runtimes::tokio::main]. Decibri is a cdylib (Python extension
+// module) with no main() to attribute, so we rely on the crate's lazy-init
+// path. This pyfunction is the persistent regression test that the lazy init
+// works in our context (locked decision Q4 of phase-5-async-support.md). If
+// a future pyo3-async-runtimes upgrade breaks the runtime init or
+// cancellation propagation primitives, the matching tests in
+// tests/test_async_smoke.py fail first and surface the regression at the
+// build-pipeline level rather than at AsyncDecibri integration time.
+//
+// Returns a Python awaitable that resolves to 42 after a 50 ms tokio sleep.
+// Underscored name marks it as internal; not part of the public API.
+// ---------------------------------------------------------------------------
+
+#[pyfunction]
+#[pyo3(name = "_async_smoke")]
+fn async_smoke(py: Python<'_>) -> PyResult<Bound<'_, PyAny>> {
+    future_into_py(py, async {
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        Ok(42_i64)
+    })
+}
+
+// ---------------------------------------------------------------------------
 // DecibriBridge: stateful capture pyclass.
 //
 // This pyclass is `Send + 'static` and may cross thread boundaries. The
@@ -908,6 +936,10 @@ fn _decibri(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<OutputDeviceInfo>()?;
     m.add_class::<DecibriBridge>()?;
     m.add_class::<DecibriOutputBridge>()?;
+
+    // Phase 5 Step 1 empirical smoke; see comment block above the
+    // async_smoke fn declaration for rationale.
+    m.add_function(wrap_pyfunction!(async_smoke, m)?)?;
 
     Ok(())
 }
