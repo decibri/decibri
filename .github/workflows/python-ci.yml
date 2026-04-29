@@ -18,6 +18,13 @@ on:
       - '.cargo/config.toml'
       - '.github/workflows/python-ci.yml'
   workflow_dispatch:
+  schedule:
+    # Nightly full 4 OS x 5 Python regression run at 04:00 UTC
+    # (14:00 AEST / 13:00 AEDT). Catches forward-compatibility issues
+    # that the reduced push matrix (3.10 floor + 3.14 ceiling only)
+    # does not exercise on every commit. Distinct from any other cron
+    # schedules in this repo (check-upstream.yml runs Sundays 22:00 UTC).
+    - cron: "0 4 * * *"
 
 concurrency:
   # Distinct from ci.yml's `ci-${{ github.ref }}` group so Rust-side CI and
@@ -48,8 +55,20 @@ jobs:
       # signal. Saves runner minutes when one entry surfaces a regression.
       fail-fast: true
       matrix:
-        # PR runs: 1 OS x 3 Python (floor, middle, ceiling) for fast feedback.
-        # Push and workflow_dispatch: full 4 OS x 5 Python matrix.
+        # Matrix sizing by trigger:
+        #   pull_request:      3 jobs  (ubuntu-latest x 3 Python: floor, middle, ceiling)
+        #   push:              8 jobs  (4 OS x 2 Python: 3.10 floor + 3.14 ceiling)
+        #   workflow_dispatch: 20 jobs (full 4 OS x 5 Python)
+        #   schedule (nightly): 20 jobs (full 4 OS x 5 Python)
+        #
+        # abi3-py310 wheels are forward-compatible by construction across
+        # Python 3.10-3.14 per CPython's stable ABI guarantee. Running 5
+        # Python versions on every push duplicates work for most regressions;
+        # floor + ceiling on push catches forward-compat issues that abi3
+        # does not shield (e.g., behavior changes in CPython runtime APIs
+        # that abi3 still inherits). The full matrix runs nightly and on
+        # manual dispatch for comprehensive coverage. Roughly 60% reduction
+        # in push-triggered CI minutes vs. the prior 4 OS x 5 Python shape.
         #
         # OS matrix (full) mirrors release.yml's cross-platform precedent:
         # - ubuntu-latest         (x86_64-unknown-linux-gnu)
@@ -64,15 +83,15 @@ jobs:
         # Python version matrix (full): floor 3.10 per pyproject.toml
         # requires-python. 3.14 GA'd 2025-10-07; well-seasoned by Phase 2
         # ship. abi3 contract means one wheel covers all five runtimes;
-        # the matrix verifies the contract empirically against actual
-        # interpreters. PR subset (3.10, 3.12, 3.14) covers floor, middle,
-        # and ceiling; abi3 makes the 3.11 and 3.13 columns post-merge
-        # canaries rather than per-PR gates.
+        # the full matrix verifies the contract empirically against every
+        # supported interpreter. PR subset (3.10, 3.12, 3.14) covers floor,
+        # middle, and ceiling. Push subset (3.10, 3.14) covers floor and
+        # ceiling only; the middle three columns become nightly canaries.
         #
         # fromJSON(...) wrappers are required: GitHub Actions expression
         # results are strings, but matrix axes must be arrays.
         os: ${{ fromJSON(github.event_name == 'pull_request' && '["ubuntu-latest"]' || '["ubuntu-latest", "ubuntu-24.04-arm", "windows-latest", "macos-14"]') }}
-        python-version: ${{ fromJSON(github.event_name == 'pull_request' && '["3.10", "3.12", "3.14"]' || '["3.10", "3.11", "3.12", "3.13", "3.14"]') }}
+        python-version: ${{ fromJSON((github.event_name == 'workflow_dispatch' || github.event_name == 'schedule') && '["3.10", "3.11", "3.12", "3.13", "3.14"]' || github.event_name == 'pull_request' && '["3.10", "3.12", "3.14"]' || '["3.10", "3.14"]') }}
     env:
       # Drives uv's interpreter selection per matrix entry. Replaces the
       # previous workflow-wide UV_PYTHON: "3.10" pin (single-version CI was
