@@ -47,6 +47,36 @@ use decibri::vad::{SileroVad, VadConfig};
 use decibri::CPAL_VERSION;
 
 // ---------------------------------------------------------------------------
+// Compile-time assertion: both bridge pyclasses are Send + 'static.
+//
+// The 'static bound is what `pyo3_async_runtimes::tokio::future_into_py`
+// requires when capturing the bridge into an async closure (Phase 5
+// async surface). Asserting at compile time means a future change that
+// reintroduces a !Send field, or adds a non-static reference, fails the
+// build at the point of regression rather than at Phase 5 integration
+// time, and makes the regression's blast radius obvious from the error
+// message (it points at the new field).
+//
+// If this assertion fails to compile, look for a recently added field
+// on `DecibriBridge` or `DecibriOutputBridge` whose type is not
+// `Send + 'static`: raw `cpal::Stream` (use a sendable handle instead),
+// `Rc<_>` / `RefCell<_>` (use `Arc<_>` / `Mutex<_>`), `&'a T` for any
+// non-static lifetime (extract owned data instead).
+//
+// Sendability is empirically backed: the Rust core's `CaptureStream`
+// is asserted `Send + Sync` at `crates/decibri/src/capture.rs:459`
+// (compile-time, unconditional, runs on every CI platform), and the
+// documented `Send` contract for all public capture/output types lives
+// at `crates/decibri/src/lib.rs:119-140`.
+// ---------------------------------------------------------------------------
+
+const _: () = {
+    const fn assert_send_static<T: Send + 'static>() {}
+    let _ = assert_send_static::<DecibriBridge>;
+    let _ = assert_send_static::<DecibriOutputBridge>;
+};
+
+// ---------------------------------------------------------------------------
 // Exception class lookup.
 //
 // The 31-class hierarchy is defined once in pure Python at
@@ -476,6 +506,16 @@ fn build_device_selector(device: Option<&Bound<'_, PyAny>>) -> PyResult<DeviceSe
 // ---------------------------------------------------------------------------
 // DecibriBridge: stateful capture pyclass.
 //
+// This pyclass is `Send + 'static` and may cross thread boundaries. The
+// compile-time assertion at the top of this module enforces the property;
+// do not add a field whose type lacks `Send + 'static` without first
+// removing the assertion (which would also block Phase 5's async work).
+// Sendability comes from the Rust core's `CaptureStream` already being
+// `Send` (see `crates/decibri/src/lib.rs:119-140` for the contract and
+// `crates/decibri/src/capture.rs:459` for the unconditional compile-time
+// assertion). The bridge holds the stream directly; no pump thread or
+// channel proxy is needed.
+//
 // Owns:
 //   - capture_config: CaptureConfig (built from constructor args, retained
 //     for diagnostic introspection)
@@ -489,7 +529,7 @@ fn build_device_selector(device: Option<&Bound<'_, PyAny>>) -> PyResult<DeviceSe
 //     on each read() that runs Silero inference)
 // ---------------------------------------------------------------------------
 
-#[pyclass(module = "decibri._decibri", unsendable)]
+#[pyclass(module = "decibri._decibri")]
 struct DecibriBridge {
     capture_config: CaptureConfig,
     format: BindingSampleFormat,
@@ -712,6 +752,15 @@ impl DecibriBridge {
 // ---------------------------------------------------------------------------
 // DecibriOutputBridge: stateful output pyclass.
 //
+// This pyclass is `Send + 'static` and may cross thread boundaries; the
+// compile-time assertion at the top of this module enforces the property.
+// Sendability comes from the Rust core's `OutputStream` being `Send` per
+// the documented contract at `crates/decibri/src/lib.rs:119-140`. There
+// is no analogous compile-time assertion in `output.rs` (capture has one
+// at line 459); CI on the four-platform matrix is the empirical gate.
+// Do not add a field whose type lacks `Send + 'static` without first
+// removing the module-level assertion.
+//
 // Owns:
 //   - output_config: OutputConfig (no frames_per_buffer per F2)
 //   - format: BindingSampleFormat
@@ -719,7 +768,7 @@ impl DecibriBridge {
 //   - stream: Option<OutputStream>
 // ---------------------------------------------------------------------------
 
-#[pyclass(module = "decibri._decibri", unsendable)]
+#[pyclass(module = "decibri._decibri")]
 struct DecibriOutputBridge {
     output_config: OutputConfig,
     format: BindingSampleFormat,
