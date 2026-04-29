@@ -32,6 +32,16 @@ classifiers = [
     "Topic :: Multimedia :: Sound/Audio :: Capture/Recording",
 ]
 
+# Runtime dependencies. typing_extensions is required because
+# python/decibri/_classes.py imports `Self` from it for compatibility with
+# Python 3.10 (the abi3 floor); typing.Self only exists in 3.11+. The dev
+# group below pins the same package for the development environment, but
+# that group does not propagate into wheel metadata, so the runtime
+# declaration is the one that reaches end users via `pip install decibri`.
+dependencies = [
+    "typing-extensions>=4.15",
+]
+
 [project.urls]
 Homepage = "https://github.com/decibri/decibri"
 Repository = "https://github.com/decibri/decibri"
@@ -52,6 +62,14 @@ module-name = "decibri._decibri"
 bindings = "pyo3"
 include = [
     { path = "python/decibri/models/silero_vad.onnx", format = ["sdist", "wheel"] },
+    # Per-platform ONNX Runtime dynamic library bundled by python-ci.yml's
+    # download/extract step before maturin runs. Wheel-only: the dylib is
+    # platform-specific and source distributions must not embed prebuilt
+    # binaries. The directory is empty on dev installs (no manual ORT
+    # download); tests gated by the requires_bundled_ort marker auto-skip
+    # in that case. Glob pattern tolerates auditwheel/delocate hash-suffix
+    # renaming applied at wheel-repair time.
+    { path = "python/decibri/_ort/*", format = ["wheel"] },
 ]
 
 [tool.pytest.ini_options]

@@ -42,6 +42,14 @@ env:
   # to every matrix entry; it is a no-op on Python 3.10 through 3.13 build
   # hosts and only takes effect for the 3.14 entries.
   PYO3_USE_ABI3_FORWARD_COMPATIBILITY: "1"
+  # Single source of truth for the bundled ONNX Runtime version, mirroring
+  # release.yml's pattern (release.yml line 20). Read by the per-platform
+  # preflight + download steps below. Also parsed by check-upstream.yml's
+  # ONNX Runtime drift check (the workflow greps release.yml for
+  # ORT_VERSION; the Python wheel pipeline pins to the same value here).
+  # Update in lockstep with release.yml at every ort-crate upgrade per the
+  # workspace Cargo.toml maintainer comment (steps 2 and 3 of that comment).
+  ORT_VERSION: 1.24.4
 
 jobs:
   python-ci:
@@ -158,6 +166,137 @@ jobs:
         # `uv sync --dev` (no --locked) per CLAUDE.md Gate 6.
         run: uv sync --dev --locked
 
+      - name: Compute ORT platform metadata
+        id: ort-meta
+        shell: bash
+        # Maps RUNNER_OS + RUNNER_ARCH to the upstream ONNX Runtime
+        # tarball naming convention. The four expected combinations
+        # mirror release.yml's per-job matrix.ort_platform_slug values:
+        # win-x64, osx-arm64, linux-x64, linux-aarch64. python-ci.yml's
+        # matrix is conditional (sized by trigger) so the slug cannot be
+        # carried as a matrix dimension; computing it here keeps a single
+        # source of truth and lets the preflight + download steps below
+        # share one URL.
+        run: |
+          case "${RUNNER_OS}-${RUNNER_ARCH}" in
+            Linux-X64)    SLUG="linux-x64";     EXT="tgz" ;;
+            Linux-ARM64)  SLUG="linux-aarch64"; EXT="tgz" ;;
+            macOS-ARM64)  SLUG="osx-arm64";     EXT="tgz" ;;
+            Windows-X64)  SLUG="win-x64";       EXT="zip" ;;
+            *)
+              echo "ERROR: unsupported runner OS+arch combination: ${RUNNER_OS}-${RUNNER_ARCH}"
+              exit 1
+              ;;
+          esac
+          URL="https://github.com/microsoft/onnxruntime/releases/download/v${ORT_VERSION}/onnxruntime-${SLUG}-${ORT_VERSION}.${EXT}"
+          echo "slug=${SLUG}" >> "$GITHUB_OUTPUT"
+          echo "ext=${EXT}" >> "$GITHUB_OUTPUT"
+          echo "url=${URL}" >> "$GITHUB_OUTPUT"
+          echo "Resolved: ${URL}"
+
+      - name: Verify ONNX Runtime tarball availability
+        shell: bash
+        # Mirrors release.yml lines 131-143: HEAD-check the URL before
+        # the heavier download runs, so a Microsoft asset rename or yank
+        # surfaces immediately with a clear error message rather than as
+        # an opaque mid-build failure. Same pattern in production for the
+        # Node release pipeline since 3.0.
+        run: |
+          URL="${{ steps.ort-meta.outputs.url }}"
+          echo "Verifying: $URL"
+          if ! curl -sIfL --retry 3 --retry-delay 2 -o /dev/null "$URL"; then
+            echo "ERROR: expected ONNX Runtime tarball not available at $URL"
+            echo "This may mean Microsoft renamed release assets, delayed a release,"
+            echo "or the pinned ORT_VERSION no longer exists upstream."
+            echo "Check: https://github.com/microsoft/onnxruntime/releases/tag/v${ORT_VERSION}"
+            exit 1
+          fi
+          echo "OK: tarball is available"
+
+      - name: Download and extract ONNX Runtime (macOS)
+        if: runner.os == 'macOS'
+        shell: bash
+        # Mirrors release.yml lines 145-155. cp -L dereferences the
+        # symlink chain (libonnxruntime.dylib -> libonnxruntime.<ver>.dylib)
+        # so the bundled file is a real signed dylib, not a dangling link
+        # post-pip-install. Renamed to unversioned to match what the Python
+        # resolver looks for under python/decibri/_ort/.
+        run: |
+          SLUG="${{ steps.ort-meta.outputs.slug }}"
+          URL="${{ steps.ort-meta.outputs.url }}"
+          mkdir -p bindings/python/python/decibri/_ort
+          curl -sL --retry 3 --retry-delay 2 -o ort.tgz "$URL"
+          tar -xzf ort.tgz
+          SRC="onnxruntime-${SLUG}-${ORT_VERSION}"
+          cp -L "$SRC/lib/libonnxruntime.${ORT_VERSION}.dylib" bindings/python/python/decibri/_ort/libonnxruntime.dylib
+
+      - name: Verify libonnxruntime.dylib codesign (macOS, diagnostic)
+        if: runner.os == 'macOS'
+        continue-on-error: true
+        # Non-gating mirror of release.yml lines 157-167: cp -L on a real
+        # file preserves signed bytes but does not preserve the original
+        # filename the signature may be scoped to. Microsoft's upstream
+        # dylib is signed; this surfaces whether the rename invalidates
+        # the signature. On failure the step is marked red but the
+        # workflow proceeds.
+        run: codesign -v --verbose=2 bindings/python/python/decibri/_ort/libonnxruntime.dylib
+
+      - name: Download and extract ONNX Runtime (Linux)
+        if: runner.os == 'Linux'
+        shell: bash
+        # Mirrors release.yml lines 169-183. Two files copied: the main
+        # dylib (symlink-resolved) and libonnxruntime_providers_shared.so
+        # (kept under its exact upstream name). The main dylib dlopens
+        # the providers solib by basename via $ORIGIN RUNPATH at session
+        # creation; without it Linux SileroVad fails to load.
+        run: |
+          SLUG="${{ steps.ort-meta.outputs.slug }}"
+          URL="${{ steps.ort-meta.outputs.url }}"
+          mkdir -p bindings/python/python/decibri/_ort
+          curl -sL --retry 3 --retry-delay 2 -o ort.tgz "$URL"
+          tar -xzf ort.tgz
+          SRC="onnxruntime-${SLUG}-${ORT_VERSION}"
+          cp -L "$SRC/lib/libonnxruntime.so" bindings/python/python/decibri/_ort/libonnxruntime.so
+          cp "$SRC/lib/libonnxruntime_providers_shared.so" bindings/python/python/decibri/_ort/
+
+      - name: Download and extract ONNX Runtime (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        # Mirrors release.yml lines 185-195. The Windows zip ships
+        # onnxruntime.dll (no rename needed; upstream name matches what
+        # the Python resolver looks for) and onnxruntime_providers_shared.dll;
+        # we bundle only the main DLL, matching release.yml's proven Node
+        # distribution. CPU EP (the only path Phase 3 uses per master-plan
+        # Decision 1) does not load providers_shared on Windows. If a
+        # future GPU EP integration needs it, revisit.
+        run: |
+          $ProgressPreference = 'SilentlyContinue'
+          $url = "${{ steps.ort-meta.outputs.url }}"
+          New-Item -ItemType Directory -Force -Path bindings/python/python/decibri/_ort | Out-Null
+          Invoke-WebRequest -Uri $url -OutFile ort.zip -MaximumRetryCount 3 -RetryIntervalSec 2
+          Expand-Archive -Path ort.zip -DestinationPath .
+          $src = "onnxruntime-${{ steps.ort-meta.outputs.slug }}-$env:ORT_VERSION"
+          Copy-Item "$src/lib/onnxruntime.dll" bindings/python/python/decibri/_ort/
+
+      - name: Inspect onnxruntime.dll imports (Windows, diagnostic)
+        if: runner.os == 'Windows'
+        continue-on-error: true
+        shell: pwsh
+        # Non-gating mirror of release.yml lines 197-217. dumpbin ships
+        # under VS install path and is not on default PATH on
+        # windows-latest runners. Output (the DLL's import table) goes to
+        # the log so unexpected dependencies (odd MSVC runtime, Windows
+        # SDK DLLs, etc.) surface before users hit "cannot find library
+        # X" at runtime.
+        run: |
+          $dumpbin = Get-ChildItem "C:\Program Files*\Microsoft Visual Studio\*\*\VC\Tools\MSVC\*\bin\Hostx64\x64\dumpbin.exe" -ErrorAction SilentlyContinue | Select-Object -First 1
+          if (-not $dumpbin) {
+            Write-Host "dumpbin.exe not found under the Visual Studio install path"
+            exit 1
+          }
+          Write-Host "Using dumpbin: $($dumpbin.FullName)"
+          & $dumpbin.FullName /imports bindings/python/python/decibri/_ort/onnxruntime.dll
+
       - name: Build extension (maturin develop, dev profile)
         working-directory: bindings/python
         # Installs the extension into the synced venv for pytest.
@@ -166,9 +305,14 @@ jobs:
       - name: Run pytest
         working-directory: bindings/python
         # GitHub Actions sets CI=true automatically; conftest.py auto-skips
-        # the requires_audio_input / requires_audio_output / requires_bundled_ort
-        # markers under that signal. CI runs only the no-hardware subset
-        # (~84 tests of the 107 in the suite).
+        # the audio hardware markers (requires_audio_input,
+        # requires_audio_output) under that signal because runners have no
+        # real audio devices. The requires_bundled_ort marker uses a
+        # separate auto-skip policy keyed on whether
+        # bindings/python/python/decibri/_ort/ contains a platform dylib;
+        # that directory is populated by the "Download and extract ONNX
+        # Runtime" step earlier in this job, so bundled-ORT tests run
+        # here rather than skip.
         run: uv run pytest -v
 
       - name: Run mypy --strict (Linux only)
@@ -183,10 +327,79 @@ jobs:
 
       - name: Build release wheel (smoke; not uploaded)
         working-directory: bindings/python
+        shell: bash
         # Validates the release-profile abi3 wheel builds end-to-end,
         # separate from the dev-profile `maturin develop` above. Catches
         # release-only issues (lto, strip, codegen-units = 1) before they'd
         # surface during Phase 5 TestPyPI publish. Adds ~30s per matrix
         # entry; acceptable cost for the pre-publish insurance. Artifact
         # not uploaded; Phase 3 adds the cross-platform wheel upload matrix.
-        run: uv run maturin build --release
+        #
+        # Clean target/wheels/ before invoking maturin. Swatinem/rust-cache
+        # caches the entire target/ tree, including target/wheels/. When a
+        # cache key matches across runs (e.g. neither dependencies nor
+        # toolchain changed), restoration brings back stale .whl files from
+        # earlier builds. The install-test step's
+        # `ls target/wheels/decibri-*.whl | head -1` picks alphabetically,
+        # which can select a stale linux_x86_64 wheel over the freshly
+        # built manylinux_2_38_x86_64 wheel. Wiping target/wheels/ here
+        # leaves only the current build's output for downstream steps to
+        # find. The Rust build cache in target/release/ and target/debug/
+        # is preserved (we only delete target/wheels/), so build times
+        # are unaffected.
+        run: |
+          rm -rf "${GITHUB_WORKSPACE}/target/wheels/"
+          uv run maturin build --release
+
+      - name: Wheel install-test (Phase 3 acceptance gate)
+        working-directory: bindings/python
+        shell: bash
+        # Catches the original Phase 2 gap: "wheel built fine, but breaks
+        # on user install". A clean venv installs the just-built wheel
+        # path-based (NOT from any registry) and runs the ORT bundling
+        # test suite against it. No editable install in this venv, so
+        # `import decibri` resolves to the wheel's installed layout
+        # exactly as a user's `pip install decibri` would. The
+        # requires_bundled_ort tests must RUN (not skip) here; if they
+        # skip, the wheel is missing the bundled _ort/ and the gate fails.
+        #
+        # uv venv creates Scripts/python.exe on Windows and bin/python on
+        # Unix; we resolve the platform-specific path explicitly to keep
+        # the rest of the step OS-neutral. set -euo pipefail surfaces any
+        # missing wheel as a hard failure rather than a silent no-op.
+        run: |
+          set -euo pipefail
+          # Wheel path: maturin writes to the cargo workspace root's
+          # target/wheels/ regardless of where it was invoked from, because
+          # bindings/python is a workspace member. The install-test step's
+          # working-directory is bindings/python (so pytest finds tests/),
+          # so we resolve the wheel via $GITHUB_WORKSPACE rather than a
+          # relative path that depends on cwd.
+          WHEEL=$(ls "${GITHUB_WORKSPACE}/target/wheels/decibri-"*.whl | head -1)
+          if [ -z "$WHEEL" ]; then
+            echo "ERROR: no wheel found in ${GITHUB_WORKSPACE}/target/wheels/"
+            exit 1
+          fi
+          echo "Install-test target: $WHEEL"
+
+          # Wheel size soft alarm (Decision: 150 MB). Bundled wheels are
+          # expected at 30 to 50 MB; alert if anything triples that.
+          SIZE=$(wc -c < "$WHEEL")
+          echo "Wheel size: $((SIZE / 1024 / 1024)) MB ($SIZE bytes)"
+          if [ "$SIZE" -gt 157286400 ]; then
+            echo "WARNING: wheel exceeds 150 MB soft cap; investigate before merge."
+          fi
+
+          uv venv .install-test
+          if [ "$RUNNER_OS" = "Windows" ]; then
+            VENV_PY=".install-test/Scripts/python.exe"
+          else
+            VENV_PY=".install-test/bin/python"
+          fi
+          uv pip install --python "$VENV_PY" "$WHEEL" pytest
+
+          # Run the install-test pytest from the source tree but with the
+          # clean venv's python; pytest finds tests/test_ort_bundling.py
+          # under the source layout, while `import decibri` resolves to
+          # the wheel-installed package (no editable install in this venv).
+          "$VENV_PY" -m pytest tests/test_ort_bundling.py -v
