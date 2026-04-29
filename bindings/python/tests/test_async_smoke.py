@@ -52,7 +52,7 @@ async def test_async_smoke_returns_expected_value() -> None:
 
 @pytest.mark.asyncio
 async def test_async_smoke_cancellation_propagates() -> None:
-    """``asyncio.timeout`` raises ``TimeoutError`` before the 50 ms sleep completes.
+    """``asyncio.wait_for`` raises ``TimeoutError`` before the 50 ms sleep completes.
 
     ``TimeoutError`` is a subclass of ``asyncio.CancelledError`` in
     Python 3.11+, so this test exercises the locked abort-immediately
@@ -61,6 +61,13 @@ async def test_async_smoke_cancellation_propagates() -> None:
     Phase 5's cancellation design needs revision before the full async
     surface lands.
 
+    Note: ``asyncio.wait_for`` is used rather than ``asyncio.timeout``
+    because the latter was added in Python 3.11 and the abi3 floor is
+    Python 3.10. ``wait_for`` has been available since Python 3.4 and
+    raises ``asyncio.TimeoutError`` on expiry with the same semantics
+    for our purposes (cancels the awaited coroutine, surfaces the
+    cancellation as TimeoutError to the caller).
+
     Note: per Phase 5 plan Risk 2, ``tokio::task::spawn_blocking`` does
     not cooperatively cancel the underlying OS thread; the Python side
     sees ``CancelledError`` immediately while the Rust thread continues.
@@ -68,5 +75,4 @@ async def test_async_smoke_cancellation_propagates() -> None:
     is what the abort-immediately design contracts to.
     """
     with pytest.raises(asyncio.TimeoutError):
-        async with asyncio.timeout(0.025):
-            await _async_smoke()
+        await asyncio.wait_for(_async_smoke(), timeout=0.025)
