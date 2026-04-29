@@ -2,10 +2,11 @@
 
 Cross-platform audio capture, output, and voice activity detection.
 
-Phase 2 surface. The full sync API is available; numpy support is held
-for Phase 3, async support held for Phase 3.
+Phase 2 sync surface plus Phase 5 async surface (AsyncDecibri,
+AsyncDecibriOutput). NumPy zero-copy support is held for Phase 6.
 """
 
+from decibri._async_classes import AsyncDecibri, AsyncDecibriOutput
 from decibri._classes import Decibri, DecibriOutput
 from decibri._decibri import (
     DecibriBridge,
@@ -52,9 +53,12 @@ from decibri.exceptions import (
 __version__ = "0.1.0a1"
 
 __all__ = [
-    # Public Python wrapper classes
+    # Public Python wrapper classes (sync)
     "Decibri",
     "DecibriOutput",
+    # Public Python wrapper classes (async; Phase 5)
+    "AsyncDecibri",
+    "AsyncDecibriOutput",
     # Internal pyclasses (advanced use)
     "DecibriBridge",
     "DecibriOutputBridge",

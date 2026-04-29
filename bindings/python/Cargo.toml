@@ -65,7 +65,26 @@ pyo3 = { version = "0.28", features = [
     "generate-import-lib",
 ] }
 
-# pyo3-async-runtimes: deferred to Phase 3 per plan §7.2 decision 6. Phase 3
-# Claude: add `pyo3-async-runtimes = { version = "0.28", features =
-# ["tokio-runtime"] }` in the first commit that introduces an async method.
-# Version pin must match pyo3 minor at that time.
+# pyo3-async-runtimes powers the AsyncDecibri / AsyncDecibriOutput surfaces
+# (Phase 5). Pinned exactly to 0.28.0 because the crate is brand new (released
+# 2026-02-04) and version drift in the absence of a long stability track record
+# is a real risk; any minor-version bump should be a deliberate cross-workflow
+# action. The `tokio-runtime` feature selects the Tokio backend; `attributes`
+# enables the `#[pyo3_async_runtimes::tokio::main]` macro (we do not currently
+# use the macro from a cdylib context, but it is part of the standard feature
+# set and inert when unused).
+pyo3-async-runtimes = { version = "=0.28.0", features = ["tokio-runtime", "attributes"] }
+
+# tokio is the async runtime that pyo3-async-runtimes drives. Features:
+#   - `rt`: the runtime itself (required by pyo3-async-runtimes).
+#   - `rt-multi-thread`: the multi-thread executor used for spawn_blocking
+#     work; the AsyncDecibri wrapper dispatches the existing GIL-released
+#     sync calls through spawn_blocking so they do not block the runtime
+#     thread.
+#   - `sync`: tokio::sync::Mutex used by the AsyncDecibriBridge /
+#     AsyncOutputBridge wrappers around the sync bridges.
+#   - `time`: tokio::time::sleep used by the empirical smoke pyfunction in
+#     this crate's lib.rs.
+#   - `macros`: enables the proc-macro entry points (#[tokio::main] etc.)
+#     that pyo3-async-runtimes' attributes feature relies on internally.
+tokio = { version = "1", features = ["rt", "rt-multi-thread", "sync", "time", "macros"] }

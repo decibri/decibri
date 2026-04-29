@@ -12,8 +12,11 @@ from ``decibri.exceptions``.
 """
 
 from pathlib import Path
+from typing import Awaitable, Coroutine, Any
 
 __all__ = [
+    "AsyncDecibriBridge",
+    "AsyncOutputBridge",
     "DecibriBridge",
     "DecibriOutputBridge",
     "DeviceInfo",
@@ -156,3 +159,82 @@ class DecibriOutputBridge:
     def is_playing(self) -> bool: ...
     @staticmethod
     def devices() -> list[OutputDeviceInfo]: ...
+
+
+class AsyncDecibriBridge:
+    """Async wrapper around ``DecibriBridge`` (Phase 5).
+
+    Internal pyclass. Public ``AsyncDecibri`` wrapper lives in
+    ``decibri._async_classes``; consumers should construct
+    ``AsyncDecibri``, not ``AsyncDecibriBridge``, directly. Each method
+    that maps to a blocking sync method dispatches via
+    ``tokio::task::spawn_blocking`` and returns a Python awaitable.
+
+    Constructor signature matches ``DecibriBridge`` exactly. Construction
+    itself is sync (Python class instantiation is always sync) and may
+    block on ORT model load when ``vad=True and vad_mode='silero'``.
+
+    The non-blocking getters (``is_open``, ``vad_probability``,
+    ``vad_holdoff_ms``) are exposed as awaitables here because the Rust
+    binding implements them via ``future_into_py`` for uniformity. The
+    public ``AsyncDecibri`` wrapper provides synchronous-property access
+    backed by Python-side state tracking; consumers should prefer that
+    surface.
+    """
+
+    def __init__(
+        self,
+        sample_rate: int,
+        channels: int,
+        frames_per_buffer: int,
+        format: str,
+        device: int | str | None = None,
+        vad: bool = False,
+        vad_threshold: float = 0.5,
+        vad_mode: str = "silero",
+        vad_holdoff: int = 0,
+        model_path: str | Path | None = None,
+        numpy: bool = False,
+        ort_library_path: str | Path | None = None,
+    ) -> None: ...
+    def start(self) -> Coroutine[Any, Any, None]: ...
+    def stop(self) -> Coroutine[Any, Any, None]: ...
+    def read(
+        self, timeout_ms: int | None = None
+    ) -> Coroutine[Any, Any, bytes | None]: ...
+    @property
+    def is_open(self) -> Awaitable[bool]: ...
+    @property
+    def vad_probability(self) -> Awaitable[float]: ...
+    @property
+    def vad_holdoff_ms(self) -> Awaitable[int]: ...
+    @staticmethod
+    def devices() -> Coroutine[Any, Any, list[DeviceInfo]]: ...
+    @staticmethod
+    def version() -> Coroutine[Any, Any, VersionInfo]: ...
+
+
+class AsyncOutputBridge:
+    """Async wrapper around ``DecibriOutputBridge`` (Phase 5).
+
+    Internal pyclass. Public ``AsyncDecibriOutput`` wrapper lives in
+    ``decibri._async_classes``; consumers should construct
+    ``AsyncDecibriOutput``, not ``AsyncOutputBridge``, directly.
+    """
+
+    def __init__(
+        self,
+        sample_rate: int,
+        channels: int,
+        format: str,
+        device: int | str | None = None,
+    ) -> None: ...
+    def start(self) -> Coroutine[Any, Any, None]: ...
+    def stop(self) -> Coroutine[Any, Any, None]: ...
+    def close(self) -> Coroutine[Any, Any, None]: ...
+    def write(self, samples: bytes) -> Coroutine[Any, Any, None]: ...
+    def drain(self) -> Coroutine[Any, Any, None]: ...
+    @property
+    def is_playing(self) -> Awaitable[bool]: ...
+    @staticmethod
+    def devices() -> Coroutine[Any, Any, list[OutputDeviceInfo]]: ...
