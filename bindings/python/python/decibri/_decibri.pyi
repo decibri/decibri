@@ -19,7 +19,7 @@ if TYPE_CHECKING:
 
     # Phase 6: read returns bytes (default) or ndarray (numpy=True);
     # write accepts either. The runtime numpy dependency is optional.
-    SampleData = Union[bytes, "np.ndarray"]
+    SampleData = Union[bytes, "np.ndarray[Any, Any]"]
 else:
     SampleData = bytes
 

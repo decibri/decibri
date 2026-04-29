@@ -36,7 +36,7 @@ import struct
 import time
 from pathlib import Path
 from types import TracebackType
-from typing import TYPE_CHECKING, Iterator, Union, cast
+from typing import TYPE_CHECKING, Any, Iterator, Union, cast
 
 from typing_extensions import Self
 
@@ -48,7 +48,7 @@ if TYPE_CHECKING:
     # (pip install decibri[numpy]); using TYPE_CHECKING keeps the import
     # cost out of the default-install path while preserving mypy
     # narrowing for users who set numpy=True.
-    SampleData = Union[bytes, "np.ndarray"]
+    SampleData = Union[bytes, "np.ndarray[Any, Any]"]
 else:
     SampleData = bytes
 

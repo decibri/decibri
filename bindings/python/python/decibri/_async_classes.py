@@ -37,7 +37,7 @@ from __future__ import annotations
 import importlib.resources
 from pathlib import Path
 from types import TracebackType
-from typing import TYPE_CHECKING, AsyncIterator, Union, cast
+from typing import TYPE_CHECKING, Any, AsyncIterator, Union, cast
 
 from typing_extensions import Self
 
@@ -46,7 +46,7 @@ if TYPE_CHECKING:
 
     # Phase 6: read can return bytes (default) or ndarray (numpy=True);
     # write can accept either. Optional runtime numpy dependency.
-    SampleData = Union[bytes, "np.ndarray"]
+    SampleData = Union[bytes, "np.ndarray[Any, Any]"]
 else:
     SampleData = bytes
 
