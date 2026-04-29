@@ -94,13 +94,15 @@ def test_exception_intermediate_parents_importable() -> None:
 
 
 def test_public_surface_count() -> None:
-    """The public ``__all__`` enumerates the full Phase 2 surface (39 names).
+    """The public ``__all__`` enumerates the full sync + async surface (41 names).
 
-    Composition: 2 public wrappers + 2 internal pyclasses + 3 value types
-    + 32 exception classes (1 base + 20 direct subclasses + OrtError + 7
-    direct OrtError subclasses + OrtPathError + 2 OrtPathError subclasses).
+    Composition: 2 sync public wrappers (Decibri, DecibriOutput) + 2 async
+    public wrappers (AsyncDecibri, AsyncDecibriOutput; Phase 5) + 2 internal
+    pyclasses + 3 value types + 32 exception classes (1 base + 20 direct
+    subclasses + OrtError + 7 direct OrtError subclasses + OrtPathError +
+    2 OrtPathError subclasses).
     """
-    assert len(decibri.__all__) == 39
+    assert len(decibri.__all__) == 41
     for name in decibri.__all__:
         assert hasattr(decibri, name), f"__all__ lists {name!r} but it is not exported"
 

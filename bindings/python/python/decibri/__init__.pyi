@@ -1,5 +1,7 @@
 """Type stubs for the decibri Python package."""
 
+from decibri._async_classes import AsyncDecibri as AsyncDecibri
+from decibri._async_classes import AsyncDecibriOutput as AsyncDecibriOutput
 from decibri._classes import Decibri as Decibri
 from decibri._classes import DecibriOutput as DecibriOutput
 from decibri._decibri import DecibriBridge as DecibriBridge
