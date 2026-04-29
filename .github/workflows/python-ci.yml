@@ -353,9 +353,15 @@ jobs:
         # missing wheel as a hard failure rather than a silent no-op.
         run: |
           set -euo pipefail
-          WHEEL=$(ls target/wheels/decibri-*.whl | head -1)
+          # Wheel path: maturin writes to the cargo workspace root's
+          # target/wheels/ regardless of where it was invoked from, because
+          # bindings/python is a workspace member. The install-test step's
+          # working-directory is bindings/python (so pytest finds tests/),
+          # so we resolve the wheel via $GITHUB_WORKSPACE rather than a
+          # relative path that depends on cwd.
+          WHEEL=$(ls "${GITHUB_WORKSPACE}/target/wheels/decibri-"*.whl | head -1)
           if [ -z "$WHEEL" ]; then
-            echo "ERROR: no wheel found in target/wheels/"
+            echo "ERROR: no wheel found in ${GITHUB_WORKSPACE}/target/wheels/"
             exit 1
           fi
           echo "Install-test target: $WHEEL"
