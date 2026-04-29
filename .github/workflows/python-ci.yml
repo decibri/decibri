@@ -327,6 +327,7 @@ jobs:
 
       - name: Build release wheel (smoke; not uploaded)
         working-directory: bindings/python
+        shell: bash
         # Validates the release-profile abi3 wheel builds end-to-end,
         # separate from the dev-profile `maturin develop` above. Catches
         # release-only issues (lto, strip, codegen-units = 1) before they'd
