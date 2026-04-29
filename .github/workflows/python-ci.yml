@@ -333,7 +333,22 @@ jobs:
         # surface during Phase 5 TestPyPI publish. Adds ~30s per matrix
         # entry; acceptable cost for the pre-publish insurance. Artifact
         # not uploaded; Phase 3 adds the cross-platform wheel upload matrix.
-        run: uv run maturin build --release
+        #
+        # Clean target/wheels/ before invoking maturin. Swatinem/rust-cache
+        # caches the entire target/ tree, including target/wheels/. When a
+        # cache key matches across runs (e.g. neither dependencies nor
+        # toolchain changed), restoration brings back stale .whl files from
+        # earlier builds. The install-test step's
+        # `ls target/wheels/decibri-*.whl | head -1` picks alphabetically,
+        # which can select a stale linux_x86_64 wheel over the freshly
+        # built manylinux_2_38_x86_64 wheel. Wiping target/wheels/ here
+        # leaves only the current build's output for downstream steps to
+        # find. The Rust build cache in target/release/ and target/debug/
+        # is preserved (we only delete target/wheels/), so build times
+        # are unaffected.
+        run: |
+          rm -rf "${GITHUB_WORKSPACE}/target/wheels/"
+          uv run maturin build --release
 
       - name: Wheel install-test (Phase 3 acceptance gate)
         working-directory: bindings/python
