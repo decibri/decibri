@@ -305,9 +305,14 @@ jobs:
       - name: Run pytest
         working-directory: bindings/python
         # GitHub Actions sets CI=true automatically; conftest.py auto-skips
-        # the requires_audio_input / requires_audio_output / requires_bundled_ort
-        # markers under that signal. CI runs only the no-hardware subset
-        # (~84 tests of the 107 in the suite).
+        # the audio hardware markers (requires_audio_input,
+        # requires_audio_output) under that signal because runners have no
+        # real audio devices. The requires_bundled_ort marker uses a
+        # separate auto-skip policy keyed on whether
+        # bindings/python/python/decibri/_ort/ contains a platform dylib;
+        # that directory is populated by the "Download and extract ONNX
+        # Runtime" step earlier in this job, so bundled-ORT tests run
+        # here rather than skip.
         run: uv run pytest -v
 
       - name: Run mypy --strict (Linux only)
@@ -329,3 +334,50 @@ jobs:
         # entry; acceptable cost for the pre-publish insurance. Artifact
         # not uploaded; Phase 3 adds the cross-platform wheel upload matrix.
         run: uv run maturin build --release
+
+      - name: Wheel install-test (Phase 3 acceptance gate)
+        working-directory: bindings/python
+        shell: bash
+        # Catches the original Phase 2 gap: "wheel built fine, but breaks
+        # on user install". A clean venv installs the just-built wheel
+        # path-based (NOT from any registry) and runs the ORT bundling
+        # test suite against it. No editable install in this venv, so
+        # `import decibri` resolves to the wheel's installed layout
+        # exactly as a user's `pip install decibri` would. The
+        # requires_bundled_ort tests must RUN (not skip) here; if they
+        # skip, the wheel is missing the bundled _ort/ and the gate fails.
+        #
+        # uv venv creates Scripts/python.exe on Windows and bin/python on
+        # Unix; we resolve the platform-specific path explicitly to keep
+        # the rest of the step OS-neutral. set -euo pipefail surfaces any
+        # missing wheel as a hard failure rather than a silent no-op.
+        run: |
+          set -euo pipefail
+          WHEEL=$(ls target/wheels/decibri-*.whl | head -1)
+          if [ -z "$WHEEL" ]; then
+            echo "ERROR: no wheel found in target/wheels/"
+            exit 1
+          fi
+          echo "Install-test target: $WHEEL"
+
+          # Wheel size soft alarm (Decision: 150 MB). Bundled wheels are
+          # expected at 30 to 50 MB; alert if anything triples that.
+          SIZE=$(wc -c < "$WHEEL")
+          echo "Wheel size: $((SIZE / 1024 / 1024)) MB ($SIZE bytes)"
+          if [ "$SIZE" -gt 157286400 ]; then
+            echo "WARNING: wheel exceeds 150 MB soft cap; investigate before merge."
+          fi
+
+          uv venv .install-test
+          if [ "$RUNNER_OS" = "Windows" ]; then
+            VENV_PY=".install-test/Scripts/python.exe"
+          else
+            VENV_PY=".install-test/bin/python"
+          fi
+          uv pip install --python "$VENV_PY" "$WHEEL" pytest
+
+          # Run the install-test pytest from the source tree but with the
+          # clean venv's python; pytest finds tests/test_ort_bundling.py
+          # under the source layout, while `import decibri` resolves to
+          # the wheel-installed package (no editable install in this venv).
+          "$VENV_PY" -m pytest tests/test_ort_bundling.py -v
