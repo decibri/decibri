@@ -31,12 +31,15 @@ use std::collections::HashMap;
 
 use tokio::sync::Mutex;
 
-use pyo3::exceptions::{PyNotImplementedError, PyRuntimeError, PyValueError};
+use pyo3::exceptions::{PyRuntimeError, PyTypeError, PyValueError};
 use pyo3::prelude::*;
 use pyo3::sync::PyOnceLock;
 use pyo3::types::{PyBytes, PyModule, PyType};
 
 use pyo3_async_runtimes::tokio::future_into_py;
+
+use numpy::ndarray::Array2;
+use numpy::{IntoPyArray, PyArray1, PyArray2, PyArrayMethods};
 
 use decibri::capture::{AudioCapture, AudioChunk, CaptureConfig, CaptureStream};
 use decibri::device::{
@@ -520,6 +523,77 @@ fn build_device_selector(device: Option<&Bound<'_, PyAny>>) -> PyResult<DeviceSe
 }
 
 // ---------------------------------------------------------------------------
+// Phase 6 helpers: encode an audio chunk's Vec<f32> into either a Python
+// bytes object (numpy=False, default) or a numpy.ndarray (numpy=True).
+// Used by both the sync DecibriBridge::read and the async
+// AsyncDecibriBridge::read paths; the async path constructs the Python
+// object outside spawn_blocking because Bound<'py, ...> is GIL-bound.
+//
+// Memory model: per Phase 6 plan §3f and the empirical Step 1 finding,
+// rust-numpy 0.28.0's `into_pyarray` performs a memcpy at the boundary
+// (the Vec is consumed; data is copied into a freshly-allocated NumPy
+// buffer). For typical audio chunks (~1-3 KB) the cost is nanoseconds.
+// ---------------------------------------------------------------------------
+
+/// Encode a chunk's f32 sample data into a Python bytes object using the
+/// existing decibri::sample byte-level conversion helpers. Default path
+/// (numpy=False); preserves the Phase 2 wire format byte-for-byte.
+fn encode_chunk_bytes<'py>(
+    py: Python<'py>,
+    data: &[f32],
+    format: BindingSampleFormat,
+) -> Bound<'py, PyAny> {
+    let bytes = match format {
+        BindingSampleFormat::Int16 => f32_to_i16_le_bytes(data),
+        BindingSampleFormat::Float32 => f32_to_f32_le_bytes(data),
+    };
+    PyBytes::new(py, &bytes).into_any()
+}
+
+/// Encode a chunk's f32 sample data into a numpy.ndarray. The dtype
+/// matches the configured format (int16 -> np.int16, float32 ->
+/// np.float32). The shape matches the channel count: 1-D `(N,)` for
+/// mono, 2-D `(N, channels)` for multi-channel (interleaved cpal data
+/// reshaped via `Array2::from_shape_vec`).
+fn encode_chunk_numpy<'py>(
+    py: Python<'py>,
+    data: Vec<f32>,
+    format: BindingSampleFormat,
+    channels: u16,
+) -> PyResult<Bound<'py, PyAny>> {
+    let channels = channels as usize;
+    match format {
+        BindingSampleFormat::Int16 => {
+            // Per-sample f32 -> i16 conversion matches f32_to_i16_le_bytes
+            // semantics: clamp into [i16::MIN, i16::MAX] after scaling by
+            // 32768.0. Avoids the bytes round-trip for the numpy path.
+            let i16_vec: Vec<i16> = data
+                .iter()
+                .map(|&s| (s * 32768.0).clamp(i16::MIN as f32, i16::MAX as f32) as i16)
+                .collect();
+            if channels == 1 {
+                Ok(i16_vec.into_pyarray(py).into_any())
+            } else {
+                let n = i16_vec.len() / channels;
+                let arr2 = Array2::from_shape_vec((n, channels), i16_vec)
+                    .map_err(|e| PyRuntimeError::new_err(format!("ndarray shape error: {e}")))?;
+                Ok(arr2.into_pyarray(py).into_any())
+            }
+        }
+        BindingSampleFormat::Float32 => {
+            if channels == 1 {
+                Ok(data.into_pyarray(py).into_any())
+            } else {
+                let n = data.len() / channels;
+                let arr2 = Array2::from_shape_vec((n, channels), data)
+                    .map_err(|e| PyRuntimeError::new_err(format!("ndarray shape error: {e}")))?;
+                Ok(arr2.into_pyarray(py).into_any())
+            }
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Phase 5 Step 1 empirical smoke: pyo3-async-runtimes integration probe.
 //
 // pyo3-async-runtimes' docs assume a binary entry point with
@@ -543,6 +617,42 @@ fn async_smoke(py: Python<'_>) -> PyResult<Bound<'_, PyAny>> {
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
         Ok(42_i64)
     })
+}
+
+// ---------------------------------------------------------------------------
+// Phase 6 Step 1 empirical smoke: rust-numpy 0.28.0 integration probe.
+//
+// Verifies that:
+//   1. rust-numpy 0.28.0 builds and runs cleanly in our extension-module
+//      context with PyO3 0.28.x.
+//   2. `Vec<i16>::into_pyarray(py)` produces a numpy.ndarray with the
+//      expected dtype, shape, and values.
+//   3. The returned ndarray's `flags.owndata == True`, proving the
+//      ownership-transfer claim from phase-6-numpy-zerocopy.md §3f
+//      (no memcpy at the Rust-Python boundary; NumPy takes ownership
+//      of the Rust Vec's heap allocation directly).
+//
+// API choice: rust-numpy 0.28.0's `IntoPyArray::into_pyarray(self, py)`
+// trait method consumes the Vec and transfers ownership to NumPy. This
+// is the recommended ownership-transfer path. Older rust-numpy versions
+// used `PyArray::from_vec_bound`; the trait-based approach in 0.28.0 is
+// the same operation under a cleaner API.
+//
+// This pyfunction stays in the codebase as persistent regression coverage
+// (per locked decision Q4 of phase-6-numpy-zerocopy.md): if a future
+// rust-numpy upgrade breaks `from_vec` / `into_pyarray` semantics or
+// pyo3 0.28 compat, the tests in tests/test_numpy_smoke.py fail first
+// and surface the regression at the build-pipeline level.
+//
+// Returns a 1-D numpy.ndarray of dtype np.int16 with values [0, 1, 2, 3, 4].
+// Underscored name marks it as internal; not part of the public API.
+// ---------------------------------------------------------------------------
+
+#[pyfunction]
+#[pyo3(name = "_numpy_smoke")]
+fn numpy_smoke(py: Python<'_>) -> Bound<'_, PyArray1<i16>> {
+    let vec: Vec<i16> = vec![0, 1, 2, 3, 4];
+    vec.into_pyarray(py)
 }
 
 // ---------------------------------------------------------------------------
@@ -580,6 +690,68 @@ struct DecibriBridge {
     stream: Option<CaptureStream>,
     vad: Option<SileroVad>,
     last_vad_probability: f32,
+    /// Phase 6: when true, `read()` returns a numpy.ndarray instead of
+    /// a bytes object. Constructor flag; per-instance commitment for
+    /// the iterator's lifetime (the user picks one return type at
+    /// construction). Output bridges do NOT have this flag; they
+    /// duck-type per-call.
+    numpy: bool,
+}
+
+// Phase 6 internal helpers on DecibriBridge; not exposed to Python.
+// Used by the public `read` pymethod (same module) and by
+// `AsyncDecibriBridge::read` (which locks the inner sync bridge inside
+// spawn_blocking, calls these to extract owned Vec data + metadata,
+// then constructs the Python object outside the spawn_blocking
+// boundary because `Bound<'py, ...>` is GIL-bound).
+impl DecibriBridge {
+    /// Read the next audio chunk, run VAD inference if configured, and
+    /// return the raw `Vec<f32>` data. No Python object construction;
+    /// returning `Vec<f32>` lets the caller decide between PyBytes and
+    /// PyArray encoding without re-running the cpal read or VAD pass.
+    fn read_raw(&mut self, py: Python<'_>, timeout_ms: Option<u64>) -> PyResult<Option<Vec<f32>>> {
+        let timeout = timeout_ms.map(Duration::from_millis);
+        let stream = self
+            .stream
+            .as_mut()
+            .ok_or_else(|| raise_named(py, "CaptureStreamClosed", "capture is not running"))?;
+
+        // Release GIL for the blocking next_chunk call. Run VAD inference
+        // inside the same allow_threads region to avoid GIL ping-pong.
+        let result: Result<Option<AudioChunk>, CoreDecibriError> = py.detach(|| {
+            let chunk = stream.next_chunk(timeout)?;
+            Ok(chunk)
+        });
+
+        let Some(chunk) = result.map_err(|e| to_py_err(py, e))? else {
+            return Ok(None);
+        };
+
+        // Run Silero VAD inference if configured.
+        if let Some(vad) = self.vad.as_mut() {
+            let result = py
+                .detach(|| vad.process(&chunk.data))
+                .map_err(|e| to_py_err(py, e))?;
+            self.last_vad_probability = result.probability;
+        }
+
+        Ok(Some(chunk.data))
+    }
+
+    /// Channel count accessor for the async wrapper's encoding step.
+    fn channels(&self) -> u16 {
+        self.capture_config.channels
+    }
+
+    /// numpy-mode flag accessor for the async wrapper's encoding step.
+    fn numpy_mode(&self) -> bool {
+        self.numpy
+    }
+
+    /// Configured sample format accessor for the async wrapper.
+    fn binding_format(&self) -> BindingSampleFormat {
+        self.format
+    }
 }
 
 #[pymethods]
@@ -615,12 +787,6 @@ impl DecibriBridge {
         numpy: bool,
         ort_library_path: Option<PathBuf>,
     ) -> PyResult<Self> {
-        if numpy {
-            return Err(PyNotImplementedError::new_err(
-                "numpy=True is not supported in 0.1.0a1; use bytes and decode in Python",
-            ));
-        }
-
         let parsed_format = parse_sample_format(&format).map_err(|e| to_py_err(py, e))?;
         let device_selector = build_device_selector(device.as_ref())?;
 
@@ -658,6 +824,7 @@ impl DecibriBridge {
             stream: None,
             vad: vad_instance,
             last_vad_probability: 0.0,
+            numpy,
         })
     }
 
@@ -690,55 +857,39 @@ impl DecibriBridge {
         &mut self,
         py: Python<'py>,
         timeout_ms: Option<u64>,
-    ) -> PyResult<Option<Bound<'py, PyBytes>>> {
-        let timeout = timeout_ms.map(Duration::from_millis);
-        let stream = self
-            .stream
-            .as_mut()
-            .ok_or_else(|| raise_named(py, "CaptureStreamClosed", "capture is not running"))?;
-
-        // Release GIL for the blocking next_chunk call. Run VAD inference
-        // inside the same allow_threads region to avoid GIL ping-pong.
-        let result: Result<Option<AudioChunk>, CoreDecibriError> = py.detach(|| {
-            let chunk = stream.next_chunk(timeout)?;
-            Ok(chunk)
-        });
-
-        let Some(chunk) = result.map_err(|e| to_py_err(py, e))? else {
+    ) -> PyResult<Option<Bound<'py, PyAny>>> {
+        let Some(data) = self.read_raw(py, timeout_ms)? else {
             return Ok(None);
         };
-
-        // Run Silero VAD inference if configured. This is also blocking-ish
-        // (ONNX inference); release GIL.
-        if let Some(vad) = self.vad.as_mut() {
-            let result = py
-                .detach(|| vad.process(&chunk.data))
-                .map_err(|e| to_py_err(py, e))?;
-            self.last_vad_probability = result.probability;
+        // Phase 6: branch on the constructor-set numpy flag. Default
+        // (numpy=False) returns PyBytes (Phase 2 wire format); numpy=True
+        // returns a numpy.ndarray with dtype matching format and shape
+        // matching channel count. Both arms are returned as Bound<PyAny>
+        // so the union is expressed at the Python boundary.
+        if self.numpy {
+            Ok(Some(encode_chunk_numpy(
+                py,
+                data,
+                self.format,
+                self.capture_config.channels,
+            )?))
+        } else {
+            Ok(Some(encode_chunk_bytes(py, &data, self.format)))
         }
-
-        // Encode to bytes per format selected at construction time.
-        let bytes = match self.format {
-            BindingSampleFormat::Int16 => f32_to_i16_le_bytes(&chunk.data),
-            BindingSampleFormat::Float32 => f32_to_f32_le_bytes(&chunk.data),
-        };
-
-        Ok(Some(PyBytes::new(py, &bytes)))
     }
 
     fn __iter__(slf: PyRef<'_, Self>) -> PyRef<'_, Self> {
         slf
     }
 
-    fn __next__<'py>(
-        mut slf: PyRefMut<'_, Self>,
-        py: Python<'py>,
-    ) -> PyResult<Bound<'py, PyBytes>> {
+    fn __next__<'py>(mut slf: PyRefMut<'_, Self>, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
         // Block indefinitely on next_chunk by passing None timeout. If the
         // stream returns None (closed), raise StopIteration via PyO3's
         // None-as-StopIteration convention by returning the appropriate err.
-        let bytes = slf.read(py, None)?;
-        match bytes {
+        // Return type is Bound<PyAny> rather than PyBytes because Phase 6's
+        // numpy=True flag makes the iterator yield ndarrays in numpy mode.
+        let result = slf.read(py, None)?;
+        match result {
             Some(b) => Ok(b),
             None => Err(pyo3::exceptions::PyStopIteration::new_err(())),
         }
@@ -818,6 +969,77 @@ struct DecibriOutputBridge {
     stream: Option<OutputStream>,
 }
 
+// Phase 6 internal helpers for DecibriOutputBridge. Not exposed to
+// Python. Each `write_*_samples` helper takes an owned slice or vec
+// of typed samples (i16 or f32), converts to the f32 vec the cpal
+// stream expects, and pushes through the GIL-released send. The
+// public `write` pymethod dispatches on the input PyAny type and
+// calls the appropriate helper.
+impl DecibriOutputBridge {
+    fn require_format(
+        &self,
+        expected: BindingSampleFormat,
+        ndarray_dtype_name: &str,
+        ndarray_shape_name: &str,
+    ) -> PyResult<()> {
+        if self.format == expected {
+            Ok(())
+        } else {
+            let configured = match self.format {
+                BindingSampleFormat::Int16 => "int16",
+                BindingSampleFormat::Float32 => "float32",
+            };
+            Err(PyTypeError::new_err(format!(
+                "format='{configured}' configured but {ndarray_shape_name} ndarray \
+                 dtype is {ndarray_dtype_name}; convert with arr.astype(np.{configured}) \
+                 or construct DecibriOutput with format='{ndarray_dtype_name}'"
+            )))
+        }
+    }
+
+    fn write_bytes_internal(&mut self, py: Python<'_>, samples: &[u8]) -> PyResult<()> {
+        let stream = self
+            .stream
+            .as_mut()
+            .ok_or_else(|| raise_named(py, "OutputStreamClosed", "output is not running"))?;
+        let owned_samples: Vec<u8> = samples.to_vec();
+        let samples_f32 = match self.format {
+            BindingSampleFormat::Int16 => py.detach(|| i16_le_bytes_to_f32(&owned_samples)),
+            BindingSampleFormat::Float32 => py.detach(|| f32_le_bytes_to_f32(&owned_samples)),
+        };
+        py.detach(|| stream.send(samples_f32))
+            .map_err(|e| to_py_err(py, e))?;
+        Ok(())
+    }
+
+    fn write_int16_samples(&mut self, py: Python<'_>, samples: &[i16]) -> PyResult<()> {
+        let stream = self
+            .stream
+            .as_mut()
+            .ok_or_else(|| raise_named(py, "OutputStreamClosed", "output is not running"))?;
+        // Per-sample i16 -> f32 conversion mirrors i16_le_bytes_to_f32:
+        // divide by 32768.0 to map [i16::MIN, i16::MAX] into approximately
+        // [-1.0, 1.0). Avoids the bytes round-trip for the numpy path.
+        let owned: Vec<i16> = samples.to_vec();
+        let samples_f32: Vec<f32> =
+            py.detach(|| owned.iter().map(|&s| s as f32 / 32768.0).collect());
+        py.detach(|| stream.send(samples_f32))
+            .map_err(|e| to_py_err(py, e))?;
+        Ok(())
+    }
+
+    fn write_float32_samples(&mut self, py: Python<'_>, samples: &[f32]) -> PyResult<()> {
+        let stream = self
+            .stream
+            .as_mut()
+            .ok_or_else(|| raise_named(py, "OutputStreamClosed", "output is not running"))?;
+        let samples_f32: Vec<f32> = samples.to_vec();
+        py.detach(|| stream.send(samples_f32))
+            .map_err(|e| to_py_err(py, e))?;
+        Ok(())
+    }
+}
+
 #[pymethods]
 impl DecibriOutputBridge {
     #[new]
@@ -861,26 +1083,64 @@ impl DecibriOutputBridge {
         Ok(())
     }
 
-    fn write(&mut self, py: Python<'_>, samples: &[u8]) -> PyResult<()> {
-        let stream = self
-            .stream
-            .as_mut()
-            .ok_or_else(|| raise_named(py, "OutputStreamClosed", "output is not running"))?;
+    fn write(&mut self, py: Python<'_>, samples: &Bound<'_, PyAny>) -> PyResult<()> {
+        // Phase 6: duck-typed dispatch. Accept Python `bytes` (the Phase 2
+        // wire format; cheap path, hit by existing users), 1-D and 2-D
+        // numpy.ndarray with dtype matching the configured format, and
+        // raise TypeError on anything else with a clear message. Per the
+        // Phase 6 plan §3c, output uses per-call dispatch (no constructor
+        // numpy flag) because each write is independent and stateless.
 
-        // Materialize a Vec<u8> from the Python-borrowed slice before entering
-        // allow_threads. PyO3's contract requires no Python-borrowed data
-        // inside the GIL-released closure. One allocation per write call;
-        // correctness over micro-optimization.
-        let owned_samples: Vec<u8> = samples.to_vec();
+        // Cheap path: bytes (existing wire format).
+        if let Ok(byte_slice) = samples.extract::<&[u8]>() {
+            return self.write_bytes_internal(py, byte_slice);
+        }
 
-        let samples_f32 = match self.format {
-            BindingSampleFormat::Int16 => py.detach(|| i16_le_bytes_to_f32(&owned_samples)),
-            BindingSampleFormat::Float32 => py.detach(|| f32_le_bytes_to_f32(&owned_samples)),
-        };
+        // numpy.ndarray paths. Order: PyArray1<i16>, PyArray1<f32>,
+        // PyArray2<i16>, PyArray2<f32>. dtype must match the configured
+        // BindingSampleFormat. Multi-channel ndarrays are flattened from
+        // shape (N, channels) to interleaved Vec<f32> for cpal.
+        if let Ok(arr) = samples.cast::<PyArray1<i16>>() {
+            self.require_format(BindingSampleFormat::Int16, "int16", "1-D")?;
+            let readonly = arr.readonly();
+            let slice = readonly
+                .as_slice()
+                .map_err(|e| PyValueError::new_err(format!("ndarray must be C-contiguous: {e}")))?;
+            return self.write_int16_samples(py, slice);
+        }
 
-        py.detach(|| stream.send(samples_f32))
-            .map_err(|e| to_py_err(py, e))?;
-        Ok(())
+        if let Ok(arr) = samples.cast::<PyArray1<f32>>() {
+            self.require_format(BindingSampleFormat::Float32, "float32", "1-D")?;
+            let readonly = arr.readonly();
+            let slice = readonly
+                .as_slice()
+                .map_err(|e| PyValueError::new_err(format!("ndarray must be C-contiguous: {e}")))?;
+            return self.write_float32_samples(py, slice);
+        }
+
+        if let Ok(arr) = samples.cast::<PyArray2<i16>>() {
+            self.require_format(BindingSampleFormat::Int16, "int16", "2-D")?;
+            let readonly = arr.readonly();
+            let slice = readonly.as_slice().map_err(|e| {
+                PyValueError::new_err(format!("2-D ndarray must be C-contiguous: {e}"))
+            })?;
+            return self.write_int16_samples(py, slice);
+        }
+
+        if let Ok(arr) = samples.cast::<PyArray2<f32>>() {
+            self.require_format(BindingSampleFormat::Float32, "float32", "2-D")?;
+            let readonly = arr.readonly();
+            let slice = readonly.as_slice().map_err(|e| {
+                PyValueError::new_err(format!("2-D ndarray must be C-contiguous: {e}"))
+            })?;
+            return self.write_float32_samples(py, slice);
+        }
+
+        Err(PyTypeError::new_err(
+            "samples must be bytes or numpy.ndarray with dtype matching the \
+             configured format (int16 or float32); 1-D for mono or 2-D \
+             (N, channels) for multi-channel",
+        ))
     }
 
     fn drain(&mut self, py: Python<'_>) -> PyResult<()> {
@@ -1061,22 +1321,39 @@ impl AsyncDecibriBridge {
     fn read<'py>(&self, py: Python<'py>, timeout_ms: Option<u64>) -> PyResult<Bound<'py, PyAny>> {
         let inner = Arc::clone(&self.inner);
         future_into_py(py, async move {
-            // Extract owned bytes inside spawn_blocking + GIL because
-            // Bound<PyBytes> is GIL-bound and not Send + 'static. Then
-            // re-wrap into Py<PyBytes> outside spawn_blocking; pyo3-
-            // async-runtimes converts the Py<PyBytes> back to a Python
-            // bytes object on resolution.
-            let raw: Option<Vec<u8>> =
-                tokio::task::spawn_blocking(move || -> PyResult<Option<Vec<u8>>> {
+            // Phase 6: extract Vec<f32> + metadata inside spawn_blocking,
+            // construct the Python object (PyBytes or PyArray) outside.
+            // Bound<'py, ...> is GIL-bound and not Send + 'static, so
+            // it cannot cross the spawn_blocking boundary. Vec<f32>,
+            // u16, bool, and BindingSampleFormat are all Send + 'static.
+            let extracted: Option<AsyncReadOutput> =
+                tokio::task::spawn_blocking(move || -> PyResult<Option<AsyncReadOutput>> {
                     let mut bridge = inner.blocking_lock();
                     Python::attach(|py| {
-                        let opt = bridge.read(py, timeout_ms)?;
-                        Ok(opt.map(|b| b.as_bytes().to_vec()))
+                        let opt = bridge.read_raw(py, timeout_ms)?;
+                        Ok(opt.map(|data| {
+                            (
+                                data,
+                                bridge.binding_format(),
+                                bridge.channels(),
+                                bridge.numpy_mode(),
+                            )
+                        }))
                     })
                 })
                 .await
                 .map_err(|e| PyRuntimeError::new_err(format!("spawn_blocking failed: {e}")))??;
-            Python::attach(|py| Ok(raw.map(|v| PyBytes::new(py, &v).unbind())))
+            Python::attach(|py| -> PyResult<Option<Py<PyAny>>> {
+                let Some((data, format, channels, numpy)) = extracted else {
+                    return Ok(None);
+                };
+                let bound = if numpy {
+                    encode_chunk_numpy(py, data, format, channels)?
+                } else {
+                    encode_chunk_bytes(py, &data, format)
+                };
+                Ok(Some(bound.unbind()))
+            })
         })
     }
 
@@ -1144,6 +1421,82 @@ impl AsyncDecibriBridge {
 // in the Python wrapper (next relay).
 // ---------------------------------------------------------------------------
 
+/// Owned bundle of (data, format, channels, numpy_flag) extracted from
+/// a `DecibriBridge` for the async read path. All fields are
+/// `Send + 'static` so they cross the `spawn_blocking` boundary.
+type AsyncReadOutput = (Vec<f32>, BindingSampleFormat, u16, bool);
+
+/// Owned input data for an async write call. Extracted from the input
+/// `Bound<'_, PyAny>` while the GIL is held; the resulting variants are
+/// all `Send + 'static` so they can cross the `spawn_blocking` boundary.
+/// On the worker thread, the `dispatch` method re-acquires the GIL
+/// (via `Python::attach`) and calls the appropriate sync helper on the
+/// inner `DecibriOutputBridge`.
+///
+/// dtype validation against the configured format happens twice: once
+/// at extraction time (via `require_format`) for the ndarray paths, and
+/// again inside the sync helpers (defense-in-depth; cheap). The bytes
+/// path skips the dtype check because bytes carry no dtype.
+enum AsyncWriteData {
+    Bytes(Vec<u8>),
+    Int16Samples(Vec<i16>),
+    Float32Samples(Vec<f32>),
+}
+
+impl AsyncWriteData {
+    fn extract(samples: &Bound<'_, PyAny>) -> PyResult<Self> {
+        if let Ok(byte_slice) = samples.extract::<&[u8]>() {
+            return Ok(AsyncWriteData::Bytes(byte_slice.to_vec()));
+        }
+        if let Ok(arr) = samples.cast::<PyArray1<i16>>() {
+            let readonly = arr.readonly();
+            let slice = readonly
+                .as_slice()
+                .map_err(|e| PyValueError::new_err(format!("ndarray must be C-contiguous: {e}")))?;
+            return Ok(AsyncWriteData::Int16Samples(slice.to_vec()));
+        }
+        if let Ok(arr) = samples.cast::<PyArray1<f32>>() {
+            let readonly = arr.readonly();
+            let slice = readonly
+                .as_slice()
+                .map_err(|e| PyValueError::new_err(format!("ndarray must be C-contiguous: {e}")))?;
+            return Ok(AsyncWriteData::Float32Samples(slice.to_vec()));
+        }
+        if let Ok(arr) = samples.cast::<PyArray2<i16>>() {
+            let readonly = arr.readonly();
+            let slice = readonly.as_slice().map_err(|e| {
+                PyValueError::new_err(format!("2-D ndarray must be C-contiguous: {e}"))
+            })?;
+            return Ok(AsyncWriteData::Int16Samples(slice.to_vec()));
+        }
+        if let Ok(arr) = samples.cast::<PyArray2<f32>>() {
+            let readonly = arr.readonly();
+            let slice = readonly.as_slice().map_err(|e| {
+                PyValueError::new_err(format!("2-D ndarray must be C-contiguous: {e}"))
+            })?;
+            return Ok(AsyncWriteData::Float32Samples(slice.to_vec()));
+        }
+        Err(PyTypeError::new_err(
+            "samples must be bytes or numpy.ndarray with dtype int16 or float32; \
+             1-D for mono or 2-D (N, channels) for multi-channel",
+        ))
+    }
+
+    fn dispatch(self, py: Python<'_>, bridge: &mut DecibriOutputBridge) -> PyResult<()> {
+        match self {
+            AsyncWriteData::Bytes(v) => bridge.write_bytes_internal(py, &v),
+            AsyncWriteData::Int16Samples(v) => {
+                bridge.require_format(BindingSampleFormat::Int16, "int16", "1-D or 2-D")?;
+                bridge.write_int16_samples(py, &v)
+            }
+            AsyncWriteData::Float32Samples(v) => {
+                bridge.require_format(BindingSampleFormat::Float32, "float32", "1-D or 2-D")?;
+                bridge.write_float32_samples(py, &v)
+            }
+        }
+    }
+}
+
 #[pyclass(module = "decibri._decibri")]
 pub(crate) struct AsyncOutputBridge {
     inner: Arc<Mutex<DecibriOutputBridge>>,
@@ -1178,16 +1531,22 @@ impl AsyncOutputBridge {
         })
     }
 
-    fn write<'py>(&self, py: Python<'py>, samples: Vec<u8>) -> PyResult<Bound<'py, PyAny>> {
-        // Take owned Vec<u8> from Python (one allocation; PyO3 conversion
-        // from `bytes` to `Vec<u8>` materialises before we cross the
-        // spawn_blocking boundary). The sync `write` takes a borrowed
-        // `&[u8]` which is GIL-bound and cannot cross.
+    fn write<'py>(
+        &self,
+        py: Python<'py>,
+        samples: &Bound<'py, PyAny>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        // Phase 6: duck-typed dispatch on input type. Extract owned Send
+        // + 'static data while the GIL is held (PyReadonlyArray and
+        // Bound<PyAny> are GIL-bound and cannot cross spawn_blocking),
+        // then cross the boundary with the AsyncWriteData enum and
+        // dispatch against the inner sync bridge inside spawn_blocking.
+        let owned = AsyncWriteData::extract(samples)?;
         let inner = Arc::clone(&self.inner);
         future_into_py(py, async move {
             tokio::task::spawn_blocking(move || -> PyResult<()> {
                 let mut bridge = inner.blocking_lock();
-                Python::attach(|py| bridge.write(py, &samples))
+                Python::attach(|py| owned.dispatch(py, &mut bridge))
             })
             .await
             .map_err(|e| PyRuntimeError::new_err(format!("spawn_blocking failed: {e}")))?
@@ -1269,6 +1628,10 @@ fn _decibri(m: &Bound<'_, PyModule>) -> PyResult<()> {
     // Phase 5 Step 1 empirical smoke; see comment block above the
     // async_smoke fn declaration for rationale.
     m.add_function(wrap_pyfunction!(async_smoke, m)?)?;
+
+    // Phase 6 Step 1 empirical smoke; see comment block above the
+    // numpy_smoke fn declaration for rationale.
+    m.add_function(wrap_pyfunction!(numpy_smoke, m)?)?;
 
     Ok(())
 }

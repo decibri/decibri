@@ -65,6 +65,13 @@ pyo3 = { version = "0.28", features = [
     "generate-import-lib",
 ] }
 
+# rust-numpy powers the optional numpy=True ndarray return paths on
+# Decibri.read and AsyncDecibri.read (Phase 6). Pinned exactly to 0.28.0
+# (released 2026-02-08) because the crate's release cadence tracks PyO3
+# minor versions; any version bump should be a deliberate cross-workflow
+# action paired with a pyo3 bump.
+numpy = "=0.28.0"
+
 # pyo3-async-runtimes powers the AsyncDecibri / AsyncDecibriOutput surfaces
 # (Phase 5). Pinned exactly to 0.28.0 because the crate is brand new (released
 # 2026-02-04) and version drift in the absence of a long stability track record

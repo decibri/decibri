@@ -36,9 +36,21 @@ import struct
 import time
 from pathlib import Path
 from types import TracebackType
-from typing import Iterator
+from typing import TYPE_CHECKING, Any, Iterator, Union, cast
 
 from typing_extensions import Self
+
+if TYPE_CHECKING:
+    import numpy as np
+
+    # Phase 6: read can return bytes (default) or ndarray (numpy=True);
+    # write can accept either. The runtime numpy dependency is optional
+    # (pip install decibri[numpy]); using TYPE_CHECKING keeps the import
+    # cost out of the default-install path while preserving mypy
+    # narrowing for users who set numpy=True.
+    SampleData = Union[bytes, "np.ndarray[Any, Any]"]
+else:
+    SampleData = bytes
 
 from decibri import _decibri, exceptions
 from decibri._decibri import DeviceInfo, OutputDeviceInfo, VersionInfo
@@ -370,6 +382,11 @@ class Decibri:
             sample_format=format,
         )
         self._format = format
+        # Phase 6: store the numpy flag so read() can branch its return
+        # type (bytes vs ndarray) without re-querying the bridge each
+        # call. The bridge also stores it; both are kept in sync because
+        # the constructor passes the same value to both layers.
+        self._numpy = numpy
 
     # -----------------------------------------------------------------------
     # Lifecycle
@@ -400,23 +417,58 @@ class Decibri:
     # Read surface
     # -----------------------------------------------------------------------
 
-    def read(self, timeout_ms: int | None = None) -> bytes | None:
-        """Read one chunk. Returns bytes, or None if the stream closed.
+    def read(self, timeout_ms: int | None = None) -> SampleData | None:
+        """Read one chunk. Returns the chunk, or None if the stream closed.
 
-        VAD state advances as a side effect when vad=True. Consumers should
-        check `is_speaking` after each read.
+        Return type:
+        - When ``numpy=False`` (default), returns ``bytes`` (Phase 2 wire
+          format).
+        - When ``numpy=True``, returns a ``numpy.ndarray`` with dtype
+          matching the configured ``format`` (np.int16 or np.float32) and
+          shape matching the channel count (1-D for mono, 2-D
+          ``(N, channels)`` for multi-channel).
+
+        VAD state advances as a side effect when ``vad=True``. Consumers
+        should check ``is_speaking`` after each read. In numpy mode with
+        VAD enabled, the chunk is converted to bytes once via
+        ``arr.tobytes()`` for the VAD state machine (the existing RMS
+        helper expects bytes); the original ndarray is returned to the
+        user. The conversion cost is microseconds for typical chunk
+        sizes.
+
+        Raises ``ImportError`` with a clear actionable message if
+        ``numpy=True`` is set but the optional ``numpy`` extra is not
+        installed (i.e. the user did not run ``pip install decibri[numpy]``).
         """
-        chunk = self._bridge.read(timeout_ms=timeout_ms)
+        try:
+            chunk = self._bridge.read(timeout_ms=timeout_ms)
+        except ImportError as exc:
+            if self._numpy:
+                raise ImportError(
+                    "numpy is not installed. Install with: pip install decibri[numpy]"
+                ) from exc
+            raise
         if chunk is None:
             return None
         if self._vad_enabled:
-            self._vad.process_chunk(chunk, self._bridge.vad_probability)
+            # The VAD state machine's _compute_rms uses struct.unpack on
+            # bytes. In numpy mode, the bridge already returned an
+            # ndarray; convert to bytes once for the VAD pass via
+            # arr.tobytes(). Cheap (~microseconds) for typical chunk
+            # sizes; cleaner than rewriting _compute_rms to handle both
+            # input types. Phase 6 plan §3i. The cast to bytes is for
+            # mypy; at runtime the branch matches the actual type.
+            if self._numpy:
+                vad_input: bytes = chunk.tobytes()  # type: ignore[union-attr]
+            else:
+                vad_input = cast(bytes, chunk)
+            self._vad.process_chunk(vad_input, self._bridge.vad_probability)
         return chunk
 
-    def __iter__(self) -> Iterator[bytes]:
+    def __iter__(self) -> Iterator[SampleData]:
         return self
 
-    def __next__(self) -> bytes:
+    def __next__(self) -> SampleData:
         chunk = self.read(timeout_ms=None)
         if chunk is None:
             raise StopIteration
@@ -516,8 +568,18 @@ class DecibriOutput:
     def close(self) -> None:
         self._bridge.close()
 
-    def write(self, samples: bytes) -> None:
-        """Write a chunk to the output stream."""
+    def write(self, samples: SampleData) -> None:
+        """Write a chunk to the output stream.
+
+        Phase 6: accepts either ``bytes`` (Phase 2 wire format) or a
+        ``numpy.ndarray`` with dtype matching the configured ``format``
+        (np.int16 for ``format='int16'``, np.float32 for
+        ``format='float32'``). Multi-channel ndarrays use shape
+        ``(N, channels)`` (interleaved). Output bridges duck-type the
+        input on each call rather than committing at construction time.
+
+        Raises ``TypeError`` on dtype mismatch or unsupported input type.
+        """
         self._bridge.write(samples)
 
     def drain(self) -> None:

@@ -37,9 +37,18 @@ from __future__ import annotations
 import importlib.resources
 from pathlib import Path
 from types import TracebackType
-from typing import AsyncIterator
+from typing import TYPE_CHECKING, Any, AsyncIterator, Union, cast
 
 from typing_extensions import Self
+
+if TYPE_CHECKING:
+    import numpy as np
+
+    # Phase 6: read can return bytes (default) or ndarray (numpy=True);
+    # write can accept either. Optional runtime numpy dependency.
+    SampleData = Union[bytes, "np.ndarray[Any, Any]"]
+else:
+    SampleData = bytes
 
 from decibri import _decibri, exceptions
 from decibri._classes import _VadStateMachine, _VALID_FORMATS, _VALID_MODES
@@ -175,6 +184,10 @@ class AsyncDecibri:
             sample_format=format,
         )
         self._format = format
+        # Phase 6: store the numpy flag so read() can branch its return
+        # type and the VAD path can convert ndarray to bytes for the
+        # state machine. Bridge stores the same flag; both kept in sync.
+        self._numpy = numpy
         # Python-side state tracking for the synchronous is_open property.
         # The Rust async bridge's is_open getter returns an awaitable; we
         # update this flag after start/stop so callers can read state
@@ -212,29 +225,52 @@ class AsyncDecibri:
     # Read surface
     # -----------------------------------------------------------------------
 
-    async def read(self, timeout_ms: int | None = None) -> bytes | None:
-        """Read one chunk. Returns bytes, or None if the stream closed.
+    async def read(self, timeout_ms: int | None = None) -> SampleData | None:
+        """Read one chunk. Returns the chunk, or None if the stream closed.
 
-        VAD state advances as a side effect when ``vad=True``. Consumers
-        should check ``is_speaking`` after each read.
+        Return type:
+        - When ``numpy=False`` (default), returns ``bytes``.
+        - When ``numpy=True``, returns a ``numpy.ndarray`` with dtype
+          matching the configured ``format`` and shape matching the
+          channel count (1-D mono, 2-D ``(N, channels)`` multi-channel).
+
+        VAD state advances as a side effect when ``vad=True``. In numpy
+        mode with VAD enabled, the chunk is converted to bytes once via
+        ``arr.tobytes()`` for the VAD state machine; the original
+        ndarray is returned to the user. Phase 6 plan §3i.
 
         Cancellation: per the Phase 5 abort-immediately decision, cancelling
         this await raises ``CancelledError`` immediately. The spawn_blocking
         thread on the Rust side runs to completion; its result (if any) is
         dropped. The bridge state remains consistent for subsequent reads.
+
+        Raises ``ImportError`` with a clear actionable message if
+        ``numpy=True`` is set but ``numpy`` is not installed (i.e. the
+        user did not run ``pip install decibri[numpy]``).
         """
-        chunk = await self._bridge.read(timeout_ms=timeout_ms)
+        try:
+            chunk = await self._bridge.read(timeout_ms=timeout_ms)
+        except ImportError as exc:
+            if self._numpy:
+                raise ImportError(
+                    "numpy is not installed. Install with: pip install decibri[numpy]"
+                ) from exc
+            raise
         if chunk is None:
             return None
         if self._vad_enabled:
             probability = await self._bridge.vad_probability
-            self._vad.process_chunk(chunk, probability)
+            if self._numpy:
+                vad_input: bytes = chunk.tobytes()  # type: ignore[union-attr]
+            else:
+                vad_input = cast(bytes, chunk)
+            self._vad.process_chunk(vad_input, probability)
         return chunk
 
-    def __aiter__(self) -> AsyncIterator[bytes]:
+    def __aiter__(self) -> AsyncIterator[SampleData]:
         return self
 
-    async def __anext__(self) -> bytes:
+    async def __anext__(self) -> SampleData:
         chunk = await self.read(timeout_ms=None)
         if chunk is None:
             raise StopAsyncIteration
@@ -364,8 +400,16 @@ class AsyncDecibriOutput:
         await self._bridge.close()
         self._is_playing = False
 
-    async def write(self, samples: bytes) -> None:
-        """Write a chunk of audio samples to the output buffer."""
+    async def write(self, samples: SampleData) -> None:
+        """Write a chunk of audio samples to the output buffer.
+
+        Phase 6: accepts either ``bytes`` or a ``numpy.ndarray`` with
+        dtype matching the configured ``format`` (np.int16 or np.float32).
+        Multi-channel ndarrays use shape ``(N, channels)`` (interleaved).
+        Output bridges duck-type the input on each call.
+
+        Raises ``TypeError`` on dtype mismatch or unsupported input type.
+        """
         await self._bridge.write(samples)
 
     async def drain(self) -> None:

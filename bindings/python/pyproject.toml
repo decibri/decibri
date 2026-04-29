@@ -42,6 +42,18 @@ dependencies = [
     "typing-extensions>=4.15",
 ]
 
+# Phase 6: numpy is the optional ndarray-support extra. Users who want
+# `Decibri(numpy=True)` and `output.write(np_array)` install via
+# `pip install decibri[numpy]`. The Rust binary always includes the
+# rust-numpy code paths (compile-time gating adds CI complexity for
+# negligible binary-size savings); calling `numpy=True` without the
+# Python `numpy` package installed raises a clear ImportError at the
+# first PyArray construction. Lower bound 1.20 covers the abi3-py310
+# baseline and matches industry convention (sounddevice, polars; cited
+# in phase-6-numpy-zerocopy.md §11 Q1 research).
+[project.optional-dependencies]
+numpy = ["numpy>=1.20"]
+
 [project.urls]
 Homepage = "https://github.com/decibri/decibri"
 Repository = "https://github.com/decibri/decibri"
@@ -53,6 +65,7 @@ dev = [
     "maturin>=1.13,<2.0",
     "pytest>=9.0,<10.0",
     "pytest-asyncio>=0.24",
+    "numpy>=1.20",
     "mypy>=1.20,<2.0",
     "typing-extensions>=4.15",
 ]
