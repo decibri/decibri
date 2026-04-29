@@ -38,6 +38,8 @@ use pyo3::types::{PyBytes, PyModule, PyType};
 
 use pyo3_async_runtimes::tokio::future_into_py;
 
+use numpy::{IntoPyArray, PyArray1};
+
 use decibri::capture::{AudioCapture, AudioChunk, CaptureConfig, CaptureStream};
 use decibri::device::{
     enumerate_input_devices, enumerate_output_devices, DeviceInfo as CoreDeviceInfo,
@@ -543,6 +545,42 @@ fn async_smoke(py: Python<'_>) -> PyResult<Bound<'_, PyAny>> {
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
         Ok(42_i64)
     })
+}
+
+// ---------------------------------------------------------------------------
+// Phase 6 Step 1 empirical smoke: rust-numpy 0.28.0 integration probe.
+//
+// Verifies that:
+//   1. rust-numpy 0.28.0 builds and runs cleanly in our extension-module
+//      context with PyO3 0.28.x.
+//   2. `Vec<i16>::into_pyarray(py)` produces a numpy.ndarray with the
+//      expected dtype, shape, and values.
+//   3. The returned ndarray's `flags.owndata == True`, proving the
+//      ownership-transfer claim from phase-6-numpy-zerocopy.md §3f
+//      (no memcpy at the Rust-Python boundary; NumPy takes ownership
+//      of the Rust Vec's heap allocation directly).
+//
+// API choice: rust-numpy 0.28.0's `IntoPyArray::into_pyarray(self, py)`
+// trait method consumes the Vec and transfers ownership to NumPy. This
+// is the recommended ownership-transfer path. Older rust-numpy versions
+// used `PyArray::from_vec_bound`; the trait-based approach in 0.28.0 is
+// the same operation under a cleaner API.
+//
+// This pyfunction stays in the codebase as persistent regression coverage
+// (per locked decision Q4 of phase-6-numpy-zerocopy.md): if a future
+// rust-numpy upgrade breaks `from_vec` / `into_pyarray` semantics or
+// pyo3 0.28 compat, the tests in tests/test_numpy_smoke.py fail first
+// and surface the regression at the build-pipeline level.
+//
+// Returns a 1-D numpy.ndarray of dtype np.int16 with values [0, 1, 2, 3, 4].
+// Underscored name marks it as internal; not part of the public API.
+// ---------------------------------------------------------------------------
+
+#[pyfunction]
+#[pyo3(name = "_numpy_smoke")]
+fn numpy_smoke(py: Python<'_>) -> Bound<'_, PyArray1<i16>> {
+    let vec: Vec<i16> = vec![0, 1, 2, 3, 4];
+    vec.into_pyarray(py)
 }
 
 // ---------------------------------------------------------------------------
@@ -1269,6 +1307,10 @@ fn _decibri(m: &Bound<'_, PyModule>) -> PyResult<()> {
     // Phase 5 Step 1 empirical smoke; see comment block above the
     // async_smoke fn declaration for rationale.
     m.add_function(wrap_pyfunction!(async_smoke, m)?)?;
+
+    // Phase 6 Step 1 empirical smoke; see comment block above the
+    // numpy_smoke fn declaration for rationale.
+    m.add_function(wrap_pyfunction!(numpy_smoke, m)?)?;
 
     Ok(())
 }
