@@ -229,6 +229,52 @@ class Decibri:
         numpy: bool = False,
         ort_library_path: str | Path | None = None,
     ) -> None:
+        """Construct a Decibri audio capture instance.
+
+        Most parameters control capture behaviour and are documented at
+        the class level. The argument that benefits from per-arg detail
+        is ``ort_library_path``, since its resolution involves a
+        priority chain that is invisible at the call site.
+
+        Parameters
+        ----------
+        ort_library_path : str | Path | None, optional
+            Path to the ONNX Runtime dynamic library used by Silero VAD.
+            Only consulted when ``vad=True`` and ``vad_mode='silero'``;
+            energy-mode VAD and ``vad=False`` do not load ORT.
+
+            If ``None`` (the default), decibri resolves the dylib via
+            this priority order, first match wins:
+
+            1. This constructor argument, if you pass an explicit path.
+            2. The ``DECIBRI_ORT_DYLIB_PATH`` environment variable,
+               for per-deployment overrides without code changes.
+            3. The ``ORT_DYLIB_PATH`` environment variable, the upstream
+               ``ort`` crate's standard convention, respected here so
+               existing bare-ort deployments keep working.
+            4. The dylib bundled with the wheel under ``decibri/_ort/``,
+               which is the default ``pip install decibri`` experience.
+
+            If none of the above resolve to a real file, ORT's default
+            loader is used. That loader itself respects ``ORT_DYLIB_PATH``
+            if you set it after decibri import, so a late environment
+            change still works as a last-resort fallback.
+
+            Path validity is enforced by the Rust core, not the resolver.
+            An invalid path (missing file, directory, etc.) raises
+            ``OrtPathInvalid`` from the bridge layer with the path and
+            reason attached.
+
+            Note: ORT initialization is process-global. Once any Decibri
+            instance constructs with a specific dylib path, subsequent
+            Decibri instances inherit that initialization regardless of
+            their own ``ort_library_path`` argument. The first Decibri
+            construction in a process determines the dylib for the
+            entire process lifetime.
+
+        Other parameters are summarised at the class docstring; refer to
+        ``help(Decibri)`` for the capture-side surface.
+        """
         if format not in _VALID_FORMATS:
             raise exceptions.InvalidFormat(
                 f"format must be 'int16' or 'float32'; got {format!r}"
@@ -285,8 +331,20 @@ class Decibri:
                     "installation, or pass model_path explicitly."
                 ) from exc
 
+        # Resolve the ORT dylib path via the four-arm priority order in
+        # _ort_resolver. Only consulted when Silero VAD is enabled; energy
+        # mode and vad=False never load ORT, so the resolver call (and its
+        # bundled-dylib lookup) is skipped to avoid the import-time cost.
+        # See _ort_resolver.resolve_ort_dylib_path for the priority order.
         resolved_ort_path: str | None = None
-        if ort_library_path is not None:
+        if vad and vad_mode == "silero":
+            from decibri._ort_resolver import resolve_ort_dylib_path
+
+            resolved_ort_path = resolve_ort_dylib_path(ort_library_path)
+        elif ort_library_path is not None:
+            # Preserve passthrough for explicit caller paths even when ORT
+            # is not loaded, so tests and tooling that introspect the
+            # bridge state see the user's intent.
             resolved_ort_path = str(Path(ort_library_path))
 
         self._bridge = _decibri.DecibriBridge(
