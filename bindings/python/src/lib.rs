@@ -24,9 +24,12 @@
 //! the bridge exposes via `vad_probability`.
 
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::time::Duration;
 
 use std::collections::HashMap;
+
+use tokio::sync::Mutex;
 
 use pyo3::exceptions::{PyNotImplementedError, PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
@@ -49,7 +52,7 @@ use decibri::vad::{SileroVad, VadConfig};
 use decibri::CPAL_VERSION;
 
 // ---------------------------------------------------------------------------
-// Compile-time assertion: both bridge pyclasses are Send + 'static.
+// Compile-time assertion: all four bridge pyclasses are Send + 'static.
 //
 // The 'static bound is what `pyo3_async_runtimes::tokio::future_into_py`
 // requires when capturing the bridge into an async closure (Phase 5
@@ -59,23 +62,34 @@ use decibri::CPAL_VERSION;
 // time, and makes the regression's blast radius obvious from the error
 // message (it points at the new field).
 //
-// If this assertion fails to compile, look for a recently added field
-// on `DecibriBridge` or `DecibriOutputBridge` whose type is not
-// `Send + 'static`: raw `cpal::Stream` (use a sendable handle instead),
-// `Rc<_>` / `RefCell<_>` (use `Arc<_>` / `Mutex<_>`), `&'a T` for any
-// non-static lifetime (extract owned data instead).
+// Coverage:
+//   - DecibriBridge / DecibriOutputBridge: the sync pyclasses; Phase 4
+//     established their Send + 'static property by removing `unsendable`.
+//   - AsyncDecibriBridge / AsyncOutputBridge: the Phase 5 async wrappers;
+//     each holds an Arc<tokio::sync::Mutex<T>> where T is the matching
+//     sync bridge. Arc + tokio::sync::Mutex are Send + Sync when T is
+//     Send (which the sync bridges are), so the async wrappers inherit
+//     the property automatically.
 //
-// Sendability is empirically backed: the Rust core's `CaptureStream`
-// is asserted `Send + Sync` at `crates/decibri/src/capture.rs:459`
-// (compile-time, unconditional, runs on every CI platform), and the
-// documented `Send` contract for all public capture/output types lives
-// at `crates/decibri/src/lib.rs:119-140`.
+// If this assertion fails to compile, look for a recently added field
+// on any of the four pyclasses whose type is not `Send + 'static`: raw
+// `cpal::Stream` (use a sendable handle instead), `Rc<_>` / `RefCell<_>`
+// (use `Arc<_>` / `Mutex<_>`), `&'a T` for any non-static lifetime
+// (extract owned data instead).
+//
+// Sendability of the sync bridges is empirically backed: the Rust core's
+// `CaptureStream` is asserted `Send + Sync` at
+// `crates/decibri/src/capture.rs:459` (compile-time, unconditional, runs
+// on every CI platform), and the documented `Send` contract for all
+// public capture/output types lives at `crates/decibri/src/lib.rs:119-140`.
 // ---------------------------------------------------------------------------
 
 const _: () = {
     const fn assert_send_static<T: Send + 'static>() {}
     let _ = assert_send_static::<DecibriBridge>;
     let _ = assert_send_static::<DecibriOutputBridge>;
+    let _ = assert_send_static::<AsyncDecibriBridge>;
+    let _ = assert_send_static::<AsyncOutputBridge>;
 };
 
 // ---------------------------------------------------------------------------
@@ -922,6 +936,315 @@ impl DecibriOutputBridge {
 }
 
 // ---------------------------------------------------------------------------
+// AsyncDecibriBridge: async wrapper around DecibriBridge.
+//
+// Phase 5 deliverable. Holds an `Arc<tokio::sync::Mutex<DecibriBridge>>` and
+// exposes the same blocking methods as the sync bridge, but async. Each
+// blocking method dispatches the underlying sync work to a Tokio worker
+// thread via `tokio::task::spawn_blocking`, keeping the runtime thread
+// responsive (per Phase 5 plan §3d).
+//
+// The compile-time `Send + 'static` assertion at the top of this module is
+// extended to cover this pyclass; PyO3 + pyo3-async-runtimes capture into
+// `future_into_py` requires it.
+//
+// Construction is sync (Python class instantiation is always sync). The
+// constructor's parameter list mirrors `DecibriBridge::new` exactly; users
+// instantiate with the same kwargs and accept that ORT model loading
+// happens during construction (potentially slow). The post-construction
+// async surface (`start`, `stop`, `read`, etc.) is what the
+// `AsyncDecibri` Python wrapper proxies through.
+//
+// Per Phase 5 plan Risk 3: concurrent calls on the same instance serialize
+// via the inner Mutex. This is a behavioural characteristic, not advertised
+// concurrency. Per Risk 2: spawn_blocking does not cooperatively cancel
+// OS threads; cancellation surfaces immediately to Python while the spawned
+// thread runs to completion. For `read`, the thread finishes its current
+// chunk (~100 ms); for `drain`, the thread waits for the cpal output to
+// flush (potentially seconds). The Python coroutine's `CancelledError`
+// arrives immediately regardless.
+//
+// Iterator (`__iter__` / `__next__`) and context manager (`__enter__` /
+// `__exit__`) protocols are deliberately NOT implemented on this Rust
+// pyclass; those are sync-only protocols. The `AsyncDecibri` Python
+// wrapper layers `__aiter__` / `__anext__` and `__aenter__` / `__aexit__`
+// on top of the async `read` / `start` / `stop` methods exposed here.
+// ---------------------------------------------------------------------------
+
+#[pyclass(module = "decibri._decibri")]
+pub(crate) struct AsyncDecibriBridge {
+    inner: Arc<Mutex<DecibriBridge>>,
+}
+
+#[pymethods]
+impl AsyncDecibriBridge {
+    #[new]
+    #[pyo3(signature = (
+        sample_rate,
+        channels,
+        frames_per_buffer,
+        format,
+        device = None,
+        vad = false,
+        vad_threshold = 0.5_f32,
+        vad_mode = "silero".to_string(),
+        vad_holdoff = 0_u32,
+        model_path = None,
+        numpy = false,
+        ort_library_path = None,
+    ))]
+    #[allow(clippy::too_many_arguments)]
+    fn new(
+        py: Python<'_>,
+        sample_rate: u32,
+        channels: u16,
+        frames_per_buffer: u32,
+        format: String,
+        device: Option<Bound<'_, PyAny>>,
+        vad: bool,
+        vad_threshold: f32,
+        vad_mode: String,
+        vad_holdoff: u32,
+        model_path: Option<PathBuf>,
+        numpy: bool,
+        ort_library_path: Option<PathBuf>,
+    ) -> PyResult<Self> {
+        let inner = DecibriBridge::new(
+            py,
+            sample_rate,
+            channels,
+            frames_per_buffer,
+            format,
+            device,
+            vad,
+            vad_threshold,
+            vad_mode,
+            vad_holdoff,
+            model_path,
+            numpy,
+            ort_library_path,
+        )?;
+        Ok(AsyncDecibriBridge {
+            inner: Arc::new(Mutex::new(inner)),
+        })
+    }
+
+    fn start<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        let inner = Arc::clone(&self.inner);
+        future_into_py(py, async move {
+            tokio::task::spawn_blocking(move || -> PyResult<()> {
+                let mut bridge = inner.blocking_lock();
+                Python::attach(|py| bridge.start(py))
+            })
+            .await
+            .map_err(|e| PyRuntimeError::new_err(format!("spawn_blocking failed: {e}")))?
+        })
+    }
+
+    fn stop<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        let inner = Arc::clone(&self.inner);
+        future_into_py(py, async move {
+            // stop() is non-blocking (just drops Options) but we still go
+            // through spawn_blocking so the Mutex acquisition is uniform
+            // with start/read; this avoids the awkward .blocking_lock()
+            // call inside an async context that tokio warns against.
+            tokio::task::spawn_blocking(move || -> PyResult<()> {
+                let mut bridge = inner.blocking_lock();
+                bridge.stop()
+            })
+            .await
+            .map_err(|e| PyRuntimeError::new_err(format!("spawn_blocking failed: {e}")))?
+        })
+    }
+
+    #[pyo3(signature = (timeout_ms = None))]
+    fn read<'py>(&self, py: Python<'py>, timeout_ms: Option<u64>) -> PyResult<Bound<'py, PyAny>> {
+        let inner = Arc::clone(&self.inner);
+        future_into_py(py, async move {
+            // Extract owned bytes inside spawn_blocking + GIL because
+            // Bound<PyBytes> is GIL-bound and not Send + 'static. Then
+            // re-wrap into Py<PyBytes> outside spawn_blocking; pyo3-
+            // async-runtimes converts the Py<PyBytes> back to a Python
+            // bytes object on resolution.
+            let raw: Option<Vec<u8>> =
+                tokio::task::spawn_blocking(move || -> PyResult<Option<Vec<u8>>> {
+                    let mut bridge = inner.blocking_lock();
+                    Python::attach(|py| {
+                        let opt = bridge.read(py, timeout_ms)?;
+                        Ok(opt.map(|b| b.as_bytes().to_vec()))
+                    })
+                })
+                .await
+                .map_err(|e| PyRuntimeError::new_err(format!("spawn_blocking failed: {e}")))??;
+            Python::attach(|py| Ok(raw.map(|v| PyBytes::new(py, &v).unbind())))
+        })
+    }
+
+    #[getter]
+    fn is_open<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        let inner = Arc::clone(&self.inner);
+        future_into_py(py, async move {
+            // Non-blocking getter: acquire the Mutex via async lock and
+            // read cached state inline. No spawn_blocking needed.
+            let bridge = inner.lock().await;
+            Ok(bridge.is_open())
+        })
+    }
+
+    #[getter]
+    fn vad_probability<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        let inner = Arc::clone(&self.inner);
+        future_into_py(py, async move {
+            let bridge = inner.lock().await;
+            Ok(bridge.vad_probability())
+        })
+    }
+
+    #[getter]
+    fn vad_holdoff_ms<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        let inner = Arc::clone(&self.inner);
+        future_into_py(py, async move {
+            let bridge = inner.lock().await;
+            Ok(bridge.vad_holdoff_ms())
+        })
+    }
+
+    #[staticmethod]
+    fn devices(py: Python<'_>) -> PyResult<Bound<'_, PyAny>> {
+        future_into_py(py, async move {
+            tokio::task::spawn_blocking(|| -> PyResult<Vec<DeviceInfo>> {
+                Python::attach(DecibriBridge::devices)
+            })
+            .await
+            .map_err(|e| PyRuntimeError::new_err(format!("spawn_blocking failed: {e}")))?
+        })
+    }
+
+    #[staticmethod]
+    fn version(py: Python<'_>) -> PyResult<Bound<'_, PyAny>> {
+        // version() is non-blocking (reads compile-time constants); no
+        // spawn_blocking, just wrap into a resolved future.
+        future_into_py(py, async move { Ok(DecibriBridge::version()) })
+    }
+}
+
+// ---------------------------------------------------------------------------
+// AsyncOutputBridge: async wrapper around DecibriOutputBridge.
+//
+// Phase 5 deliverable. Same architecture as AsyncDecibriBridge:
+// `Arc<tokio::sync::Mutex<DecibriOutputBridge>>` with each blocking
+// method dispatched via spawn_blocking.
+//
+// Risk 2 explicitly applies to `drain`: the cpal output buffer can hold
+// multiple seconds of pending audio; spawn_blocking does not abort the
+// drain on Python cancellation, so the audio finishes playing even after
+// the Python coroutine is cancelled. The Python coroutine sees
+// CancelledError immediately; the audio finishes asynchronously to the
+// caller's logic. Document this in the AsyncDecibriOutput.drain docstring
+// in the Python wrapper (next relay).
+// ---------------------------------------------------------------------------
+
+#[pyclass(module = "decibri._decibri")]
+pub(crate) struct AsyncOutputBridge {
+    inner: Arc<Mutex<DecibriOutputBridge>>,
+}
+
+#[pymethods]
+impl AsyncOutputBridge {
+    #[new]
+    #[pyo3(signature = (sample_rate, channels, format, device = None))]
+    fn new(
+        py: Python<'_>,
+        sample_rate: u32,
+        channels: u16,
+        format: String,
+        device: Option<Bound<'_, PyAny>>,
+    ) -> PyResult<Self> {
+        let inner = DecibriOutputBridge::new(py, sample_rate, channels, format, device)?;
+        Ok(AsyncOutputBridge {
+            inner: Arc::new(Mutex::new(inner)),
+        })
+    }
+
+    fn start<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        let inner = Arc::clone(&self.inner);
+        future_into_py(py, async move {
+            tokio::task::spawn_blocking(move || -> PyResult<()> {
+                let mut bridge = inner.blocking_lock();
+                Python::attach(|py| bridge.start(py))
+            })
+            .await
+            .map_err(|e| PyRuntimeError::new_err(format!("spawn_blocking failed: {e}")))?
+        })
+    }
+
+    fn write<'py>(&self, py: Python<'py>, samples: Vec<u8>) -> PyResult<Bound<'py, PyAny>> {
+        // Take owned Vec<u8> from Python (one allocation; PyO3 conversion
+        // from `bytes` to `Vec<u8>` materialises before we cross the
+        // spawn_blocking boundary). The sync `write` takes a borrowed
+        // `&[u8]` which is GIL-bound and cannot cross.
+        let inner = Arc::clone(&self.inner);
+        future_into_py(py, async move {
+            tokio::task::spawn_blocking(move || -> PyResult<()> {
+                let mut bridge = inner.blocking_lock();
+                Python::attach(|py| bridge.write(py, &samples))
+            })
+            .await
+            .map_err(|e| PyRuntimeError::new_err(format!("spawn_blocking failed: {e}")))?
+        })
+    }
+
+    fn drain<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        let inner = Arc::clone(&self.inner);
+        future_into_py(py, async move {
+            tokio::task::spawn_blocking(move || -> PyResult<()> {
+                let mut bridge = inner.blocking_lock();
+                Python::attach(|py| bridge.drain(py))
+            })
+            .await
+            .map_err(|e| PyRuntimeError::new_err(format!("spawn_blocking failed: {e}")))?
+        })
+    }
+
+    fn stop<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        let inner = Arc::clone(&self.inner);
+        future_into_py(py, async move {
+            tokio::task::spawn_blocking(move || -> PyResult<()> {
+                let mut bridge = inner.blocking_lock();
+                bridge.stop()
+            })
+            .await
+            .map_err(|e| PyRuntimeError::new_err(format!("spawn_blocking failed: {e}")))?
+        })
+    }
+
+    fn close<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        // close is documented in the sync bridge as an alias for stop.
+        self.stop(py)
+    }
+
+    #[getter]
+    fn is_playing<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        let inner = Arc::clone(&self.inner);
+        future_into_py(py, async move {
+            let bridge = inner.lock().await;
+            Ok(bridge.is_playing())
+        })
+    }
+
+    #[staticmethod]
+    fn devices(py: Python<'_>) -> PyResult<Bound<'_, PyAny>> {
+        future_into_py(py, async move {
+            tokio::task::spawn_blocking(|| -> PyResult<Vec<OutputDeviceInfo>> {
+                Python::attach(DecibriOutputBridge::devices)
+            })
+            .await
+            .map_err(|e| PyRuntimeError::new_err(format!("spawn_blocking failed: {e}")))?
+        })
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Module entry point.
 //
 // Exception classes are not registered as module attributes here. They live
@@ -936,6 +1259,12 @@ fn _decibri(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<OutputDeviceInfo>()?;
     m.add_class::<DecibriBridge>()?;
     m.add_class::<DecibriOutputBridge>()?;
+
+    // Phase 5 async pyclasses. The Python wrappers (AsyncDecibri,
+    // AsyncDecibriOutput) live in python/decibri/_async_classes.py and
+    // proxy to these via Arc<tokio::sync::Mutex<sync_bridge>>.
+    m.add_class::<AsyncDecibriBridge>()?;
+    m.add_class::<AsyncOutputBridge>()?;
 
     // Phase 5 Step 1 empirical smoke; see comment block above the
     // async_smoke fn declaration for rationale.

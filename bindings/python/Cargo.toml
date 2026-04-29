@@ -81,8 +81,10 @@ pyo3-async-runtimes = { version = "=0.28.0", features = ["tokio-runtime", "attri
 #     work; the AsyncDecibri wrapper dispatches the existing GIL-released
 #     sync calls through spawn_blocking so they do not block the runtime
 #     thread.
+#   - `sync`: tokio::sync::Mutex used by the AsyncDecibriBridge /
+#     AsyncOutputBridge wrappers around the sync bridges.
 #   - `time`: tokio::time::sleep used by the empirical smoke pyfunction in
 #     this crate's lib.rs.
 #   - `macros`: enables the proc-macro entry points (#[tokio::main] etc.)
 #     that pyo3-async-runtimes' attributes feature relies on internally.
-tokio = { version = "1", features = ["rt", "rt-multi-thread", "time", "macros"] }
+tokio = { version = "1", features = ["rt", "rt-multi-thread", "sync", "time", "macros"] }
