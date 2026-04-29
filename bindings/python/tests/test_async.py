@@ -31,14 +31,15 @@ from decibri import AsyncDecibri, AsyncDecibriOutput
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.requires_audio_input
 @pytest.mark.asyncio
 async def test_async_decibri_construct_start_stop() -> None:
     """AsyncDecibri can be constructed, started, and stopped without exception.
 
     No vad to avoid ORT model load (the construction smoke for the bundled
-    ORT path is in tests/test_ort_bundling.py). No real audio reads in
-    this test; the assertion is just that the lifecycle completes cleanly
-    on a CI runner without audio input.
+    ORT path is in tests/test_ort_bundling.py). The lifecycle assertion
+    requires a real cpal input stream to open; CI runners without audio
+    hardware skip via the requires_audio_input marker.
     """
     decibri = AsyncDecibri(vad=False)
     assert decibri.is_open is False
@@ -48,9 +49,14 @@ async def test_async_decibri_construct_start_stop() -> None:
     assert decibri.is_open is False
 
 
+@pytest.mark.requires_audio_output
 @pytest.mark.asyncio
 async def test_async_output_construct_start_stop() -> None:
-    """AsyncDecibriOutput can be constructed, started, and stopped."""
+    """AsyncDecibriOutput can be constructed, started, and stopped.
+
+    Requires audio output hardware to open the cpal stream; CI runners
+    without audio output skip via the requires_audio_output marker.
+    """
     output = AsyncDecibriOutput()
     assert output.is_playing is False
     await output.start()
@@ -89,12 +95,16 @@ async def test_async_decibri_read_returns_bytes() -> None:
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.requires_audio_input
 @pytest.mark.asyncio
 async def test_async_with_decibri() -> None:
     """``async with AsyncDecibri()`` enters by starting, exits by stopping.
 
     Inside the with body, ``is_open`` is True. After the with block
     completes, ``is_open`` is False (verifying ``__aexit__`` ran).
+
+    ``__aenter__`` calls ``start`` which opens a cpal input stream;
+    requires audio input hardware. CI runners without it skip.
     """
     decibri = AsyncDecibri(vad=False)
     assert decibri.is_open is False
@@ -104,9 +114,14 @@ async def test_async_with_decibri() -> None:
     assert decibri.is_open is False
 
 
+@pytest.mark.requires_audio_output
 @pytest.mark.asyncio
 async def test_async_with_decibri_output() -> None:
-    """``async with AsyncDecibriOutput()`` enters by starting, exits by stopping."""
+    """``async with AsyncDecibriOutput()`` enters by starting, exits by stopping.
+
+    Requires audio output hardware (the output cpal stream opens during
+    ``__aenter__``).
+    """
     output = AsyncDecibriOutput()
     async with output as o:
         assert o is output
@@ -114,12 +129,14 @@ async def test_async_with_decibri_output() -> None:
     assert output.is_playing is False
 
 
+@pytest.mark.requires_audio_input
 @pytest.mark.asyncio
 async def test_async_with_decibri_propagates_exceptions() -> None:
     """Exceptions inside ``async with`` body propagate after stop runs.
 
     Verifies ``__aexit__`` does not suppress exceptions and that the
     bridge is still stopped (resource cleanup) even on exception path.
+    Requires audio input hardware (``__aenter__`` opens the stream).
     """
 
     class _AsyncWithProbe(Exception):
@@ -219,6 +236,7 @@ async def test_async_output_write_drain() -> None:
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.requires_audio_input
 @pytest.mark.asyncio
 async def test_async_decibri_concurrent_tasks_share_instance() -> None:
     """Two concurrent tasks calling on the same instance work without panic.
@@ -237,6 +255,9 @@ async def test_async_decibri_concurrent_tasks_share_instance() -> None:
     Concurrent ``start`` is intentionally avoided because the bridge
     raises ``AlreadyRunning`` on the second call by design (correct
     behaviour, not a Phase 5 concern).
+
+    Requires audio input hardware: the test starts a real cpal stream
+    before issuing the concurrent stops. CI runners without audio skip.
     """
     decibri = AsyncDecibri(vad=False)
 
