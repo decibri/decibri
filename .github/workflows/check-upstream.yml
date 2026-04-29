@@ -30,7 +30,11 @@ jobs:
           # Use cargo search instead of curl+python: avoids crates.io
           # User-Agent enforcement issues from GitHub Actions runner IPs,
           # and uses the cargo toolchain's own crates.io client.
-          VERSION=$(cargo search cpal --limit 1 | head -1 | grep -oP '"\K[^"]+')
+          # Parser splits on '"' and takes field 2 (the version string).
+          # Earlier attempt used grep -oP '"\K[^"]+', but PCRE \K matches
+          # twice on a line like `cpal = "0.17.3"    # description`,
+          # producing two output lines and corrupting $GITHUB_OUTPUT.
+          VERSION=$(cargo search cpal --limit 1 | head -1 | awk -F'"' '{print $2}')
           if [ -z "$VERSION" ]; then
             echo "ERROR: could not extract cpal version from cargo search output"
             cargo search cpal --limit 1
@@ -78,7 +82,9 @@ jobs:
           # Use cargo search instead of curl+python: avoids crates.io
           # User-Agent enforcement issues from GitHub Actions runner IPs,
           # and uses the cargo toolchain's own crates.io client.
-          VERSION=$(cargo search ort --limit 1 | head -1 | grep -oP '"\K[^"]+')
+          # See check-cpal for parser rationale; awk -F'"' is robust and
+          # preserves RC suffixes like 2.0.0-rc.12.
+          VERSION=$(cargo search ort --limit 1 | head -1 | awk -F'"' '{print $2}')
           if [ -z "$VERSION" ]; then
             echo "ERROR: could not extract ort version from cargo search output"
             cargo search ort --limit 1
