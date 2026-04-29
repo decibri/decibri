@@ -127,11 +127,20 @@ def test_write_accepts_bytes_regression() -> None:
         o.drain()
 
 
+@pytest.mark.requires_audio_output
 def test_write_rejects_dtype_mismatch() -> None:
     """``np.float32`` ndarray to ``format='int16'`` output raises TypeError.
 
-    Type check fires at ``write()`` time before reaching cpal; no audio
-    hardware needed. The output bridge raises before opening the stream.
+    The dtype check fires at ``write()`` time, but the test path requires
+    ``output.start()`` to succeed first (the bridge's stream-state check
+    raises ``OutputStreamClosed`` before the dtype check would run if the
+    output is not started). On CI runners without audio output hardware,
+    ``start()`` fails with ``StreamOpenFailed`` before the test can
+    exercise the dtype-rejection path; hence the
+    ``requires_audio_output`` marker. Restructuring the bridge to
+    validate dtype before stream-state would be a real refactor; out of
+    Phase 6 scope. The dtype-rejection behavior is still verified, just
+    only on hardware.
     """
     samples = np.zeros(1600, dtype=np.float32)
     output = DecibriOutput(format="int16")
