@@ -363,15 +363,32 @@ jobs:
           rm -rf "${GITHUB_WORKSPACE}/target/wheels/"
           uv run maturin build --release
 
-      - name: Clean target/wheels before Linux container build
+      - name: Clean target/ before Linux container build
         if: runner.os == 'Linux'
         shell: bash
-        # Linux uses maturin-action (next step) which writes to target/wheels/
-        # via --out. The macOS/Windows step's `rm -rf` before its host build
-        # handles the stale-wheel-in-cache concern; we mirror that here for
-        # the Linux path so Swatinem/rust-cache restoring a stale linux wheel
-        # cannot win the install-test step's `ls | head -1` lookup.
-        run: rm -rf "${GITHUB_WORKSPACE}/target/wheels/"
+        # Wipe the entire target/ directory before the manylinux_2_28
+        # container build. Two distinct concerns this addresses:
+        #
+        # 1. Stale wheels from rust-cache restore. The macOS/Windows host
+        #    build's `rm -rf target/wheels` solves the same concern; we
+        #    mirror that here so the install-test step's `ls | head -1`
+        #    lookup cannot pick a stale wheel.
+        #
+        # 2. Host-built build scripts in target/release/build/. The earlier
+        #    host-side steps (maturin develop --uv, cargo test-decibri) ran
+        #    on Ubuntu 24.04 (glibc 2.38) and produced build-script binaries
+        #    linked against that glibc. The manylinux_2_28 container has
+        #    glibc 2.28 and cannot exec those host-built scripts (GLIBC_2.30
+        #    + 2.32 + 2.33 + 2.34 symbols not found at runtime). Without
+        #    this clean, the container's cargo build crashes when it tries
+        #    to invoke crates/decibri's build.rs from the cached host
+        #    artifact. Cleaning the entire target/ forces the container to
+        #    rebuild every build script against its own glibc.
+        #
+        # Trade-off: container build loses the rust-cache benefit; full
+        # rebuild every time. Acceptable because correctness wins, and
+        # the macOS/Windows host paths still reuse rust-cache normally.
+        run: rm -rf "${GITHUB_WORKSPACE}/target/"
 
       - name: Build Linux wheel in manylinux_2_28 container (Phase 7 Step 2.5)
         if: runner.os == 'Linux'
