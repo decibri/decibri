@@ -250,23 +250,21 @@ jobs:
         # workflow proceeds.
         run: codesign -v --verbose=2 bindings/python/python/decibri/_ort/libonnxruntime.dylib
 
-      - name: Download and extract ONNX Runtime (Linux)
-        if: runner.os == 'Linux'
-        shell: bash
-        # Mirrors release.yml lines 169-183. Two files copied: the main
-        # dylib (symlink-resolved) and libonnxruntime_providers_shared.so
-        # (kept under its exact upstream name). The main dylib dlopens
-        # the providers solib by basename via $ORIGIN RUNPATH at session
-        # creation; without it Linux SileroVad fails to load.
-        run: |
-          SLUG="${{ steps.ort-meta.outputs.slug }}"
-          URL="${{ steps.ort-meta.outputs.url }}"
-          mkdir -p bindings/python/python/decibri/_ort
-          curl -sL --retry 3 --retry-delay 2 -o ort.tgz "$URL"
-          tar -xzf ort.tgz
-          SRC="onnxruntime-${SLUG}-${ORT_VERSION}"
-          cp -L "$SRC/lib/libonnxruntime.so" bindings/python/python/decibri/_ort/libonnxruntime.so
-          cp "$SRC/lib/libonnxruntime_providers_shared.so" bindings/python/python/decibri/_ort/
+      # NOTE (Phase 7 Step 2.5, 2026-04-30): host-side Linux ORT download
+      # was removed. The Linux release wheel now builds inside a
+      # manylinux_2_28 container via the "Build Linux wheel in
+      # manylinux_2_28 container" step below; the ORT tarball is
+      # downloaded INSIDE that container via before-script-linux so
+      # its glibc symbol versioning matches the wheel's manylinux floor.
+      # Trade-off: the host-side `maturin develop` + pytest path on
+      # Linux now skips `requires_bundled_ort` tests because _ort/ is
+      # empty during dev install; coverage of the bundled-ORT path on
+      # Linux moves entirely to the install-test gate (which runs
+      # against the container-built wheel and exercises ORT load
+      # end-to-end). macOS and Windows paths still populate _ort/ on
+      # the host because their wheels are host-built (no container
+      # equivalent needed; macOS / Windows runners have appropriate
+      # glibc / MSVC versions for their respective platform tags).
 
       - name: Download and extract ONNX Runtime (Windows)
         if: runner.os == 'Windows'
@@ -334,7 +332,8 @@ jobs:
         working-directory: bindings/python
         run: uv run mypy --strict python/
 
-      - name: Build release wheel (smoke; not uploaded)
+      - name: Build release wheel (macOS/Windows host build; smoke, not uploaded)
+        if: runner.os != 'Linux'
         working-directory: bindings/python
         shell: bash
         # Validates the release-profile abi3 wheel builds end-to-end,
@@ -344,21 +343,93 @@ jobs:
         # entry; acceptable cost for the pre-publish insurance. Artifact
         # not uploaded; Phase 3 adds the cross-platform wheel upload matrix.
         #
+        # Linux jobs use the maturin-action container build step below
+        # (Phase 7 Step 2.5) instead of this host-side build, because
+        # ubuntu-latest's glibc 2.38 produces wheels too new for the
+        # manylinux_2_28 floor that PyPI consumers expect.
+        #
         # Clean target/wheels/ before invoking maturin. Swatinem/rust-cache
         # caches the entire target/ tree, including target/wheels/. When a
         # cache key matches across runs (e.g. neither dependencies nor
         # toolchain changed), restoration brings back stale .whl files from
         # earlier builds. The install-test step's
         # `ls target/wheels/decibri-*.whl | head -1` picks alphabetically,
-        # which can select a stale linux_x86_64 wheel over the freshly
-        # built manylinux_2_38_x86_64 wheel. Wiping target/wheels/ here
-        # leaves only the current build's output for downstream steps to
-        # find. The Rust build cache in target/release/ and target/debug/
-        # is preserved (we only delete target/wheels/), so build times
-        # are unaffected.
+        # which can select a stale wheel over the freshly built one.
+        # Wiping target/wheels/ here leaves only the current build's output
+        # for downstream steps to find. The Rust build cache in target/release/
+        # and target/debug/ is preserved (we only delete target/wheels/),
+        # so build times are unaffected.
         run: |
           rm -rf "${GITHUB_WORKSPACE}/target/wheels/"
           uv run maturin build --release
+
+      - name: Clean target/wheels before Linux container build
+        if: runner.os == 'Linux'
+        shell: bash
+        # Linux uses maturin-action (next step) which writes to target/wheels/
+        # via --out. The macOS/Windows step's `rm -rf` before its host build
+        # handles the stale-wheel-in-cache concern; we mirror that here for
+        # the Linux path so Swatinem/rust-cache restoring a stale linux wheel
+        # cannot win the install-test step's `ls | head -1` lookup.
+        run: rm -rf "${GITHUB_WORKSPACE}/target/wheels/"
+
+      - name: Build Linux wheel in manylinux_2_28 container (Phase 7 Step 2.5)
+        if: runner.os == 'Linux'
+        # Phase 7 Step 2.5 (added 2026-04-30 after CI failure on Step 2).
+        # Builds the Linux release wheel inside a manylinux_2_28 container
+        # via PyO3/maturin-action. The container provides glibc 2.28 + an
+        # older toolchain so the produced wheel references symbols within
+        # the manylinux_2_28 policy ceiling, which auditwheel can then
+        # repair / verify. Without this, ubuntu-latest's glibc 2.38 produces
+        # wheels with too-recent symbols (libc/libstdc++/libgcc_s) that
+        # auditwheel refuses to repair.
+        #
+        # Manylinux profile choice: 2_28 (matches ONNX Runtime 1.24's
+        # documented glibc floor; targeting 2_17 would waste audit headroom).
+        #
+        # Target derivation: matrix.os carries the runner OS; for Linux
+        # that's either ubuntu-latest (x86_64) or ubuntu-24.04-arm (aarch64).
+        # We compute the Rust target triple inline rather than adding a
+        # matrix axis (the matrix uses fromJSON-driven flat axes; adding
+        # a per-entry target field would require an include: block).
+        #
+        # before-script-linux runs INSIDE the container before maturin builds.
+        # ORT download lives here so the dylib lands in the workspace at
+        # bindings/python/python/decibri/_ort/ before maturin's [tool.maturin]
+        # include directive packages it. Container's curl + tar are part of
+        # the manylinux_2_28 base image.
+        #
+        # Reference: PyO3/maturin-action README; matches polars / ruff /
+        # tokenizers production CI patterns. Fully cited in
+        # phase-7-wheel-hardening.md Step 2.5.
+        uses: PyO3/maturin-action@3e2bdf6ba6453a61e649744019b8a2d906c7eb38 # v1.51.0
+        with:
+          manylinux: 2_28
+          target: ${{ matrix.os == 'ubuntu-24.04-arm' && 'aarch64-unknown-linux-gnu' || 'x86_64-unknown-linux-gnu' }}
+          working-directory: bindings/python
+          args: --release --compatibility pypi --out ${{ github.workspace }}/target/wheels
+          before-script-linux: |
+            set -euo pipefail
+            ARCH=$(uname -m)
+            case "$ARCH" in
+              x86_64)  ORT_ARCH="linux-x64"     ;;
+              aarch64) ORT_ARCH="linux-aarch64" ;;
+              *)
+                echo "ERROR: unsupported container architecture: $ARCH"
+                exit 1
+                ;;
+            esac
+            ORT_TARBALL="onnxruntime-${ORT_ARCH}-${ORT_VERSION}.tgz"
+            ORT_URL="https://github.com/microsoft/onnxruntime/releases/download/v${ORT_VERSION}/${ORT_TARBALL}"
+            echo "Downloading ORT inside container: $ORT_URL"
+
+            mkdir -p bindings/python/python/decibri/_ort
+            curl -sL --retry 3 --retry-delay 2 -o /tmp/ort.tgz "$ORT_URL"
+            tar -xzf /tmp/ort.tgz -C /tmp
+            SRC="/tmp/onnxruntime-${ORT_ARCH}-${ORT_VERSION}"
+            cp -L "$SRC/lib/libonnxruntime.so" bindings/python/python/decibri/_ort/libonnxruntime.so
+            cp    "$SRC/lib/libonnxruntime_providers_shared.so" bindings/python/python/decibri/_ort/
+            ls -la bindings/python/python/decibri/_ort/
 
       - name: Install auditwheel (Linux only)
         if: runner.os == 'Linux'
