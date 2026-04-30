@@ -410,6 +410,17 @@ jobs:
           args: --release --compatibility pypi --out ${{ github.workspace }}/target/wheels
           before-script-linux: |
             set -euo pipefail
+            # Inject ORT_VERSION at YAML processing time. maturin-action's
+            # docker invocation does NOT auto-forward workflow-level env
+            # vars into the container (only a fixed allowlist of GITHUB_*
+            # and a few build-related vars); referencing $ORT_VERSION
+            # directly inside before-script-linux fails with "unbound
+            # variable" under set -u. The ${{ env.ORT_VERSION }} expression
+            # interpolates at the GitHub Actions YAML-processing layer
+            # before the script reaches the container, so the script that
+            # actually runs inside the container sees a literal version
+            # string and the downstream ORT_TARBALL / ORT_URL lines work.
+            ORT_VERSION="${{ env.ORT_VERSION }}"
             ARCH=$(uname -m)
             case "$ARCH" in
               x86_64)  ORT_ARCH="linux-x64"     ;;
