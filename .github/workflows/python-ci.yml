@@ -50,6 +50,15 @@ env:
   # Update in lockstep with release.yml at every ort-crate upgrade per the
   # workspace Cargo.toml maintainer comment (steps 2 and 3 of that comment).
   ORT_VERSION: 1.24.4
+  # Phase 7 wheel size thresholds. Soft warning continues the Phase 3
+  # alarm (150 MB; today's bundled wheel is ~30 to 50 MB). Hard fail at
+  # 200 MB catches pathological regressions (e.g., accidentally bundling
+  # ORT twice). auditwheel and delocate may inflate wheel size slightly
+  # post-repair; the headroom (3x to 7x current size) absorbs that without
+  # masking real bloat. Threshold values can be retuned via these env
+  # vars without touching the size-check step.
+  WHEEL_SIZE_SOFT_WARN_MB: 150
+  WHEEL_SIZE_HARD_FAIL_MB: 200
 
 jobs:
   python-ci:
@@ -241,23 +250,21 @@ jobs:
         # workflow proceeds.
         run: codesign -v --verbose=2 bindings/python/python/decibri/_ort/libonnxruntime.dylib
 
-      - name: Download and extract ONNX Runtime (Linux)
-        if: runner.os == 'Linux'
-        shell: bash
-        # Mirrors release.yml lines 169-183. Two files copied: the main
-        # dylib (symlink-resolved) and libonnxruntime_providers_shared.so
-        # (kept under its exact upstream name). The main dylib dlopens
-        # the providers solib by basename via $ORIGIN RUNPATH at session
-        # creation; without it Linux SileroVad fails to load.
-        run: |
-          SLUG="${{ steps.ort-meta.outputs.slug }}"
-          URL="${{ steps.ort-meta.outputs.url }}"
-          mkdir -p bindings/python/python/decibri/_ort
-          curl -sL --retry 3 --retry-delay 2 -o ort.tgz "$URL"
-          tar -xzf ort.tgz
-          SRC="onnxruntime-${SLUG}-${ORT_VERSION}"
-          cp -L "$SRC/lib/libonnxruntime.so" bindings/python/python/decibri/_ort/libonnxruntime.so
-          cp "$SRC/lib/libonnxruntime_providers_shared.so" bindings/python/python/decibri/_ort/
+      # NOTE (Phase 7 Step 2.5, 2026-04-30): host-side Linux ORT download
+      # was removed. The Linux release wheel now builds inside a
+      # manylinux_2_28 container via the "Build Linux wheel in
+      # manylinux_2_28 container" step below; the ORT tarball is
+      # downloaded INSIDE that container via before-script-linux so
+      # its glibc symbol versioning matches the wheel's manylinux floor.
+      # Trade-off: the host-side `maturin develop` + pytest path on
+      # Linux now skips `requires_bundled_ort` tests because _ort/ is
+      # empty during dev install; coverage of the bundled-ORT path on
+      # Linux moves entirely to the install-test gate (which runs
+      # against the container-built wheel and exercises ORT load
+      # end-to-end). macOS and Windows paths still populate _ort/ on
+      # the host because their wheels are host-built (no container
+      # equivalent needed; macOS / Windows runners have appropriate
+      # glibc / MSVC versions for their respective platform tags).
 
       - name: Download and extract ONNX Runtime (Windows)
         if: runner.os == 'Windows'
@@ -325,7 +332,8 @@ jobs:
         working-directory: bindings/python
         run: uv run mypy --strict python/
 
-      - name: Build release wheel (smoke; not uploaded)
+      - name: Build release wheel (macOS/Windows host build; smoke, not uploaded)
+        if: runner.os != 'Linux'
         working-directory: bindings/python
         shell: bash
         # Validates the release-profile abi3 wheel builds end-to-end,
@@ -335,21 +343,262 @@ jobs:
         # entry; acceptable cost for the pre-publish insurance. Artifact
         # not uploaded; Phase 3 adds the cross-platform wheel upload matrix.
         #
+        # Linux jobs use the maturin-action container build step below
+        # (Phase 7 Step 2.5) instead of this host-side build, because
+        # ubuntu-latest's glibc 2.38 produces wheels too new for the
+        # manylinux_2_28 floor that PyPI consumers expect.
+        #
         # Clean target/wheels/ before invoking maturin. Swatinem/rust-cache
         # caches the entire target/ tree, including target/wheels/. When a
         # cache key matches across runs (e.g. neither dependencies nor
         # toolchain changed), restoration brings back stale .whl files from
         # earlier builds. The install-test step's
         # `ls target/wheels/decibri-*.whl | head -1` picks alphabetically,
-        # which can select a stale linux_x86_64 wheel over the freshly
-        # built manylinux_2_38_x86_64 wheel. Wiping target/wheels/ here
-        # leaves only the current build's output for downstream steps to
-        # find. The Rust build cache in target/release/ and target/debug/
-        # is preserved (we only delete target/wheels/), so build times
-        # are unaffected.
+        # which can select a stale wheel over the freshly built one.
+        # Wiping target/wheels/ here leaves only the current build's output
+        # for downstream steps to find. The Rust build cache in target/release/
+        # and target/debug/ is preserved (we only delete target/wheels/),
+        # so build times are unaffected.
         run: |
           rm -rf "${GITHUB_WORKSPACE}/target/wheels/"
           uv run maturin build --release
+
+      - name: Clean target/ before Linux container build
+        if: runner.os == 'Linux'
+        shell: bash
+        # Wipe the entire target/ directory before the manylinux_2_28
+        # container build. Two distinct concerns this addresses:
+        #
+        # 1. Stale wheels from rust-cache restore. The macOS/Windows host
+        #    build's `rm -rf target/wheels` solves the same concern; we
+        #    mirror that here so the install-test step's `ls | head -1`
+        #    lookup cannot pick a stale wheel.
+        #
+        # 2. Host-built build scripts in target/release/build/. The earlier
+        #    host-side steps (maturin develop --uv, cargo test-decibri) ran
+        #    on Ubuntu 24.04 (glibc 2.38) and produced build-script binaries
+        #    linked against that glibc. The manylinux_2_28 container has
+        #    glibc 2.28 and cannot exec those host-built scripts (GLIBC_2.30
+        #    + 2.32 + 2.33 + 2.34 symbols not found at runtime). Without
+        #    this clean, the container's cargo build crashes when it tries
+        #    to invoke crates/decibri's build.rs from the cached host
+        #    artifact. Cleaning the entire target/ forces the container to
+        #    rebuild every build script against its own glibc.
+        #
+        # Trade-off: container build loses the rust-cache benefit; full
+        # rebuild every time. Acceptable because correctness wins, and
+        # the macOS/Windows host paths still reuse rust-cache normally.
+        run: rm -rf "${GITHUB_WORKSPACE}/target/"
+
+      - name: Build Linux wheel in manylinux_2_28 container (Phase 7 Step 2.5)
+        if: runner.os == 'Linux'
+        # Phase 7 Step 2.5 (added 2026-04-30 after CI failure on Step 2).
+        # Builds the Linux release wheel inside a manylinux_2_28 container
+        # via PyO3/maturin-action. The container provides glibc 2.28 + an
+        # older toolchain so the produced wheel references symbols within
+        # the manylinux_2_28 policy ceiling, which auditwheel can then
+        # repair / verify. Without this, ubuntu-latest's glibc 2.38 produces
+        # wheels with too-recent symbols (libc/libstdc++/libgcc_s) that
+        # auditwheel refuses to repair.
+        #
+        # Manylinux profile choice: 2_28 (matches ONNX Runtime 1.24's
+        # documented glibc floor; targeting 2_17 would waste audit headroom).
+        #
+        # Target derivation: matrix.os carries the runner OS; for Linux
+        # that's either ubuntu-latest (x86_64) or ubuntu-24.04-arm (aarch64).
+        # We compute the Rust target triple inline rather than adding a
+        # matrix axis (the matrix uses fromJSON-driven flat axes; adding
+        # a per-entry target field would require an include: block).
+        #
+        # before-script-linux runs INSIDE the container before maturin builds.
+        # ORT download lives here so the dylib lands in the workspace at
+        # bindings/python/python/decibri/_ort/ before maturin's [tool.maturin]
+        # include directive packages it. Container's curl + tar are part of
+        # the manylinux_2_28 base image.
+        #
+        # Reference: PyO3/maturin-action README; matches polars / ruff /
+        # tokenizers production CI patterns. Fully cited in
+        # phase-7-wheel-hardening.md Step 2.5.
+        uses: PyO3/maturin-action@3e2bdf6ba6453a61e649744019b8a2d906c7eb38 # v1.51.0
+        with:
+          manylinux: 2_28
+          target: ${{ matrix.os == 'ubuntu-24.04-arm' && 'aarch64-unknown-linux-gnu' || 'x86_64-unknown-linux-gnu' }}
+          working-directory: bindings/python
+          args: --release --compatibility pypi --out ${{ github.workspace }}/target/wheels
+          before-script-linux: |
+            set -euo pipefail
+            # Install ALSA dev headers for cpal -> alsa -> alsa-sys. The
+            # manylinux_2_28 image (quay.io/pypa/manylinux_2_28_x86_64) is
+            # AlmaLinux 8-based and does not include alsa-lib-devel by
+            # default; without it the Linux build of cpal 0.17 fails at
+            # alsa-sys's pkg-config probe. Equivalent to the host-side
+            # `apt-get install libasound2-dev` step earlier in this job
+            # but for the dnf-based manylinux image. Runs as root inside
+            # the container so no sudo needed. Only Python-binding dep
+            # graph is built here (cargo --manifest-path bindings/python/
+            # Cargo.toml via maturin); openssl-sys, napi-sys, etc. are
+            # not in this graph and need no further system libraries.
+            dnf install -y alsa-lib-devel
+            # Inject ORT_VERSION at YAML processing time. maturin-action's
+            # docker invocation does NOT auto-forward workflow-level env
+            # vars into the container (only a fixed allowlist of GITHUB_*
+            # and a few build-related vars); referencing $ORT_VERSION
+            # directly inside before-script-linux fails with "unbound
+            # variable" under set -u. The ${{ env.ORT_VERSION }} expression
+            # interpolates at the GitHub Actions YAML-processing layer
+            # before the script reaches the container, so the script that
+            # actually runs inside the container sees a literal version
+            # string and the downstream ORT_TARBALL / ORT_URL lines work.
+            ORT_VERSION="${{ env.ORT_VERSION }}"
+            ARCH=$(uname -m)
+            case "$ARCH" in
+              x86_64)  ORT_ARCH="linux-x64"     ;;
+              aarch64) ORT_ARCH="linux-aarch64" ;;
+              *)
+                echo "ERROR: unsupported container architecture: $ARCH"
+                exit 1
+                ;;
+            esac
+            ORT_TARBALL="onnxruntime-${ORT_ARCH}-${ORT_VERSION}.tgz"
+            ORT_URL="https://github.com/microsoft/onnxruntime/releases/download/v${ORT_VERSION}/${ORT_TARBALL}"
+            echo "Downloading ORT inside container: $ORT_URL"
+
+            mkdir -p bindings/python/python/decibri/_ort
+            curl -sL --retry 3 --retry-delay 2 -o /tmp/ort.tgz "$ORT_URL"
+            tar -xzf /tmp/ort.tgz -C /tmp
+            SRC="/tmp/onnxruntime-${ORT_ARCH}-${ORT_VERSION}"
+            cp -L "$SRC/lib/libonnxruntime.so" bindings/python/python/decibri/_ort/libonnxruntime.so
+            cp    "$SRC/lib/libonnxruntime_providers_shared.so" bindings/python/python/decibri/_ort/
+            ls -la bindings/python/python/decibri/_ort/
+
+      - name: Install auditwheel (Linux only)
+        if: runner.os == 'Linux'
+        working-directory: bindings/python
+        # Phase 7 Step 2. auditwheel is the canonical tool for verifying
+        # and repairing manylinux compliance on Linux wheels; PyPI rejects
+        # bare linux_* tags, so without auditwheel repair our wheels would
+        # fail upload at Phase 11. Pin range matches phase-7-wheel-hardening.md
+        # Section 11 Q7; bumps become deliberate cross-workflow actions.
+        # auditwheel CLI is Linux-only (refuses on macOS / Windows hosts);
+        # the install + invocation are gated to runner.os == 'Linux'.
+        run: uv pip install 'auditwheel>=6.0,<7.0'
+
+      - name: Run auditwheel repair (Linux only)
+        if: runner.os == 'Linux'
+        working-directory: bindings/python
+        shell: bash
+        # Phase 7 Step 2. Verifies external symbol versioning is within
+        # the manylinux_2_28 policy ceiling (chosen because ubuntu-latest
+        # ships glibc >= 2.35; manylinux_2_28 targets glibc >= 2.28 and
+        # is widely accepted by PyPI consumers). auditwheel rewrites
+        # RPATH entries in the bundled _decibri.*.so to use $ORIGIN-relative
+        # paths so it loads libonnxruntime.so from _ort/. Repaired wheel
+        # may rename bundled libraries with hash suffixes (e.g.
+        # libonnxruntime-abc123.so); the existing _ort_resolver.py glob
+        # pattern (libonnxruntime*.so) tolerates this by design.
+        #
+        # Repaired wheel replaces the original in target/wheels/ so
+        # downstream steps (Wheel install-test, abi3 forward-compat) see
+        # exactly one wheel: the audited one. This is the artifact Phase 11
+        # eventually publishes to PyPI; CI tests what publishes.
+        #
+        # If auditwheel rejects manylinux_2_28 due to versioned-symbol
+        # conflicts, escalate to manylinux_2_34 (or surface for plan
+        # amendment). Failure mode per phase-7-wheel-hardening.md Section 11
+        # Q1: fix in Phase 7 unless requires multi-week scope expansion.
+        run: |
+          set -euo pipefail
+          WHEEL=$(ls "${GITHUB_WORKSPACE}/target/wheels/decibri-"*.whl | head -1)
+          if [ -z "$WHEEL" ]; then
+            echo "ERROR: no wheel found for auditwheel"
+            exit 1
+          fi
+          echo "Auditing wheel (pre-repair): $WHEEL"
+          uv run auditwheel show "$WHEEL"
+
+          ARCH=$(uname -m)
+          case "$ARCH" in
+            x86_64)  PLAT="manylinux_2_28_x86_64" ;;
+            aarch64) PLAT="manylinux_2_28_aarch64" ;;
+            *)
+              echo "ERROR: unsupported architecture for auditwheel: $ARCH"
+              exit 1
+              ;;
+          esac
+          echo "Selected manylinux platform: $PLAT"
+
+          mkdir -p "${GITHUB_WORKSPACE}/target/wheels/repaired"
+          uv run auditwheel repair --plat "$PLAT" \
+            -w "${GITHUB_WORKSPACE}/target/wheels/repaired/" "$WHEEL"
+
+          # Replace the original wheel with the repaired one. The install-test
+          # step's `ls target/wheels/decibri-*.whl | head -1` lookup expects
+          # exactly one wheel; remove the unaudited original first.
+          rm "$WHEEL"
+          mv "${GITHUB_WORKSPACE}/target/wheels/repaired/decibri-"*.whl \
+             "${GITHUB_WORKSPACE}/target/wheels/"
+          rmdir "${GITHUB_WORKSPACE}/target/wheels/repaired"
+
+          NEW_WHEEL=$(ls "${GITHUB_WORKSPACE}/target/wheels/decibri-"*.whl | head -1)
+          echo "Repaired wheel: $NEW_WHEEL"
+          uv run auditwheel show "$NEW_WHEEL"
+
+      - name: Install delocate (macOS only)
+        if: runner.os == 'macOS'
+        working-directory: bindings/python
+        # Phase 7 Step 3. delocate is the macOS analog of auditwheel;
+        # bundles externals into the wheel and rewrites LC_LOAD_DYLIB
+        # install names to @loader_path/<dir>/<lib>. Pin range per
+        # phase-7-wheel-hardening.md Section 11 Q7.
+        run: uv pip install 'delocate>=0.13.0,<0.14.0'
+
+      - name: Run delocate repair (macOS only)
+        if: runner.os == 'macOS'
+        working-directory: bindings/python
+        shell: bash
+        # Phase 7 Step 3. delocate-listdeps enumerates external library
+        # references; output should include only system frameworks
+        # (/System/Library/Frameworks/CoreAudio.framework/..., etc.).
+        # Anything pointing to /opt/homebrew/, /usr/local/, /Users/runner/
+        # is a portability defect.
+        #
+        # delocate-wheel walks the wheel's libraries, copies any external
+        # (non-system) dependencies into the wheel, and rewrites install
+        # names. The -L _ort flag (Phase 7 Step 1 finding) keeps bundled
+        # dylibs in the existing _ort/ directory rather than relocating
+        # to delocate's default .dylibs/ subdirectory; this preserves the
+        # _ort_resolver.py glob pattern (libonnxruntime*.dylib under _ort/)
+        # so the resolver continues to find the dylib without modification.
+        #
+        # Phase 3's non-gating macOS codesign diagnostic (earlier step) is
+        # preserved; if delocate's rewrites invalidate Microsoft's upstream
+        # signature, the diagnostic logs it without blocking.
+        run: |
+          set -euo pipefail
+          WHEEL=$(ls "${GITHUB_WORKSPACE}/target/wheels/decibri-"*.whl | head -1)
+          if [ -z "$WHEEL" ]; then
+            echo "ERROR: no wheel found for delocate"
+            exit 1
+          fi
+          echo "Delocating wheel (pre-repair): $WHEEL"
+          echo "External dependencies (pre-repair):"
+          uv run delocate-listdeps --depending "$WHEEL"
+
+          mkdir -p "${GITHUB_WORKSPACE}/target/wheels/repaired"
+          uv run delocate-wheel \
+            -w "${GITHUB_WORKSPACE}/target/wheels/repaired/" \
+            -L _ort \
+            -v "$WHEEL"
+
+          rm "$WHEEL"
+          mv "${GITHUB_WORKSPACE}/target/wheels/repaired/decibri-"*.whl \
+             "${GITHUB_WORKSPACE}/target/wheels/"
+          rmdir "${GITHUB_WORKSPACE}/target/wheels/repaired"
+
+          NEW_WHEEL=$(ls "${GITHUB_WORKSPACE}/target/wheels/decibri-"*.whl | head -1)
+          echo "Repaired wheel: $NEW_WHEEL"
+          echo "External dependencies (post-repair):"
+          uv run delocate-listdeps --depending "$NEW_WHEEL"
 
       - name: Wheel install-test (Phase 3 acceptance gate)
         working-directory: bindings/python
@@ -382,12 +631,24 @@ jobs:
           fi
           echo "Install-test target: $WHEEL"
 
-          # Wheel size soft alarm (Decision: 150 MB). Bundled wheels are
-          # expected at 30 to 50 MB; alert if anything triples that.
+          # Wheel size check: soft warning + hard fail (Phase 7 Step 8).
+          # Thresholds come from workflow-level env (WHEEL_SIZE_SOFT_WARN_MB,
+          # WHEEL_SIZE_HARD_FAIL_MB); current values are 150 (soft) and 200
+          # (hard). Today's bundled wheel is ~30 to 50 MB; auditwheel and
+          # delocate may inflate slightly post-repair. Hard fail catches
+          # pathological regressions (double-bundling, accidental large
+          # asset inclusion) without masking the existing soft signal.
+          # `wc -c` is portable across macOS / Linux (cleaner than stat
+          # branching on -c%s vs -f%z).
           SIZE=$(wc -c < "$WHEEL")
-          echo "Wheel size: $((SIZE / 1024 / 1024)) MB ($SIZE bytes)"
-          if [ "$SIZE" -gt 157286400 ]; then
-            echo "WARNING: wheel exceeds 150 MB soft cap; investigate before merge."
+          SIZE_MB=$((SIZE / 1024 / 1024))
+          echo "Wheel size: ${SIZE_MB} MB ($SIZE bytes)"
+          if [ "$SIZE_MB" -ge "${WHEEL_SIZE_HARD_FAIL_MB}" ]; then
+            echo "ERROR: wheel ${SIZE_MB} MB exceeds hard fail threshold ${WHEEL_SIZE_HARD_FAIL_MB} MB"
+            exit 1
+          fi
+          if [ "$SIZE_MB" -ge "${WHEEL_SIZE_SOFT_WARN_MB}" ]; then
+            echo "WARNING: wheel ${SIZE_MB} MB exceeds soft warning threshold ${WHEEL_SIZE_SOFT_WARN_MB} MB; investigate before merge."
           fi
 
           uv venv .install-test
@@ -400,6 +661,58 @@ jobs:
 
           # Run the install-test pytest from the source tree but with the
           # clean venv's python; pytest finds tests/test_ort_bundling.py
-          # under the source layout, while `import decibri` resolves to
-          # the wheel-installed package (no editable install in this venv).
-          "$VENV_PY" -m pytest tests/test_ort_bundling.py -v
+          # and tests/test_wheel_smoke.py under the source layout, while
+          # `import decibri` resolves to the wheel-installed package (no
+          # editable install in this venv). Phase 7 Step 6 added
+          # test_wheel_smoke.py to the canonical install-gate so every
+          # push exercises the production install surface (import,
+          # construct sync + async + numpy=True, resolver-finds-bundled).
+          "$VENV_PY" -m pytest tests/test_ort_bundling.py tests/test_wheel_smoke.py -v
+
+      - name: abi3 forward-compat verification
+        if: |
+          (github.event_name == 'workflow_dispatch' || github.event_name == 'schedule') &&
+          matrix.python-version == '3.10'
+        working-directory: bindings/python
+        shell: bash
+        # Phase 7 Step 7. The PyO3 abi3-py310 contract guarantees one
+        # wheel built against the Python 3.10 stable ABI loads on every
+        # CPython 3.10+. Push matrix already verifies floor (3.10) and
+        # ceiling (3.14) per locked decision 6; this step empirically
+        # verifies the middle versions (3.11, 3.12, 3.13) on
+        # workflow_dispatch and nightly schedule runs only.
+        #
+        # Conditional on matrix.python-version == '3.10' so the loop
+        # runs once per OS (from the 3.10 matrix entry), not five times.
+        # The 3.10-built wheel is the canonical artifact; verifying
+        # backward-compat from a 3.14 build is not the abi3 promise
+        # and not Phase 7's concern.
+        #
+        # Each iteration: install the matrix-built wheel into a fresh
+        # venv on the target Python; run the same install-gate test
+        # surface (test_ort_bundling.py + test_wheel_smoke.py) per
+        # phase-7-wheel-hardening.md Section 11 Q8 (smoke + ORT bundling
+        # only; full 152-test baseline is already covered per matrix
+        # entry by maturin develop).
+        run: |
+          set -euo pipefail
+          WHEEL=$(ls "${GITHUB_WORKSPACE}/target/wheels/decibri-"*.whl | head -1)
+          if [ -z "$WHEEL" ]; then
+            echo "ERROR: no wheel found for abi3 forward-compat sweep"
+            exit 1
+          fi
+          echo "abi3 forward-compat target: $WHEEL"
+
+          for PYVER in 3.11 3.12 3.13 3.14; do
+            echo "===== abi3 forward-compat: Python ${PYVER} ====="
+            uv python install "${PYVER}"
+            uv venv --python "${PYVER}" ".abi3-fwd-${PYVER}"
+            if [ "$RUNNER_OS" = "Windows" ]; then
+              FWD_PY=".abi3-fwd-${PYVER}/Scripts/python.exe"
+            else
+              FWD_PY=".abi3-fwd-${PYVER}/bin/python"
+            fi
+            uv pip install --python "$FWD_PY" "$WHEEL" pytest pytest-asyncio
+            "$FWD_PY" -m pytest tests/test_ort_bundling.py tests/test_wheel_smoke.py -v
+            rm -rf ".abi3-fwd-${PYVER}"
+          done
