@@ -410,6 +410,18 @@ jobs:
           args: --release --compatibility pypi --out ${{ github.workspace }}/target/wheels
           before-script-linux: |
             set -euo pipefail
+            # Install ALSA dev headers for cpal -> alsa -> alsa-sys. The
+            # manylinux_2_28 image (quay.io/pypa/manylinux_2_28_x86_64) is
+            # AlmaLinux 8-based and does not include alsa-lib-devel by
+            # default; without it the Linux build of cpal 0.17 fails at
+            # alsa-sys's pkg-config probe. Equivalent to the host-side
+            # `apt-get install libasound2-dev` step earlier in this job
+            # but for the dnf-based manylinux image. Runs as root inside
+            # the container so no sudo needed. Only Python-binding dep
+            # graph is built here (cargo --manifest-path bindings/python/
+            # Cargo.toml via maturin); openssl-sys, napi-sys, etc. are
+            # not in this graph and need no further system libraries.
+            dnf install -y alsa-lib-devel
             # Inject ORT_VERSION at YAML processing time. maturin-action's
             # docker invocation does NOT auto-forward workflow-level env
             # vars into the container (only a fixed allowlist of GITHUB_*
