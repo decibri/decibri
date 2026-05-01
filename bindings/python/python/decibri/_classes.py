@@ -421,6 +421,17 @@ class Microphone:
         self._bridge.stop()
         self._vad.reset()
 
+    def close(self) -> None:
+        """Close the microphone and release resources.
+
+        Currently an alias for ``stop()``; provided for API symmetry
+        with ``Speaker.close()`` and the asyncio / aiohttp / httpx
+        convention. A future release may differentiate close (release
+        all resources) from stop (pause but keep device open); 0.1.0
+        makes them equivalent.
+        """
+        self.stop()
+
     def __enter__(self) -> Self:
         self.start()
         return self

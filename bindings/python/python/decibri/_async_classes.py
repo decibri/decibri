@@ -226,6 +226,15 @@ class AsyncMicrophone:
         self._is_open = False
         self._vad.reset()
 
+    async def close(self) -> None:
+        """Close the microphone and release resources.
+
+        Currently an alias for ``stop()``; provided for API symmetry
+        with ``AsyncSpeaker.close()``. See ``Microphone.close()`` for
+        the full rationale.
+        """
+        await self.stop()
+
     async def __aenter__(self) -> Self:
         await self.start()
         return self

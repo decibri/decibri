@@ -127,6 +127,50 @@ def test_stop_without_start_is_safe() -> None:
 
 
 # ---------------------------------------------------------------------------
+# Section 2b: close() alias for stop() (Phase 7.5).
+#
+# Microphone.close() is provided for API symmetry with Speaker.close()
+# and the asyncio / aiohttp / httpx convention. Currently a pure alias
+# for stop(); future releases may differentiate. These tests verify the
+# alias semantics and idempotency.
+# ---------------------------------------------------------------------------
+
+
+def test_close_is_alias_for_stop() -> None:
+    """Microphone.close() invokes the same bridge teardown as stop()."""
+    mock = _MockBridge()
+    d = _make_decibri_with_mock_bridge(mock)
+    d.close()
+    # close() routes through wrapper.stop() which calls bridge.stop().
+    assert mock.stop_calls == 1
+
+
+def test_close_called_twice_is_safe() -> None:
+    """close() is idempotent on the wrapper layer."""
+    mock = _MockBridge()
+    d = _make_decibri_with_mock_bridge(mock)
+    d.close()
+    d.close()
+    assert mock.stop_calls == 2
+
+
+def test_close_without_start_is_safe() -> None:
+    """close() before any start() does not raise (real bridge path)."""
+    d = Microphone()  # real bridge; not mocked
+    d.close()  # no preceding start; should be a no-op
+
+
+def test_close_resets_vad_state() -> None:
+    """close() resets the wrapper-side VAD state machine (via stop())."""
+    mock = _MockBridge()
+    d = _make_decibri_with_mock_bridge(mock)
+    # Force the state machine into a non-default state, then close.
+    d._vad._is_speaking = True  # type: ignore[attr-defined]
+    d.close()
+    assert d._vad._is_speaking is False  # type: ignore[attr-defined]
+
+
+# ---------------------------------------------------------------------------
 # Section 3: GIL-release correctness.
 #
 # Pattern: a background daemon thread increments a counter and sleeps 1ms in

@@ -295,3 +295,39 @@ async def test_async_version_returns_version_info() -> None:
     info = AsyncMicrophone.version()
     # VersionInfo has decibri / cpal / wheel fields per the Rust bridge
     assert info is not None
+
+
+# ---------------------------------------------------------------------------
+# Phase 7.5: close() alias for stop() on AsyncMicrophone
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_async_microphone_close_method_exists() -> None:
+    """AsyncMicrophone exposes close() (mirrors AsyncSpeaker.close())."""
+    import inspect
+
+    mic = AsyncMicrophone(vad=False)
+    assert hasattr(mic, "close")
+    assert inspect.iscoroutinefunction(mic.close)
+
+
+@pytest.mark.requires_audio_input
+@pytest.mark.asyncio
+async def test_async_microphone_close_stops_stream() -> None:
+    """await AsyncMicrophone.close() leaves the stream stopped (alias for stop())."""
+    mic = AsyncMicrophone(vad=False)
+    await mic.start()
+    assert mic.is_open is True
+    await mic.close()
+    assert mic.is_open is False
+
+
+@pytest.mark.requires_audio_input
+@pytest.mark.asyncio
+async def test_async_microphone_close_idempotent() -> None:
+    """await close() can be invoked multiple times safely."""
+    mic = AsyncMicrophone(vad=False)
+    await mic.start()
+    await mic.close()
+    await mic.close()  # second close is a no-op
