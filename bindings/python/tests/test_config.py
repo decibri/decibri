@@ -22,7 +22,7 @@ Notes on PyO3 boundary:
 - Positive out-of-range values pass through PyO3 cleanly and trigger
   validation at .start() time.
 
-VAD-specific validations (vad_threshold range, vad_mode string, vad_holdoff
+VAD-specific validations (vad_threshold range, vad union value, vad_holdoff
 negative) raise bare ValueError from the wrapper (not DecibriError subclasses)
 and live in test_vad.py Section A alongside the rest of the VAD surface.
 """

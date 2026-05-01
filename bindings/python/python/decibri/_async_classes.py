@@ -95,10 +95,9 @@ class AsyncMicrophone:
         frames_per_buffer: int = 1600,
         format: str = "int16",
         device: int | str | None = None,
-        vad: bool = False,
+        vad: bool | str = False,
         vad_threshold: float | None = None,
         vad_holdoff: int = 300,
-        vad_mode: str = "energy",
         model_path: str | Path | None = None,
         numpy: bool = False,
         ort_library_path: str | Path | None = None,
@@ -107,9 +106,27 @@ class AsyncMicrophone:
             raise exceptions.InvalidFormat(
                 f"format must be 'int16' or 'float32'; got {format!r}"
             )
-        if vad_mode not in _VALID_MODES:
+
+        # Phase 7.5: collapse the legacy two-flag pattern (vad=True,
+        # vad_mode="silero") into a single union-typed parameter. Mirrors
+        # Microphone exactly; see _classes.py for the full rationale.
+        vad_enabled: bool
+        vad_mode: str
+        if vad is False:
+            vad_enabled = False
+            vad_mode = "energy"  # inert placeholder; bridge ignores when disabled
+        elif vad is True:
             raise ValueError(
-                f"vad_mode must be 'silero' or 'energy'; got {vad_mode!r}"
+                "vad=True is no longer supported. "
+                "Specify the mode explicitly: vad='silero' or vad='energy'."
+            )
+        elif vad in _VALID_MODES:
+            vad_enabled = True
+            vad_mode = vad
+        else:
+            raise ValueError(
+                f"Invalid vad value: {vad!r}. "
+                "Expected False, 'silero', or 'energy'."
             )
 
         if vad_threshold is None:
@@ -129,7 +146,7 @@ class AsyncMicrophone:
         resolved_model_path: str | None = None
         if model_path is not None:
             resolved_model_path = str(Path(model_path))
-        elif vad and vad_mode == "silero":
+        elif vad_enabled and vad_mode == "silero":
             try:
                 model_resource = (
                     importlib.resources.files("decibri")
@@ -154,7 +171,7 @@ class AsyncMicrophone:
         # the sync wrapper uses (see _ort_resolver.resolve_ort_dylib_path).
         # Lazy import: only loaded when Silero VAD is enabled.
         resolved_ort_path: str | None = None
-        if vad and vad_mode == "silero":
+        if vad_enabled and vad_mode == "silero":
             from decibri._ort_resolver import resolve_ort_dylib_path
 
             resolved_ort_path = resolve_ort_dylib_path(ort_library_path)
@@ -167,7 +184,7 @@ class AsyncMicrophone:
             frames_per_buffer=frames_per_buffer,
             format=format,
             device=device,
-            vad=vad,
+            vad=vad_enabled,
             vad_threshold=vad_threshold,
             vad_mode=vad_mode,
             vad_holdoff=vad_holdoff,
@@ -176,7 +193,7 @@ class AsyncMicrophone:
             ort_library_path=resolved_ort_path,
         )
 
-        self._vad_enabled = vad
+        self._vad_enabled = vad_enabled
         self._vad = _VadStateMachine(
             mode=vad_mode,
             threshold=vad_threshold,
@@ -234,7 +251,8 @@ class AsyncMicrophone:
           matching the configured ``format`` and shape matching the
           channel count (1-D mono, 2-D ``(N, channels)`` multi-channel).
 
-        VAD state advances as a side effect when ``vad=True``. In numpy
+        VAD state advances as a side effect when VAD is enabled
+        (``vad="silero"`` or ``vad="energy"``). In numpy
         mode with VAD enabled, the chunk is converted to bytes once via
         ``arr.tobytes()`` for the VAD state machine; the original
         ndarray is returned to the user. Phase 6 plan §3i.

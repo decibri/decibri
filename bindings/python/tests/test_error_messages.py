@@ -122,9 +122,15 @@ def test_output_drain_before_start_message() -> None:
             id="vad_threshold_above_one",
         ),
         pytest.param(
-            {"vad_mode": "bogus"},
-            "vad_mode must be 'silero' or 'energy'; got 'bogus'",
-            id="vad_mode_invalid",
+            {"vad": "bogus"},
+            "Invalid vad value: 'bogus'. Expected False, 'silero', or 'energy'.",
+            id="vad_invalid_string",
+        ),
+        pytest.param(
+            {"vad": True},
+            "vad=True is no longer supported. "
+            "Specify the mode explicitly: vad='silero' or vad='energy'.",
+            id="vad_true_rejected",
         ),
         pytest.param(
             {"vad_holdoff": -1},

@@ -40,13 +40,13 @@ def test_construct_decibri_default() -> None:
 
 @pytest.mark.requires_bundled_ort
 def test_construct_decibri_silero_vad() -> None:
-    """Microphone(vad=True, vad_mode='silero') constructs cleanly with ORT.
+    """Microphone(vad='silero') constructs cleanly with ORT.
 
     Verifies: ORT dylib loads from bundled _ort/, Silero ONNX model
     loads from bundled models/silero_vad.onnx, ONNX session initializes.
     Skipped if _ort/ is empty (dev installs without bundled ORT).
     """
-    d = decibri.Microphone(vad=True, vad_mode="silero")
+    d = decibri.Microphone(vad="silero")
     assert d is not None
 
 
