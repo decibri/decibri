@@ -1,7 +1,7 @@
 """Phase 6 tests for numpy ndarray support.
 
 Covers the goals from Section 2 of phase-6-numpy-zerocopy.md:
-construction with numpy=True (no NotImplementedError), bytes-mode
+construction with as_ndarray=True (no NotImplementedError), bytes-mode
 regression (default), ndarray return on read, dtype/shape correctness,
 ndarray-accept on write, dtype mismatch rejection, async parallel,
 and the 5-test smoke baseline still passing.
@@ -28,26 +28,27 @@ from decibri import AsyncMicrophone, AsyncSpeaker, Microphone, Speaker
 # ---------------------------------------------------------------------------
 
 
-def test_construction_with_numpy_true_no_longer_raises() -> None:
+def test_construction_with_as_ndarray_true_no_longer_raises() -> None:
     """Phase 6 removes the Phase 2 NotImplementedError guard.
 
     Pre-Phase-6, ``Microphone(numpy=True)`` raised
-    ``NotImplementedError("numpy=True is not supported in 0.1.0a1...")``.
-    Phase 6 wires the actual ndarray path; construction now succeeds.
+    ``NotImplementedError``. Phase 6 wires the actual ndarray path; the
+    constructor now succeeds. Phase 7.7 renamed the wrapper kwarg from
+    ``numpy`` to ``as_ndarray`` (bridge keeps ``numpy`` per LD11).
     """
-    decibri = Microphone(numpy=True, vad=False)
+    decibri = Microphone(as_ndarray=True, vad=False)
     assert decibri is not None
 
 
-def test_construction_numpy_false_default_unchanged() -> None:
-    """Default ``numpy=False`` preserves the Phase 5 behavior verbatim."""
+def test_construction_default_unchanged() -> None:
+    """Default ``as_ndarray=False`` preserves the Phase 5 behavior verbatim."""
     decibri = Microphone(vad=False)
     assert decibri is not None
 
 
-def test_async_construction_with_numpy_true() -> None:
-    """``AsyncMicrophone(numpy=True)`` constructs without exception."""
-    async_decibri = AsyncMicrophone(numpy=True, vad=False)
+def test_async_construction_with_as_ndarray_true() -> None:
+    """``AsyncMicrophone(as_ndarray=True)`` constructs without exception."""
+    async_decibri = AsyncMicrophone(as_ndarray=True, vad=False)
     assert async_decibri is not None
 
 
@@ -57,16 +58,16 @@ def test_async_construction_with_numpy_true() -> None:
 
 
 @pytest.mark.requires_audio_input
-def test_read_returns_ndarray_when_numpy_true() -> None:
-    """Sync read with ``numpy=True`` returns ``numpy.ndarray``, not bytes."""
-    with Microphone(numpy=True, vad=False) as d:
+def test_read_returns_ndarray_when_as_ndarray_true() -> None:
+    """Sync read with ``as_ndarray=True`` returns ``numpy.ndarray``, not bytes."""
+    with Microphone(as_ndarray=True, vad=False) as d:
         chunk = d.read()
         if chunk is not None:
             assert isinstance(chunk, np.ndarray)
 
 
 @pytest.mark.requires_audio_input
-def test_read_returns_bytes_when_numpy_false() -> None:
+def test_read_returns_bytes_when_as_ndarray_false() -> None:
     """Default sync read returns ``bytes`` (Phase 5 baseline regression)."""
     with Microphone(vad=False) as d:
         chunk = d.read()
@@ -76,8 +77,8 @@ def test_read_returns_bytes_when_numpy_false() -> None:
 
 @pytest.mark.requires_audio_input
 def test_read_dtype_matches_int16_format() -> None:
-    """``numpy=True`` with ``dtype='int16'`` returns dtype ``np.int16``."""
-    with Microphone(numpy=True, dtype="int16", vad=False) as d:
+    """``as_ndarray=True`` with ``dtype='int16'`` returns dtype ``np.int16``."""
+    with Microphone(as_ndarray=True, dtype="int16", vad=False) as d:
         chunk = d.read()
         if chunk is not None:
             assert isinstance(chunk, np.ndarray)
@@ -86,8 +87,8 @@ def test_read_dtype_matches_int16_format() -> None:
 
 @pytest.mark.requires_audio_input
 def test_read_dtype_matches_float32_format() -> None:
-    """``numpy=True`` with ``dtype='float32'`` returns dtype ``np.float32``."""
-    with Microphone(numpy=True, dtype="float32", vad=False) as d:
+    """``as_ndarray=True`` with ``dtype='float32'`` returns dtype ``np.float32``."""
+    with Microphone(as_ndarray=True, dtype="float32", vad=False) as d:
         chunk = d.read()
         if chunk is not None:
             assert isinstance(chunk, np.ndarray)
@@ -97,7 +98,7 @@ def test_read_dtype_matches_float32_format() -> None:
 @pytest.mark.requires_audio_input
 def test_read_shape_mono_is_1d() -> None:
     """Mono read (``channels=1``) returns 1-D ndarray with shape ``(N,)``."""
-    with Microphone(numpy=True, channels=1, vad=False) as d:
+    with Microphone(as_ndarray=True, channels=1, vad=False) as d:
         chunk = d.read()
         if chunk is not None:
             assert isinstance(chunk, np.ndarray)
@@ -160,8 +161,8 @@ def test_write_rejects_dtype_mismatch() -> None:
 @pytest.mark.asyncio
 @pytest.mark.requires_audio_input
 async def test_async_read_returns_ndarray() -> None:
-    """``AsyncMicrophone(numpy=True).read()`` returns ndarray (async parallel)."""
-    async with AsyncMicrophone(numpy=True, vad=False) as d:
+    """``AsyncMicrophone(as_ndarray=True).read()`` returns ndarray (async parallel)."""
+    async with AsyncMicrophone(as_ndarray=True, vad=False) as d:
         chunk = await d.read()
         if chunk is not None:
             assert isinstance(chunk, np.ndarray)

@@ -3,21 +3,15 @@
 Cross-platform audio capture, output, and voice activity detection.
 
 Public surface: ``Microphone`` and ``Speaker`` (sync), ``AsyncMicrophone``
-and ``AsyncSpeaker`` (async). Lowercase factory functions
-(``decibri.microphone()``, ``decibri.speaker()``,
-``decibri.async_microphone()``, ``decibri.async_speaker()``) provide
-sounddevice-style call-site convenience over the same classes.
+and ``AsyncSpeaker`` (async). Construct directly via the class
+constructors (``decibri.Microphone(...)`` / ``decibri.Speaker(...)``).
 """
 
-from typing import Any as _Any
-
 from decibri._async_classes import AsyncMicrophone, AsyncSpeaker
-from decibri._classes import Microphone, Speaker
+from decibri._classes import Chunk, Microphone, Speaker
 from decibri._decibri import (
     DeviceInfo,
-    MicrophoneBridge,
     OutputDeviceInfo,
-    SpeakerBridge,
     VersionInfo,
 )
 from decibri.exceptions import (
@@ -26,6 +20,7 @@ from decibri.exceptions import (
     ChannelsOutOfRange,
     DecibriError,
     DeviceEnumerationFailed,
+    DeviceError,
     DeviceIndexOutOfRange,
     DeviceNotFound,
     FramesPerBufferOutOfRange,
@@ -58,56 +53,22 @@ from decibri.exceptions import (
 __version__ = "0.1.0a1"
 
 
-def microphone(**kwargs: _Any) -> Microphone:
-    """Create a ``Microphone`` instance.
-
-    Module-level convenience for ``decibri.Microphone(**kwargs)``;
-    mirrors the sounddevice ``sd.rec()`` ergonomic. Both forms are
-    supported and equivalent.
-    """
-    return Microphone(**kwargs)
-
-
-def speaker(**kwargs: _Any) -> Speaker:
-    """Create a ``Speaker`` instance.
-
-    Module-level convenience for ``decibri.Speaker(**kwargs)``.
-    """
-    return Speaker(**kwargs)
-
-
-def async_microphone(**kwargs: _Any) -> AsyncMicrophone:
-    """Create an ``AsyncMicrophone`` instance.
-
-    Module-level convenience for ``decibri.AsyncMicrophone(**kwargs)``.
-    """
-    return AsyncMicrophone(**kwargs)
-
-
-def async_speaker(**kwargs: _Any) -> AsyncSpeaker:
-    """Create an ``AsyncSpeaker`` instance.
-
-    Module-level convenience for ``decibri.AsyncSpeaker(**kwargs)``.
-    """
-    return AsyncSpeaker(**kwargs)
-
-
-def devices() -> list[DeviceInfo]:
+def input_devices() -> list[DeviceInfo]:
     """List available audio input devices.
 
-    Module-level convenience for ``Microphone.devices()``. Returns input
-    devices only; for output devices use ``decibri.output_devices()``.
-    To list both, concatenate the two.
+    Module-level convenience for ``Microphone.input_devices()``. Returns
+    input devices only; for output devices use
+    ``decibri.output_devices()``. To list both, concatenate the two.
     """
-    return Microphone.devices()
+    return Microphone.input_devices()
 
 
 def output_devices() -> list[OutputDeviceInfo]:
     """List available audio output devices.
 
-    Module-level convenience for ``Speaker.devices()``.
+    Module-level convenience for ``Speaker.output_devices()``.
     """
-    return Speaker.devices()
+    return Speaker.output_devices()
 
 
 def version() -> VersionInfo:
@@ -147,8 +108,8 @@ def record_to_file(
         Number of input channels. Default 1 (mono).
     device : int | str | None, optional
         Input device selector. ``None`` (default) uses the system
-        default input. Pass an integer index from ``devices()`` or a
-        substring of the device name.
+        default input. Pass an integer index from ``input_devices()``
+        or a substring of the device name.
 
     Notes
     -----
@@ -232,33 +193,30 @@ __all__ = [
     # Public Python wrapper classes (async; Phase 5)
     "AsyncMicrophone",
     "AsyncSpeaker",
-    # Lowercase factory functions (Phase 7.5; sounddevice-style)
-    "microphone",
-    "speaker",
-    "async_microphone",
-    "async_speaker",
-    # Module-level convenience functions (Phase 7.5)
-    "devices",
+    # Module-level convenience functions
+    "input_devices",
     "output_devices",
     "version",
     # File convenience functions (Phase 7.6 Item C5)
     "record_to_file",
     "async_record_to_file",
-    # Internal pyclasses (advanced use, accessible via attribute lookup
-    # but not in __all__).
     # Value types
     "DeviceInfo",
     "OutputDeviceInfo",
     "VersionInfo",
-    # Exception hierarchy entry points (Phase 7.6 Item C3, Shape C2):
+    # Audio chunk with metadata (Phase 7.7 Item B1)
+    "Chunk",
+    # Exception hierarchy entry points (Phase 7.6 Item C3, Shape C2;
+    # Phase 7.7 Item B7 added DeviceError):
     # only the catch-target roots are surfaced in __all__ to keep
-    # `from decibri import *` legible. The full 32-class hierarchy
+    # `from decibri import *` legible. The full 32+-class hierarchy
     # remains importable via top-level attribute lookup
     # (``decibri.<Class>``) AND via the explicit submodule
     # (``decibri.exceptions.<Class>``); see decibri.exceptions for the
-    # complete list. The three names below cover catch-anything,
-    # catch-any-ORT, and catch-any-ORT-path-error respectively.
+    # complete list. The four names below cover catch-anything,
+    # catch-any-device-error, catch-any-ORT, and catch-any-ORT-path-error.
     "DecibriError",
+    "DeviceError",
     "OrtError",
     "OrtPathError",
 ]

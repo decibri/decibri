@@ -127,12 +127,13 @@ def test_stop_without_start_is_safe() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Section 2b: close() alias for stop() (Phase 7.5).
+# Section 2b: close() permanent alias for stop() (Phase 7.5; permanence
+# committed in Phase 7.7 Item B6).
 #
-# Microphone.close() is provided for API symmetry with Speaker.close()
-# and the asyncio / aiohttp / httpx convention. Currently a pure alias
-# for stop(); future releases may differentiate. These tests verify the
-# alias semantics and idempotency.
+# Microphone.close() is provided for ergonomic parity with the
+# asyncio / aiohttp / httpx convention. Phase 7.7 commits close() to
+# remain a permanent alias for stop() across all decibri versions; the
+# prior "may diverge in future" hedge has been removed.
 # ---------------------------------------------------------------------------
 
 
@@ -465,6 +466,83 @@ def test_async_microphone_no_del_attr() -> None:
         "AsyncMicrophone must not define __del__: a finalizer cannot await, "
         "so explicit `await stop()` / `async with` is the only correct path."
     )
+
+
+# ---------------------------------------------------------------------------
+# Section 7: Re-entry contract (Phase 7.7 Item B5).
+#
+# Microphone, Speaker, AsyncMicrophone, and AsyncSpeaker are reusable across
+# stop/start cycles. Pin the contract so future refactors can't silently
+# break the documented behaviour:
+#   - start() after stop() reconstructs the stream cleanly.
+#   - start() after close() works the same as start() after stop().
+#   - start() after exiting a `with` block works the same.
+#   - VAD state (is_speaking, vad_score) resets on each new start().
+#   - start() while already started raises AlreadyRunning.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.requires_audio_input
+def test_microphone_start_after_stop_reconstructs_stream() -> None:
+    """Pinning Phase 7.7 B5 outcome (i): start after stop is supported."""
+    d = Microphone()
+    d.start()
+    assert d.is_open is True
+    d.stop()
+    assert d.is_open is False
+    d.start()
+    assert d.is_open is True
+    d.stop()
+
+
+@pytest.mark.requires_audio_input
+def test_microphone_start_after_close_reconstructs_stream() -> None:
+    """Pinning Phase 7.7 B5 outcome (i): start after close is supported."""
+    d = Microphone()
+    d.start()
+    d.close()
+    assert d.is_open is False
+    d.start()
+    assert d.is_open is True
+    d.stop()
+
+
+@pytest.mark.requires_audio_input
+def test_microphone_start_after_with_block_reconstructs_stream() -> None:
+    """Pinning Phase 7.7 B5 outcome (i): start after `with` exit is supported."""
+    d = Microphone()
+    with d:
+        pass
+    d.start()
+    assert d.is_open is True
+    d.stop()
+
+
+def test_microphone_vad_state_resets_on_restart() -> None:
+    """Pinning Phase 7.7 B5 outcome (i): VAD state resets on each new start()."""
+    d = Microphone(vad="energy")
+    # Force the VAD state machine into a non-default state.
+    d._vad._is_speaking = True  # type: ignore[attr-defined]
+    d._vad._last_probability = 0.9  # type: ignore[attr-defined]
+    d.stop()
+    # stop() resets the state machine.
+    assert d._vad._is_speaking is False  # type: ignore[attr-defined]
+    assert d._vad._last_probability == 0.0  # type: ignore[attr-defined]
+    # And it stays reset across the start/stop boundary.
+
+
+@pytest.mark.requires_audio_input
+def test_microphone_double_start_raises_already_running() -> None:
+    """Pinning Phase 7.7 B5 outcome (i): start() while running raises AlreadyRunning."""
+    from decibri import AlreadyRunning
+
+    d = Microphone()
+    d.start()
+    try:
+        with pytest.raises(AlreadyRunning):
+            d.start()
+    finally:
+        d.stop()
 
 
 def test_async_microphone_pyo3_drop_releases_resource() -> None:

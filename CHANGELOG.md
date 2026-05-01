@@ -1,9 +1,33 @@
+<!-- markdownlint-disable MD024 -->
+
 # Changelog
 
 All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+
+## [Unreleased]
+
+### Python binding (0.1.0a1) - Phase 7.7 final API polish
+
+#### Removed
+
+- Lowercase factory functions: `decibri.microphone()`, `decibri.speaker()`, `decibri.async_microphone()`, `decibri.async_speaker()`. Use the corresponding class constructors `Microphone()`, `Speaker()`, `AsyncMicrophone()`, `AsyncSpeaker()` instead. The factories were thin pass-throughs with no precedent in comparable libraries (gold-standard cohort survey: 0 of 10).
+- `MicrophoneBridge` and `SpeakerBridge` no longer accessible at the top-level `decibri.<X>` namespace. Bridges are internal and remain available at `decibri._decibri.<X>` for advanced users. Symmetric with the never-public `AsyncMicrophoneBridge` and `AsyncSpeakerBridge`.
+
+#### Changed
+
+- `decibri.devices()` renamed to `decibri.input_devices()` for symmetry with `decibri.output_devices()`. `Microphone.devices()` staticmethod renamed to `Microphone.input_devices()`; `Speaker.devices()` renamed to `Speaker.output_devices()`. Async equivalents follow the same shape.
+- `Microphone.vad_probability` / `AsyncMicrophone.vad_probability` property renamed to `vad_score`. Mode-agnostic (returns the Silero probability in `vad="silero"` mode and the normalized RMS energy in `vad="energy"` mode); previous name was a misnomer in energy mode. Bridge keeps `vad_probability` for cross-binding consistency per LD11.
+- `Microphone(numpy=...)` / `AsyncMicrophone(numpy=...)` kwarg renamed to `as_ndarray=...`. Reads correctly at the call site (`Microphone(as_ndarray=True)` parses as "use ndarray output"). Bridge keeps `numpy` per LD11.
+- `Microphone.close()` / `AsyncMicrophone.close()` / `Speaker.close()` / `AsyncSpeaker.close()` are now permanent aliases for `stop()`. Removed the prior "may diverge in future" hedge; the two methods are guaranteed equivalent across all decibri versions.
+
+#### Added
+
+- `Chunk` dataclass and `Microphone.read_with_metadata()` / `iter_with_metadata()` (and async equivalents). Returns a frozen `Chunk` with `.data`, `.timestamp`, `.sequence`, `.is_speaking`, `.vad_score` instead of a naked `bytes | ndarray`. Additive; `read()` keeps its current signature.
+- `DeviceError` catch-target intermediate (subclass of `DecibriError`, parent of all eight device-related exceptions: `DeviceNotFound`, `OutputDeviceNotFound`, `MultipleDevicesMatch`, `DeviceIndexOutOfRange`, `NoMicrophoneFound`, `NoOutputDeviceFound`, `NotAnInputDevice`, `DeviceEnumerationFailed`). Symmetric with `OrtError` and `OrtPathError`. Existing catches via `DecibriError` remain unchanged (parent chain preserved).
+- Re-entry contract documented and pinned by tests on `Microphone.start()`, `Speaker.start()`, `AsyncMicrophone.start()`, `AsyncSpeaker.start()`. Calling `start()` after `stop()` / `close()` reconstructs the underlying audio stream cleanly; VAD state resets on each new `start()`. Calling `start()` while already started raises `AlreadyRunning`.
 
 ## [3.3.2] - 2026-04-26
 

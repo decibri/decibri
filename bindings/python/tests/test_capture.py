@@ -30,8 +30,8 @@ pytestmark = pytest.mark.requires_audio_input
 # ---------------------------------------------------------------------------
 
 
-def test_devices_returns_list_of_device_info() -> None:
-    devices = Microphone.devices()
+def test_input_devices_returns_list_of_device_info() -> None:
+    devices = Microphone.input_devices()
     assert isinstance(devices, list)
     assert len(devices) > 0
     for d in devices:
@@ -128,3 +128,93 @@ def test_iterator_yields_bytes() -> None:
             if count >= 3:
                 break
         assert count == 3
+
+
+# ---------------------------------------------------------------------------
+# Phase 7.7 Item B1: read_with_metadata + iter_with_metadata + Chunk
+# ---------------------------------------------------------------------------
+
+
+def test_read_with_metadata_returns_chunk() -> None:
+    """``read_with_metadata()`` returns a frozen ``Chunk`` with all fields."""
+    import dataclasses
+
+    from decibri import Chunk
+
+    with Microphone(sample_rate=16000, channels=1, frames_per_buffer=512) as d:
+        chunk = d.read_with_metadata(timeout_ms=500)
+        assert chunk is not None
+        assert isinstance(chunk, Chunk)
+        # All five fields populated:
+        assert isinstance(chunk.data, bytes)
+        assert len(chunk.data) == 1024
+        assert isinstance(chunk.timestamp, float)
+        assert chunk.timestamp > 0.0
+        assert chunk.sequence == 0  # first chunk after start
+        assert chunk.is_speaking is False  # vad disabled
+        assert chunk.vad_score == 0.0
+        # Frozen: assignment after construction raises FrozenInstanceError.
+        with pytest.raises(dataclasses.FrozenInstanceError):
+            chunk.sequence = 1  # type: ignore[misc]
+
+
+def test_read_with_metadata_sequence_increments() -> None:
+    """Successive ``read_with_metadata()`` calls produce monotonic sequence values."""
+    with Microphone(sample_rate=16000, channels=1, frames_per_buffer=512) as d:
+        c0 = d.read_with_metadata(timeout_ms=500)
+        c1 = d.read_with_metadata(timeout_ms=500)
+        c2 = d.read_with_metadata(timeout_ms=500)
+        assert c0 is not None
+        assert c1 is not None
+        assert c2 is not None
+        assert c0.sequence == 0
+        assert c1.sequence == 1
+        assert c2.sequence == 2
+
+
+def test_read_with_metadata_sequence_resets_on_restart() -> None:
+    """Stopping and restarting the microphone resets sequence to 0."""
+    d = Microphone(sample_rate=16000, channels=1, frames_per_buffer=512)
+    d.start()
+    c0 = d.read_with_metadata(timeout_ms=500)
+    c1 = d.read_with_metadata(timeout_ms=500)
+    assert c0 is not None and c0.sequence == 0
+    assert c1 is not None and c1.sequence == 1
+    d.stop()
+    d.start()
+    try:
+        c2 = d.read_with_metadata(timeout_ms=500)
+        assert c2 is not None
+        assert c2.sequence == 0  # restart resets sequence
+    finally:
+        d.stop()
+
+
+def test_iter_with_metadata_yields_chunks() -> None:
+    """``iter_with_metadata()`` yields Chunk objects until break."""
+    from decibri import Chunk
+
+    with Microphone(sample_rate=16000, channels=1, frames_per_buffer=512) as d:
+        count = 0
+        last_seq = -1
+        for chunk in d.iter_with_metadata():
+            assert isinstance(chunk, Chunk)
+            assert chunk.sequence == last_seq + 1
+            last_seq = chunk.sequence
+            count += 1
+            if count >= 3:
+                break
+        assert count == 3
+
+
+def test_chunk_is_frozen_dataclass() -> None:
+    """Chunk is a frozen dataclass with slots; cannot be mutated post-construction."""
+    import dataclasses
+
+    from decibri import Chunk
+
+    chunk = Chunk(data=b"x" * 4, timestamp=1.0, sequence=0, is_speaking=False, vad_score=0.0)
+    with pytest.raises(dataclasses.FrozenInstanceError):
+        chunk.timestamp = 2.0  # type: ignore[misc]
+    with pytest.raises(dataclasses.FrozenInstanceError):
+        chunk.sequence = 5  # type: ignore[misc]

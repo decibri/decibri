@@ -20,9 +20,11 @@ Architectural notes:
   access using `time.monotonic()`, so consumers who pause iteration still
   observe correct state when they next read the property.
 
-- `vad_probability` is mode-aware. In Silero mode it passes through the
+- `vad_score` is mode-aware. In Silero mode it passes through the
   bridge's raw probability. In energy mode it returns the most recent
-  chunk's RMS, computed inside `read()` and cached.
+  chunk's RMS, computed inside `read()` and cached. The bridge keeps
+  the raw `vad_probability` name for cross-binding consistency; the
+  wrapper exposes the mode-agnostic `vad_score` view.
 
 - The Phase 2 surface is sync only. Async iteration and event callbacks
   ship in Phase 3 alongside `pyo3-async-runtimes` integration (Q7).
@@ -34,6 +36,7 @@ import importlib.resources
 import math
 import struct
 import time
+from dataclasses import dataclass
 from pathlib import Path
 from types import TracebackType
 from typing import TYPE_CHECKING, Any, Iterator, Union, cast
@@ -43,11 +46,11 @@ from typing_extensions import Self
 if TYPE_CHECKING:
     import numpy as np
 
-    # Phase 6: read can return bytes (default) or ndarray (numpy=True);
+    # Phase 6: read can return bytes (default) or ndarray (as_ndarray=True);
     # write can accept either. The runtime numpy dependency is optional
     # (pip install decibri[numpy]); using TYPE_CHECKING keeps the import
     # cost out of the default-install path while preserving mypy
-    # narrowing for users who set numpy=True.
+    # narrowing for users who set as_ndarray=True.
     SampleData = Union[bytes, "np.ndarray[Any, Any]"]
 else:
     SampleData = bytes
@@ -55,7 +58,46 @@ else:
 from decibri import _decibri, exceptions
 from decibri._decibri import DeviceInfo, OutputDeviceInfo, VersionInfo
 
-__all__ = ["Microphone", "Speaker", "DeviceInfo", "OutputDeviceInfo", "VersionInfo"]
+__all__ = ["Chunk", "Microphone", "Speaker", "DeviceInfo", "OutputDeviceInfo", "VersionInfo"]
+
+
+# ---------------------------------------------------------------------------
+# Chunk: typed audio chunk with metadata (Phase 7.7 Item B1).
+#
+# Frozen dataclass returned from read_with_metadata() / iter_with_metadata().
+# read() keeps the naked-data return shape for backwards compatibility;
+# Chunk is the additive richer surface.
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True, slots=True)
+class Chunk:
+    """Audio chunk with metadata.
+
+    Returned by ``Microphone.read_with_metadata()`` /
+    ``AsyncMicrophone.read_with_metadata()`` and yielded by
+    ``Microphone.iter_with_metadata()`` /
+    ``AsyncMicrophone.aiter_with_metadata()``. Provides the audio data
+    plus context the consumer would otherwise have to track manually.
+
+    Attributes:
+        data: The audio data, ``bytes`` (default) or ``np.ndarray``
+            (when the Microphone was constructed with ``as_ndarray=True``).
+        timestamp: ``time.monotonic()`` value at the chunk boundary,
+            in seconds. Use for relative timing within a session.
+        sequence: Monotonic chunk counter starting at 0 for the first
+            chunk after ``start()``. Resets to 0 on each new ``start()``.
+        is_speaking: Snapshot of VAD state when the chunk was read.
+            Always ``False`` if VAD is disabled.
+        vad_score: Snapshot of VAD score when the chunk was read in
+            ``[0, 1]``. ``0.0`` if VAD is disabled.
+    """
+
+    data: SampleData
+    timestamp: float
+    sequence: int
+    is_speaking: bool
+    vad_score: float
 
 
 # ---------------------------------------------------------------------------
@@ -154,7 +196,7 @@ class _VadStateMachine:
         return self._is_speaking
 
     @property
-    def vad_probability(self) -> float:
+    def vad_score(self) -> float:
         return self._last_probability
 
 
@@ -220,7 +262,7 @@ class Microphone:
     The VAD parameters (`vad`, `vad_threshold`, `vad_holdoff_ms`,
     `model_path`, `ort_library_path`) configure both the bridge and the
     wrapper-layer state machine. ``vad`` accepts ``False`` (disabled),
-    ``"silero"``, or ``"energy"``. With ``vad=False``, ``vad_probability``
+    ``"silero"``, or ``"energy"``. With ``vad=False``, ``vad_score``
     returns 0.0 and ``is_speaking`` returns False unconditionally.
 
     The wrapper is sync only in Phase 2. Async iteration and speech-event
@@ -255,7 +297,7 @@ class Microphone:
         vad_threshold: float | None = None,
         vad_holdoff_ms: int = 300,
         model_path: str | Path | None = None,
-        numpy: bool = False,
+        as_ndarray: bool = False,
         ort_library_path: str | Path | None = None,
     ) -> None:
         """Construct a Microphone audio capture instance.
@@ -424,7 +466,7 @@ class Microphone:
             vad_mode=vad_mode,
             vad_holdoff=vad_holdoff_ms,
             model_path=resolved_model_path,
-            numpy=numpy,
+            numpy=as_ndarray,
             ort_library_path=resolved_ort_path,
         )
 
@@ -436,33 +478,51 @@ class Microphone:
             sample_format=dtype,
         )
         self._format = dtype
-        # Phase 6: store the numpy flag so read() can branch its return
-        # type (bytes vs ndarray) without re-querying the bridge each
-        # call. The bridge also stores it; both are kept in sync because
-        # the constructor passes the same value to both layers.
-        self._numpy = numpy
+        # Phase 6: store the as_ndarray flag (bridge-level: numpy=) so
+        # read() can branch its return type (bytes vs ndarray) without
+        # re-querying the bridge each call. Wrapper-only rename
+        # (Phase 7.7 Item B4); bridge keeps the original `numpy` name
+        # for cross-binding consistency per LD11.
+        self._as_ndarray = as_ndarray
+        # Phase 7.7 Item B1: chunk counter for read_with_metadata().
+        # Increments on every non-None chunk emission; resets to 0 on
+        # each stop() so a subsequent start() begins a fresh sequence.
+        self._sequence = 0
 
     # -----------------------------------------------------------------------
     # Lifecycle
     # -----------------------------------------------------------------------
 
     def start(self) -> None:
-        """Open and start the capture stream."""
+        """Open and start the capture stream.
+
+        Re-entry contract:
+            Calling ``start()`` after ``stop()`` or ``close()`` is supported
+            and reconstructs the underlying audio stream cleanly. The
+            ``Microphone`` instance is reusable; you can stop, start, and
+            stop again as many times as needed. VAD state
+            (``is_speaking``, ``vad_score``) resets to default values on
+            each new ``start()``. Re-entry after exiting a ``with`` block
+            is also supported (since ``__exit__`` calls ``stop()``).
+
+            Calling ``start()`` while already started raises
+            ``AlreadyRunning``.
+        """
         self._bridge.start()
 
     def stop(self) -> None:
         """Stop the capture stream and reset VAD state."""
         self._bridge.stop()
         self._vad.reset()
+        self._sequence = 0
 
     def close(self) -> None:
-        """Close the microphone and release resources.
+        """Stop the capture stream. Permanent alias for ``stop()``.
 
-        Currently an alias for ``stop()``; provided for API symmetry
-        with ``Speaker.close()`` and the asyncio / aiohttp / httpx
-        convention. A future release may differentiate close (release
-        all resources) from stop (pause but keep device open); 0.1.0
-        makes them equivalent.
+        Provided for ergonomic parity with the asyncio / aiohttp /
+        httpx convention and for use cases where ``close()`` reads
+        more naturally than ``stop()``. The two methods are guaranteed
+        to remain semantically equivalent across all decibri versions.
         """
         # Calls self.stop() rather than self._bridge.close() so the
         # wrapper-side cleanup (vad.reset() in stop()) runs. The
@@ -492,36 +552,36 @@ class Microphone:
         """Read one chunk. Returns the chunk, or None if the stream closed.
 
         Return type:
-        - When ``numpy=False`` (default), returns ``bytes`` (Phase 2 wire
-          format).
-        - When ``numpy=True``, returns a ``numpy.ndarray`` with dtype
-          matching the configured ``dtype`` (np.int16 or np.float32) and
-          shape matching the channel count (1-D for mono, 2-D
-          ``(N, channels)`` for multi-channel).
+        - When ``as_ndarray=False`` (default), returns ``bytes`` (Phase 2
+          wire format).
+        - When ``as_ndarray=True``, returns a ``numpy.ndarray`` with
+          dtype matching the configured ``dtype`` (np.int16 or
+          np.float32) and shape matching the channel count (1-D for
+          mono, 2-D ``(N, channels)`` for multi-channel).
 
-        Future metadata (timestamps, sequence numbers, latency hints)
-        will be exposed via additional methods such as
-        ``read_with_metadata()``, not by changing this method's return
-        type. Code that relies on ``read()`` returning ``bytes`` or
-        ``ndarray`` will not break when richer metadata APIs ship.
+        Use ``read_with_metadata()`` to receive a typed ``Chunk`` with
+        ``.data``, ``.timestamp``, ``.sequence``, ``.is_speaking``, and
+        ``.vad_score`` attributes. ``read()`` keeps its naked-data
+        signature for backward compatibility.
 
         VAD state advances as a side effect when VAD is enabled
         (``vad="silero"`` or ``vad="energy"``). Consumers
-        should check ``is_speaking`` after each read. In numpy mode with
-        VAD enabled, the chunk is converted to bytes once via
+        should check ``is_speaking`` after each read. In ndarray mode
+        with VAD enabled, the chunk is converted to bytes once via
         ``arr.tobytes()`` for the VAD state machine (the existing RMS
         helper expects bytes); the original ndarray is returned to the
         user. The conversion cost is microseconds for typical chunk
         sizes.
 
         Raises ``ImportError`` with a clear actionable message if
-        ``numpy=True`` is set but the optional ``numpy`` extra is not
-        installed (i.e. the user did not run ``pip install decibri[numpy]``).
+        ``as_ndarray=True`` is set but the optional ``numpy`` extra is
+        not installed (i.e. the user did not run
+        ``pip install decibri[numpy]``).
         """
         try:
             chunk = self._bridge.read(timeout_ms=timeout_ms)
         except ImportError as exc:
-            if self._numpy:
+            if self._as_ndarray:
                 raise ImportError(
                     "numpy is not installed. Install with: pip install decibri[numpy]"
                 ) from exc
@@ -530,18 +590,65 @@ class Microphone:
             return None
         if self._vad_enabled:
             # The VAD state machine's _compute_rms uses struct.unpack on
-            # bytes. In numpy mode, the bridge already returned an
+            # bytes. In ndarray mode, the bridge already returned an
             # ndarray; convert to bytes once for the VAD pass via
             # arr.tobytes(). Cheap (~microseconds) for typical chunk
             # sizes; cleaner than rewriting _compute_rms to handle both
             # input types. Phase 6 plan §3i. The cast to bytes is for
             # mypy; at runtime the branch matches the actual type.
-            if self._numpy:
+            if self._as_ndarray:
                 vad_input: bytes = chunk.tobytes()  # type: ignore[union-attr]
             else:
                 vad_input = cast(bytes, chunk)
             self._vad.process_chunk(vad_input, self._bridge.vad_probability)
+        self._sequence += 1
         return chunk
+
+    def read_with_metadata(self, timeout_ms: int | None = None) -> Chunk | None:
+        """Read one chunk and return it as a typed ``Chunk`` with metadata.
+
+        Returns ``None`` if the stream closed cleanly (mirroring
+        ``read()``); otherwise returns a frozen ``Chunk`` with
+        ``.data``, ``.timestamp``, ``.sequence``, ``.is_speaking``,
+        and ``.vad_score`` attributes. The ``data`` field has the
+        same shape and type as ``read()`` would have returned
+        (``bytes`` by default; ``np.ndarray`` when
+        ``as_ndarray=True``).
+
+        ``timestamp`` is ``time.monotonic()`` taken immediately after
+        the bridge returns the chunk; useful for relative timing
+        within a session. ``sequence`` is a monotonic per-session
+        counter starting at 0; it resets on each new ``start()``.
+        ``is_speaking`` and ``vad_score`` snapshot the VAD state at
+        the chunk boundary (always ``False`` and ``0.0`` respectively
+        when ``vad=False``).
+        """
+        data = self.read(timeout_ms=timeout_ms)
+        if data is None:
+            return None
+        # self._sequence has just been incremented inside read(); the
+        # current chunk's index is sequence - 1 (0-based).
+        return Chunk(
+            data=data,
+            timestamp=time.monotonic(),
+            sequence=self._sequence - 1,
+            is_speaking=self.is_speaking,
+            vad_score=self.vad_score,
+        )
+
+    def iter_with_metadata(self) -> Iterator[Chunk]:
+        """Yield ``Chunk`` objects until the stream closes cleanly.
+
+        Generator wrapping ``read_with_metadata()``: stops when the
+        bridge returns ``None``. Use this in place of
+        ``for chunk in mic`` when you want metadata alongside the
+        audio data.
+        """
+        while True:
+            chunk = self.read_with_metadata(timeout_ms=None)
+            if chunk is None:
+                return
+            yield chunk
 
     def __iter__(self) -> Iterator[SampleData]:
         return self
@@ -576,24 +683,29 @@ class Microphone:
         return self._vad.is_speaking
 
     @property
-    def vad_probability(self) -> float:
-        """Most recent VAD probability.
+    def vad_score(self) -> float:
+        """Most recent VAD score in ``[0, 1]``. Mode-agnostic.
 
-        In Silero mode, returns the raw probability from the model.
-        In energy mode, returns the RMS of the most recent chunk.
-        Always 0.0 when vad=False.
+        In ``vad="silero"`` mode, returns the raw probability from the
+        Silero model. In ``vad="energy"`` mode, returns the normalized
+        RMS energy of the most recent chunk. Always 0.0 when
+        ``vad=False``.
+
+        The underlying bridge property is named ``vad_probability`` for
+        cross-binding consistency; ``vad_score`` is the mode-agnostic
+        wrapper-side name (it is not a probability in energy mode).
         """
         if not self._vad_enabled:
             return 0.0
-        return self._vad.vad_probability
+        return self._vad.vad_score
 
     # -----------------------------------------------------------------------
     # Static methods
     # -----------------------------------------------------------------------
 
     @staticmethod
-    def devices() -> list[DeviceInfo]:
-        """List available input devices."""
+    def input_devices() -> list[DeviceInfo]:
+        """List available audio input devices."""
         return _decibri.MicrophoneBridge.devices()
 
     @staticmethod
@@ -662,7 +774,7 @@ class Speaker:
         device : int | str | None, optional
             Output device selector. ``None`` (default) uses the system
             default output. Pass an integer index from
-            ``Speaker.devices()`` or a substring of the device name.
+            ``Speaker.output_devices()`` or a substring of the device name.
             ``Speaker`` does not load ONNX Runtime, so there is no
             ``ort_library_path`` parameter (output never invokes VAD).
         """
@@ -680,12 +792,32 @@ class Speaker:
         )
 
     def start(self) -> None:
+        """Open and start the output stream.
+
+        Re-entry contract:
+            Calling ``start()`` after ``stop()`` or ``close()`` is
+            supported and reconstructs the underlying output stream
+            cleanly. The ``Speaker`` instance is reusable across
+            stop/start cycles. Re-entry after exiting a ``with`` block
+            is also supported (since ``__exit__`` calls ``stop()``).
+
+            Calling ``start()`` while already started raises
+            ``AlreadyRunning``.
+        """
         self._bridge.start()
 
     def stop(self) -> None:
+        """Stop the output stream."""
         self._bridge.stop()
 
     def close(self) -> None:
+        """Stop the output stream. Permanent alias for ``stop()``.
+
+        Provided for ergonomic parity with the asyncio / aiohttp /
+        httpx convention and for use cases where ``close()`` reads
+        more naturally than ``stop()``. The two methods are guaranteed
+        to remain semantically equivalent across all decibri versions.
+        """
         self._bridge.close()
 
     def write(self, samples: SampleData) -> None:
@@ -723,8 +855,8 @@ class Speaker:
         return self._bridge.is_playing
 
     @staticmethod
-    def devices() -> list[OutputDeviceInfo]:
-        """List available output devices."""
+    def output_devices() -> list[OutputDeviceInfo]:
+        """List available audio output devices."""
         return _decibri.SpeakerBridge.devices()
 
     def __del__(self) -> None:

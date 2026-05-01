@@ -4,19 +4,31 @@ Matches the Rust surface in ``bindings/python/src/lib.rs``. Kept alongside
 the compiled ``.pyd`` / ``.so`` so mypy and IDEs see types without loading
 the extension. Update this file when the Rust surface changes.
 
+Internal module. Phase 7.7 Item A2: the four bridge classes
+(``MicrophoneBridge``, ``SpeakerBridge``, ``AsyncMicrophoneBridge``,
+``AsyncSpeakerBridge``) are accessible only via ``decibri._decibri.<X>``;
+they are NOT re-exported on the top-level ``decibri`` module and are NOT
+part of the public 0.1.0 API. Consumers should construct the wrapper
+classes (``decibri.Microphone``, ``decibri.Speaker``,
+``decibri.AsyncMicrophone``, ``decibri.AsyncSpeaker``) directly. The
+bridges remain importable for advanced users but carry no API stability
+guarantee across versions.
+
 Exception classes are NOT re-exported on this module. They live exclusively
 at ``decibri.exceptions``; ``to_py_err`` in the Rust binding raises instances
 of those pure-Python classes via ``PyErr::from_type``. Consumers should
-import exceptions from ``decibri`` (after Commit 6 re-export) or directly
-from ``decibri.exceptions``.
+import exceptions from ``decibri`` or directly from ``decibri.exceptions``.
 
-Wrapper-only naming translations (Phase 7.6):
-    The public ``decibri.Microphone`` / ``decibri.Speaker`` wrappers
-    expose ``dtype=`` and ``vad_holdoff_ms=`` to align with NumPy and
-    explicit-units conventions. The Rust bridge stubs below keep the
-    cross-binding-historical names ``format=`` and ``vad_holdoff=``;
-    the Python wrappers translate at the boundary. Direct bridge
-    consumers (advanced use) continue to use the bridge-level names.
+Wrapper-only naming translations (Phase 7.6 + Phase 7.7):
+    The public Python wrappers translate three kwargs at the boundary
+    while the bridge keeps the cross-binding-historical names per LD11:
+        wrapper ``dtype=``       -> bridge ``format=``
+        wrapper ``vad_holdoff_ms=`` -> bridge ``vad_holdoff=``
+        wrapper ``as_ndarray=``  -> bridge ``numpy=``
+    Direct bridge consumers (advanced use) continue to use the
+    bridge-level names. The wrapper-side ``vad_score`` property is a
+    mode-aware view of the bridge's ``vad_probability``; the bridge
+    name is unchanged.
 """
 
 from pathlib import Path

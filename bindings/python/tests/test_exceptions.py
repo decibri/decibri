@@ -1,15 +1,17 @@
 """Phase 2 exception hierarchy tests.
 
 Covers all 32 exception classes shipped in the public ``decibri`` namespace:
-1 base (DecibriError) + 20 direct subclasses + OrtError intermediate parent
-+ 7 direct OrtError subclasses + OrtPathError intermediate parent + 2 direct
-OrtPathError subclasses.
+1 base (DecibriError) + 11 direct subclasses + DeviceError intermediate
++ 8 direct DeviceError subclasses + OrtError intermediate + 7 direct
+OrtError subclasses + OrtPathError intermediate + 2 direct OrtPathError
+subclasses.
 
 Verifies:
 - Each class is reachable, raisable, and catchable by its own type.
-- The catch-target hierarchy: ``except OrtError`` catches all 9 ORT-family
-  instance variants; ``except OrtPathError`` catches the 2 path-specific
-  variants; ``except DecibriError`` catches everything.
+- The catch-target hierarchy: ``except DeviceError`` catches all 8
+  device-related instance variants; ``except OrtError`` catches all 9
+  ORT-family instance variants; ``except OrtPathError`` catches the 2
+  path-specific variants; ``except DecibriError`` catches everything.
 - Path-bearing exceptions (OrtLoadFailed, OrtPathInvalid, VadModelLoadFailed)
   expose .path (and .reason for OrtPathInvalid) as named attributes per
   CPython OSError convention.
@@ -24,6 +26,7 @@ from decibri import (
     ChannelsOutOfRange,
     DecibriError,
     DeviceEnumerationFailed,
+    DeviceError,
     DeviceIndexOutOfRange,
     DeviceNotFound,
     FramesPerBufferOutOfRange,
@@ -62,20 +65,12 @@ import pytest
 
 ALL_DECIBRI_ERROR_CLASSES = (
     DecibriError,
-    # 20 direct DecibriError subclasses
+    # 11 direct DecibriError subclasses (non-device, non-ORT)
     AlreadyRunning,
     CaptureStreamClosed,
     ChannelsOutOfRange,
-    DeviceEnumerationFailed,
-    DeviceIndexOutOfRange,
-    DeviceNotFound,
     FramesPerBufferOutOfRange,
     InvalidFormat,
-    MultipleDevicesMatch,
-    NoMicrophoneFound,
-    NoOutputDeviceFound,
-    NotAnInputDevice,
-    OutputDeviceNotFound,
     OutputStreamClosed,
     PermissionDenied,
     SampleRateOutOfRange,
@@ -83,6 +78,16 @@ ALL_DECIBRI_ERROR_CLASSES = (
     StreamStartFailed,
     VadSampleRateUnsupported,
     VadThresholdOutOfRange,
+    # DeviceError intermediate + 8 direct subclasses (Phase 7.7 Item B7)
+    DeviceError,
+    DeviceEnumerationFailed,
+    DeviceIndexOutOfRange,
+    DeviceNotFound,
+    MultipleDevicesMatch,
+    NoMicrophoneFound,
+    NoOutputDeviceFound,
+    NotAnInputDevice,
+    OutputDeviceNotFound,
     # OrtError + 7 direct + OrtPathError + 2 direct
     OrtError,
     OrtInitFailed,
@@ -99,7 +104,11 @@ ALL_DECIBRI_ERROR_CLASSES = (
 
 
 def test_class_count() -> None:
-    assert len(ALL_DECIBRI_ERROR_CLASSES) == 32
+    # Phase 7.7 Item B7 added DeviceError intermediate, taking the total
+    # from 32 to 33: 1 base + 11 direct + DeviceError + 8 device + OrtError
+    # + 7 ORT direct + OrtPathError + 2 path. 29 instance + 4 catch-target
+    # intermediates (DecibriError, DeviceError, OrtError, OrtPathError).
+    assert len(ALL_DECIBRI_ERROR_CLASSES) == 33
 
 
 def test_all_inherit_from_decibri_error() -> None:
@@ -153,6 +162,53 @@ def test_ort_init_failed_is_not_path_error() -> None:
     """OrtInitFailed has no path; it is NOT under OrtPathError. Per Q1 revision."""
     assert not issubclass(OrtInitFailed, OrtPathError)
     assert issubclass(OrtInitFailed, OrtError)
+
+
+# ---------------------------------------------------------------------------
+# Phase 7.7 Item B7: DeviceError catch-target.
+#
+# DeviceError is the parent of all 8 device-related exception classes.
+# Symmetric with OrtError; existing catches via DecibriError are preserved.
+# ---------------------------------------------------------------------------
+
+
+DEVICE_ERROR_INSTANCE_CLASSES = (
+    DeviceNotFound,
+    OutputDeviceNotFound,
+    MultipleDevicesMatch,
+    DeviceIndexOutOfRange,
+    NoMicrophoneFound,
+    NoOutputDeviceFound,
+    NotAnInputDevice,
+    DeviceEnumerationFailed,
+)
+
+
+def test_device_error_catches_all_eight_variants() -> None:
+    """except DeviceError catches all 8 device-related instance classes."""
+    assert len(DEVICE_ERROR_INSTANCE_CLASSES) == 8
+    for cls in DEVICE_ERROR_INSTANCE_CLASSES:
+        assert issubclass(cls, DeviceError), f"{cls.__name__} is not a DeviceError subclass"
+
+
+def test_device_error_subclasses_still_catchable_as_decibri_error() -> None:
+    """The DeviceError reparenting preserves the DecibriError parent chain."""
+    for cls in DEVICE_ERROR_INSTANCE_CLASSES:
+        assert issubclass(cls, DecibriError), (
+            f"{cls.__name__} should still be catchable as DecibriError "
+            f"after Phase 7.7 reparenting"
+        )
+
+
+def test_device_error_inherits_from_decibri_error() -> None:
+    """DeviceError itself is a DecibriError subclass."""
+    assert issubclass(DeviceError, DecibriError)
+
+
+def test_device_error_is_not_ort_error() -> None:
+    """DeviceError is independent of OrtError; no overlap."""
+    assert not issubclass(DeviceError, OrtError)
+    assert not issubclass(OrtError, DeviceError)
 
 
 # ---------------------------------------------------------------------------

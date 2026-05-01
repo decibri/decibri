@@ -31,8 +31,8 @@ pytestmark = pytest.mark.requires_audio_output
 # ---------------------------------------------------------------------------
 
 
-def test_devices_returns_list_of_output_device_info() -> None:
-    devices = Speaker.devices()
+def test_output_devices_returns_list_of_output_device_info() -> None:
+    devices = Speaker.output_devices()
     assert isinstance(devices, list)
     assert len(devices) > 0
     for d in devices:
