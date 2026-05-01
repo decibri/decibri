@@ -1,7 +1,7 @@
 """High-level Python wrapper for decibri audio capture with VAD policy.
 
-This module ships the consumer-facing `Decibri` class. The class wraps the
-native `_decibri.DecibriBridge` pyclass (Rust binding shipped in Commit 2)
+This module ships the consumer-facing `Microphone` class. The class wraps the
+native `_decibri.MicrophoneBridge` pyclass (Rust binding shipped in Commit 2)
 and adds wrapper-layer VAD policy: threshold application, holdoff state
 machine, and mode dispatch (Silero passthrough vs energy RMS computation).
 
@@ -55,7 +55,7 @@ else:
 from decibri import _decibri, exceptions
 from decibri._decibri import DeviceInfo, OutputDeviceInfo, VersionInfo
 
-__all__ = ["Decibri", "DecibriOutput", "DeviceInfo", "OutputDeviceInfo", "VersionInfo"]
+__all__ = ["Microphone", "Speaker", "DeviceInfo", "OutputDeviceInfo", "VersionInfo"]
 
 
 # ---------------------------------------------------------------------------
@@ -73,7 +73,7 @@ __all__ = ["Decibri", "DecibriOutput", "DeviceInfo", "OutputDeviceInfo", "Versio
 #   3. Run a holdoff state machine on the threshold result, with time-based
 #      expiry of the silence timer.
 #
-# Construction is driven by Decibri.__init__; consumers don't touch this
+# Construction is driven by Microphone.__init__; consumers don't touch this
 # class directly.
 # ---------------------------------------------------------------------------
 
@@ -113,7 +113,7 @@ class _VadStateMachine:
         self._last_probability = 0.0
 
     def process_chunk(self, chunk_bytes: bytes, bridge_probability: float) -> None:
-        """Update VAD state from one chunk. Called inside Decibri.read()."""
+        """Update VAD state from one chunk. Called inside Microphone.read()."""
         if self._mode == "silero":
             probability = bridge_probability
         elif self._mode == "energy":
@@ -191,12 +191,12 @@ def _compute_rms(chunk_bytes: bytes, sample_format: str) -> float:
         sum_sq = sum(s * s for s in samples)
         return math.sqrt(sum_sq / sample_count)
 
-    # Unreachable; format is validated at Decibri construction time.
+    # Unreachable; format is validated at Microphone construction time.
     return 0.0
 
 
 # ---------------------------------------------------------------------------
-# Decibri: consumer-facing audio capture class.
+# Microphone: consumer-facing audio capture class.
 # ---------------------------------------------------------------------------
 
 
@@ -204,11 +204,11 @@ _VALID_MODES = frozenset({"silero", "energy"})
 _VALID_FORMATS = frozenset({"int16", "float32"})
 
 
-class Decibri:
+class Microphone:
     """Audio capture with VAD policy.
 
     Example:
-        with Decibri(sample_rate=16000, channels=1, frames_per_buffer=512) as d:
+        with Microphone(sample_rate=16000, channels=1, frames_per_buffer=512) as d:
             for chunk in d:
                 if d.is_speaking:
                     process(chunk)
@@ -241,7 +241,7 @@ class Decibri:
         numpy: bool = False,
         ort_library_path: str | Path | None = None,
     ) -> None:
-        """Construct a Decibri audio capture instance.
+        """Construct a Microphone audio capture instance.
 
         Most parameters control capture behaviour and are documented at
         the class level. The argument that benefits from per-arg detail
@@ -277,15 +277,15 @@ class Decibri:
             ``OrtPathInvalid`` from the bridge layer with the path and
             reason attached.
 
-            Note: ORT initialization is process-global. Once any Decibri
+            Note: ORT initialization is process-global. Once any Microphone
             instance constructs with a specific dylib path, subsequent
-            Decibri instances inherit that initialization regardless of
-            their own ``ort_library_path`` argument. The first Decibri
+            Microphone instances inherit that initialization regardless of
+            their own ``ort_library_path`` argument. The first Microphone
             construction in a process determines the dylib for the
             entire process lifetime.
 
         Other parameters are summarised at the class docstring; refer to
-        ``help(Decibri)`` for the capture-side surface.
+        ``help(Microphone)`` for the capture-side surface.
         """
         if format not in _VALID_FORMATS:
             raise exceptions.InvalidFormat(
@@ -359,7 +359,7 @@ class Decibri:
             # bridge state see the user's intent.
             resolved_ort_path = str(Path(ort_library_path))
 
-        self._bridge = _decibri.DecibriBridge(
+        self._bridge = _decibri.MicrophoneBridge(
             sample_rate=sample_rate,
             channels=channels,
             frames_per_buffer=frames_per_buffer,
@@ -516,27 +516,27 @@ class Decibri:
     @staticmethod
     def devices() -> list[DeviceInfo]:
         """List available input devices."""
-        return _decibri.DecibriBridge.devices()
+        return _decibri.MicrophoneBridge.devices()
 
     @staticmethod
     def version() -> VersionInfo:
         """Return version info: decibri Rust core, cpal, and binding wheel."""
-        return _decibri.DecibriBridge.version()
+        return _decibri.MicrophoneBridge.version()
 
 
 # ---------------------------------------------------------------------------
-# DecibriOutput: consumer-facing audio output class.
+# Speaker: consumer-facing audio output class.
 #
-# Thin wrapper over DecibriOutputBridge. No VAD, no policy. Provided here
+# Thin wrapper over SpeakerBridge. No VAD, no policy. Provided here
 # for symmetry and a unified import surface.
 # ---------------------------------------------------------------------------
 
 
-class DecibriOutput:
+class Speaker:
     """Audio output stream.
 
     Example:
-        with DecibriOutput(sample_rate=16000, channels=1) as out:
+        with Speaker(sample_rate=16000, channels=1) as out:
             out.write(audio_bytes)
             out.drain()
     """
@@ -552,7 +552,7 @@ class DecibriOutput:
             raise exceptions.InvalidFormat(
                 f"format must be 'int16' or 'float32'; got {format!r}"
             )
-        self._bridge = _decibri.DecibriOutputBridge(
+        self._bridge = _decibri.SpeakerBridge(
             sample_rate=sample_rate,
             channels=channels,
             format=format,
@@ -605,4 +605,4 @@ class DecibriOutput:
     @staticmethod
     def devices() -> list[OutputDeviceInfo]:
         """List available output devices."""
-        return _decibri.DecibriOutputBridge.devices()
+        return _decibri.SpeakerBridge.devices()

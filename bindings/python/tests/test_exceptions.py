@@ -223,7 +223,7 @@ def test_binding_raises_pure_python_classes() -> None:
     from decibri import exceptions as py_exc
 
     with pytest.raises(py_exc.InvalidFormat) as exc_info:
-        _decibri.DecibriBridge(
+        _decibri.MicrophoneBridge(
             sample_rate=16000,
             channels=1,
             frames_per_buffer=512,

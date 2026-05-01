@@ -1,12 +1,12 @@
 """Phase 5 Step 1 empirical smoke tests for pyo3-async-runtimes.
 
-Verifies two preconditions for the AsyncDecibri / AsyncDecibriOutput
+Verifies two preconditions for the AsyncMicrophone / AsyncSpeaker
 surface that lands in subsequent Phase 5 relays:
 
 1. The Tokio runtime initializes correctly in our extension-module
    context. ``pyo3-async-runtimes`` documents
    ``#[pyo3_async_runtimes::tokio::main]`` as the entry-point pattern,
-   but Decibri is a cdylib (Python extension module) with no main()
+   but Microphone is a cdylib (Python extension module) with no main()
    to attribute. We rely on the crate's lazy-init path.
 
 2. ``asyncio.CancelledError`` (and its ``TimeoutError`` subclass)
@@ -18,7 +18,7 @@ surface that lands in subsequent Phase 5 relays:
 These tests stay as persistent regression coverage (locked decision Q4):
 if a future ``pyo3-async-runtimes`` upgrade breaks runtime init or
 cancellation propagation, these tests fail first and surface the
-regression at the build-pipeline level rather than at AsyncDecibri
+regression at the build-pipeline level rather than at AsyncMicrophone
 integration time.
 
 The smoke pyfunction lives at ``decibri._decibri._async_smoke`` and
@@ -44,7 +44,7 @@ async def test_async_smoke_returns_expected_value() -> None:
     followed by ``Ok(42_i64)``) is awaitable from Python and yields the
     expected value. If this test fails with a runtime-not-initialised
     error, the lazy-init assumption is wrong and Phase 5's plan needs
-    revision before any AsyncDecibri code lands.
+    revision before any AsyncMicrophone code lands.
     """
     result = await _async_smoke()
     assert result == 42, f"Expected 42, got {result!r}"

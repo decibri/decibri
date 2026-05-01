@@ -13,10 +13,10 @@ Three tiers:
    on dev installs where `_ort/` is empty (per `conftest.py`).
 
 3. End-to-end construction smoke (requires bundled `_ort/`): construct
-   `Decibri(vad=True, vad_mode='silero')` and verify the load path
+   `Microphone(vad=True, vad_mode='silero')` and verify the load path
    reaches Silero session creation without raising. Marked
    `requires_bundled_ort`. Inference (forward pass against synthesized
-   audio) is intentionally deferred to Phase 4+; the existing Decibri
+   audio) is intentionally deferred to Phase 4+; the existing Microphone
    class consumes from a real microphone and does not expose a
    buffer-injection API, so a deterministic inference smoke would need
    an additional surface that is out of Phase 3 scope.
@@ -256,7 +256,7 @@ def test_resolver_bundled_default(
 
 @pytest.mark.requires_bundled_ort
 def test_decibri_silero_construction() -> None:
-    """``Decibri(vad=True, vad_mode='silero')`` constructs end-to-end.
+    """``Microphone(vad=True, vad_mode='silero')`` constructs end-to-end.
 
     Exercises the full Phase 3 load path in one assertion: the resolver
     finds the bundled dylib, the Rust bridge receives the resolved path,
@@ -267,6 +267,6 @@ def test_decibri_silero_construction() -> None:
     test surfaces the failure. The construction does not start audio
     capture; no microphone is required.
     """
-    instance = decibri.Decibri(vad=True, vad_mode="silero")
+    instance = decibri.Microphone(vad=True, vad_mode="silero")
     assert instance is not None
-    assert isinstance(instance, decibri.Decibri)
+    assert isinstance(instance, decibri.Microphone)

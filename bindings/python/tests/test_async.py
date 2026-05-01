@@ -1,4 +1,4 @@
-"""Phase 5 tests for AsyncDecibri and AsyncDecibriOutput.
+"""Phase 5 tests for AsyncMicrophone and AsyncSpeaker.
 
 Covers the goals from Section 2 of phase-5-async-support.md:
 construction lifecycle, async context manager, async iterator,
@@ -13,7 +13,7 @@ because the latter is Python 3.11+ only and the abi3 floor is 3.10.
 
 The smoke pyfunction in ``tests/test_async_smoke.py`` already proves
 runtime initialization and basic cancellation propagation; this file
-exercises the AsyncDecibri / AsyncDecibriOutput public surface.
+exercises the AsyncMicrophone / AsyncSpeaker public surface.
 """
 
 from __future__ import annotations
@@ -23,7 +23,7 @@ from typing import Any
 
 import pytest
 
-from decibri import AsyncDecibri, AsyncDecibriOutput
+from decibri import AsyncMicrophone, AsyncSpeaker
 
 
 # ---------------------------------------------------------------------------
@@ -34,14 +34,14 @@ from decibri import AsyncDecibri, AsyncDecibriOutput
 @pytest.mark.requires_audio_input
 @pytest.mark.asyncio
 async def test_async_decibri_construct_start_stop() -> None:
-    """AsyncDecibri can be constructed, started, and stopped without exception.
+    """AsyncMicrophone can be constructed, started, and stopped without exception.
 
     No vad to avoid ORT model load (the construction smoke for the bundled
     ORT path is in tests/test_ort_bundling.py). The lifecycle assertion
     requires a real cpal input stream to open; CI runners without audio
     hardware skip via the requires_audio_input marker.
     """
-    decibri = AsyncDecibri(vad=False)
+    decibri = AsyncMicrophone(vad=False)
     assert decibri.is_open is False
     await decibri.start()
     assert decibri.is_open is True
@@ -52,12 +52,12 @@ async def test_async_decibri_construct_start_stop() -> None:
 @pytest.mark.requires_audio_output
 @pytest.mark.asyncio
 async def test_async_output_construct_start_stop() -> None:
-    """AsyncDecibriOutput can be constructed, started, and stopped.
+    """AsyncSpeaker can be constructed, started, and stopped.
 
     Requires audio output hardware to open the cpal stream; CI runners
     without audio output skip via the requires_audio_output marker.
     """
-    output = AsyncDecibriOutput()
+    output = AsyncSpeaker()
     assert output.is_playing is False
     await output.start()
     assert output.is_playing is True
@@ -79,7 +79,7 @@ async def test_async_decibri_read_returns_bytes() -> None:
     16 kHz mono int16 = 1024 bytes; this test asserts the chunk is non-
     empty bytes and lets the exact length be implementation-defined.
     """
-    decibri = AsyncDecibri(vad=False)
+    decibri = AsyncMicrophone(vad=False)
     await decibri.start()
     try:
         chunk = await decibri.read()
@@ -98,7 +98,7 @@ async def test_async_decibri_read_returns_bytes() -> None:
 @pytest.mark.requires_audio_input
 @pytest.mark.asyncio
 async def test_async_with_decibri() -> None:
-    """``async with AsyncDecibri()`` enters by starting, exits by stopping.
+    """``async with AsyncMicrophone()`` enters by starting, exits by stopping.
 
     Inside the with body, ``is_open`` is True. After the with block
     completes, ``is_open`` is False (verifying ``__aexit__`` ran).
@@ -106,7 +106,7 @@ async def test_async_with_decibri() -> None:
     ``__aenter__`` calls ``start`` which opens a cpal input stream;
     requires audio input hardware. CI runners without it skip.
     """
-    decibri = AsyncDecibri(vad=False)
+    decibri = AsyncMicrophone(vad=False)
     assert decibri.is_open is False
     async with decibri as d:
         assert d is decibri
@@ -117,12 +117,12 @@ async def test_async_with_decibri() -> None:
 @pytest.mark.requires_audio_output
 @pytest.mark.asyncio
 async def test_async_with_decibri_output() -> None:
-    """``async with AsyncDecibriOutput()`` enters by starting, exits by stopping.
+    """``async with AsyncSpeaker()`` enters by starting, exits by stopping.
 
     Requires audio output hardware (the output cpal stream opens during
     ``__aenter__``).
     """
-    output = AsyncDecibriOutput()
+    output = AsyncSpeaker()
     async with output as o:
         assert o is output
         assert output.is_playing is True
@@ -142,7 +142,7 @@ async def test_async_with_decibri_propagates_exceptions() -> None:
     class _AsyncWithProbe(Exception):
         pass
 
-    decibri = AsyncDecibri(vad=False)
+    decibri = AsyncMicrophone(vad=False)
     with pytest.raises(_AsyncWithProbe):
         async with decibri:
             assert decibri.is_open is True
@@ -165,7 +165,7 @@ async def test_async_for_decibri_iterates() -> None:
     self, ``__anext__`` returns chunks, and the loop terminates correctly.
     """
     chunks_collected = 0
-    async with AsyncDecibri(vad=False) as decibri:
+    async with AsyncMicrophone(vad=False) as decibri:
         async for chunk in decibri:
             assert isinstance(chunk, bytes)
             chunks_collected += 1
@@ -186,11 +186,11 @@ async def test_async_decibri_cancellation_raises() -> None:
     On a not-started bridge, the bridge's own error handling fires
     immediately (CaptureStreamClosed); on a started bridge with no audio
     hardware, ``wait_for`` may time out. Either path proves the
-    cancellation pathway works on AsyncDecibri's read coroutine. The
+    cancellation pathway works on AsyncMicrophone's read coroutine. The
     foundational cancellation propagation is already proven by
     tests/test_async_smoke.py.
     """
-    decibri = AsyncDecibri(vad=False)
+    decibri = AsyncMicrophone(vad=False)
     with pytest.raises((asyncio.TimeoutError, Exception)):
         await asyncio.wait_for(decibri.read(), timeout=0.025)
 
@@ -201,9 +201,9 @@ async def test_async_output_cancellation_during_drain() -> None:
 
     Either the bridge's own error handling fires (OutputStreamClosed on
     a not-started output) or the wait_for times out; either path proves
-    cancellation works on AsyncDecibriOutput.drain.
+    cancellation works on AsyncSpeaker.drain.
     """
-    output = AsyncDecibriOutput()
+    output = AsyncSpeaker()
     with pytest.raises((asyncio.TimeoutError, Exception)):
         await asyncio.wait_for(output.drain(), timeout=0.025)
 
@@ -226,7 +226,7 @@ async def test_async_output_write_drain() -> None:
     num_samples = (sample_rate * duration_ms) // 1000
     silence = b"\x00\x00" * num_samples  # int16 silence
 
-    async with AsyncDecibriOutput(sample_rate=sample_rate) as output:
+    async with AsyncSpeaker(sample_rate=sample_rate) as output:
         await output.write(silence)
         await output.drain()
 
@@ -259,7 +259,7 @@ async def test_async_decibri_concurrent_tasks_share_instance() -> None:
     Requires audio input hardware: the test starts a real cpal stream
     before issuing the concurrent stops. CI runners without audio skip.
     """
-    decibri = AsyncDecibri(vad=False)
+    decibri = AsyncMicrophone(vad=False)
 
     await decibri.start()
     try:
@@ -277,21 +277,21 @@ async def test_async_decibri_concurrent_tasks_share_instance() -> None:
 
 @pytest.mark.asyncio
 async def test_async_devices_returns_list() -> None:
-    """``AsyncDecibri.devices()`` is async and returns a list."""
-    devices: list[Any] = await AsyncDecibri.devices()
+    """``AsyncMicrophone.devices()`` is async and returns a list."""
+    devices: list[Any] = await AsyncMicrophone.devices()
     assert isinstance(devices, list)
 
 
 @pytest.mark.asyncio
 async def test_async_output_devices_returns_list() -> None:
-    """``AsyncDecibriOutput.devices()`` is async and returns a list."""
-    devices: list[Any] = await AsyncDecibriOutput.devices()
+    """``AsyncSpeaker.devices()`` is async and returns a list."""
+    devices: list[Any] = await AsyncSpeaker.devices()
     assert isinstance(devices, list)
 
 
 @pytest.mark.asyncio
 async def test_async_version_returns_version_info() -> None:
-    """``AsyncDecibri.version()`` is sync (reads compile-time constants)."""
-    info = AsyncDecibri.version()
+    """``AsyncMicrophone.version()`` is sync (reads compile-time constants)."""
+    info = AsyncMicrophone.version()
     # VersionInfo has decibri / cpal / wheel fields per the Rust bridge
     assert info is not None

@@ -1,7 +1,7 @@
 """Phase 4 bridge sendability tests.
 
-Verifies the Phase 4 invariant from the Python side: both `Decibri` and
-`DecibriOutput` instances can cross thread boundaries without raising
+Verifies the Phase 4 invariant from the Python side: both `Microphone` and
+`Speaker` instances can cross thread boundaries without raising
 PyRuntimeError("can't access object from another thread"). The Rust
 binding asserts the same property at compile time via the
 `Send + 'static` assertion in `bindings/python/src/lib.rs`; these tests
@@ -26,25 +26,25 @@ from __future__ import annotations
 import concurrent.futures
 from typing import Any
 
-from decibri import Decibri, DecibriOutput
+from decibri import Microphone, Speaker
 
 
 def test_decibri_construct_no_unsendable_error() -> None:
-    """Constructed Decibri instance survives a thread-pool submission.
+    """Constructed Microphone instance survives a thread-pool submission.
 
     Pre-Phase-4 (#[pyclass(unsendable)]), this raised PyRuntimeError on
     the worker's first attribute access. Post-Phase-4, the bridge is
     `Send + 'static` and PyO3 admits the cross-thread access.
     """
-    decibri = Decibri(vad=False)
+    decibri = Microphone(vad=False)
     with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
         future = executor.submit(lambda d: d is not None, decibri)
         assert future.result() is True
 
 
 def test_decibri_output_construct_no_unsendable_error() -> None:
-    """Same property for DecibriOutput; the output bridge is also Send."""
-    output = DecibriOutput()
+    """Same property for Speaker; the output bridge is also Send."""
+    output = Speaker()
     with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
         future = executor.submit(lambda d: d is not None, output)
         assert future.result() is True
@@ -60,7 +60,7 @@ def test_decibri_method_call_from_worker_thread() -> None:
     Send property holds but a method internally relies on a thread-local
     state that only the construction thread carries.
     """
-    decibri = Decibri(vad=False)
+    decibri = Microphone(vad=False)
     with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
         future = executor.submit(lambda d: d.is_open, decibri)
         result = future.result()
@@ -79,7 +79,7 @@ def test_decibri_can_be_passed_through_threadpool_for_callable() -> None:
     If this test passes, the Phase 5 async wiring will compile when the
     bridge is captured into a tokio::spawn_blocking-shaped closure.
     """
-    decibri = Decibri(vad=False)
+    decibri = Microphone(vad=False)
 
     def use_decibri() -> bool:
         return decibri.is_open

@@ -1,7 +1,7 @@
 """Smoke tests for the decibri Python wheel.
 
 Phase 1 scope: wheel import, extension module load, VersionInfo correctness.
-Phase 2 additions: public API name surface (Decibri, DecibriOutput, exception
+Phase 2 additions: public API name surface (Microphone, Speaker, exception
 hierarchy roots) and the Silero VAD model bundling check.
 
 These tests are intentionally low-coverage and high-confidence: they verify
@@ -17,7 +17,7 @@ import decibri
 
 def test_package_imports() -> None:
     assert decibri.__version__ == "0.1.0a1"
-    assert hasattr(decibri, "DecibriBridge")
+    assert hasattr(decibri, "MicrophoneBridge")
     assert hasattr(decibri, "VersionInfo")
 
 
@@ -26,12 +26,12 @@ def test_extension_module_loads() -> None:
     # and return the exact same objects the public __init__.py re-exports.
     from decibri import _decibri
 
-    assert _decibri.DecibriBridge is decibri.DecibriBridge
+    assert _decibri.MicrophoneBridge is decibri.MicrophoneBridge
     assert _decibri.VersionInfo is decibri.VersionInfo
 
 
 def test_version_returns_version_info() -> None:
-    info = decibri.DecibriBridge.version()
+    info = decibri.MicrophoneBridge.version()
     assert isinstance(info, decibri.VersionInfo)
 
 
@@ -39,18 +39,18 @@ def test_version_decibri_matches_rust_core() -> None:
     # Literal equality per Phase 1 plan. When the Rust workspace bumps past
     # 3.3.2 this assertion breaks deliberately: force a conscious update of
     # the Python test expectation alongside the Rust version bump.
-    assert decibri.DecibriBridge.version().decibri == "3.3.2"
+    assert decibri.MicrophoneBridge.version().decibri == "3.3.2"
 
 
 def test_version_portaudio_matches_node_binding() -> None:
-    # Byte-identical to the Node binding's `Decibri.version().portaudio`
+    # Byte-identical to the Node binding's `Microphone.version().portaudio`
     # output, sourced from the same `decibri::CPAL_VERSION` const in the
     # Rust core. Contract enforced by `crates/decibri/build.rs`.
-    assert decibri.DecibriBridge.version().portaudio == "cpal 0.17"
+    assert decibri.MicrophoneBridge.version().portaudio == "cpal 0.17"
 
 
 def test_version_info_fields() -> None:
-    info = decibri.DecibriBridge.version()
+    info = decibri.MicrophoneBridge.version()
     assert info.decibri == "3.3.2"
     assert info.portaudio == "cpal 0.17"
     assert info.binding == "0.1.0a1"
@@ -59,7 +59,7 @@ def test_version_info_fields() -> None:
 def test_version_info_is_frozen() -> None:
     import pytest
 
-    info = decibri.DecibriBridge.version()
+    info = decibri.MicrophoneBridge.version()
     with pytest.raises(AttributeError):
         info.decibri = "hijacked"  # type: ignore[misc]
 
@@ -71,10 +71,10 @@ def test_version_info_is_frozen() -> None:
 
 def test_public_classes_importable() -> None:
     """The two public Python wrapper classes are reachable from the package."""
-    from decibri import Decibri, DecibriOutput
+    from decibri import Microphone, Speaker
 
-    assert isinstance(Decibri, type)
-    assert isinstance(DecibriOutput, type)
+    assert isinstance(Microphone, type)
+    assert isinstance(Speaker, type)
 
 
 def test_exception_root_importable() -> None:
@@ -94,15 +94,16 @@ def test_exception_intermediate_parents_importable() -> None:
 
 
 def test_public_surface_count() -> None:
-    """The public ``__all__`` enumerates the full sync + async surface (41 names).
+    """The public ``__all__`` enumerates the full sync + async surface (45 names).
 
-    Composition: 2 sync public wrappers (Decibri, DecibriOutput) + 2 async
-    public wrappers (AsyncDecibri, AsyncDecibriOutput; Phase 5) + 2 internal
-    pyclasses + 3 value types + 32 exception classes (1 base + 20 direct
-    subclasses + OrtError + 7 direct OrtError subclasses + OrtPathError +
-    2 OrtPathError subclasses).
+    Composition: 2 sync public wrappers (Microphone, Speaker) + 2 async
+    public wrappers (AsyncMicrophone, AsyncSpeaker; Phase 5) + 4 lowercase
+    factory functions (microphone, speaker, async_microphone, async_speaker;
+    Phase 7.5) + 2 internal pyclasses + 3 value types + 32 exception classes
+    (1 base + 20 direct subclasses + OrtError + 7 direct OrtError subclasses
+    + OrtPathError + 2 OrtPathError subclasses).
     """
-    assert len(decibri.__all__) == 41
+    assert len(decibri.__all__) == 45
     for name in decibri.__all__:
         assert hasattr(decibri, name), f"__all__ lists {name!r} but it is not exported"
 

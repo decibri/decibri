@@ -1,16 +1,16 @@
 """Phase 2 configuration validation tests (hard-freeze byte-identity).
 
-Tests Decibri constructor + start() argument validation with full message-text
+Tests Microphone constructor + start() argument validation with full message-text
 equality per Q5 hybrid policy (hard-freeze on InvalidArg-family). All tests
 exercise the path a user actually hits, not direct exception instantiation.
 
 Two validation layers:
 
 - Wrapper-layer validation in _classes.py (format string lookup): fires at
-  Decibri.__init__ time. Message text is composed in Python with the
+  Microphone.__init__ time. Message text is composed in Python with the
   offending value interpolated.
 - Rust-core validation in AudioCapture::new via config.validate(): fires at
-  Decibri.start() time, BEFORE any cpal device interaction. Runs in CI
+  Microphone.start() time, BEFORE any cpal device interaction. Runs in CI
   without audio hardware. Message text from crates/decibri/src/error.rs
   Display impls (static strings; no value interpolation).
 
@@ -31,7 +31,7 @@ import pytest
 
 from decibri import (
     ChannelsOutOfRange,
-    Decibri,
+    Microphone,
     FramesPerBufferOutOfRange,
     InvalidFormat,
     SampleRateOutOfRange,
@@ -39,7 +39,7 @@ from decibri import (
 
 
 # ---------------------------------------------------------------------------
-# Wrapper-layer validation: format string lookup at Decibri.__init__ time.
+# Wrapper-layer validation: format string lookup at Microphone.__init__ time.
 # The wrapper composes its own f-string message including the offending value.
 # ---------------------------------------------------------------------------
 
@@ -75,15 +75,15 @@ from decibri import (
     ],
 )
 def test_invalid_format_wrapper(format_value: str, expected_msg: str) -> None:
-    """Decibri rejects invalid format strings at the wrapper layer (construction)."""
+    """Microphone rejects invalid format strings at the wrapper layer (construction)."""
     with pytest.raises(InvalidFormat) as exc_info:
-        Decibri(format=format_value)
+        Microphone(format=format_value)
     assert str(exc_info.value) == expected_msg
 
 
 # ---------------------------------------------------------------------------
 # Bridge-layer validation: sample_rate / channels / frames_per_buffer
-# range checks fire at Decibri.start() via CaptureConfig::validate(). The
+# range checks fire at Microphone.start() via CaptureConfig::validate(). The
 # validate() call runs BEFORE cpal device interaction, so the test does NOT
 # need audio hardware. Messages from error.rs Display impls.
 # ---------------------------------------------------------------------------
@@ -100,7 +100,7 @@ def test_invalid_format_wrapper(format_value: str, expected_msg: str) -> None:
 )
 def test_invalid_sample_rate(sample_rate: int) -> None:
     """Out-of-range sample_rate raises with the canonical Rust Display message at start()."""
-    d = Decibri(sample_rate=sample_rate)
+    d = Microphone(sample_rate=sample_rate)
     with pytest.raises(SampleRateOutOfRange) as exc_info:
         d.start()
     assert str(exc_info.value) == "sample rate must be between 1000 and 384000"
@@ -116,7 +116,7 @@ def test_invalid_sample_rate(sample_rate: int) -> None:
 )
 def test_invalid_channels(channels: int) -> None:
     """Out-of-range channels raises with the canonical Rust Display message at start()."""
-    d = Decibri(channels=channels)
+    d = Microphone(channels=channels)
     with pytest.raises(ChannelsOutOfRange) as exc_info:
         d.start()
     assert str(exc_info.value) == "channels must be between 1 and 32"
@@ -133,7 +133,7 @@ def test_invalid_channels(channels: int) -> None:
 )
 def test_invalid_frames_per_buffer(frames_per_buffer: int) -> None:
     """Out-of-range frames_per_buffer raises with the canonical Display message at start()."""
-    d = Decibri(frames_per_buffer=frames_per_buffer)
+    d = Microphone(frames_per_buffer=frames_per_buffer)
     with pytest.raises(FramesPerBufferOutOfRange) as exc_info:
         d.start()
     assert str(exc_info.value) == "frames per buffer must be between 64 and 65536"
@@ -160,4 +160,4 @@ def test_invalid_frames_per_buffer(frames_per_buffer: int) -> None:
 )
 def test_boundary_values_construct_cleanly(kwargs: dict) -> None:
     """Values exactly at min/max boundaries construct without raising."""
-    Decibri(**kwargs)
+    Microphone(**kwargs)

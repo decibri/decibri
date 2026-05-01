@@ -18,7 +18,7 @@
 //! `decibri::sample::*` helpers for byte-level conversion at the boundary.
 //!
 //! VAD architecture: the `vad_mode` and `vad_holdoff` parameters accepted by
-//! `DecibriBridge.__init__` are stored as inert state on the bridge or used
+//! `MicrophoneBridge.__init__` are stored as inert state on the bridge or used
 //! only as construction gates; the wrapper layer (`_classes.py`) implements
 //! mode/holdoff/threshold policy on top of the raw Silero probability that
 //! the bridge exposes via `vad_probability`.
@@ -66,9 +66,9 @@ use decibri::CPAL_VERSION;
 // message (it points at the new field).
 //
 // Coverage:
-//   - DecibriBridge / DecibriOutputBridge: the sync pyclasses; Phase 4
+//   - MicrophoneBridge / SpeakerBridge: the sync pyclasses; Phase 4
 //     established their Send + 'static property by removing `unsendable`.
-//   - AsyncDecibriBridge / AsyncOutputBridge: the Phase 5 async wrappers;
+//   - AsyncMicrophoneBridge / AsyncSpeakerBridge: the Phase 5 async wrappers;
 //     each holds an Arc<tokio::sync::Mutex<T>> where T is the matching
 //     sync bridge. Arc + tokio::sync::Mutex are Send + Sync when T is
 //     Send (which the sync bridges are), so the async wrappers inherit
@@ -89,10 +89,10 @@ use decibri::CPAL_VERSION;
 
 const _: () = {
     const fn assert_send_static<T: Send + 'static>() {}
-    let _ = assert_send_static::<DecibriBridge>;
-    let _ = assert_send_static::<DecibriOutputBridge>;
-    let _ = assert_send_static::<AsyncDecibriBridge>;
-    let _ = assert_send_static::<AsyncOutputBridge>;
+    let _ = assert_send_static::<MicrophoneBridge>;
+    let _ = assert_send_static::<SpeakerBridge>;
+    let _ = assert_send_static::<AsyncMicrophoneBridge>;
+    let _ = assert_send_static::<AsyncSpeakerBridge>;
 };
 
 // ---------------------------------------------------------------------------
@@ -384,7 +384,7 @@ fn parse_sample_format(s: &str) -> Result<BindingSampleFormat, CoreDecibriError>
 
 // ---------------------------------------------------------------------------
 // VersionInfo: surfaces decibri Rust core version, cpal version, and binding
-// version via three string fields. Constructed by DecibriBridge::version().
+// version via three string fields. Constructed by MicrophoneBridge::version().
 // ---------------------------------------------------------------------------
 
 #[pyclass(module = "decibri._decibri", frozen)]
@@ -525,8 +525,8 @@ fn build_device_selector(device: Option<&Bound<'_, PyAny>>) -> PyResult<DeviceSe
 // ---------------------------------------------------------------------------
 // Phase 6 helpers: encode an audio chunk's Vec<f32> into either a Python
 // bytes object (numpy=False, default) or a numpy.ndarray (numpy=True).
-// Used by both the sync DecibriBridge::read and the async
-// AsyncDecibriBridge::read paths; the async path constructs the Python
+// Used by both the sync MicrophoneBridge::read and the async
+// AsyncMicrophoneBridge::read paths; the async path constructs the Python
 // object outside spawn_blocking because Bound<'py, ...> is GIL-bound.
 //
 // Memory model: per Phase 6 plan §3f and the empirical Step 1 finding,
@@ -597,14 +597,14 @@ fn encode_chunk_numpy<'py>(
 // Phase 5 Step 1 empirical smoke: pyo3-async-runtimes integration probe.
 //
 // pyo3-async-runtimes' docs assume a binary entry point with
-// #[pyo3_async_runtimes::tokio::main]. Decibri is a cdylib (Python extension
+// #[pyo3_async_runtimes::tokio::main]. Microphone is a cdylib (Python extension
 // module) with no main() to attribute, so we rely on the crate's lazy-init
 // path. This pyfunction is the persistent regression test that the lazy init
 // works in our context (locked decision Q4 of phase-5-async-support.md). If
 // a future pyo3-async-runtimes upgrade breaks the runtime init or
 // cancellation propagation primitives, the matching tests in
 // tests/test_async_smoke.py fail first and surface the regression at the
-// build-pipeline level rather than at AsyncDecibri integration time.
+// build-pipeline level rather than at AsyncMicrophone integration time.
 //
 // Returns a Python awaitable that resolves to 42 after a 50 ms tokio sleep.
 // Underscored name marks it as internal; not part of the public API.
@@ -656,7 +656,7 @@ fn numpy_smoke(py: Python<'_>) -> Bound<'_, PyArray1<i16>> {
 }
 
 // ---------------------------------------------------------------------------
-// DecibriBridge: stateful capture pyclass.
+// MicrophoneBridge: stateful capture pyclass.
 //
 // This pyclass is `Send + 'static` and may cross thread boundaries. The
 // compile-time assertion at the top of this module enforces the property;
@@ -682,7 +682,7 @@ fn numpy_smoke(py: Python<'_>) -> Bound<'_, PyArray1<i16>> {
 // ---------------------------------------------------------------------------
 
 #[pyclass(module = "decibri._decibri")]
-struct DecibriBridge {
+struct MicrophoneBridge {
     capture_config: CaptureConfig,
     format: BindingSampleFormat,
     vad_holdoff_ms: u32,
@@ -698,13 +698,13 @@ struct DecibriBridge {
     numpy: bool,
 }
 
-// Phase 6 internal helpers on DecibriBridge; not exposed to Python.
+// Phase 6 internal helpers on MicrophoneBridge; not exposed to Python.
 // Used by the public `read` pymethod (same module) and by
-// `AsyncDecibriBridge::read` (which locks the inner sync bridge inside
+// `AsyncMicrophoneBridge::read` (which locks the inner sync bridge inside
 // spawn_blocking, calls these to extract owned Vec data + metadata,
 // then constructs the Python object outside the spawn_blocking
 // boundary because `Bound<'py, ...>` is GIL-bound).
-impl DecibriBridge {
+impl MicrophoneBridge {
     /// Read the next audio chunk, run VAD inference if configured, and
     /// return the raw `Vec<f32>` data. No Python object construction;
     /// returning `Vec<f32>` lets the caller decide between PyBytes and
@@ -755,7 +755,7 @@ impl DecibriBridge {
 }
 
 #[pymethods]
-impl DecibriBridge {
+impl MicrophoneBridge {
     #[new]
     #[pyo3(signature = (
         sample_rate,
@@ -816,7 +816,7 @@ impl DecibriBridge {
             None
         };
 
-        Ok(DecibriBridge {
+        Ok(MicrophoneBridge {
             capture_config,
             format: parsed_format,
             vad_holdoff_ms: vad_holdoff,
@@ -943,7 +943,7 @@ impl DecibriBridge {
 }
 
 // ---------------------------------------------------------------------------
-// DecibriOutputBridge: stateful output pyclass.
+// SpeakerBridge: stateful output pyclass.
 //
 // This pyclass is `Send + 'static` and may cross thread boundaries; the
 // compile-time assertion at the top of this module enforces the property.
@@ -962,20 +962,20 @@ impl DecibriBridge {
 // ---------------------------------------------------------------------------
 
 #[pyclass(module = "decibri._decibri")]
-struct DecibriOutputBridge {
+struct SpeakerBridge {
     output_config: OutputConfig,
     format: BindingSampleFormat,
     output: Option<AudioOutput>,
     stream: Option<OutputStream>,
 }
 
-// Phase 6 internal helpers for DecibriOutputBridge. Not exposed to
+// Phase 6 internal helpers for SpeakerBridge. Not exposed to
 // Python. Each `write_*_samples` helper takes an owned slice or vec
 // of typed samples (i16 or f32), converts to the f32 vec the cpal
 // stream expects, and pushes through the GIL-released send. The
 // public `write` pymethod dispatches on the input PyAny type and
 // calls the appropriate helper.
-impl DecibriOutputBridge {
+impl SpeakerBridge {
     fn require_format(
         &self,
         expected: BindingSampleFormat,
@@ -992,7 +992,7 @@ impl DecibriOutputBridge {
             Err(PyTypeError::new_err(format!(
                 "format='{configured}' configured but {ndarray_shape_name} ndarray \
                  dtype is {ndarray_dtype_name}; convert with arr.astype(np.{configured}) \
-                 or construct DecibriOutput with format='{ndarray_dtype_name}'"
+                 or construct Speaker with format='{ndarray_dtype_name}'"
             )))
         }
     }
@@ -1041,7 +1041,7 @@ impl DecibriOutputBridge {
 }
 
 #[pymethods]
-impl DecibriOutputBridge {
+impl SpeakerBridge {
     #[new]
     #[pyo3(signature = (sample_rate, channels, format, device = None))]
     fn new(
@@ -1060,7 +1060,7 @@ impl DecibriOutputBridge {
             device: device_selector,
         };
 
-        Ok(DecibriOutputBridge {
+        Ok(SpeakerBridge {
             output_config,
             format: parsed_format,
             output: None,
@@ -1196,9 +1196,9 @@ impl DecibriOutputBridge {
 }
 
 // ---------------------------------------------------------------------------
-// AsyncDecibriBridge: async wrapper around DecibriBridge.
+// AsyncMicrophoneBridge: async wrapper around MicrophoneBridge.
 //
-// Phase 5 deliverable. Holds an `Arc<tokio::sync::Mutex<DecibriBridge>>` and
+// Phase 5 deliverable. Holds an `Arc<tokio::sync::Mutex<MicrophoneBridge>>` and
 // exposes the same blocking methods as the sync bridge, but async. Each
 // blocking method dispatches the underlying sync work to a Tokio worker
 // thread via `tokio::task::spawn_blocking`, keeping the runtime thread
@@ -1209,11 +1209,11 @@ impl DecibriOutputBridge {
 // `future_into_py` requires it.
 //
 // Construction is sync (Python class instantiation is always sync). The
-// constructor's parameter list mirrors `DecibriBridge::new` exactly; users
+// constructor's parameter list mirrors `MicrophoneBridge::new` exactly; users
 // instantiate with the same kwargs and accept that ORT model loading
 // happens during construction (potentially slow). The post-construction
 // async surface (`start`, `stop`, `read`, etc.) is what the
-// `AsyncDecibri` Python wrapper proxies through.
+// `AsyncMicrophone` Python wrapper proxies through.
 //
 // Per Phase 5 plan Risk 3: concurrent calls on the same instance serialize
 // via the inner Mutex. This is a behavioural characteristic, not advertised
@@ -1226,18 +1226,18 @@ impl DecibriOutputBridge {
 //
 // Iterator (`__iter__` / `__next__`) and context manager (`__enter__` /
 // `__exit__`) protocols are deliberately NOT implemented on this Rust
-// pyclass; those are sync-only protocols. The `AsyncDecibri` Python
+// pyclass; those are sync-only protocols. The `AsyncMicrophone` Python
 // wrapper layers `__aiter__` / `__anext__` and `__aenter__` / `__aexit__`
 // on top of the async `read` / `start` / `stop` methods exposed here.
 // ---------------------------------------------------------------------------
 
 #[pyclass(module = "decibri._decibri")]
-pub(crate) struct AsyncDecibriBridge {
-    inner: Arc<Mutex<DecibriBridge>>,
+pub(crate) struct AsyncMicrophoneBridge {
+    inner: Arc<Mutex<MicrophoneBridge>>,
 }
 
 #[pymethods]
-impl AsyncDecibriBridge {
+impl AsyncMicrophoneBridge {
     #[new]
     #[pyo3(signature = (
         sample_rate,
@@ -1269,7 +1269,7 @@ impl AsyncDecibriBridge {
         numpy: bool,
         ort_library_path: Option<PathBuf>,
     ) -> PyResult<Self> {
-        let inner = DecibriBridge::new(
+        let inner = MicrophoneBridge::new(
             py,
             sample_rate,
             channels,
@@ -1284,7 +1284,7 @@ impl AsyncDecibriBridge {
             numpy,
             ort_library_path,
         )?;
-        Ok(AsyncDecibriBridge {
+        Ok(AsyncMicrophoneBridge {
             inner: Arc::new(Mutex::new(inner)),
         })
     }
@@ -1390,7 +1390,7 @@ impl AsyncDecibriBridge {
     fn devices(py: Python<'_>) -> PyResult<Bound<'_, PyAny>> {
         future_into_py(py, async move {
             tokio::task::spawn_blocking(|| -> PyResult<Vec<DeviceInfo>> {
-                Python::attach(DecibriBridge::devices)
+                Python::attach(MicrophoneBridge::devices)
             })
             .await
             .map_err(|e| PyRuntimeError::new_err(format!("spawn_blocking failed: {e}")))?
@@ -1401,15 +1401,15 @@ impl AsyncDecibriBridge {
     fn version(py: Python<'_>) -> PyResult<Bound<'_, PyAny>> {
         // version() is non-blocking (reads compile-time constants); no
         // spawn_blocking, just wrap into a resolved future.
-        future_into_py(py, async move { Ok(DecibriBridge::version()) })
+        future_into_py(py, async move { Ok(MicrophoneBridge::version()) })
     }
 }
 
 // ---------------------------------------------------------------------------
-// AsyncOutputBridge: async wrapper around DecibriOutputBridge.
+// AsyncSpeakerBridge: async wrapper around SpeakerBridge.
 //
-// Phase 5 deliverable. Same architecture as AsyncDecibriBridge:
-// `Arc<tokio::sync::Mutex<DecibriOutputBridge>>` with each blocking
+// Phase 5 deliverable. Same architecture as AsyncMicrophoneBridge:
+// `Arc<tokio::sync::Mutex<SpeakerBridge>>` with each blocking
 // method dispatched via spawn_blocking.
 //
 // Risk 2 explicitly applies to `drain`: the cpal output buffer can hold
@@ -1417,12 +1417,12 @@ impl AsyncDecibriBridge {
 // drain on Python cancellation, so the audio finishes playing even after
 // the Python coroutine is cancelled. The Python coroutine sees
 // CancelledError immediately; the audio finishes asynchronously to the
-// caller's logic. Document this in the AsyncDecibriOutput.drain docstring
+// caller's logic. Document this in the AsyncSpeaker.drain docstring
 // in the Python wrapper (next relay).
 // ---------------------------------------------------------------------------
 
 /// Owned bundle of (data, format, channels, numpy_flag) extracted from
-/// a `DecibriBridge` for the async read path. All fields are
+/// a `MicrophoneBridge` for the async read path. All fields are
 /// `Send + 'static` so they cross the `spawn_blocking` boundary.
 type AsyncReadOutput = (Vec<f32>, BindingSampleFormat, u16, bool);
 
@@ -1431,7 +1431,7 @@ type AsyncReadOutput = (Vec<f32>, BindingSampleFormat, u16, bool);
 /// all `Send + 'static` so they can cross the `spawn_blocking` boundary.
 /// On the worker thread, the `dispatch` method re-acquires the GIL
 /// (via `Python::attach`) and calls the appropriate sync helper on the
-/// inner `DecibriOutputBridge`.
+/// inner `SpeakerBridge`.
 ///
 /// dtype validation against the configured format happens twice: once
 /// at extraction time (via `require_format`) for the ndarray paths, and
@@ -1482,7 +1482,7 @@ impl AsyncWriteData {
         ))
     }
 
-    fn dispatch(self, py: Python<'_>, bridge: &mut DecibriOutputBridge) -> PyResult<()> {
+    fn dispatch(self, py: Python<'_>, bridge: &mut SpeakerBridge) -> PyResult<()> {
         match self {
             AsyncWriteData::Bytes(v) => bridge.write_bytes_internal(py, &v),
             AsyncWriteData::Int16Samples(v) => {
@@ -1498,12 +1498,12 @@ impl AsyncWriteData {
 }
 
 #[pyclass(module = "decibri._decibri")]
-pub(crate) struct AsyncOutputBridge {
-    inner: Arc<Mutex<DecibriOutputBridge>>,
+pub(crate) struct AsyncSpeakerBridge {
+    inner: Arc<Mutex<SpeakerBridge>>,
 }
 
 #[pymethods]
-impl AsyncOutputBridge {
+impl AsyncSpeakerBridge {
     #[new]
     #[pyo3(signature = (sample_rate, channels, format, device = None))]
     fn new(
@@ -1513,8 +1513,8 @@ impl AsyncOutputBridge {
         format: String,
         device: Option<Bound<'_, PyAny>>,
     ) -> PyResult<Self> {
-        let inner = DecibriOutputBridge::new(py, sample_rate, channels, format, device)?;
-        Ok(AsyncOutputBridge {
+        let inner = SpeakerBridge::new(py, sample_rate, channels, format, device)?;
+        Ok(AsyncSpeakerBridge {
             inner: Arc::new(Mutex::new(inner)),
         })
     }
@@ -1595,7 +1595,7 @@ impl AsyncOutputBridge {
     fn devices(py: Python<'_>) -> PyResult<Bound<'_, PyAny>> {
         future_into_py(py, async move {
             tokio::task::spawn_blocking(|| -> PyResult<Vec<OutputDeviceInfo>> {
-                Python::attach(DecibriOutputBridge::devices)
+                Python::attach(SpeakerBridge::devices)
             })
             .await
             .map_err(|e| PyRuntimeError::new_err(format!("spawn_blocking failed: {e}")))?
@@ -1616,14 +1616,14 @@ fn _decibri(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<VersionInfo>()?;
     m.add_class::<DeviceInfo>()?;
     m.add_class::<OutputDeviceInfo>()?;
-    m.add_class::<DecibriBridge>()?;
-    m.add_class::<DecibriOutputBridge>()?;
+    m.add_class::<MicrophoneBridge>()?;
+    m.add_class::<SpeakerBridge>()?;
 
-    // Phase 5 async pyclasses. The Python wrappers (AsyncDecibri,
-    // AsyncDecibriOutput) live in python/decibri/_async_classes.py and
+    // Phase 5 async pyclasses. The Python wrappers (AsyncMicrophone,
+    // AsyncSpeaker) live in python/decibri/_async_classes.py and
     // proxy to these via Arc<tokio::sync::Mutex<sync_bridge>>.
-    m.add_class::<AsyncDecibriBridge>()?;
-    m.add_class::<AsyncOutputBridge>()?;
+    m.add_class::<AsyncMicrophoneBridge>()?;
+    m.add_class::<AsyncSpeakerBridge>()?;
 
     // Phase 5 Step 1 empirical smoke; see comment block above the
     // async_smoke fn declaration for rationale.

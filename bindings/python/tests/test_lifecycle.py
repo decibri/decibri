@@ -2,7 +2,7 @@
 
 Three sections:
 
-1. Context-manager exception safety: tests of Decibri's __enter__ / __exit__
+1. Context-manager exception safety: tests of Microphone's __enter__ / __exit__
    behavior when the wrapped bridge raises. Bridge is mocked; no markers.
 2. Idempotent stop: stop() called twice is a no-op. No markers.
 3. GIL-release correctness: the binding's read() releases the GIL during
@@ -19,13 +19,13 @@ from typing import Any
 
 import pytest
 
-from decibri import Decibri
+from decibri import Microphone
 
 
 # ---------------------------------------------------------------------------
 # Section 1: context-manager exception safety with mocked bridge.
 #
-# These tests substitute Decibri's internal _bridge with a fake that raises
+# These tests substitute Microphone's internal _bridge with a fake that raises
 # from start() or stop() on demand. The fake exercises only the wrapper's
 # context-manager logic; no native interaction.
 # ---------------------------------------------------------------------------
@@ -55,9 +55,9 @@ class _MockBridge:
             raise self._stop_raises
 
 
-def _make_decibri_with_mock_bridge(mock: _MockBridge) -> Decibri:
-    """Construct a Decibri then swap in the mock bridge for the real one."""
-    d = Decibri()
+def _make_decibri_with_mock_bridge(mock: _MockBridge) -> Microphone:
+    """Construct a Microphone then swap in the mock bridge for the real one."""
+    d = Microphone()
     d._bridge = mock  # type: ignore[assignment]
     return d
 
@@ -122,7 +122,7 @@ def test_stop_called_twice_is_safe() -> None:
 
 def test_stop_without_start_is_safe() -> None:
     """stop() before any start() does not raise (real bridge path)."""
-    d = Decibri()  # real bridge; not mocked
+    d = Microphone()  # real bridge; not mocked
     d.stop()  # no preceding start; should be a no-op
 
 
@@ -130,7 +130,7 @@ def test_stop_without_start_is_safe() -> None:
 # Section 3: GIL-release correctness.
 #
 # Pattern: a background daemon thread increments a counter and sleeps 1ms in
-# a tight loop. The main thread calls Decibri.read() with a 500ms timeout.
+# a tight loop. The main thread calls Microphone.read() with a 500ms timeout.
 # If the binding's read() correctly wraps next_chunk in py.detach(...) (the
 # PyO3 0.28 GIL-release primitive), the background thread runs freely
 # during the blocking next_chunk and the counter advances substantially.
@@ -151,7 +151,7 @@ def test_stop_without_start_is_safe() -> None:
 
 @pytest.mark.requires_audio_input
 def test_read_releases_gil() -> None:
-    """Decibri.read() releases the GIL during its blocking next_chunk call.
+    """Microphone.read() releases the GIL during its blocking next_chunk call.
 
     This is a PROBABILISTIC test relying on background-thread scheduling.
     Floor of counter > 50 chosen for Windows 15ms timer-resolution tolerance
@@ -166,7 +166,7 @@ def test_read_releases_gil() -> None:
             counter[0] += 1
             time.sleep(0.001)
 
-    d = Decibri(sample_rate=16000, channels=1, frames_per_buffer=512)
+    d = Microphone(sample_rate=16000, channels=1, frames_per_buffer=512)
     d.start()
     try:
         worker = threading.Thread(target=background_worker, daemon=True)
@@ -193,11 +193,11 @@ def test_read_releases_gil() -> None:
 
 
 def test_decibri_garbage_collection_safe() -> None:
-    """Constructing and discarding Decibri does not leak / raise on gc.collect()."""
+    """Constructing and discarding Microphone does not leak / raise on gc.collect()."""
     import gc
 
     for _ in range(10):
-        d = Decibri()
+        d = Microphone()
         d.stop()
         del d
 

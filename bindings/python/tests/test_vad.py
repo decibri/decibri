@@ -10,7 +10,7 @@ Section B: pure _VadStateMachine and _compute_rms tests (no markers). The
 wrapper-layer state machine and RMS helper are pure-Python and test-injectable
 without hardware or ORT. This is the bulk of the no-marker VAD coverage.
 
-Section C: end-to-end inference (markers). Full Decibri(vad=True, ...)
+Section C: end-to-end inference (markers). Full Microphone(vad=True, ...)
 integration tests using real audio + (for Silero) real ORT runtime.
 """
 
@@ -19,7 +19,7 @@ import time
 
 import pytest
 
-from decibri import Decibri
+from decibri import Microphone
 from decibri._classes import _VadStateMachine, _compute_rms
 
 
@@ -36,40 +36,40 @@ def test_vad_threshold_default_silero_is_zero_point_five() -> None:
     unconditionally based on vad_mode; vad=False just skips bridge-side
     SileroVad::new.
     """
-    d = Decibri(vad=False, vad_mode="silero")
+    d = Microphone(vad=False, vad_mode="silero")
     assert d._vad._threshold == 0.5  # type: ignore[attr-defined]
 
 
 def test_vad_threshold_default_energy_is_zero_point_zero_one() -> None:
     """Energy mode defaults vad_threshold to 0.01 when not specified."""
-    d = Decibri(vad=False, vad_mode="energy")
+    d = Microphone(vad=False, vad_mode="energy")
     assert d._vad._threshold == 0.01  # type: ignore[attr-defined]
 
 
 def test_vad_threshold_explicit_overrides_default() -> None:
     """User-supplied vad_threshold wins over the mode-dependent default."""
-    d = Decibri(vad=False, vad_mode="energy", vad_threshold=0.42)
+    d = Microphone(vad=False, vad_mode="energy", vad_threshold=0.42)
     assert d._vad._threshold == 0.42  # type: ignore[attr-defined]
 
 
 def test_vad_threshold_boundary_zero_accepted() -> None:
     """vad_threshold=0.0 is at the lower boundary; accepted."""
-    Decibri(vad=False, vad_mode="energy", vad_threshold=0.0)
+    Microphone(vad=False, vad_mode="energy", vad_threshold=0.0)
 
 
 def test_vad_threshold_boundary_one_accepted() -> None:
     """vad_threshold=1.0 is at the upper boundary; accepted."""
-    Decibri(vad=False, vad_mode="energy", vad_threshold=1.0)
+    Microphone(vad=False, vad_mode="energy", vad_threshold=1.0)
 
 
 def test_vad_holdoff_zero_accepted() -> None:
     """vad_holdoff=0 is at the lower boundary; accepted."""
-    Decibri(vad=False, vad_mode="energy", vad_holdoff=0)
+    Microphone(vad=False, vad_mode="energy", vad_holdoff=0)
 
 
 def test_vad_disabled_ignores_vad_kwargs() -> None:
     """With vad=False the VAD-specific kwargs don't trigger model resolution."""
-    d = Decibri(vad=False, vad_mode="silero", model_path=None)
+    d = Microphone(vad=False, vad_mode="silero", model_path=None)
     # Bundled model NOT resolved because vad=False; would have raised
     # ValueError if attempted with no bundled file. Here it just passes.
     assert d.vad_probability == 0.0
@@ -78,13 +78,13 @@ def test_vad_disabled_ignores_vad_kwargs() -> None:
 
 def test_vad_disabled_probability_returns_zero() -> None:
     """vad_probability is always 0.0 when vad=False."""
-    d = Decibri(vad=False)
+    d = Microphone(vad=False)
     assert d.vad_probability == 0.0
 
 
 def test_vad_disabled_is_speaking_returns_false() -> None:
     """is_speaking is always False when vad=False."""
-    d = Decibri(vad=False)
+    d = Microphone(vad=False)
     assert d.is_speaking is False
 
 
@@ -261,11 +261,11 @@ def test_vad_state_machine_reset() -> None:
 def test_vad_holdoff_end_to_end() -> None:
     """End-to-end Silero VAD with real audio + bundled model + holdoff timer.
 
-    Constructs Decibri(vad=True, vad_mode='silero') with auto-resolved model
+    Constructs Microphone(vad=True, vad_mode='silero') with auto-resolved model
     and a short holdoff. Reads audio for ~250ms; expects is_speaking to
     fluctuate based on real microphone input.
     """
-    with Decibri(
+    with Microphone(
         sample_rate=16000,
         channels=1,
         frames_per_buffer=512,
@@ -283,7 +283,7 @@ def test_vad_holdoff_end_to_end() -> None:
 @pytest.mark.requires_audio_input
 def test_vad_energy_mode_end_to_end() -> None:
     """End-to-end energy VAD with real audio (no Silero / ORT)."""
-    with Decibri(
+    with Microphone(
         sample_rate=16000,
         channels=1,
         frames_per_buffer=512,
@@ -302,7 +302,7 @@ def test_vad_energy_mode_end_to_end() -> None:
 @pytest.mark.requires_bundled_ort
 def test_vad_silero_mode_end_to_end() -> None:
     """End-to-end Silero VAD with real audio + bundled model."""
-    with Decibri(
+    with Microphone(
         sample_rate=16000,
         channels=1,
         frames_per_buffer=512,

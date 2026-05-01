@@ -1,6 +1,6 @@
 """Phase 6 Step 1 empirical smoke tests for rust-numpy 0.28.0.
 
-Verifies three preconditions for the AsyncDecibri / DecibriOutput numpy
+Verifies three preconditions for the AsyncMicrophone / Speaker numpy
 surfaces that land in subsequent Phase 6 relays:
 
 1. rust-numpy 0.28.0 builds and runs cleanly in our extension-module
@@ -8,7 +8,7 @@ surfaces that land in subsequent Phase 6 relays:
 
 2. ``Vec<i16>::into_pyarray(py)`` produces a ``numpy.ndarray`` with the
    expected dtype, shape, and values. This is the primary API path for
-   the upcoming ``DecibriBridge::read`` numpy branch (when the
+   the upcoming ``MicrophoneBridge::read`` numpy branch (when the
    ``numpy=True`` constructor flag is set, the read returns a PyArray
    constructed from the cpal-derived ``Vec<i16>`` or ``Vec<f32>``).
 
@@ -29,7 +29,7 @@ These tests stay as persistent regression coverage (locked decision Q4
 of phase-6-numpy-zerocopy.md): if a future rust-numpy upgrade breaks
 the ``into_pyarray`` semantics or pyo3 0.28 compat, these tests fail
 first and surface the regression at the build-pipeline level rather
-than at AsyncDecibri integration time.
+than at AsyncMicrophone integration time.
 """
 
 from __future__ import annotations
@@ -118,7 +118,7 @@ def test_numpy_smoke_owndata_documents_copy_semantics() -> None:
       was technically inaccurate; the rebrand to "NumPy ndarray
       support" lands as a separate plan-storage edit. The
       functionality this enables is unchanged: callers get
-      ``numpy.ndarray`` returns from ``Decibri(numpy=True).read()``
+      ``numpy.ndarray`` returns from ``Microphone(numpy=True).read()``
       with the expected dtype and shape; only the marketing word
       "zero-copy" is wrong.
 

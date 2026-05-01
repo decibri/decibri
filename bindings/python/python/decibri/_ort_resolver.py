@@ -61,7 +61,7 @@ def _bundled_dylib_path() -> str | None:
     the ``decibri`` package can't be located when running from an unusual
     import path), the exception is logged at debug and ``None`` is
     returned. Loud failures here would prevent users from constructing
-    ``Decibri(vad=False)`` which doesn't need ORT at all.
+    ``Microphone(vad=False)`` which doesn't need ORT at all.
     """
     pattern = _PLATFORM_PATTERNS.get(sys.platform)
     if pattern is None:

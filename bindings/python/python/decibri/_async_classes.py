@@ -1,13 +1,13 @@
-"""Async Python wrappers for decibri: AsyncDecibri and AsyncDecibriOutput.
+"""Async Python wrappers for decibri: AsyncMicrophone and AsyncSpeaker.
 
 Phase 5 of the Python Integration Project. These classes mirror the sync
-``Decibri`` and ``DecibriOutput`` surfaces method-for-method, with
+``Microphone`` and ``Speaker`` surfaces method-for-method, with
 ``async def`` semantics, async context manager support
 (``__aenter__`` / ``__aexit__``), and (for capture only) async iterator
 support (``__aiter__`` / ``__anext__``).
 
 Implementation: each method proxies to the underlying Rust async pyclass
-(``AsyncDecibriBridge`` / ``AsyncOutputBridge``) which dispatches blocking
+(``AsyncMicrophoneBridge`` / ``AsyncSpeakerBridge``) which dispatches blocking
 work to a Tokio worker thread via ``spawn_blocking``. The Tokio runtime
 is lazily initialized; no explicit init call is needed.
 
@@ -24,11 +24,11 @@ State properties (``is_open``, ``is_speaking``, ``vad_probability``,
 ``is_playing``) are synchronous Python properties backed by Python-side
 state tracking. The Rust async bridge exposes these as awaitables, but
 awaiting from a property is not idiomatic Python and would surprise
-callers who expect ``decibri.is_open`` to behave like sync ``Decibri``.
+callers who expect ``decibri.is_open`` to behave like sync ``Microphone``.
 The wrapper updates ``_is_open`` after ``start()`` and ``stop()`` return.
 
 Cross-binding compat: pure Python. The Rust core is unchanged. The sync
-``Decibri`` and ``DecibriOutput`` classes (in ``_classes.py``) are
+``Microphone`` and ``Speaker`` classes (in ``_classes.py``) are
 unchanged and exist alongside this module.
 """
 
@@ -54,25 +54,25 @@ from decibri import _decibri, exceptions
 from decibri._classes import _VadStateMachine, _VALID_FORMATS, _VALID_MODES
 from decibri._decibri import DeviceInfo, OutputDeviceInfo, VersionInfo
 
-__all__ = ["AsyncDecibri", "AsyncDecibriOutput"]
+__all__ = ["AsyncMicrophone", "AsyncSpeaker"]
 
 
 # ---------------------------------------------------------------------------
-# AsyncDecibri: async audio capture; mirror of decibri.Decibri.
+# AsyncMicrophone: async audio capture; mirror of decibri.Microphone.
 # ---------------------------------------------------------------------------
 
 
-class AsyncDecibri:
-    """Async audio capture; mirror of ``decibri.Decibri``.
+class AsyncMicrophone:
+    """Async audio capture; mirror of ``decibri.Microphone``.
 
     Use ``async def`` methods: ``await async_decibri.start()``,
     ``chunk = await async_decibri.read()``, ``await async_decibri.stop()``.
 
-    Supports ``async with AsyncDecibri() as d:`` for automatic start/stop.
+    Supports ``async with AsyncMicrophone() as d:`` for automatic start/stop.
     Supports ``async for chunk in async_decibri:`` for iterator-style
-    consumption (capture only; ``AsyncDecibriOutput`` does not iterate).
+    consumption (capture only; ``AsyncSpeaker`` does not iterate).
 
-    Constructor signature matches sync ``Decibri`` exactly. See ``Decibri``
+    Constructor signature matches sync ``Microphone`` exactly. See ``Microphone``
     for parameter documentation including the ``ort_library_path`` priority
     order; this class is a 1:1 mapping with async semantics.
 
@@ -123,7 +123,7 @@ class AsyncDecibri:
                 f"vad_holdoff must be non-negative; got {vad_holdoff}"
             )
 
-        # Resolve the Silero ONNX model path. Same logic as sync Decibri:
+        # Resolve the Silero ONNX model path. Same logic as sync Microphone:
         # user-supplied path wins; otherwise fall back to the bundled model
         # via importlib.resources when Silero VAD is requested.
         resolved_model_path: str | None = None
@@ -161,7 +161,7 @@ class AsyncDecibri:
         elif ort_library_path is not None:
             resolved_ort_path = str(Path(ort_library_path))
 
-        self._bridge = _decibri.AsyncDecibriBridge(
+        self._bridge = _decibri.AsyncMicrophoneBridge(
             sample_rate=sample_rate,
             channels=channels,
             frames_per_buffer=frames_per_buffer,
@@ -322,7 +322,7 @@ class AsyncDecibri:
     @staticmethod
     async def devices() -> list[DeviceInfo]:
         """List available input devices."""
-        return await _decibri.AsyncDecibriBridge.devices()
+        return await _decibri.AsyncMicrophoneBridge.devices()
 
     @staticmethod
     def version() -> VersionInfo:
@@ -330,30 +330,30 @@ class AsyncDecibri:
 
         Synchronous because it reads compile-time constants only; no I/O.
         Intentionally not async to avoid forcing callers to await for what
-        is effectively a metadata lookup. Reuses the sync ``DecibriBridge``
+        is effectively a metadata lookup. Reuses the sync ``MicrophoneBridge``
         static method directly; the async bridge's ``version()`` wraps the
         same data in a coroutine for uniformity but offers no benefit for
         this purely-compile-time lookup.
         """
-        return _decibri.DecibriBridge.version()
+        return _decibri.MicrophoneBridge.version()
 
 
 # ---------------------------------------------------------------------------
-# AsyncDecibriOutput: async audio output; mirror of DecibriOutput.
+# AsyncSpeaker: async audio output; mirror of Speaker.
 # ---------------------------------------------------------------------------
 
 
-class AsyncDecibriOutput:
-    """Async audio output; mirror of ``decibri.DecibriOutput``.
+class AsyncSpeaker:
+    """Async audio output; mirror of ``decibri.Speaker``.
 
     Use ``async def`` methods: ``await async_output.start()``,
     ``await async_output.write(samples)``, ``await async_output.drain()``,
     ``await async_output.stop()``.
 
-    Supports ``async with AsyncDecibriOutput() as o:`` for automatic
+    Supports ``async with AsyncSpeaker() as o:`` for automatic
     start/stop. Does NOT implement async iterator protocol (output is
     push-only; you write to it, you do not iterate over it). This mirrors
-    the sync ``DecibriOutput``, which also has no iterator protocol.
+    the sync ``Speaker``, which also has no iterator protocol.
 
     Cancellation note for ``drain()``: cancelling a ``await drain()`` call
     raises ``CancelledError`` immediately, but the audio continues to play
@@ -376,7 +376,7 @@ class AsyncDecibriOutput:
             raise exceptions.InvalidFormat(
                 f"format must be 'int16' or 'float32'; got {format!r}"
             )
-        self._bridge = _decibri.AsyncOutputBridge(
+        self._bridge = _decibri.AsyncSpeakerBridge(
             sample_rate=sample_rate,
             channels=channels,
             format=format,
@@ -396,7 +396,7 @@ class AsyncDecibriOutput:
         self._is_playing = False
 
     async def close(self) -> None:
-        """Alias for ``stop()``; provided for symmetry with sync ``DecibriOutput``."""
+        """Alias for ``stop()``; provided for symmetry with sync ``Speaker``."""
         await self._bridge.close()
         self._is_playing = False
 
@@ -445,4 +445,4 @@ class AsyncDecibriOutput:
     @staticmethod
     async def devices() -> list[OutputDeviceInfo]:
         """List available output devices."""
-        return await _decibri.AsyncOutputBridge.devices()
+        return await _decibri.AsyncSpeakerBridge.devices()
