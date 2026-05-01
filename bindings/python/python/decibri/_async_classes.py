@@ -89,6 +89,30 @@ class AsyncMicrophone:
     Concurrency: concurrent calls on the same instance serialize via the
     Rust-side ``tokio::sync::Mutex``. This is a behavioural characteristic
     of the architecture, not advertised concurrency.
+
+    Cleanup and disconnect:
+        Mid-stream device disconnect (USB unplug, default-device switch,
+        driver error) is surfaced as a ``CaptureStreamClosed`` raised on
+        the next ``await read()``. cpal detects the disconnect and
+        closes the underlying stream within roughly 20ms; the bridge
+        then reports the closed state on its next read attempt.
+
+        Sibling-task cancellation works correctly here: cancelling a
+        concurrent ``await stop()`` from another asyncio task while a
+        ``read()`` is in flight is safe (the Tokio mutex serializes the
+        operations cleanly). This is the recommended path when a sync
+        ``Microphone`` would hit the 0.1.0 threaded-shutdown limitation.
+
+    Resource cleanup:
+        Always use ``async with AsyncMicrophone(...) as d:`` or call
+        ``await d.stop()`` explicitly. ``AsyncMicrophone`` does NOT
+        define ``__del__`` because finalizers cannot await; calling
+        ``await self.stop()`` from a synchronous ``__del__`` would
+        require a running event loop and would deadlock or warn under
+        most conditions. The Rust side's pyo3 ``Drop`` impl will release
+        the underlying bridge resources when the instance is collected,
+        but the cleaner path is explicit ``await stop()`` or the async
+        context manager.
     """
 
     def __init__(
@@ -96,11 +120,11 @@ class AsyncMicrophone:
         sample_rate: int = 16000,
         channels: int = 1,
         frames_per_buffer: int = 1600,
-        format: str = "int16",
+        dtype: str = "int16",
         device: int | str | None = None,
         vad: bool | str = False,
         vad_threshold: float | None = None,
-        vad_holdoff: int = 300,
+        vad_holdoff_ms: int = 300,
         model_path: str | Path | None = None,
         numpy: bool = False,
         ort_library_path: str | Path | None = None,
@@ -125,10 +149,24 @@ class AsyncMicrophone:
             Realtime in the same pipeline, capture at 16000 for VAD
             then resample to 24000 (e.g., via ``resampy`` or
             ``scipy.signal.resample_poly``) before sending to OpenAI.
+
+        Notes
+        -----
+        ORT load is synchronous in 0.1.0. When ``vad='silero'`` is set
+        the Silero ONNX runtime is loaded inside ``__init__`` itself,
+        which blocks for roughly 100 to 500 milliseconds depending on
+        platform and disk cache. This blocks the event loop because
+        ``__init__`` runs synchronously even on async classes. For
+        latency-sensitive event-loop hot paths, construct the
+        ``AsyncMicrophone`` once at startup (or inside an executor) and
+        reuse it for the lifetime of the process.
+
+        A future ``AsyncMicrophone.open(...)`` async factory that
+        offloads ORT load to a worker thread is on the 0.2.0+ roadmap.
         """
-        if format not in _VALID_FORMATS:
+        if dtype not in _VALID_FORMATS:
             raise exceptions.InvalidFormat(
-                f"format must be 'int16' or 'float32'; got {format!r}"
+                f"dtype must be 'int16' or 'float32'; got {dtype!r}"
             )
 
         # Phase 7.5: collapse the legacy two-flag pattern (vad=True,
@@ -159,9 +197,9 @@ class AsyncMicrophone:
             raise ValueError(
                 f"vad_threshold must be in [0, 1]; got {vad_threshold}"
             )
-        if vad_holdoff < 0:
+        if vad_holdoff_ms < 0:
             raise ValueError(
-                f"vad_holdoff must be non-negative; got {vad_holdoff}"
+                f"vad_holdoff_ms must be non-negative milliseconds; got {vad_holdoff_ms}"
             )
 
         # Resolve the Silero ONNX model path. Same logic as sync Microphone:
@@ -202,16 +240,18 @@ class AsyncMicrophone:
         elif ort_library_path is not None:
             resolved_ort_path = str(Path(ort_library_path))
 
+        # Wrapper-only rename (Phase 7.6 Item C2): public surface uses
+        # `dtype`; bridge keeps `format` for cross-binding consistency.
         self._bridge = _decibri.AsyncMicrophoneBridge(
             sample_rate=sample_rate,
             channels=channels,
             frames_per_buffer=frames_per_buffer,
-            format=format,
+            format=dtype,
             device=device,
             vad=vad_enabled,
             vad_threshold=vad_threshold,
             vad_mode=vad_mode,
-            vad_holdoff=vad_holdoff,
+            vad_holdoff=vad_holdoff_ms,
             model_path=resolved_model_path,
             numpy=numpy,
             ort_library_path=resolved_ort_path,
@@ -221,10 +261,10 @@ class AsyncMicrophone:
         self._vad = _VadStateMachine(
             mode=vad_mode,
             threshold=vad_threshold,
-            holdoff_ms=vad_holdoff,
-            sample_format=format,
+            holdoff_ms=vad_holdoff_ms,
+            sample_format=dtype,
         )
-        self._format = format
+        self._format = dtype
         # Phase 6: store the numpy flag so read() can branch its return
         # type and the VAD path can convert ndarray to bytes for the
         # state machine. Bridge stores the same flag; both kept in sync.
@@ -279,7 +319,7 @@ class AsyncMicrophone:
         Return type:
         - When ``numpy=False`` (default), returns ``bytes``.
         - When ``numpy=True``, returns a ``numpy.ndarray`` with dtype
-          matching the configured ``format`` and shape matching the
+          matching the configured ``dtype`` and shape matching the
           channel count (1-D mono, 2-D ``(N, channels)`` multi-channel).
 
         Future metadata (timestamps, sequence numbers, latency hints)
@@ -375,6 +415,14 @@ class AsyncMicrophone:
     # Static methods
     # -----------------------------------------------------------------------
 
+    # Note: no __del__ on AsyncMicrophone by design.
+    # A finalizer cannot await; calling `await self.stop()` from __del__
+    # would require a running event loop and deadlock or warn under most
+    # conditions. The Rust pyo3 Drop on the underlying bridge handles
+    # resource release at GC time. Consumers should always use
+    # `async with AsyncMicrophone(...) as d:` or `await d.stop()`
+    # explicitly. See the class docstring's "Resource cleanup" section.
+
     @staticmethod
     async def devices() -> list[DeviceInfo]:
         """List available input devices."""
@@ -419,23 +467,59 @@ class AsyncSpeaker:
     Phase 5 plan Risk 2 (spawn_blocking does not cooperatively cancel OS
     threads); for production use, complete drains before initiating new
     writes.
+
+    Resource cleanup:
+        Always use ``async with AsyncSpeaker(...) as o:`` or call
+        ``await o.stop()`` explicitly. ``AsyncSpeaker`` does NOT define
+        ``__del__`` because finalizers cannot await; calling
+        ``await self.stop()`` from a synchronous ``__del__`` would
+        require a running event loop and deadlock or warn under most
+        conditions. The Rust side's pyo3 ``Drop`` impl will release the
+        underlying bridge resources when the instance is collected, but
+        the cleaner path is explicit ``await stop()`` or the async
+        context manager.
     """
 
     def __init__(
         self,
         sample_rate: int = 16000,
         channels: int = 1,
-        format: str = "int16",
+        dtype: str = "int16",
         device: int | str | None = None,
     ) -> None:
-        if format not in _VALID_FORMATS:
+        """Construct an AsyncSpeaker audio output instance.
+
+        Parameters
+        ----------
+        sample_rate : int, optional
+            Output sample rate in Hz. Default 16000 (matches the
+            cloud-STT capture convention used by ``AsyncMicrophone``).
+            For playback of OpenAI Realtime audio use 24000.
+        channels : int, optional
+            Number of output channels. Default 1 (mono). Multi-channel
+            samples are interleaved on the wire.
+        dtype : str, optional
+            Sample dtype: ``"int16"`` (default) or ``"float32"``. Must
+            match the dtype of the data passed to ``write()``; mismatch
+            raises ``TypeError`` at write time.
+        device : int | str | None, optional
+            Output device selector. ``None`` (default) uses the system
+            default output. Pass an integer index from
+            ``AsyncSpeaker.devices()`` or a substring of the device
+            name. ``AsyncSpeaker`` does not load ONNX Runtime, so there
+            is no ``ort_library_path`` parameter (output never invokes
+            VAD).
+        """
+        if dtype not in _VALID_FORMATS:
             raise exceptions.InvalidFormat(
-                f"format must be 'int16' or 'float32'; got {format!r}"
+                f"dtype must be 'int16' or 'float32'; got {dtype!r}"
             )
+        # Wrapper-only rename (Phase 7.6 Item C2): public surface uses
+        # `dtype`; bridge keeps `format` for cross-binding consistency.
         self._bridge = _decibri.AsyncSpeakerBridge(
             sample_rate=sample_rate,
             channels=channels,
-            format=format,
+            format=dtype,
             device=device,
         )
     async def start(self) -> None:
@@ -461,7 +545,7 @@ class AsyncSpeaker:
         """Write a chunk of audio samples to the output buffer.
 
         Phase 6: accepts either ``bytes`` or a ``numpy.ndarray`` with
-        dtype matching the configured ``format`` (np.int16 or np.float32).
+        dtype matching the configured ``dtype`` (np.int16 or np.float32).
         Multi-channel ndarrays use shape ``(N, channels)`` (interleaved).
         Output bridges duck-type the input on each call.
 
@@ -501,6 +585,14 @@ class AsyncSpeaker:
         cache.
         """
         return bool(self._bridge.is_playing_sync)
+
+    # Note: no __del__ on AsyncSpeaker by design.
+    # A finalizer cannot await; calling `await self.stop()` from __del__
+    # would require a running event loop and deadlock or warn under most
+    # conditions. The Rust pyo3 Drop on the underlying bridge handles
+    # resource release at GC time. Consumers should always use
+    # `async with AsyncSpeaker(...) as o:` or `await o.stop()` explicitly.
+    # See the class docstring's "Resource cleanup" section.
 
     @staticmethod
     async def devices() -> list[OutputDeviceInfo]:

@@ -105,7 +105,7 @@ def test_drain_before_start_raises_closed() -> None:
 
 def test_write_then_drain_roundtrip() -> None:
     """Write a short silence buffer + drain. Verifies the full output cycle."""
-    with Speaker(sample_rate=16000, channels=1, format="int16") as o:
+    with Speaker(sample_rate=16000, channels=1, dtype="int16") as o:
         # ~100ms of silence at 16kHz mono int16 = 1600 samples * 2 bytes = 3200 bytes
         silence = b"\x00" * 3200
         o.write(silence)

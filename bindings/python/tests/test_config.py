@@ -22,9 +22,10 @@ Notes on PyO3 boundary:
 - Positive out-of-range values pass through PyO3 cleanly and trigger
   validation at .start() time.
 
-VAD-specific validations (vad_threshold range, vad union value, vad_holdoff
-negative) raise bare ValueError from the wrapper (not DecibriError subclasses)
-and live in test_vad.py Section A alongside the rest of the VAD surface.
+VAD-specific validations (vad_threshold range, vad union value,
+vad_holdoff_ms negative) raise bare ValueError from the wrapper (not
+DecibriError subclasses) and live in test_vad.py Section A alongside the
+rest of the VAD surface.
 """
 
 import pytest
@@ -39,45 +40,45 @@ from decibri import (
 
 
 # ---------------------------------------------------------------------------
-# Wrapper-layer validation: format string lookup at Microphone.__init__ time.
+# Wrapper-layer validation: dtype string lookup at Microphone.__init__ time.
 # The wrapper composes its own f-string message including the offending value.
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.parametrize(
-    "format_value,expected_msg",
+    "dtype_value,expected_msg",
     [
         pytest.param(
             "bogus",
-            "format must be 'int16' or 'float32'; got 'bogus'",
-            id="format_bogus_string",
+            "dtype must be 'int16' or 'float32'; got 'bogus'",
+            id="dtype_bogus_string",
         ),
         pytest.param(
             "INT16",
-            "format must be 'int16' or 'float32'; got 'INT16'",
-            id="format_wrong_case",
+            "dtype must be 'int16' or 'float32'; got 'INT16'",
+            id="dtype_wrong_case",
         ),
         pytest.param(
             "i16",
-            "format must be 'int16' or 'float32'; got 'i16'",
-            id="format_short_form",
+            "dtype must be 'int16' or 'float32'; got 'i16'",
+            id="dtype_short_form",
         ),
         pytest.param(
             "f32",
-            "format must be 'int16' or 'float32'; got 'f32'",
-            id="format_short_float",
+            "dtype must be 'int16' or 'float32'; got 'f32'",
+            id="dtype_short_float",
         ),
         pytest.param(
             "",
-            "format must be 'int16' or 'float32'; got ''",
-            id="format_empty",
+            "dtype must be 'int16' or 'float32'; got ''",
+            id="dtype_empty",
         ),
     ],
 )
-def test_invalid_format_wrapper(format_value: str, expected_msg: str) -> None:
-    """Microphone rejects invalid format strings at the wrapper layer (construction)."""
+def test_invalid_format_wrapper(dtype_value: str, expected_msg: str) -> None:
+    """Microphone rejects invalid dtype strings at the wrapper layer (construction)."""
     with pytest.raises(InvalidFormat) as exc_info:
-        Microphone(format=format_value)
+        Microphone(dtype=dtype_value)
     assert str(exc_info.value) == expected_msg
 
 

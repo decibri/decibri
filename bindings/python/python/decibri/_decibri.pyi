@@ -9,6 +9,14 @@ at ``decibri.exceptions``; ``to_py_err`` in the Rust binding raises instances
 of those pure-Python classes via ``PyErr::from_type``. Consumers should
 import exceptions from ``decibri`` (after Commit 6 re-export) or directly
 from ``decibri.exceptions``.
+
+Wrapper-only naming translations (Phase 7.6):
+    The public ``decibri.Microphone`` / ``decibri.Speaker`` wrappers
+    expose ``dtype=`` and ``vad_holdoff_ms=`` to align with NumPy and
+    explicit-units conventions. The Rust bridge stubs below keep the
+    cross-binding-historical names ``format=`` and ``vad_holdoff=``;
+    the Python wrappers translate at the boundary. Direct bridge
+    consumers (advanced use) continue to use the bridge-level names.
 """
 
 from pathlib import Path

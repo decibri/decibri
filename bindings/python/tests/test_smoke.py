@@ -17,6 +17,8 @@ import decibri
 
 def test_package_imports() -> None:
     assert decibri.__version__ == "0.1.0a1"
+    # MicrophoneBridge remains accessible via attribute lookup even though
+    # it is intentionally not in __all__ (Phase 7.6 Item B2).
     assert hasattr(decibri, "MicrophoneBridge")
     assert hasattr(decibri, "VersionInfo")
 
@@ -96,18 +98,27 @@ def test_exception_intermediate_parents_importable() -> None:
 
 
 def test_public_surface_count() -> None:
-    """The public ``__all__`` enumerates the full sync + async surface (48 names).
+    """The public ``__all__`` enumerates the trimmed top-level surface (19 names).
 
-    Composition: 2 sync public wrappers (Microphone, Speaker) + 2 async
-    public wrappers (AsyncMicrophone, AsyncSpeaker; Phase 5) + 4 lowercase
-    factory functions (microphone, speaker, async_microphone, async_speaker;
-    Phase 7.5) + 3 module-level convenience functions (devices,
-    output_devices, version; Phase 7.5) + 2 internal pyclasses + 3 value
-    types + 32 exception classes (1 base + 20 direct subclasses + OrtError
-    + 7 direct OrtError subclasses + OrtPathError + 2 OrtPathError
-    subclasses).
+    Phase 7.6 trimmed the public surface in three stages:
+      - Item B2 dropped the two internal bridges (MicrophoneBridge,
+        SpeakerBridge); they remain importable via attribute lookup.
+      - Item C3 (Shape C2) dropped the 29 granular exception subclasses
+        from __all__; only the three catch-target roots (DecibriError,
+        OrtError, OrtPathError) remain. All 32 exception classes are
+        still importable both at decibri.<X> and at decibri.exceptions.<X>.
+      - Item C5 added record_to_file and async_record_to_file.
+
+    Final composition: 2 sync wrappers (Microphone, Speaker) + 2 async
+    wrappers (AsyncMicrophone, AsyncSpeaker) + 4 lowercase factories
+    (microphone, speaker, async_microphone, async_speaker) + 3 module-
+    level convenience functions (devices, output_devices, version) +
+    2 file convenience functions (record_to_file, async_record_to_file)
+    + 3 value types (DeviceInfo, OutputDeviceInfo, VersionInfo) +
+    3 exception roots (DecibriError, OrtError, OrtPathError)
+    = 2 + 2 + 4 + 3 + 2 + 3 + 3 = 19.
     """
-    assert len(decibri.__all__) == 48
+    assert len(decibri.__all__) == 19
     for name in decibri.__all__:
         assert hasattr(decibri, name), f"__all__ lists {name!r} but it is not exported"
 

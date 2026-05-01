@@ -93,14 +93,14 @@ def test_read_returns_bytes_with_timeout() -> None:
 
 
 def test_read_int16_chunk_size() -> None:
-    with Microphone(sample_rate=16000, channels=1, frames_per_buffer=256, format="int16") as d:
+    with Microphone(sample_rate=16000, channels=1, frames_per_buffer=256, dtype="int16") as d:
         chunk = d.read(timeout_ms=500)
         assert chunk is not None
         assert len(chunk) == 256 * 1 * 2  # 512 bytes
 
 
 def test_read_float32_chunk_size() -> None:
-    with Microphone(sample_rate=16000, channels=1, frames_per_buffer=256, format="float32") as d:
+    with Microphone(sample_rate=16000, channels=1, frames_per_buffer=256, dtype="float32") as d:
         chunk = d.read(timeout_ms=500)
         assert chunk is not None
         assert len(chunk) == 256 * 1 * 4  # 1024 bytes

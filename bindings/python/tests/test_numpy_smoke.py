@@ -54,7 +54,7 @@ def test_numpy_smoke_dtype_is_int16() -> None:
     """The smoke ndarray has dtype ``np.int16`` matching the ``Vec<i16>`` input.
 
     Validates the dtype mapping that Phase 6's read path will rely on:
-    Rust ``i16`` -> NumPy ``np.int16`` for ``format='int16'`` mode.
+    Rust ``i16`` -> NumPy ``np.int16`` for ``dtype='int16'`` mode.
     """
     arr = _numpy_smoke()
     assert arr.dtype == np.int16, f"Expected int16, got {arr.dtype!r}"

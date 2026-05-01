@@ -33,36 +33,36 @@ from decibri import (
 
 
 # ---------------------------------------------------------------------------
-# Hard-freeze: format string rejection on the OUTPUT path. The capture path
+# Hard-freeze: dtype string rejection on the OUTPUT path. The capture path
 # is covered by test_config.py::test_invalid_format_wrapper. Output mirrors
 # the same wrapper-layer validation with the same message text.
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.parametrize(
-    "format_value,expected_msg",
+    "dtype_value,expected_msg",
     [
         pytest.param(
             "bogus",
-            "format must be 'int16' or 'float32'; got 'bogus'",
-            id="output_format_bogus_string",
+            "dtype must be 'int16' or 'float32'; got 'bogus'",
+            id="output_dtype_bogus_string",
         ),
         pytest.param(
             "INT16",
-            "format must be 'int16' or 'float32'; got 'INT16'",
-            id="output_format_wrong_case",
+            "dtype must be 'int16' or 'float32'; got 'INT16'",
+            id="output_dtype_wrong_case",
         ),
         pytest.param(
             "",
-            "format must be 'int16' or 'float32'; got ''",
-            id="output_format_empty",
+            "dtype must be 'int16' or 'float32'; got ''",
+            id="output_dtype_empty",
         ),
     ],
 )
-def test_output_invalid_format_wrapper(format_value: str, expected_msg: str) -> None:
-    """Speaker rejects invalid format strings with the same message text as Microphone."""
+def test_output_invalid_format_wrapper(dtype_value: str, expected_msg: str) -> None:
+    """Speaker rejects invalid dtype strings with the same message text as Microphone."""
     with pytest.raises(InvalidFormat) as exc_info:
-        Speaker(format=format_value)
+        Speaker(dtype=dtype_value)
     assert str(exc_info.value) == expected_msg
 
 
@@ -133,13 +133,13 @@ def test_output_drain_before_start_message() -> None:
             id="vad_true_rejected",
         ),
         pytest.param(
-            {"vad_holdoff": -1},
-            "vad_holdoff must be non-negative; got -1",
+            {"vad_holdoff_ms": -1},
+            "vad_holdoff_ms must be non-negative milliseconds; got -1",
             id="vad_holdoff_negative",
         ),
         pytest.param(
-            {"vad_holdoff": -100},
-            "vad_holdoff must be non-negative; got -100",
+            {"vad_holdoff_ms": -100},
+            "vad_holdoff_ms must be non-negative milliseconds; got -100",
             id="vad_holdoff_far_negative",
         ),
     ],

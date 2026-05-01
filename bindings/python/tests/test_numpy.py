@@ -76,8 +76,8 @@ def test_read_returns_bytes_when_numpy_false() -> None:
 
 @pytest.mark.requires_audio_input
 def test_read_dtype_matches_int16_format() -> None:
-    """``numpy=True`` with ``format='int16'`` returns dtype ``np.int16``."""
-    with Microphone(numpy=True, format="int16", vad=False) as d:
+    """``numpy=True`` with ``dtype='int16'`` returns dtype ``np.int16``."""
+    with Microphone(numpy=True, dtype="int16", vad=False) as d:
         chunk = d.read()
         if chunk is not None:
             assert isinstance(chunk, np.ndarray)
@@ -86,8 +86,8 @@ def test_read_dtype_matches_int16_format() -> None:
 
 @pytest.mark.requires_audio_input
 def test_read_dtype_matches_float32_format() -> None:
-    """``numpy=True`` with ``format='float32'`` returns dtype ``np.float32``."""
-    with Microphone(numpy=True, format="float32", vad=False) as d:
+    """``numpy=True`` with ``dtype='float32'`` returns dtype ``np.float32``."""
+    with Microphone(numpy=True, dtype="float32", vad=False) as d:
         chunk = d.read()
         if chunk is not None:
             assert isinstance(chunk, np.ndarray)
@@ -113,7 +113,7 @@ def test_read_shape_mono_is_1d() -> None:
 def test_write_accepts_ndarray_int16() -> None:
     """Output write accepts ``np.int16`` ndarray (mono 1-D)."""
     samples = np.zeros(1600, dtype=np.int16)  # 100 ms at 16 kHz
-    with Speaker(format="int16") as o:
+    with Speaker(dtype="int16") as o:
         o.write(samples)
         o.drain()
 
@@ -122,14 +122,14 @@ def test_write_accepts_ndarray_int16() -> None:
 def test_write_accepts_bytes_regression() -> None:
     """Output write still accepts ``bytes`` (Phase 5 baseline regression)."""
     samples = b"\x00\x00" * 1600
-    with Speaker(format="int16") as o:
+    with Speaker(dtype="int16") as o:
         o.write(samples)
         o.drain()
 
 
 @pytest.mark.requires_audio_output
 def test_write_rejects_dtype_mismatch() -> None:
-    """``np.float32`` ndarray to ``format='int16'`` output raises TypeError.
+    """``np.float32`` ndarray to ``dtype='int16'`` output raises TypeError.
 
     The dtype check fires at ``write()`` time, but the test path requires
     ``output.start()`` to succeed first (the bridge's stream-state check
@@ -143,7 +143,7 @@ def test_write_rejects_dtype_mismatch() -> None:
     only on hardware.
     """
     samples = np.zeros(1600, dtype=np.float32)
-    output = Speaker(format="int16")
+    output = Speaker(dtype="int16")
     output.start()
     try:
         with pytest.raises(TypeError):
@@ -172,6 +172,6 @@ async def test_async_read_returns_ndarray() -> None:
 async def test_async_write_accepts_ndarray() -> None:
     """``AsyncSpeaker.write()`` accepts ndarray (async parallel)."""
     samples = np.zeros(1600, dtype=np.int16)
-    async with AsyncSpeaker(format="int16") as o:
+    async with AsyncSpeaker(dtype="int16") as o:
         await o.write(samples)
         await o.drain()
