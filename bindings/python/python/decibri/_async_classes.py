@@ -25,7 +25,10 @@ State properties (``is_open``, ``is_speaking``, ``vad_probability``,
 state tracking. The Rust async bridge exposes these as awaitables, but
 awaiting from a property is not idiomatic Python and would surprise
 callers who expect ``decibri.is_open`` to behave like sync ``Microphone``.
-The wrapper updates ``_is_open`` after ``start()`` and ``stop()`` return.
+Phase 7.5 Item 10: the sync ``is_open`` / ``is_playing`` properties
+now delegate to lock-free atomic mirrors on the Rust bridge, so they
+report bridge truth (not stale Python-side cache) even when the Rust
+side closes the stream itself.
 
 Cross-binding compat: pure Python. The Rust core is unchanged. The sync
 ``Microphone`` and ``Speaker`` classes (in ``_classes.py``) are
@@ -205,12 +208,6 @@ class AsyncMicrophone:
         # type and the VAD path can convert ndarray to bytes for the
         # state machine. Bridge stores the same flag; both kept in sync.
         self._numpy = numpy
-        # Python-side state tracking for the synchronous is_open property.
-        # The Rust async bridge's is_open getter returns an awaitable; we
-        # update this flag after start/stop so callers can read state
-        # without an await.
-        self._is_open = False
-
     # -----------------------------------------------------------------------
     # Lifecycle
     # -----------------------------------------------------------------------
@@ -218,12 +215,10 @@ class AsyncMicrophone:
     async def start(self) -> None:
         """Open and start the capture stream."""
         await self._bridge.start()
-        self._is_open = True
 
     async def stop(self) -> None:
         """Stop the capture stream and reset VAD state."""
         await self._bridge.stop()
-        self._is_open = False
         self._vad.reset()
 
     async def close(self) -> None:
@@ -311,10 +306,12 @@ class AsyncMicrophone:
     def is_open(self) -> bool:
         """True if the capture stream is currently running.
 
-        Synchronous property backed by Python-side state tracking. Set on
-        ``await start()`` completion, cleared on ``await stop()`` completion.
+        Queries the Rust bridge directly via a lock-free atomic mirror
+        (Phase 7.5 Item 10). Reports honestly even when the Rust side
+        closes the stream itself (e.g., device disconnect or cpal driver
+        error), unlike the prior Python-side cache.
         """
-        return self._is_open
+        return bool(self._bridge.is_open_sync)
 
     @property
     def is_speaking(self) -> bool:
@@ -409,23 +406,17 @@ class AsyncSpeaker:
             format=format,
             device=device,
         )
-        # Python-side state tracking for the synchronous is_playing property.
-        self._is_playing = False
-
     async def start(self) -> None:
         """Open and start the output stream."""
         await self._bridge.start()
-        self._is_playing = True
 
     async def stop(self) -> None:
         """Stop the output stream."""
         await self._bridge.stop()
-        self._is_playing = False
 
     async def close(self) -> None:
         """Alias for ``stop()``; provided for symmetry with sync ``Speaker``."""
         await self._bridge.close()
-        self._is_playing = False
 
     async def write(self, samples: SampleData) -> None:
         """Write a chunk of audio samples to the output buffer.
@@ -465,9 +456,12 @@ class AsyncSpeaker:
     def is_playing(self) -> bool:
         """True if the output stream is currently running.
 
-        Synchronous property backed by Python-side state tracking.
+        Queries the Rust bridge directly via a lock-free atomic mirror
+        (Phase 7.5 Item 10 sibling fix). Reports honestly even when the
+        Rust side closes the stream itself, unlike the prior Python-side
+        cache.
         """
-        return self._is_playing
+        return bool(self._bridge.is_playing_sync)
 
     @staticmethod
     async def devices() -> list[OutputDeviceInfo]:

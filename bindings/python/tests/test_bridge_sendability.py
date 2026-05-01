@@ -88,3 +88,46 @@ def test_decibri_can_be_passed_through_threadpool_for_callable() -> None:
         future: concurrent.futures.Future[Any] = executor.submit(use_decibri)
         result = future.result()
     assert result is False
+
+
+# ---------------------------------------------------------------------------
+# Phase 7.5 Item 12 (expanded): bridge-level close() symmetry
+#
+# SpeakerBridge has had close() since Phase 2; Phase 7.5 adds the missing
+# MicrophoneBridge::close() and AsyncMicrophoneBridge::close() as literal
+# aliases for stop(), so all four bridges have the same lifecycle surface.
+# ---------------------------------------------------------------------------
+
+
+def test_microphone_bridge_close_exists() -> None:
+    """MicrophoneBridge.close() is exposed and callable as alias for stop()."""
+    from decibri._decibri import MicrophoneBridge
+
+    assert hasattr(MicrophoneBridge, "close")
+    assert callable(MicrophoneBridge.close)
+
+
+def test_async_microphone_bridge_close_exists() -> None:
+    """AsyncMicrophoneBridge.close() is exposed and callable as alias for stop()."""
+    from decibri._decibri import AsyncMicrophoneBridge
+
+    assert hasattr(AsyncMicrophoneBridge, "close")
+    assert callable(AsyncMicrophoneBridge.close)
+
+
+def test_all_four_bridges_have_close() -> None:
+    """All four bridges expose close() (sync + async, capture + output)."""
+    from decibri._decibri import (
+        AsyncMicrophoneBridge,
+        AsyncSpeakerBridge,
+        MicrophoneBridge,
+        SpeakerBridge,
+    )
+
+    for bridge in (
+        MicrophoneBridge,
+        SpeakerBridge,
+        AsyncMicrophoneBridge,
+        AsyncSpeakerBridge,
+    ):
+        assert hasattr(bridge, "close"), f"{bridge.__name__} missing close()"

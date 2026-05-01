@@ -331,3 +331,63 @@ async def test_async_microphone_close_idempotent() -> None:
     await mic.start()
     await mic.close()
     await mic.close()  # second close is a no-op
+
+
+# ---------------------------------------------------------------------------
+# Phase 7.5 Item 10: is_open / is_playing now query bridge truth
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.requires_audio_input
+@pytest.mark.asyncio
+async def test_async_microphone_is_open_reflects_bridge_truth() -> None:
+    """AsyncMicrophone.is_open queries the Rust bridge atomic mirror.
+
+    Phase 7.5 Item 10: previously this was a Python-side cache that
+    could lie when the Rust side closed the stream itself. Now it
+    delegates to the lock-free atomic mirror on AsyncMicrophoneBridge.
+    """
+    mic = AsyncMicrophone(vad=False)
+    assert mic.is_open is False, "Pre-start: bridge atomic should be False"
+
+    await mic.start()
+    assert mic.is_open is True, "Post-start: bridge atomic should be True"
+
+    await mic.stop()
+    assert mic.is_open is False, "Post-stop: bridge atomic should be False"
+
+
+@pytest.mark.requires_audio_output
+@pytest.mark.asyncio
+async def test_async_speaker_is_playing_reflects_bridge_truth() -> None:
+    """AsyncSpeaker.is_playing queries the Rust bridge atomic mirror.
+
+    Phase 7.5 Item 10 sibling fix: same shape as AsyncMicrophone.is_open.
+    """
+    spk = AsyncSpeaker()
+    assert spk.is_playing is False
+
+    await spk.start()
+    assert spk.is_playing is True
+
+    await spk.stop()
+    assert spk.is_playing is False
+
+
+@pytest.mark.asyncio
+async def test_async_microphone_is_open_pre_start_no_hardware() -> None:
+    """AsyncMicrophone.is_open returns False before start without hardware.
+
+    Validates the atomic-mirror sync getter is callable without an
+    active stream or audio device. Construction does not start the
+    stream; the atomic should be False from the constructor.
+    """
+    mic = AsyncMicrophone(vad=False)
+    assert mic.is_open is False
+
+
+@pytest.mark.asyncio
+async def test_async_speaker_is_playing_pre_start_no_hardware() -> None:
+    """AsyncSpeaker.is_playing returns False before start without hardware."""
+    spk = AsyncSpeaker()
+    assert spk.is_playing is False

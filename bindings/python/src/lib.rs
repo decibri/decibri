@@ -24,6 +24,7 @@
 //! the bridge exposes via `vad_probability`.
 
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -852,6 +853,13 @@ impl MicrophoneBridge {
         Ok(())
     }
 
+    fn close(&mut self) -> PyResult<()> {
+        // Phase 7.5: literal alias for stop, mirroring SpeakerBridge::close.
+        // Bridge-level symmetry for users constructing MicrophoneBridge
+        // directly (advanced use; surface in __all__).
+        self.stop()
+    }
+
     #[pyo3(signature = (timeout_ms = None))]
     fn read<'py>(
         &mut self,
@@ -1234,6 +1242,14 @@ impl SpeakerBridge {
 #[pyclass(module = "decibri._decibri")]
 pub(crate) struct AsyncMicrophoneBridge {
     inner: Arc<Mutex<MicrophoneBridge>>,
+    // Phase 7.5 Item 10: lock-free mirror of inner.stream.is_some(). The
+    // public is_open getter is awaitable (acquires the tokio Mutex), which
+    // makes it unusable from a synchronous Python property. The wrapper
+    // class needs a sync property to keep API symmetry with sync
+    // Microphone.is_open; this AtomicBool is its source of truth.
+    // Updated by start() and stop() after the inner mutation succeeds;
+    // read by the is_open_sync getter without locking.
+    is_open_atomic: Arc<AtomicBool>,
 }
 
 #[pymethods]
@@ -1286,15 +1302,22 @@ impl AsyncMicrophoneBridge {
         )?;
         Ok(AsyncMicrophoneBridge {
             inner: Arc::new(Mutex::new(inner)),
+            is_open_atomic: Arc::new(AtomicBool::new(false)),
         })
     }
 
     fn start<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
         let inner = Arc::clone(&self.inner);
+        let is_open_atomic = Arc::clone(&self.is_open_atomic);
         future_into_py(py, async move {
             tokio::task::spawn_blocking(move || -> PyResult<()> {
                 let mut bridge = inner.blocking_lock();
-                Python::attach(|py| bridge.start(py))
+                Python::attach(|py| bridge.start(py))?;
+                // Phase 7.5 Item 10: only set the atomic AFTER the inner
+                // start() succeeds. If start() returns Err, the ? operator
+                // returns early and the atomic stays false.
+                is_open_atomic.store(true, Ordering::Release);
+                Ok(())
             })
             .await
             .map_err(|e| PyRuntimeError::new_err(format!("spawn_blocking failed: {e}")))?
@@ -1303,6 +1326,7 @@ impl AsyncMicrophoneBridge {
 
     fn stop<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
         let inner = Arc::clone(&self.inner);
+        let is_open_atomic = Arc::clone(&self.is_open_atomic);
         future_into_py(py, async move {
             // stop() is non-blocking (just drops Options) but we still go
             // through spawn_blocking so the Mutex acquisition is uniform
@@ -1310,11 +1334,23 @@ impl AsyncMicrophoneBridge {
             // call inside an async context that tokio warns against.
             tokio::task::spawn_blocking(move || -> PyResult<()> {
                 let mut bridge = inner.blocking_lock();
-                bridge.stop()
+                bridge.stop()?;
+                // Phase 7.5 Item 10: clear the atomic after the inner
+                // stop() succeeds. inner.stop() itself is infallible, but
+                // mirroring the pattern from start() keeps the symmetry.
+                is_open_atomic.store(false, Ordering::Release);
+                Ok(())
             })
             .await
             .map_err(|e| PyRuntimeError::new_err(format!("spawn_blocking failed: {e}")))?
         })
+    }
+
+    fn close<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        // Phase 7.5: close is a literal alias for stop, mirroring
+        // AsyncSpeakerBridge::close. Bridge-level symmetry for users
+        // constructing AsyncMicrophoneBridge directly.
+        self.stop(py)
     }
 
     #[pyo3(signature = (timeout_ms = None))]
@@ -1366,6 +1402,15 @@ impl AsyncMicrophoneBridge {
             let bridge = inner.lock().await;
             Ok(bridge.is_open())
         })
+    }
+
+    #[getter]
+    fn is_open_sync(&self) -> bool {
+        // Phase 7.5 Item 10: lock-free sync getter for the wrapper's
+        // synchronous AsyncMicrophone.is_open property. Reads the atomic
+        // mirror updated by start() and stop(); no Mutex acquisition,
+        // no awaiting, safe to call from any thread without a runtime.
+        self.is_open_atomic.load(Ordering::Acquire)
     }
 
     #[getter]
@@ -1500,6 +1545,10 @@ impl AsyncWriteData {
 #[pyclass(module = "decibri._decibri")]
 pub(crate) struct AsyncSpeakerBridge {
     inner: Arc<Mutex<SpeakerBridge>>,
+    // Phase 7.5 Item 10 sibling fix: lock-free mirror of inner.stream
+    // state. Same shape as AsyncMicrophoneBridge.is_open_atomic; same
+    // motivation (sync wrapper property needs lock-free truth).
+    is_playing_atomic: Arc<AtomicBool>,
 }
 
 #[pymethods]
@@ -1516,15 +1565,21 @@ impl AsyncSpeakerBridge {
         let inner = SpeakerBridge::new(py, sample_rate, channels, format, device)?;
         Ok(AsyncSpeakerBridge {
             inner: Arc::new(Mutex::new(inner)),
+            is_playing_atomic: Arc::new(AtomicBool::new(false)),
         })
     }
 
     fn start<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
         let inner = Arc::clone(&self.inner);
+        let is_playing_atomic = Arc::clone(&self.is_playing_atomic);
         future_into_py(py, async move {
             tokio::task::spawn_blocking(move || -> PyResult<()> {
                 let mut bridge = inner.blocking_lock();
-                Python::attach(|py| bridge.start(py))
+                Python::attach(|py| bridge.start(py))?;
+                // Phase 7.5 Item 10 sibling fix: set atomic only after
+                // inner.start() succeeds. ? returns early on Err.
+                is_playing_atomic.store(true, Ordering::Release);
+                Ok(())
             })
             .await
             .map_err(|e| PyRuntimeError::new_err(format!("spawn_blocking failed: {e}")))?
@@ -1567,10 +1622,16 @@ impl AsyncSpeakerBridge {
 
     fn stop<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
         let inner = Arc::clone(&self.inner);
+        let is_playing_atomic = Arc::clone(&self.is_playing_atomic);
         future_into_py(py, async move {
             tokio::task::spawn_blocking(move || -> PyResult<()> {
                 let mut bridge = inner.blocking_lock();
-                bridge.stop()
+                bridge.stop()?;
+                // Phase 7.5 Item 10 sibling fix: clear atomic after
+                // inner.stop() succeeds (infallible today; mirroring
+                // pattern keeps symmetry with start()).
+                is_playing_atomic.store(false, Ordering::Release);
+                Ok(())
             })
             .await
             .map_err(|e| PyRuntimeError::new_err(format!("spawn_blocking failed: {e}")))?
@@ -1589,6 +1650,14 @@ impl AsyncSpeakerBridge {
             let bridge = inner.lock().await;
             Ok(bridge.is_playing())
         })
+    }
+
+    #[getter]
+    fn is_playing_sync(&self) -> bool {
+        // Phase 7.5 Item 10 sibling fix: lock-free sync getter for the
+        // wrapper's synchronous AsyncSpeaker.is_playing property. Same
+        // pattern as AsyncMicrophoneBridge.is_open_sync.
+        self.is_playing_atomic.load(Ordering::Acquire)
     }
 
     #[staticmethod]
