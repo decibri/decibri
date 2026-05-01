@@ -1,7 +1,7 @@
 """High-level Python wrapper for decibri audio capture with VAD policy.
 
-This module ships the consumer-facing `Decibri` class. The class wraps the
-native `_decibri.DecibriBridge` pyclass (Rust binding shipped in Commit 2)
+This module ships the consumer-facing `Microphone` class. The class wraps the
+native `_decibri.MicrophoneBridge` pyclass (Rust binding shipped in Commit 2)
 and adds wrapper-layer VAD policy: threshold application, holdoff state
 machine, and mode dispatch (Silero passthrough vs energy RMS computation).
 
@@ -55,7 +55,7 @@ else:
 from decibri import _decibri, exceptions
 from decibri._decibri import DeviceInfo, OutputDeviceInfo, VersionInfo
 
-__all__ = ["Decibri", "DecibriOutput", "DeviceInfo", "OutputDeviceInfo", "VersionInfo"]
+__all__ = ["Microphone", "Speaker", "DeviceInfo", "OutputDeviceInfo", "VersionInfo"]
 
 
 # ---------------------------------------------------------------------------
@@ -73,7 +73,7 @@ __all__ = ["Decibri", "DecibriOutput", "DeviceInfo", "OutputDeviceInfo", "Versio
 #   3. Run a holdoff state machine on the threshold result, with time-based
 #      expiry of the silence timer.
 #
-# Construction is driven by Decibri.__init__; consumers don't touch this
+# Construction is driven by Microphone.__init__; consumers don't touch this
 # class directly.
 # ---------------------------------------------------------------------------
 
@@ -113,7 +113,7 @@ class _VadStateMachine:
         self._last_probability = 0.0
 
     def process_chunk(self, chunk_bytes: bytes, bridge_probability: float) -> None:
-        """Update VAD state from one chunk. Called inside Decibri.read()."""
+        """Update VAD state from one chunk. Called inside Microphone.read()."""
         if self._mode == "silero":
             probability = bridge_probability
         elif self._mode == "energy":
@@ -191,12 +191,12 @@ def _compute_rms(chunk_bytes: bytes, sample_format: str) -> float:
         sum_sq = sum(s * s for s in samples)
         return math.sqrt(sum_sq / sample_count)
 
-    # Unreachable; format is validated at Decibri construction time.
+    # Unreachable; format is validated at Microphone construction time.
     return 0.0
 
 
 # ---------------------------------------------------------------------------
-# Decibri: consumer-facing audio capture class.
+# Microphone: consumer-facing audio capture class.
 # ---------------------------------------------------------------------------
 
 
@@ -204,11 +204,11 @@ _VALID_MODES = frozenset({"silero", "energy"})
 _VALID_FORMATS = frozenset({"int16", "float32"})
 
 
-class Decibri:
+class Microphone:
     """Audio capture with VAD policy.
 
     Example:
-        with Decibri(sample_rate=16000, channels=1, frames_per_buffer=512) as d:
+        with Microphone(sample_rate=16000, channels=1, frames_per_buffer=1600) as d:
             for chunk in d:
                 if d.is_speaking:
                     process(chunk)
@@ -217,10 +217,11 @@ class Decibri:
     `start()` explicitly. Iteration without an active capture raises
     `_decibri.CaptureStreamClosed`.
 
-    The VAD parameters (`vad`, `vad_mode`, `vad_threshold`, `vad_holdoff`,
+    The VAD parameters (`vad`, `vad_threshold`, `vad_holdoff`,
     `model_path`, `ort_library_path`) configure both the bridge and the
-    wrapper-layer state machine. With `vad=False`, `vad_probability` returns
-    0.0 and `is_speaking` returns False unconditionally.
+    wrapper-layer state machine. ``vad`` accepts ``False`` (disabled),
+    ``"silero"``, or ``"energy"``. With ``vad=False``, ``vad_probability``
+    returns 0.0 and ``is_speaking`` returns False unconditionally.
 
     The wrapper is sync only in Phase 2. Async iteration and speech-event
     callbacks ship in Phase 3.
@@ -230,30 +231,42 @@ class Decibri:
         self,
         sample_rate: int = 16000,
         channels: int = 1,
-        frames_per_buffer: int = 512,
+        frames_per_buffer: int = 1600,
         format: str = "int16",
         device: int | str | None = None,
-        vad: bool = False,
+        vad: bool | str = False,
         vad_threshold: float | None = None,
         vad_holdoff: int = 300,
-        vad_mode: str = "energy",
         model_path: str | Path | None = None,
         numpy: bool = False,
         ort_library_path: str | Path | None = None,
     ) -> None:
-        """Construct a Decibri audio capture instance.
+        """Construct a Microphone audio capture instance.
 
         Most parameters control capture behaviour and are documented at
-        the class level. The argument that benefits from per-arg detail
-        is ``ort_library_path``, since its resolution involves a
-        priority chain that is invisible at the call site.
+        the class level. The arguments that benefit from per-arg detail
+        are ``sample_rate`` (cloud-STT compatibility) and
+        ``ort_library_path`` (its resolution involves a priority chain
+        that is invisible at the call site).
 
         Parameters
         ----------
+        sample_rate : int, optional
+            Sample rate in Hz. Default 16000 (the cloud-STT convention;
+            matches Silero VAD's native rate).
+
+            Note: OpenAI Realtime API requires 24000 Hz; most other
+            cloud STT providers (Deepgram, AssemblyAI, Azure, Google,
+            AWS Transcribe) prefer 16000 Hz. Silero VAD operates at
+            16000 Hz natively. If using both Silero VAD and OpenAI
+            Realtime in the same pipeline, capture at 16000 for VAD
+            then resample to 24000 (e.g., via ``resampy`` or
+            ``scipy.signal.resample_poly``) before sending to OpenAI.
+
         ort_library_path : str | Path | None, optional
             Path to the ONNX Runtime dynamic library used by Silero VAD.
-            Only consulted when ``vad=True`` and ``vad_mode='silero'``;
-            energy-mode VAD and ``vad=False`` do not load ORT.
+            Only consulted when ``vad='silero'``; energy-mode VAD
+            (``vad='energy'``) and ``vad=False`` do not load ORT.
 
             If ``None`` (the default), decibri resolves the dylib via
             this priority order, first match wins:
@@ -277,23 +290,43 @@ class Decibri:
             ``OrtPathInvalid`` from the bridge layer with the path and
             reason attached.
 
-            Note: ORT initialization is process-global. Once any Decibri
+            Note: ORT initialization is process-global. Once any Microphone
             instance constructs with a specific dylib path, subsequent
-            Decibri instances inherit that initialization regardless of
-            their own ``ort_library_path`` argument. The first Decibri
+            Microphone instances inherit that initialization regardless of
+            their own ``ort_library_path`` argument. The first Microphone
             construction in a process determines the dylib for the
             entire process lifetime.
 
         Other parameters are summarised at the class docstring; refer to
-        ``help(Decibri)`` for the capture-side surface.
+        ``help(Microphone)`` for the capture-side surface.
         """
         if format not in _VALID_FORMATS:
             raise exceptions.InvalidFormat(
                 f"format must be 'int16' or 'float32'; got {format!r}"
             )
-        if vad_mode not in _VALID_MODES:
+
+        # Phase 7.5: collapse the legacy two-flag pattern (vad=True,
+        # vad_mode="silero") into a single union-typed parameter. ``vad``
+        # accepts False (disabled; default), "silero", or "energy".
+        # vad=True is rejected explicitly so existing callers get a
+        # migration-friendly message rather than a silent semantic change.
+        vad_enabled: bool
+        vad_mode: str
+        if vad is False:
+            vad_enabled = False
+            vad_mode = "energy"  # inert placeholder; bridge ignores when disabled
+        elif vad is True:
             raise ValueError(
-                f"vad_mode must be 'silero' or 'energy'; got {vad_mode!r}"
+                "vad=True is no longer supported. "
+                "Specify the mode explicitly: vad='silero' or vad='energy'."
+            )
+        elif vad in _VALID_MODES:
+            vad_enabled = True
+            vad_mode = vad
+        else:
+            raise ValueError(
+                f"Invalid vad value: {vad!r}. "
+                "Expected False, 'silero', or 'energy'."
             )
 
         # Mode-dependent threshold default mirroring Node:
@@ -318,7 +351,7 @@ class Decibri:
         resolved_model_path: str | None = None
         if model_path is not None:
             resolved_model_path = str(Path(model_path))
-        elif vad and vad_mode == "silero":
+        elif vad_enabled and vad_mode == "silero":
             try:
                 model_resource = (
                     importlib.resources.files("decibri")
@@ -349,7 +382,7 @@ class Decibri:
         # bundled-dylib lookup) is skipped to avoid the import-time cost.
         # See _ort_resolver.resolve_ort_dylib_path for the priority order.
         resolved_ort_path: str | None = None
-        if vad and vad_mode == "silero":
+        if vad_enabled and vad_mode == "silero":
             from decibri._ort_resolver import resolve_ort_dylib_path
 
             resolved_ort_path = resolve_ort_dylib_path(ort_library_path)
@@ -359,13 +392,13 @@ class Decibri:
             # bridge state see the user's intent.
             resolved_ort_path = str(Path(ort_library_path))
 
-        self._bridge = _decibri.DecibriBridge(
+        self._bridge = _decibri.MicrophoneBridge(
             sample_rate=sample_rate,
             channels=channels,
             frames_per_buffer=frames_per_buffer,
             format=format,
             device=device,
-            vad=vad,
+            vad=vad_enabled,
             vad_threshold=vad_threshold,
             vad_mode=vad_mode,
             vad_holdoff=vad_holdoff,
@@ -374,7 +407,7 @@ class Decibri:
             ort_library_path=resolved_ort_path,
         )
 
-        self._vad_enabled = vad
+        self._vad_enabled = vad_enabled
         self._vad = _VadStateMachine(
             mode=vad_mode,
             threshold=vad_threshold,
@@ -400,6 +433,23 @@ class Decibri:
         """Stop the capture stream and reset VAD state."""
         self._bridge.stop()
         self._vad.reset()
+
+    def close(self) -> None:
+        """Close the microphone and release resources.
+
+        Currently an alias for ``stop()``; provided for API symmetry
+        with ``Speaker.close()`` and the asyncio / aiohttp / httpx
+        convention. A future release may differentiate close (release
+        all resources) from stop (pause but keep device open); 0.1.0
+        makes them equivalent.
+        """
+        # Calls self.stop() rather than self._bridge.close() so the
+        # wrapper-side cleanup (vad.reset() in stop()) runs. The
+        # bridge-level MicrophoneBridge.close() exists for symmetry
+        # with SpeakerBridge.close() and for advanced direct-bridge
+        # users; the wrapper keeps its own routing here to ensure
+        # VAD state is reset on every close.
+        self.stop()
 
     def __enter__(self) -> Self:
         self.start()
@@ -428,7 +478,14 @@ class Decibri:
           shape matching the channel count (1-D for mono, 2-D
           ``(N, channels)`` for multi-channel).
 
-        VAD state advances as a side effect when ``vad=True``. Consumers
+        Future metadata (timestamps, sequence numbers, latency hints)
+        will be exposed via additional methods such as
+        ``read_with_metadata()``, not by changing this method's return
+        type. Code that relies on ``read()`` returning ``bytes`` or
+        ``ndarray`` will not break when richer metadata APIs ship.
+
+        VAD state advances as a side effect when VAD is enabled
+        (``vad="silero"`` or ``vad="energy"``). Consumers
         should check ``is_speaking`` after each read. In numpy mode with
         VAD enabled, the chunk is converted to bytes once via
         ``arr.tobytes()`` for the VAD state machine (the existing RMS
@@ -516,27 +573,27 @@ class Decibri:
     @staticmethod
     def devices() -> list[DeviceInfo]:
         """List available input devices."""
-        return _decibri.DecibriBridge.devices()
+        return _decibri.MicrophoneBridge.devices()
 
     @staticmethod
     def version() -> VersionInfo:
         """Return version info: decibri Rust core, cpal, and binding wheel."""
-        return _decibri.DecibriBridge.version()
+        return _decibri.MicrophoneBridge.version()
 
 
 # ---------------------------------------------------------------------------
-# DecibriOutput: consumer-facing audio output class.
+# Speaker: consumer-facing audio output class.
 #
-# Thin wrapper over DecibriOutputBridge. No VAD, no policy. Provided here
+# Thin wrapper over SpeakerBridge. No VAD, no policy. Provided here
 # for symmetry and a unified import surface.
 # ---------------------------------------------------------------------------
 
 
-class DecibriOutput:
+class Speaker:
     """Audio output stream.
 
     Example:
-        with DecibriOutput(sample_rate=16000, channels=1) as out:
+        with Speaker(sample_rate=16000, channels=1) as out:
             out.write(audio_bytes)
             out.drain()
     """
@@ -552,7 +609,7 @@ class DecibriOutput:
             raise exceptions.InvalidFormat(
                 f"format must be 'int16' or 'float32'; got {format!r}"
             )
-        self._bridge = _decibri.DecibriOutputBridge(
+        self._bridge = _decibri.SpeakerBridge(
             sample_rate=sample_rate,
             channels=channels,
             format=format,
@@ -605,4 +662,4 @@ class DecibriOutput:
     @staticmethod
     def devices() -> list[OutputDeviceInfo]:
         """List available output devices."""
-        return _decibri.DecibriOutputBridge.devices()
+        return _decibri.SpeakerBridge.devices()

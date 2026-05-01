@@ -24,10 +24,10 @@ else:
     SampleData = bytes
 
 __all__ = [
-    "AsyncDecibriBridge",
-    "AsyncOutputBridge",
-    "DecibriBridge",
-    "DecibriOutputBridge",
+    "AsyncMicrophoneBridge",
+    "AsyncSpeakerBridge",
+    "MicrophoneBridge",
+    "SpeakerBridge",
     "DeviceInfo",
     "OutputDeviceInfo",
     "VersionInfo",
@@ -39,22 +39,21 @@ class VersionInfo:
 
     The ``decibri`` field is the Rust core version (``CARGO_PKG_VERSION``
     at build time), not the Python wheel version. The ``binding`` field
-    is the Python wheel version. The ``portaudio`` field is the cpal
-    crate version, prefixed with ``"cpal "`` for compatibility with the
-    Node binding's identical field.
+    is the Python wheel version. The ``audio_backend`` field is the cpal
+    crate version, prefixed with ``"cpal "`` to identify the backend.
     """
 
     @property
     def decibri(self) -> str: ...
     @property
-    def portaudio(self) -> str: ...
+    def audio_backend(self) -> str: ...
     @property
     def binding(self) -> str: ...
     def __repr__(self) -> str: ...
 
 
 class DeviceInfo:
-    """Audio input device metadata. Returned by ``DecibriBridge.devices()``."""
+    """Audio input device metadata. Returned by ``MicrophoneBridge.devices()``."""
 
     @property
     def index(self) -> int: ...
@@ -72,7 +71,7 @@ class DeviceInfo:
 
 
 class OutputDeviceInfo:
-    """Audio output device metadata. Returned by ``DecibriOutputBridge.devices()``."""
+    """Audio output device metadata. Returned by ``SpeakerBridge.devices()``."""
 
     @property
     def index(self) -> int: ...
@@ -89,10 +88,10 @@ class OutputDeviceInfo:
     def __repr__(self) -> str: ...
 
 
-class DecibriBridge:
-    """Internal capture bridge. Public ``Decibri`` wrapper lives in
-    ``decibri._classes``; consumers should construct ``Decibri``, not
-    ``DecibriBridge``, directly.
+class MicrophoneBridge:
+    """Internal capture bridge. Public ``Microphone`` wrapper lives in
+    ``decibri._classes``; consumers should construct ``Microphone``, not
+    ``MicrophoneBridge``, directly.
 
     The bridge is a thin inference primitive. VAD policy (threshold
     application, holdoff state machine, mode dispatch) lives in the
@@ -117,10 +116,11 @@ class DecibriBridge:
     ) -> None: ...
     def start(self) -> None: ...
     def stop(self) -> None: ...
+    def close(self) -> None: ...
     def read(self, timeout_ms: int | None = None) -> SampleData | None: ...
-    def __iter__(self) -> DecibriBridge: ...
+    def __iter__(self) -> MicrophoneBridge: ...
     def __next__(self) -> bytes: ...
-    def __enter__(self) -> DecibriBridge: ...
+    def __enter__(self) -> MicrophoneBridge: ...
     def __exit__(
         self,
         exc_type: object,
@@ -139,10 +139,10 @@ class DecibriBridge:
     def version() -> VersionInfo: ...
 
 
-class DecibriOutputBridge:
-    """Internal output bridge. Public ``DecibriOutput`` wrapper lives in
-    ``decibri._classes``; consumers should construct ``DecibriOutput``,
-    not ``DecibriOutputBridge``, directly.
+class SpeakerBridge:
+    """Internal output bridge. Public ``Speaker`` wrapper lives in
+    ``decibri._classes``; consumers should construct ``Speaker``,
+    not ``SpeakerBridge``, directly.
     """
 
     def __init__(
@@ -157,7 +157,7 @@ class DecibriOutputBridge:
     def close(self) -> None: ...
     def write(self, samples: SampleData) -> None: ...
     def drain(self) -> None: ...
-    def __enter__(self) -> DecibriOutputBridge: ...
+    def __enter__(self) -> SpeakerBridge: ...
     def __exit__(
         self,
         exc_type: object,
@@ -170,23 +170,23 @@ class DecibriOutputBridge:
     def devices() -> list[OutputDeviceInfo]: ...
 
 
-class AsyncDecibriBridge:
-    """Async wrapper around ``DecibriBridge`` (Phase 5).
+class AsyncMicrophoneBridge:
+    """Async wrapper around ``MicrophoneBridge`` (Phase 5).
 
-    Internal pyclass. Public ``AsyncDecibri`` wrapper lives in
+    Internal pyclass. Public ``AsyncMicrophone`` wrapper lives in
     ``decibri._async_classes``; consumers should construct
-    ``AsyncDecibri``, not ``AsyncDecibriBridge``, directly. Each method
+    ``AsyncMicrophone``, not ``AsyncMicrophoneBridge``, directly. Each method
     that maps to a blocking sync method dispatches via
     ``tokio::task::spawn_blocking`` and returns a Python awaitable.
 
-    Constructor signature matches ``DecibriBridge`` exactly. Construction
+    Constructor signature matches ``MicrophoneBridge`` exactly. Construction
     itself is sync (Python class instantiation is always sync) and may
     block on ORT model load when ``vad=True and vad_mode='silero'``.
 
     The non-blocking getters (``is_open``, ``vad_probability``,
     ``vad_holdoff_ms``) are exposed as awaitables here because the Rust
     binding implements them via ``future_into_py`` for uniformity. The
-    public ``AsyncDecibri`` wrapper provides synchronous-property access
+    public ``AsyncMicrophone`` wrapper provides synchronous-property access
     backed by Python-side state tracking; consumers should prefer that
     surface.
     """
@@ -208,11 +208,14 @@ class AsyncDecibriBridge:
     ) -> None: ...
     def start(self) -> Coroutine[Any, Any, None]: ...
     def stop(self) -> Coroutine[Any, Any, None]: ...
+    def close(self) -> Coroutine[Any, Any, None]: ...
     def read(
         self, timeout_ms: int | None = None
     ) -> Coroutine[Any, Any, SampleData | None]: ...
     @property
     def is_open(self) -> Awaitable[bool]: ...
+    @property
+    def is_open_sync(self) -> bool: ...
     @property
     def vad_probability(self) -> Awaitable[float]: ...
     @property
@@ -223,12 +226,12 @@ class AsyncDecibriBridge:
     def version() -> Coroutine[Any, Any, VersionInfo]: ...
 
 
-class AsyncOutputBridge:
-    """Async wrapper around ``DecibriOutputBridge`` (Phase 5).
+class AsyncSpeakerBridge:
+    """Async wrapper around ``SpeakerBridge`` (Phase 5).
 
-    Internal pyclass. Public ``AsyncDecibriOutput`` wrapper lives in
+    Internal pyclass. Public ``AsyncSpeaker`` wrapper lives in
     ``decibri._async_classes``; consumers should construct
-    ``AsyncDecibriOutput``, not ``AsyncOutputBridge``, directly.
+    ``AsyncSpeaker``, not ``AsyncSpeakerBridge``, directly.
     """
 
     def __init__(
@@ -245,5 +248,7 @@ class AsyncOutputBridge:
     def drain(self) -> Coroutine[Any, Any, None]: ...
     @property
     def is_playing(self) -> Awaitable[bool]: ...
+    @property
+    def is_playing_sync(self) -> bool: ...
     @staticmethod
     def devices() -> Coroutine[Any, Any, list[OutputDeviceInfo]]: ...

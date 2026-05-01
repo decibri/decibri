@@ -33,20 +33,20 @@ def test_import_decibri() -> None:
 
 
 def test_construct_decibri_default() -> None:
-    """Decibri() constructs cleanly without VAD (no ORT load needed)."""
-    d = decibri.Decibri()
+    """Microphone() constructs cleanly without VAD (no ORT load needed)."""
+    d = decibri.Microphone()
     assert d is not None
 
 
 @pytest.mark.requires_bundled_ort
 def test_construct_decibri_silero_vad() -> None:
-    """Decibri(vad=True, vad_mode='silero') constructs cleanly with ORT.
+    """Microphone(vad='silero') constructs cleanly with ORT.
 
     Verifies: ORT dylib loads from bundled _ort/, Silero ONNX model
     loads from bundled models/silero_vad.onnx, ONNX session initializes.
     Skipped if _ort/ is empty (dev installs without bundled ORT).
     """
-    d = decibri.Decibri(vad=True, vad_mode="silero")
+    d = decibri.Microphone(vad="silero")
     assert d is not None
 
 
@@ -70,19 +70,19 @@ def test_resolver_finds_bundled() -> None:
 
 
 def test_async_construct() -> None:
-    """AsyncDecibri constructs cleanly (verifies pyo3-async-runtimes loads)."""
-    d = decibri.AsyncDecibri()
+    """AsyncMicrophone constructs cleanly (verifies pyo3-async-runtimes loads)."""
+    d = decibri.AsyncMicrophone()
     assert d is not None
 
 
 def test_numpy_construct() -> None:
-    """Decibri(numpy=True) constructs cleanly (verifies rust-numpy bundling).
+    """Microphone(numpy=True) constructs cleanly (verifies rust-numpy bundling).
 
     Construction only; no actual read. The numpy=True flag exercises
     the rust-numpy code path's presence in the wheel; calling read()
     would also exercise it but requires audio hardware.
     """
-    d = decibri.Decibri(numpy=True)
+    d = decibri.Microphone(numpy=True)
     assert d is not None
 
 

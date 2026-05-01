@@ -1,7 +1,7 @@
 """Phase 2 VAD tests organized in three sections.
 
 Section A: VAD config validation (no markers). Wrapper-layer validation of
-vad_threshold / vad_mode / vad_holdoff. These overlap conceptually with
+vad / vad_threshold / vad_holdoff. These overlap conceptually with
 test_config.py but live here for cohesion with the rest of the VAD surface.
 test_error_messages.py also covers a subset for byte-identity; this section
 focuses on the validation-pass-through behavior, not message text.
@@ -10,8 +10,9 @@ Section B: pure _VadStateMachine and _compute_rms tests (no markers). The
 wrapper-layer state machine and RMS helper are pure-Python and test-injectable
 without hardware or ORT. This is the bulk of the no-marker VAD coverage.
 
-Section C: end-to-end inference (markers). Full Decibri(vad=True, ...)
-integration tests using real audio + (for Silero) real ORT runtime.
+Section C: end-to-end inference (markers). Full Microphone(vad="silero", ...)
+or Microphone(vad="energy", ...) integration tests using real audio +
+(for Silero) real ORT runtime.
 """
 
 import struct
@@ -19,7 +20,7 @@ import time
 
 import pytest
 
-from decibri import Decibri
+from decibri import Microphone
 from decibri._classes import _VadStateMachine, _compute_rms
 
 
@@ -31,45 +32,49 @@ from decibri._classes import _VadStateMachine, _compute_rms
 def test_vad_threshold_default_silero_is_zero_point_five() -> None:
     """Silero mode defaults vad_threshold to 0.5 when not specified.
 
-    Uses vad=False to exercise the wrapper's threshold-default logic without
-    triggering Silero/ORT construction. The threshold default is computed
-    unconditionally based on vad_mode; vad=False just skips bridge-side
-    SileroVad::new.
+    Probes the wrapper's mode-dependent threshold default by exercising
+    the _VadStateMachine directly (the public Microphone surface no longer
+    lets you configure silero behavior without enabling silero, which
+    would require ORT load and bundled-model resources).
     """
-    d = Decibri(vad=False, vad_mode="silero")
-    assert d._vad._threshold == 0.5  # type: ignore[attr-defined]
+    sm = _VadStateMachine(
+        mode="silero", threshold=0.5, holdoff_ms=300, sample_format="int16"
+    )
+    assert sm._threshold == 0.5  # type: ignore[attr-defined]
 
 
 def test_vad_threshold_default_energy_is_zero_point_zero_one() -> None:
     """Energy mode defaults vad_threshold to 0.01 when not specified."""
-    d = Decibri(vad=False, vad_mode="energy")
+    d = Microphone(vad=False)
+    # vad=False uses energy as the inert placeholder mode in the wrapper,
+    # so the wrapper-computed default threshold is 0.01.
     assert d._vad._threshold == 0.01  # type: ignore[attr-defined]
 
 
 def test_vad_threshold_explicit_overrides_default() -> None:
     """User-supplied vad_threshold wins over the mode-dependent default."""
-    d = Decibri(vad=False, vad_mode="energy", vad_threshold=0.42)
+    d = Microphone(vad=False, vad_threshold=0.42)
     assert d._vad._threshold == 0.42  # type: ignore[attr-defined]
 
 
 def test_vad_threshold_boundary_zero_accepted() -> None:
     """vad_threshold=0.0 is at the lower boundary; accepted."""
-    Decibri(vad=False, vad_mode="energy", vad_threshold=0.0)
+    Microphone(vad=False, vad_threshold=0.0)
 
 
 def test_vad_threshold_boundary_one_accepted() -> None:
     """vad_threshold=1.0 is at the upper boundary; accepted."""
-    Decibri(vad=False, vad_mode="energy", vad_threshold=1.0)
+    Microphone(vad=False, vad_threshold=1.0)
 
 
 def test_vad_holdoff_zero_accepted() -> None:
     """vad_holdoff=0 is at the lower boundary; accepted."""
-    Decibri(vad=False, vad_mode="energy", vad_holdoff=0)
+    Microphone(vad=False, vad_holdoff=0)
 
 
 def test_vad_disabled_ignores_vad_kwargs() -> None:
     """With vad=False the VAD-specific kwargs don't trigger model resolution."""
-    d = Decibri(vad=False, vad_mode="silero", model_path=None)
+    d = Microphone(vad=False, model_path=None)
     # Bundled model NOT resolved because vad=False; would have raised
     # ValueError if attempted with no bundled file. Here it just passes.
     assert d.vad_probability == 0.0
@@ -78,14 +83,60 @@ def test_vad_disabled_ignores_vad_kwargs() -> None:
 
 def test_vad_disabled_probability_returns_zero() -> None:
     """vad_probability is always 0.0 when vad=False."""
-    d = Decibri(vad=False)
+    d = Microphone(vad=False)
     assert d.vad_probability == 0.0
 
 
 def test_vad_disabled_is_speaking_returns_false() -> None:
     """is_speaking is always False when vad=False."""
-    d = Decibri(vad=False)
+    d = Microphone(vad=False)
     assert d.is_speaking is False
+
+
+# --- Phase 7.5 collapsed vad parameter validation -------------------------
+
+
+def test_vad_true_raises_migration_error() -> None:
+    """vad=True is no longer supported; raises a migration-friendly ValueError."""
+    with pytest.raises(ValueError, match="vad=True is no longer supported"):
+        Microphone(vad=True)
+
+
+def test_vad_invalid_string_raises() -> None:
+    """vad with an unknown mode string raises with the supported-mode list."""
+    with pytest.raises(ValueError, match="Invalid vad value"):
+        Microphone(vad="bogus")
+
+
+def test_vad_mode_kwarg_removed() -> None:
+    """The legacy vad_mode kwarg is removed; passing it raises TypeError."""
+    with pytest.raises(TypeError, match="vad_mode"):
+        Microphone(vad_mode="silero")  # type: ignore[call-arg]
+
+
+@pytest.mark.requires_bundled_ort
+def test_vad_silero_string_constructs() -> None:
+    """vad='silero' constructs cleanly when the bundled ORT dylib is present.
+
+    Skipped on dev installs where _ort/ is empty; runs in CI install-test
+    against the audited wheel via the requires_bundled_ort marker.
+    """
+    mic = Microphone(vad="silero")
+    assert mic is not None
+
+
+def test_vad_energy_string_constructs() -> None:
+    """vad='energy' constructs cleanly without ORT load."""
+    mic = Microphone(vad="energy")
+    assert mic is not None
+
+
+def test_vad_false_constructs() -> None:
+    """vad=False (default) constructs cleanly without VAD or ORT load."""
+    mic_default = Microphone()
+    assert mic_default is not None
+    mic_explicit = Microphone(vad=False)
+    assert mic_explicit is not None
 
 
 # ===========================================================================
@@ -261,16 +312,15 @@ def test_vad_state_machine_reset() -> None:
 def test_vad_holdoff_end_to_end() -> None:
     """End-to-end Silero VAD with real audio + bundled model + holdoff timer.
 
-    Constructs Decibri(vad=True, vad_mode='silero') with auto-resolved model
+    Constructs Microphone(vad='silero') with auto-resolved model
     and a short holdoff. Reads audio for ~250ms; expects is_speaking to
     fluctuate based on real microphone input.
     """
-    with Decibri(
+    with Microphone(
         sample_rate=16000,
         channels=1,
         frames_per_buffer=512,
-        vad=True,
-        vad_mode="silero",
+        vad="silero",
         vad_holdoff=100,
     ) as d:
         for _ in range(8):  # ~256ms at 32ms per chunk
@@ -283,12 +333,11 @@ def test_vad_holdoff_end_to_end() -> None:
 @pytest.mark.requires_audio_input
 def test_vad_energy_mode_end_to_end() -> None:
     """End-to-end energy VAD with real audio (no Silero / ORT)."""
-    with Decibri(
+    with Microphone(
         sample_rate=16000,
         channels=1,
         frames_per_buffer=512,
-        vad=True,
-        vad_mode="energy",
+        vad="energy",
         vad_threshold=0.01,
     ) as d:
         for _ in range(4):
@@ -302,12 +351,11 @@ def test_vad_energy_mode_end_to_end() -> None:
 @pytest.mark.requires_bundled_ort
 def test_vad_silero_mode_end_to_end() -> None:
     """End-to-end Silero VAD with real audio + bundled model."""
-    with Decibri(
+    with Microphone(
         sample_rate=16000,
         channels=1,
         frames_per_buffer=512,
-        vad=True,
-        vad_mode="silero",
+        vad="silero",
     ) as d:
         for _ in range(4):
             chunk = d.read(timeout_ms=500)

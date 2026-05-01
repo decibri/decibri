@@ -1,13 +1,15 @@
 """Type stubs for the decibri Python package."""
 
-from decibri._async_classes import AsyncDecibri as AsyncDecibri
-from decibri._async_classes import AsyncDecibriOutput as AsyncDecibriOutput
-from decibri._classes import Decibri as Decibri
-from decibri._classes import DecibriOutput as DecibriOutput
-from decibri._decibri import DecibriBridge as DecibriBridge
-from decibri._decibri import DecibriOutputBridge as DecibriOutputBridge
+from pathlib import Path
+
+from decibri._async_classes import AsyncMicrophone as AsyncMicrophone
+from decibri._async_classes import AsyncSpeaker as AsyncSpeaker
+from decibri._classes import Microphone as Microphone
+from decibri._classes import Speaker as Speaker
 from decibri._decibri import DeviceInfo as DeviceInfo
+from decibri._decibri import MicrophoneBridge as MicrophoneBridge
 from decibri._decibri import OutputDeviceInfo as OutputDeviceInfo
+from decibri._decibri import SpeakerBridge as SpeakerBridge
 from decibri._decibri import VersionInfo as VersionInfo
 from decibri.exceptions import AlreadyRunning as AlreadyRunning
 from decibri.exceptions import CaptureStreamClosed as CaptureStreamClosed
@@ -44,3 +46,45 @@ from decibri.exceptions import VadThresholdOutOfRange as VadThresholdOutOfRange
 
 __version__: str
 __all__: list[str]
+
+def microphone(
+    sample_rate: int = 16000,
+    channels: int = 1,
+    frames_per_buffer: int = 1600,
+    format: str = "int16",
+    device: int | str | None = None,
+    vad: bool | str = False,
+    vad_threshold: float | None = None,
+    vad_holdoff: int = 300,
+    model_path: str | Path | None = None,
+    numpy: bool = False,
+    ort_library_path: str | Path | None = None,
+) -> Microphone: ...
+def speaker(
+    sample_rate: int = 16000,
+    channels: int = 1,
+    format: str = "int16",
+    device: int | str | None = None,
+) -> Speaker: ...
+def async_microphone(
+    sample_rate: int = 16000,
+    channels: int = 1,
+    frames_per_buffer: int = 1600,
+    format: str = "int16",
+    device: int | str | None = None,
+    vad: bool | str = False,
+    vad_threshold: float | None = None,
+    vad_holdoff: int = 300,
+    model_path: str | Path | None = None,
+    numpy: bool = False,
+    ort_library_path: str | Path | None = None,
+) -> AsyncMicrophone: ...
+def async_speaker(
+    sample_rate: int = 16000,
+    channels: int = 1,
+    format: str = "int16",
+    device: int | str | None = None,
+) -> AsyncSpeaker: ...
+def devices() -> list[DeviceInfo]: ...
+def output_devices() -> list[OutputDeviceInfo]: ...
+def version() -> VersionInfo: ...
