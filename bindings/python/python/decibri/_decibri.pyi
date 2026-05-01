@@ -39,15 +39,14 @@ class VersionInfo:
 
     The ``decibri`` field is the Rust core version (``CARGO_PKG_VERSION``
     at build time), not the Python wheel version. The ``binding`` field
-    is the Python wheel version. The ``portaudio`` field is the cpal
-    crate version, prefixed with ``"cpal "`` for compatibility with the
-    Node binding's identical field.
+    is the Python wheel version. The ``audio_backend`` field is the cpal
+    crate version, prefixed with ``"cpal "`` to identify the backend.
     """
 
     @property
     def decibri(self) -> str: ...
     @property
-    def portaudio(self) -> str: ...
+    def audio_backend(self) -> str: ...
     @property
     def binding(self) -> str: ...
     def __repr__(self) -> str: ...

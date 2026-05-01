@@ -42,17 +42,19 @@ def test_version_decibri_matches_rust_core() -> None:
     assert decibri.MicrophoneBridge.version().decibri == "3.3.2"
 
 
-def test_version_portaudio_matches_node_binding() -> None:
-    # Byte-identical to the Node binding's `Microphone.version().portaudio`
-    # output, sourced from the same `decibri::CPAL_VERSION` const in the
-    # Rust core. Contract enforced by `crates/decibri/build.rs`.
-    assert decibri.MicrophoneBridge.version().portaudio == "cpal 0.17"
+def test_version_audio_backend_matches_cpal() -> None:
+    # Sourced from the same `decibri::CPAL_VERSION` const in the Rust
+    # core that the Node binding's version field reads. Contract enforced
+    # by `crates/decibri/build.rs`. Phase 7.5: field renamed from
+    # `portaudio` to `audio_backend` (more honest; we use cpal, not
+    # portaudio).
+    assert decibri.MicrophoneBridge.version().audio_backend == "cpal 0.17"
 
 
 def test_version_info_fields() -> None:
     info = decibri.MicrophoneBridge.version()
     assert info.decibri == "3.3.2"
-    assert info.portaudio == "cpal 0.17"
+    assert info.audio_backend == "cpal 0.17"
     assert info.binding == "0.1.0a1"
 
 

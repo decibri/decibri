@@ -392,7 +392,7 @@ struct VersionInfo {
     #[pyo3(get)]
     decibri: String,
     #[pyo3(get)]
-    portaudio: String,
+    audio_backend: String,
     #[pyo3(get)]
     binding: String,
 }
@@ -401,8 +401,8 @@ struct VersionInfo {
 impl VersionInfo {
     fn __repr__(&self) -> String {
         format!(
-            "VersionInfo(decibri='{}', portaudio='{}', binding='{}')",
-            self.decibri, self.portaudio, self.binding
+            "VersionInfo(decibri='{}', audio_backend='{}', binding='{}')",
+            self.decibri, self.audio_backend, self.binding
         )
     }
 }
@@ -410,7 +410,7 @@ impl VersionInfo {
 fn build_version_info() -> VersionInfo {
     VersionInfo {
         decibri: env!("CARGO_PKG_VERSION").to_string(),
-        portaudio: format!("cpal {}", CPAL_VERSION),
+        audio_backend: format!("cpal {}", CPAL_VERSION),
         binding: "0.1.0a1".to_string(),
     }
 }
