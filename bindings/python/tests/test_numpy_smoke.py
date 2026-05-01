@@ -118,7 +118,7 @@ def test_numpy_smoke_owndata_documents_copy_semantics() -> None:
       was technically inaccurate; the rebrand to "NumPy ndarray
       support" lands as a separate plan-storage edit. The
       functionality this enables is unchanged: callers get
-      ``numpy.ndarray`` returns from ``Microphone(numpy=True).read()``
+      ``numpy.ndarray`` returns from ``Microphone(as_ndarray=True).read()``
       with the expected dtype and shape; only the marketing word
       "zero-copy" is wrong.
 

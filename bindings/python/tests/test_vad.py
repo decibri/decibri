@@ -77,14 +77,14 @@ def test_vad_disabled_ignores_vad_kwargs() -> None:
     d = Microphone(vad=False, model_path=None)
     # Bundled model NOT resolved because vad=False; would have raised
     # ValueError if attempted with no bundled file. Here it just passes.
-    assert d.vad_probability == 0.0
+    assert d.vad_score == 0.0
     assert d.is_speaking is False
 
 
 def test_vad_disabled_probability_returns_zero() -> None:
-    """vad_probability is always 0.0 when vad=False."""
+    """vad_score is always 0.0 when vad=False."""
     d = Microphone(vad=False)
-    assert d.vad_probability == 0.0
+    assert d.vad_score == 0.0
 
 
 def test_vad_disabled_is_speaking_returns_false() -> None:
@@ -202,16 +202,16 @@ def test_compute_rms_empty_buffer_returns_zero() -> None:
 
 
 def test_state_machine_silero_passthrough() -> None:
-    """Silero mode passes bridge_probability through to vad_probability."""
+    """Silero mode passes bridge_probability through to vad_score."""
     sm = _VadStateMachine(
         mode="silero", threshold=0.5, holdoff_ms=300, sample_format="int16"
     )
     sm.process_chunk(b"\x00" * 1024, bridge_probability=0.7)
-    assert sm.vad_probability == 0.7
+    assert sm.vad_score == 0.7
     assert sm.is_speaking is True  # 0.7 > 0.5
 
     sm.process_chunk(b"\x00" * 1024, bridge_probability=0.2)
-    assert sm.vad_probability == 0.2
+    assert sm.vad_score == 0.2
     # Still speaking; below threshold starts holdoff timer but doesn't flip yet
     assert sm.is_speaking is True
 
@@ -223,14 +223,14 @@ def test_state_machine_energy_passthrough() -> None:
     )
     silence = b"\x00\x00" * 512
     sm.process_chunk(silence, bridge_probability=0.999)  # bridge prob ignored in energy mode
-    assert sm.vad_probability == 0.0  # RMS of silence
+    assert sm.vad_score == 0.0  # RMS of silence
     assert sm.is_speaking is False
 
     # Loud buffer above energy threshold
     samples = [16384] * 512
     loud = struct.pack(f"<512h", *samples)
     sm.process_chunk(loud, bridge_probability=0.0)
-    assert sm.vad_probability > 0.4  # RMS of constant 16384 is ~0.5
+    assert sm.vad_score > 0.4  # RMS of constant 16384 is ~0.5
     assert sm.is_speaking is True
 
 
@@ -294,11 +294,11 @@ def test_vad_state_machine_reset() -> None:
     sm = _VadStateMachine(mode="silero", threshold=0.5, holdoff_ms=300, sample_format="int16")
     sm.process_chunk(b"\x00" * 1024, bridge_probability=0.9)
     assert sm.is_speaking is True
-    assert sm.vad_probability == 0.9
+    assert sm.vad_score == 0.9
 
     sm.reset()
     assert sm.is_speaking is False
-    assert sm.vad_probability == 0.0
+    assert sm.vad_score == 0.0
     assert sm._silence_started_at is None  # type: ignore[attr-defined]
 
 
@@ -327,7 +327,7 @@ def test_vad_holdoff_end_to_end() -> None:
             chunk = d.read(timeout_ms=500)
             assert chunk is not None
         # Probability should be a real float in [0, 1]
-        assert 0.0 <= d.vad_probability <= 1.0
+        assert 0.0 <= d.vad_score <= 1.0
 
 
 @pytest.mark.requires_audio_input
@@ -343,8 +343,8 @@ def test_vad_energy_mode_end_to_end() -> None:
         for _ in range(4):
             chunk = d.read(timeout_ms=500)
             assert chunk is not None
-        # vad_probability is the RMS of the most recent chunk; in [0, 1]
-        assert 0.0 <= d.vad_probability <= 1.0
+        # vad_score is the RMS of the most recent chunk; in [0, 1]
+        assert 0.0 <= d.vad_score <= 1.0
 
 
 @pytest.mark.requires_audio_input
@@ -360,4 +360,4 @@ def test_vad_silero_mode_end_to_end() -> None:
         for _ in range(4):
             chunk = d.read(timeout_ms=500)
             assert chunk is not None
-        assert 0.0 <= d.vad_probability <= 1.0
+        assert 0.0 <= d.vad_score <= 1.0

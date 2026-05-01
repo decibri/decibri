@@ -20,7 +20,7 @@ is dropped. Per the Phase 5 plan Risk 2, the spawn_blocking OS thread
 itself does not cooperatively cancel; the Python coroutine sees
 ``CancelledError`` immediately while the Rust thread runs to completion.
 
-State properties (``is_open``, ``is_speaking``, ``vad_probability``,
+State properties (``is_open``, ``is_speaking``, ``vad_score``,
 ``is_playing``) are synchronous Python properties backed by Python-side
 state tracking. The Rust async bridge exposes these as awaitables, but
 awaiting from a property is not idiomatic Python and would surprise
@@ -38,6 +38,7 @@ unchanged and exist alongside this module.
 from __future__ import annotations
 
 import importlib.resources
+import time
 from pathlib import Path
 from types import TracebackType
 from typing import TYPE_CHECKING, Any, AsyncIterator, Union, cast
@@ -47,14 +48,14 @@ from typing_extensions import Self
 if TYPE_CHECKING:
     import numpy as np
 
-    # Phase 6: read can return bytes (default) or ndarray (numpy=True);
+    # Phase 6: read can return bytes (default) or ndarray (as_ndarray=True);
     # write can accept either. Optional runtime numpy dependency.
     SampleData = Union[bytes, "np.ndarray[Any, Any]"]
 else:
     SampleData = bytes
 
 from decibri import _decibri, exceptions
-from decibri._classes import _VadStateMachine, _VALID_FORMATS, _VALID_MODES
+from decibri._classes import Chunk, _VadStateMachine, _VALID_FORMATS, _VALID_MODES
 from decibri._decibri import DeviceInfo, OutputDeviceInfo, VersionInfo
 
 __all__ = ["AsyncMicrophone", "AsyncSpeaker"]
@@ -126,7 +127,7 @@ class AsyncMicrophone:
         vad_threshold: float | None = None,
         vad_holdoff_ms: int = 300,
         model_path: str | Path | None = None,
-        numpy: bool = False,
+        as_ndarray: bool = False,
         ort_library_path: str | Path | None = None,
     ) -> None:
         """Construct an AsyncMicrophone audio capture instance.
@@ -253,7 +254,7 @@ class AsyncMicrophone:
             vad_mode=vad_mode,
             vad_holdoff=vad_holdoff_ms,
             model_path=resolved_model_path,
-            numpy=numpy,
+            numpy=as_ndarray,
             ort_library_path=resolved_ort_path,
         )
 
@@ -265,29 +266,46 @@ class AsyncMicrophone:
             sample_format=dtype,
         )
         self._format = dtype
-        # Phase 6: store the numpy flag so read() can branch its return
-        # type and the VAD path can convert ndarray to bytes for the
-        # state machine. Bridge stores the same flag; both kept in sync.
-        self._numpy = numpy
+        # Wrapper-only rename (Phase 7.7 Item B4); bridge keeps the
+        # original `numpy` name for cross-binding consistency per LD11.
+        self._as_ndarray = as_ndarray
+        # Phase 7.7 Item B1: chunk counter for read_with_metadata().
+        self._sequence = 0
     # -----------------------------------------------------------------------
     # Lifecycle
     # -----------------------------------------------------------------------
 
     async def start(self) -> None:
-        """Open and start the capture stream."""
+        """Open and start the capture stream.
+
+        Re-entry contract:
+            Calling ``await start()`` after ``await stop()`` or
+            ``await close()`` is supported and reconstructs the
+            underlying audio stream cleanly. The ``AsyncMicrophone``
+            instance is reusable across stop/start cycles. VAD state
+            (``is_speaking``, ``vad_score``) resets to default values
+            on each new ``await start()``. Re-entry after exiting an
+            ``async with`` block is also supported (since
+            ``__aexit__`` calls ``await stop()``).
+
+            Calling ``await start()`` while already started raises
+            ``AlreadyRunning``.
+        """
         await self._bridge.start()
 
     async def stop(self) -> None:
         """Stop the capture stream and reset VAD state."""
         await self._bridge.stop()
         self._vad.reset()
+        self._sequence = 0
 
     async def close(self) -> None:
-        """Close the microphone and release resources.
+        """Stop the capture stream. Permanent alias for ``stop()``.
 
-        Currently an alias for ``stop()``; provided for API symmetry
-        with ``AsyncSpeaker.close()``. See ``Microphone.close()`` for
-        the full rationale.
+        Provided for ergonomic parity with the asyncio / aiohttp /
+        httpx convention and for use cases where ``close()`` reads
+        more naturally than ``stop()``. The two methods are guaranteed
+        to remain semantically equivalent across all decibri versions.
         """
         # Calls self.stop() rather than self._bridge.close() so the
         # wrapper-side cleanup (vad.reset() in stop()) runs. The
@@ -317,18 +335,19 @@ class AsyncMicrophone:
         """Read one chunk. Returns the chunk, or None if the stream closed.
 
         Return type:
-        - When ``numpy=False`` (default), returns ``bytes``.
-        - When ``numpy=True``, returns a ``numpy.ndarray`` with dtype
-          matching the configured ``dtype`` and shape matching the
-          channel count (1-D mono, 2-D ``(N, channels)`` multi-channel).
+        - When ``as_ndarray=False`` (default), returns ``bytes``.
+        - When ``as_ndarray=True``, returns a ``numpy.ndarray`` with
+          dtype matching the configured ``dtype`` and shape matching
+          the channel count (1-D mono, 2-D ``(N, channels)``
+          multi-channel).
 
-        Future metadata (timestamps, sequence numbers, latency hints)
-        will be exposed via additional methods such as
-        ``read_with_metadata()``, not by changing this method's return
-        type.
+        Use ``read_with_metadata()`` to receive a typed ``Chunk`` with
+        ``.data``, ``.timestamp``, ``.sequence``, ``.is_speaking``, and
+        ``.vad_score`` attributes. ``read()`` keeps its naked-data
+        signature for backward compatibility.
 
         VAD state advances as a side effect when VAD is enabled
-        (``vad="silero"`` or ``vad="energy"``). In numpy
+        (``vad="silero"`` or ``vad="energy"``). In ndarray
         mode with VAD enabled, the chunk is converted to bytes once via
         ``arr.tobytes()`` for the VAD state machine; the original
         ndarray is returned to the user. Phase 6 plan §3i.
@@ -339,13 +358,13 @@ class AsyncMicrophone:
         dropped. The bridge state remains consistent for subsequent reads.
 
         Raises ``ImportError`` with a clear actionable message if
-        ``numpy=True`` is set but ``numpy`` is not installed (i.e. the
-        user did not run ``pip install decibri[numpy]``).
+        ``as_ndarray=True`` is set but ``numpy`` is not installed (i.e.
+        the user did not run ``pip install decibri[numpy]``).
         """
         try:
             chunk = await self._bridge.read(timeout_ms=timeout_ms)
         except ImportError as exc:
-            if self._numpy:
+            if self._as_ndarray:
                 raise ImportError(
                     "numpy is not installed. Install with: pip install decibri[numpy]"
                 ) from exc
@@ -354,12 +373,48 @@ class AsyncMicrophone:
             return None
         if self._vad_enabled:
             probability = await self._bridge.vad_probability
-            if self._numpy:
+            if self._as_ndarray:
+                # ndarray mode: convert chunk to bytes for the VAD
+                # state machine (struct.unpack-based).
                 vad_input: bytes = chunk.tobytes()  # type: ignore[union-attr]
             else:
                 vad_input = cast(bytes, chunk)
             self._vad.process_chunk(vad_input, probability)
+        self._sequence += 1
         return chunk
+
+    async def read_with_metadata(self, timeout_ms: int | None = None) -> Chunk | None:
+        """Async parallel of ``Microphone.read_with_metadata()``.
+
+        Returns ``None`` on clean stream close; otherwise a frozen
+        ``Chunk`` with ``.data``, ``.timestamp``, ``.sequence``,
+        ``.is_speaking``, and ``.vad_score`` attributes. See
+        ``Microphone.read_with_metadata`` for the full contract.
+        """
+        data = await self.read(timeout_ms=timeout_ms)
+        if data is None:
+            return None
+        return Chunk(
+            data=data,
+            timestamp=time.monotonic(),
+            sequence=self._sequence - 1,
+            is_speaking=self.is_speaking,
+            vad_score=self.vad_score,
+        )
+
+    async def aiter_with_metadata(self) -> AsyncIterator[Chunk]:
+        """Async-yield ``Chunk`` objects until the stream closes cleanly.
+
+        Async-generator wrapping ``await read_with_metadata()``: stops
+        when the bridge returns ``None``. Use this in place of
+        ``async for chunk in mic`` when you want metadata alongside the
+        audio data.
+        """
+        while True:
+            chunk = await self.read_with_metadata(timeout_ms=None)
+            if chunk is None:
+                return
+            yield chunk
 
     def __aiter__(self) -> AsyncIterator[SampleData]:
         return self
@@ -400,16 +455,21 @@ class AsyncMicrophone:
         return self._vad.is_speaking
 
     @property
-    def vad_probability(self) -> float:
-        """Most recent VAD probability.
+    def vad_score(self) -> float:
+        """Most recent VAD score in ``[0, 1]``. Mode-agnostic.
 
-        In Silero mode, returns the raw probability from the model.
-        In energy mode, returns the RMS of the most recent chunk.
-        Always 0.0 when ``vad=False``.
+        In ``vad="silero"`` mode, returns the raw probability from the
+        Silero model. In ``vad="energy"`` mode, returns the normalized
+        RMS energy of the most recent chunk. Always 0.0 when
+        ``vad=False``.
+
+        The underlying bridge property is named ``vad_probability`` for
+        cross-binding consistency; ``vad_score`` is the mode-agnostic
+        wrapper-side name (it is not a probability in energy mode).
         """
         if not self._vad_enabled:
             return 0.0
-        return self._vad.vad_probability
+        return self._vad.vad_score
 
     # -----------------------------------------------------------------------
     # Static methods
@@ -424,8 +484,8 @@ class AsyncMicrophone:
     # explicitly. See the class docstring's "Resource cleanup" section.
 
     @staticmethod
-    async def devices() -> list[DeviceInfo]:
-        """List available input devices."""
+    async def input_devices() -> list[DeviceInfo]:
+        """List available audio input devices."""
         return await _decibri.AsyncMicrophoneBridge.devices()
 
     @staticmethod
@@ -505,7 +565,7 @@ class AsyncSpeaker:
         device : int | str | None, optional
             Output device selector. ``None`` (default) uses the system
             default output. Pass an integer index from
-            ``AsyncSpeaker.devices()`` or a substring of the device
+            ``AsyncSpeaker.output_devices()`` or a substring of the device
             name. ``AsyncSpeaker`` does not load ONNX Runtime, so there
             is no ``ort_library_path`` parameter (output never invokes
             VAD).
@@ -523,7 +583,19 @@ class AsyncSpeaker:
             device=device,
         )
     async def start(self) -> None:
-        """Open and start the output stream."""
+        """Open and start the output stream.
+
+        Re-entry contract:
+            Calling ``await start()`` after ``await stop()`` or
+            ``await close()`` is supported and reconstructs the
+            underlying output stream cleanly. The ``AsyncSpeaker``
+            instance is reusable across stop/start cycles. Re-entry
+            after exiting an ``async with`` block is also supported
+            (since ``__aexit__`` calls ``await stop()``).
+
+            Calling ``await start()`` while already started raises
+            ``AlreadyRunning``.
+        """
         await self._bridge.start()
 
     async def stop(self) -> None:
@@ -531,13 +603,13 @@ class AsyncSpeaker:
         await self._bridge.stop()
 
     async def close(self) -> None:
-        """Close the speaker and release resources.
+        """Stop the output stream. Permanent alias for ``stop()``.
 
-        Equivalent to ``await stop()``: the bridge-level ``close()`` is
-        itself a literal alias for ``stop()`` (see lib.rs). The
-        wrapper-side ``close()`` exists for API symmetry with sync
-        ``Speaker.close()`` and the asyncio / aiohttp / httpx
-        convention.
+        The bridge-level ``close()`` is itself a literal alias for
+        ``stop()`` (see lib.rs). The wrapper-side ``close()`` exists
+        for ergonomic parity with the asyncio / aiohttp / httpx
+        convention. ``close()`` and ``stop()`` are guaranteed to
+        remain semantically equivalent across all decibri versions.
         """
         await self._bridge.close()
 
@@ -595,6 +667,6 @@ class AsyncSpeaker:
     # See the class docstring's "Resource cleanup" section.
 
     @staticmethod
-    async def devices() -> list[OutputDeviceInfo]:
-        """List available output devices."""
+    async def output_devices() -> list[OutputDeviceInfo]:
+        """List available audio output devices."""
         return await _decibri.AsyncSpeakerBridge.devices()

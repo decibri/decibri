@@ -75,14 +75,14 @@ def test_async_construct() -> None:
     assert d is not None
 
 
-def test_numpy_construct() -> None:
-    """Microphone(numpy=True) constructs cleanly (verifies rust-numpy bundling).
+def test_as_ndarray_construct() -> None:
+    """Microphone(as_ndarray=True) constructs cleanly (verifies rust-numpy bundling).
 
-    Construction only; no actual read. The numpy=True flag exercises
+    Construction only; no actual read. The as_ndarray=True flag exercises
     the rust-numpy code path's presence in the wheel; calling read()
     would also exercise it but requires audio hardware.
     """
-    d = decibri.Microphone(numpy=True)
+    d = decibri.Microphone(as_ndarray=True)
     assert d is not None
 
 

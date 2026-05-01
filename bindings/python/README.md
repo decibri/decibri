@@ -32,8 +32,6 @@ Not yet on PyPI. Built locally via:
         speaker.drain()
 
     # Async equivalents: AsyncMicrophone, AsyncSpeaker
-    # Lowercase factory functions: decibri.microphone(), decibri.speaker(),
-    # decibri.async_microphone(), decibri.async_speaker()
 
 All exceptions are also accessible via `decibri.exceptions.<Class>` for
 code that prefers explicit submodule imports.

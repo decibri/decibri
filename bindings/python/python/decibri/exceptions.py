@@ -4,13 +4,19 @@ This module is the public home for the decibri exception hierarchy. All
 classes are also re-exported at ``decibri.<X>`` for convenience; users
 may import from either path.
 
-29 instance classes (one per Rust DecibriError variant) plus 2 intermediate
-parent classes (OrtError, OrtPathError) for catch ergonomics, totaling 31
-class definitions. Single-inheritance hierarchy per CPython convention.
+29 instance classes (one per Rust DecibriError variant) plus 3 intermediate
+parent classes (DeviceError, OrtError, OrtPathError) for catch ergonomics,
+totaling 32 class definitions. Single-inheritance hierarchy per CPython
+convention.
 
 Hierarchy:
     DecibriError
-    + 19 direct subclasses (config + runtime errors that don't involve ORT)
+    + 11 direct subclasses (config + runtime errors that don't involve
+      device enumeration or ORT)
+    + DeviceError (intermediate; no instances; catches device-related)
+        + 8 direct device subclasses (DeviceNotFound, OutputDeviceNotFound,
+          MultipleDevicesMatch, DeviceIndexOutOfRange, NoMicrophoneFound,
+          NoOutputDeviceFound, NotAnInputDevice, DeviceEnumerationFailed)
     + OrtError (intermediate; no instances; catches all ORT-related)
         + 7 direct ORT subclasses (init, session, threads, inference, tensors)
         + OrtPathError (intermediate; no instances; catches path-specific)
@@ -18,10 +24,11 @@ Hierarchy:
             + OrtPathInvalid (has path field; pre-check rejected)
 
 Design rationale: see Q1 (revised 2026-04-26) in the Phase 2 design
-decisions reference doc. Intermediate parents OrtError and OrtPathError
-are catch-targets only; they have no instances themselves. The Rust core's
-DecibriError variants map directly to the 29 instance classes via the
-to_py_err mapper in bindings/python/src/lib.rs (added in Commit 2).
+decisions reference doc. Phase 7.7 Item B7 added DeviceError for symmetry
+with OrtError and OrtPathError. Intermediate parents (DeviceError,
+OrtError, OrtPathError) are catch-targets only; they have no instances
+themselves. The Rust core's DecibriError variants map directly to the 29
+instance classes via the to_py_err mapper in bindings/python/src/lib.rs.
 """
 
 
@@ -34,7 +41,7 @@ class DecibriError(Exception):
     """
 
 
-# Direct DecibriError subclasses (20 classes: 19 instance + OrtError parent)
+# Direct DecibriError subclasses that are not device-related and not ORT-related
 
 
 class SampleRateOutOfRange(DecibriError):
@@ -53,35 +60,57 @@ class InvalidFormat(DecibriError):
     """Raised when format string is not recognized."""
 
 
-class DeviceNotFound(DecibriError):
+# DeviceError intermediate parent (Phase 7.7 Item B7)
+
+
+class DeviceError(DecibriError):
+    """Base class for all device-enumeration and selection errors.
+
+    Catches: DeviceNotFound, OutputDeviceNotFound, MultipleDevicesMatch,
+    DeviceIndexOutOfRange, NoMicrophoneFound, NoOutputDeviceFound,
+    NotAnInputDevice, DeviceEnumerationFailed. 8 instance classes total.
+
+    Use this when you want to catch any device-selection failure with a
+    single except clause: bad device name, ambiguous match, missing
+    hardware, host-API enumeration error. All eight remain catchable as
+    DecibriError (the parent chain is preserved).
+
+    This class has no instances of its own; it is a catch-target only.
+    """
+
+
+# Direct DeviceError subclasses (8 instance classes)
+
+
+class DeviceNotFound(DeviceError):
     """Raised when the named input device cannot be found on the system."""
 
 
-class OutputDeviceNotFound(DecibriError):
+class OutputDeviceNotFound(DeviceError):
     """Raised when the named output device cannot be found on the system."""
 
 
-class MultipleDevicesMatch(DecibriError):
+class MultipleDevicesMatch(DeviceError):
     """Raised when device name is ambiguous; suggests using device ID."""
 
 
-class DeviceIndexOutOfRange(DecibriError):
+class DeviceIndexOutOfRange(DeviceError):
     """Raised when device index is out of range for the host."""
 
 
-class NoMicrophoneFound(DecibriError):
+class NoMicrophoneFound(DeviceError):
     """Raised when no input device is available on the system."""
 
 
-class NoOutputDeviceFound(DecibriError):
+class NoOutputDeviceFound(DeviceError):
     """Raised when no output device is available on the system."""
 
 
-class NotAnInputDevice(DecibriError):
+class NotAnInputDevice(DeviceError):
     """Raised when a device matched but is not an input device."""
 
 
-class DeviceEnumerationFailed(DecibriError):
+class DeviceEnumerationFailed(DeviceError):
     """Raised when the underlying audio system fails to enumerate devices."""
 
 

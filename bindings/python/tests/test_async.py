@@ -276,16 +276,16 @@ async def test_async_decibri_concurrent_tasks_share_instance() -> None:
 
 
 @pytest.mark.asyncio
-async def test_async_devices_returns_list() -> None:
-    """``AsyncMicrophone.devices()`` is async and returns a list."""
-    devices: list[Any] = await AsyncMicrophone.devices()
+async def test_async_input_devices_returns_list() -> None:
+    """``AsyncMicrophone.input_devices()`` is async and returns a list."""
+    devices: list[Any] = await AsyncMicrophone.input_devices()
     assert isinstance(devices, list)
 
 
 @pytest.mark.asyncio
 async def test_async_output_devices_returns_list() -> None:
-    """``AsyncSpeaker.devices()`` is async and returns a list."""
-    devices: list[Any] = await AsyncSpeaker.devices()
+    """``AsyncSpeaker.output_devices()`` is async and returns a list."""
+    devices: list[Any] = await AsyncSpeaker.output_devices()
     assert isinstance(devices, list)
 
 
@@ -391,3 +391,49 @@ async def test_async_speaker_is_playing_pre_start_no_hardware() -> None:
     """AsyncSpeaker.is_playing returns False before start without hardware."""
     spk = AsyncSpeaker()
     assert spk.is_playing is False
+
+
+# ---------------------------------------------------------------------------
+# Phase 7.7 Item B1: async read_with_metadata + aiter_with_metadata + Chunk
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.requires_audio_input
+@pytest.mark.asyncio
+async def test_async_read_with_metadata_returns_chunk() -> None:
+    """``await read_with_metadata()`` returns a frozen ``Chunk``."""
+    import dataclasses
+
+    from decibri import Chunk
+
+    async with AsyncMicrophone(sample_rate=16000, channels=1, frames_per_buffer=512) as d:
+        chunk = await d.read_with_metadata(timeout_ms=500)
+        assert chunk is not None
+        assert isinstance(chunk, Chunk)
+        assert isinstance(chunk.data, bytes)
+        assert isinstance(chunk.timestamp, float)
+        assert chunk.timestamp > 0.0
+        assert chunk.sequence == 0
+        assert chunk.is_speaking is False
+        assert chunk.vad_score == 0.0
+        with pytest.raises(dataclasses.FrozenInstanceError):
+            chunk.sequence = 99  # type: ignore[misc]
+
+
+@pytest.mark.requires_audio_input
+@pytest.mark.asyncio
+async def test_async_aiter_with_metadata_yields_chunks() -> None:
+    """``async for chunk in mic.aiter_with_metadata()`` yields Chunk objects."""
+    from decibri import Chunk
+
+    async with AsyncMicrophone(sample_rate=16000, channels=1, frames_per_buffer=512) as d:
+        count = 0
+        last_seq = -1
+        async for chunk in d.aiter_with_metadata():
+            assert isinstance(chunk, Chunk)
+            assert chunk.sequence == last_seq + 1
+            last_seq = chunk.sequence
+            count += 1
+            if count >= 3:
+                break
+        assert count == 3

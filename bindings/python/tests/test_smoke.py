@@ -17,44 +17,59 @@ import decibri
 
 def test_package_imports() -> None:
     assert decibri.__version__ == "0.1.0a1"
-    # MicrophoneBridge remains accessible via attribute lookup even though
-    # it is intentionally not in __all__ (Phase 7.6 Item B2).
-    assert hasattr(decibri, "MicrophoneBridge")
+    # Phase 7.7 Item A2: bridges are hidden behind the private _decibri
+    # module. They are NOT accessible at decibri.<X> top level (sync or
+    # async). The async pair was never accessible at the top level; the
+    # sync pair (MicrophoneBridge, SpeakerBridge) used to be importable
+    # via attribute lookup but was hidden in 7.7 for symmetry.
+    assert not hasattr(decibri, "MicrophoneBridge")
+    assert not hasattr(decibri, "SpeakerBridge")
+    assert not hasattr(decibri, "AsyncMicrophoneBridge")
+    assert not hasattr(decibri, "AsyncSpeakerBridge")
     assert hasattr(decibri, "VersionInfo")
 
 
 def test_extension_module_loads() -> None:
-    # Importing from the underscore-prefixed internal module should succeed
-    # and return the exact same objects the public __init__.py re-exports.
+    # The bridges remain accessible via the explicit private submodule
+    # for advanced users; this is the only supported path post-7.7.
     from decibri import _decibri
 
-    assert _decibri.MicrophoneBridge is decibri.MicrophoneBridge
+    assert _decibri.MicrophoneBridge is not None
+    assert _decibri.SpeakerBridge is not None
+    assert _decibri.AsyncMicrophoneBridge is not None
+    assert _decibri.AsyncSpeakerBridge is not None
     assert _decibri.VersionInfo is decibri.VersionInfo
 
 
 def test_version_returns_version_info() -> None:
-    info = decibri.MicrophoneBridge.version()
+    from decibri import _decibri
+
+    info = _decibri.MicrophoneBridge.version()
     assert isinstance(info, decibri.VersionInfo)
 
 
 def test_version_decibri_matches_rust_core() -> None:
+    from decibri import _decibri
+
     # Literal equality per Phase 1 plan. When the Rust workspace bumps past
     # 3.3.2 this assertion breaks deliberately: force a conscious update of
     # the Python test expectation alongside the Rust version bump.
-    assert decibri.MicrophoneBridge.version().decibri == "3.3.2"
+    assert _decibri.MicrophoneBridge.version().decibri == "3.3.2"
 
 
 def test_version_audio_backend_matches_cpal() -> None:
+    from decibri import _decibri
+
     # Sourced from the same `decibri::CPAL_VERSION` const in the Rust
     # core that the Node binding's version field reads. Contract enforced
-    # by `crates/decibri/build.rs`. Phase 7.5: field renamed from
-    # `portaudio` to `audio_backend` (more honest; we use cpal, not
-    # portaudio).
-    assert decibri.MicrophoneBridge.version().audio_backend == "cpal 0.17"
+    # by `crates/decibri/build.rs`.
+    assert _decibri.MicrophoneBridge.version().audio_backend == "cpal 0.17"
 
 
 def test_version_info_fields() -> None:
-    info = decibri.MicrophoneBridge.version()
+    from decibri import _decibri
+
+    info = _decibri.MicrophoneBridge.version()
     assert info.decibri == "3.3.2"
     assert info.audio_backend == "cpal 0.17"
     assert info.binding == "0.1.0a1"
@@ -63,7 +78,9 @@ def test_version_info_fields() -> None:
 def test_version_info_is_frozen() -> None:
     import pytest
 
-    info = decibri.MicrophoneBridge.version()
+    from decibri import _decibri
+
+    info = _decibri.MicrophoneBridge.version()
     with pytest.raises(AttributeError):
         info.decibri = "hijacked"  # type: ignore[misc]
 
@@ -90,37 +107,44 @@ def test_exception_root_importable() -> None:
 
 
 def test_exception_intermediate_parents_importable() -> None:
-    """OrtError and OrtPathError catch-target intermediates are reachable."""
-    from decibri import DecibriError, OrtError, OrtPathError
+    """DeviceError, OrtError, OrtPathError catch-target intermediates are reachable."""
+    from decibri import DecibriError, DeviceError, OrtError, OrtPathError
 
+    assert issubclass(DeviceError, DecibriError)
     assert issubclass(OrtError, DecibriError)
     assert issubclass(OrtPathError, OrtError)
 
 
 def test_public_surface_count() -> None:
-    """The public ``__all__`` enumerates the trimmed top-level surface (19 names).
+    """The public ``__all__`` enumerates the trimmed top-level surface (17 names).
 
-    Phase 7.6 trimmed the public surface in three stages:
-      - Item B2 dropped the two internal bridges (MicrophoneBridge,
-        SpeakerBridge); they remain importable via attribute lookup.
-      - Item C3 (Shape C2) dropped the 29 granular exception subclasses
-        from __all__; only the three catch-target roots (DecibriError,
-        OrtError, OrtPathError) remain. All 32 exception classes are
-        still importable both at decibri.<X> and at decibri.exceptions.<X>.
-      - Item C5 added record_to_file and async_record_to_file.
+    Phase 7.7 reshaped the public surface:
+      - Item A1 removed four lowercase factory functions
+        (microphone, speaker, async_microphone, async_speaker).
+      - Item B2 renamed `devices` -> `input_devices`.
+      - Item B7 added `DeviceError` (catch-target intermediate).
+      - Item B1 added `Chunk` (audio chunk with metadata).
 
     Final composition: 2 sync wrappers (Microphone, Speaker) + 2 async
-    wrappers (AsyncMicrophone, AsyncSpeaker) + 4 lowercase factories
-    (microphone, speaker, async_microphone, async_speaker) + 3 module-
-    level convenience functions (devices, output_devices, version) +
+    wrappers (AsyncMicrophone, AsyncSpeaker) + 3 module-level
+    convenience functions (input_devices, output_devices, version) +
     2 file convenience functions (record_to_file, async_record_to_file)
-    + 3 value types (DeviceInfo, OutputDeviceInfo, VersionInfo) +
-    3 exception roots (DecibriError, OrtError, OrtPathError)
-    = 2 + 2 + 4 + 3 + 2 + 3 + 3 = 19.
+    + 3 value types (DeviceInfo, OutputDeviceInfo, VersionInfo)
+    + 1 audio chunk dataclass (Chunk)
+    + 4 exception roots (DecibriError, DeviceError, OrtError, OrtPathError)
+    = 2 + 2 + 3 + 2 + 3 + 1 + 4 = 17.
     """
-    assert len(decibri.__all__) == 19
+    assert len(decibri.__all__) == 17
     for name in decibri.__all__:
         assert hasattr(decibri, name), f"__all__ lists {name!r} but it is not exported"
+
+
+def test_lowercase_factories_removed() -> None:
+    """Phase 7.7 Item A1: the four lowercase factories are gone."""
+    for removed_name in ("microphone", "speaker", "async_microphone", "async_speaker"):
+        assert not hasattr(decibri, removed_name), (
+            f"decibri.{removed_name} should have been removed in Phase 7.7"
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -128,21 +152,21 @@ def test_public_surface_count() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_module_level_devices_aliases_microphone() -> None:
-    """decibri.devices() is an alias for Microphone.devices() (input devices)."""
-    result = decibri.devices()
+def test_module_level_input_devices_aliases_microphone() -> None:
+    """decibri.input_devices() is an alias for Microphone.input_devices()."""
+    result = decibri.input_devices()
     assert isinstance(result, list)
-    expected = decibri.Microphone.devices()
+    expected = decibri.Microphone.input_devices()
     assert len(result) == len(expected)
     # DeviceInfo objects don't implement __eq__; compare by stable id field.
     assert [d.id for d in result] == [d.id for d in expected]
 
 
 def test_module_level_output_devices_aliases_speaker() -> None:
-    """decibri.output_devices() is an alias for Speaker.devices() (output devices)."""
+    """decibri.output_devices() is an alias for Speaker.output_devices()."""
     result = decibri.output_devices()
     assert isinstance(result, list)
-    expected = decibri.Speaker.devices()
+    expected = decibri.Speaker.output_devices()
     assert len(result) == len(expected)
     assert [d.id for d in result] == [d.id for d in expected]
 
