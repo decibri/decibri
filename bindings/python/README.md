@@ -35,6 +35,9 @@ Not yet on PyPI. Built locally via:
     # Lowercase factory functions: decibri.microphone(), decibri.speaker(),
     # decibri.async_microphone(), decibri.async_speaker()
 
+All exceptions are also accessible via `decibri.exceptions.<Class>` for
+code that prefers explicit submodule imports.
+
 ## License
 
 Apache-2.0. See the [workspace LICENSE](../../LICENSE).

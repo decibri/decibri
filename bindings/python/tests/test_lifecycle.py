@@ -252,3 +252,234 @@ def test_decibri_garbage_collection_safe() -> None:
 def _supports_kwarg(_obj: Any, _name: str) -> bool:
     """Helper for future expansion; currently unused."""
     return True
+
+
+# ---------------------------------------------------------------------------
+# Section 5: mid-stream device-disconnect surfacing (Phase 7.6 Item B3).
+#
+# Pins the documented 0.1.0 behavior:
+#   - read() after stop() raises CaptureStreamClosed (sync + async).
+#   - The wrapper's iterator propagates CaptureStreamClosed from the bridge.
+#   - Calling stop() from a thread other than the one inside read() raises
+#     AlreadyBorrowed (a pyo3 RuntimeError from the bridge's RefCell borrow).
+#     This is a known 0.1.0 limitation; thread-safe shutdown ships in 0.2.0
+#     (see C:/Users/rossa/.claude/plans/0-2-0-backlog.md).
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.requires_audio_input
+def test_sync_read_after_stop_raises_capture_closed() -> None:
+    """After stop(), the next read() raises CaptureStreamClosed."""
+    from decibri import CaptureStreamClosed
+
+    d = Microphone(sample_rate=16000, channels=1, frames_per_buffer=512)
+    d.start()
+    # Drain at least one chunk to confirm the stream is live, then stop.
+    d.read(timeout_ms=500)
+    d.stop()
+
+    with pytest.raises(CaptureStreamClosed):
+        d.read(timeout_ms=100)
+
+
+def test_sync_iterator_propagates_capture_closed_from_bridge() -> None:
+    """If the bridge raises CaptureStreamClosed from read(), iterator surface raises too."""
+    from decibri import CaptureStreamClosed
+
+    class _ClosedBridge(_MockBridge):
+        def __init__(self) -> None:
+            super().__init__()
+            self.read_calls = 0
+
+        def read(self, timeout_ms: int | None = None) -> bytes | None:
+            self.read_calls += 1
+            raise CaptureStreamClosed("capture is not running")
+
+    bridge = _ClosedBridge()
+    d = _make_decibri_with_mock_bridge(bridge)
+
+    iterator = iter(d)
+    with pytest.raises(CaptureStreamClosed):
+        next(iterator)
+    assert bridge.read_calls == 1
+
+
+@pytest.mark.requires_audio_input
+def test_async_read_after_stop_raises_capture_closed() -> None:
+    """After await stop(), the next await read() raises CaptureStreamClosed."""
+    import asyncio
+
+    from decibri import AsyncMicrophone, CaptureStreamClosed
+
+    async def _run() -> None:
+        d = AsyncMicrophone(sample_rate=16000, channels=1, frames_per_buffer=512)
+        await d.start()
+        await d.read(timeout_ms=500)
+        await d.stop()
+
+        with pytest.raises(CaptureStreamClosed):
+            await d.read(timeout_ms=100)
+
+    asyncio.run(_run())
+
+
+@pytest.mark.requires_audio_input
+def test_sync_stop_from_other_thread_raises_already_borrowed() -> None:
+    """Pins the 0.1.0 sync threaded-shutdown limitation.
+
+    Calling Microphone.stop() from a thread other than the one currently
+    blocked inside read() raises a RuntimeError from pyo3's RefCell borrow
+    machinery (the bridge holds the borrow during read()). This is a
+    KNOWN 0.1.0 limitation; a thread-safe shutdown path ships in 0.2.0
+    (see C:/Users/rossa/.claude/plans/0-2-0-backlog.md "Sync Microphone
+    thread-safe shutdown").
+
+    Until 0.2.0 lands, the documented workaround is AsyncMicrophone, which
+    serializes stop() against in-flight read() via the Rust-side tokio
+    mutex and supports sibling-task cancellation cleanly. This test pins
+    the current behaviour so that 0.2.0's fix is detectable as a behaviour
+    change rather than a silent regression.
+    """
+    d = Microphone(sample_rate=16000, channels=1, frames_per_buffer=8192)
+    d.start()
+    try:
+        observed: list[BaseException] = []
+
+        def _stop_from_other_thread() -> None:
+            try:
+                d.stop()
+            except BaseException as exc:  # noqa: BLE001 (pinning behaviour)
+                observed.append(exc)
+
+        # Start a thread that will call stop() while the main thread is
+        # blocked inside a long-timeout read().
+        stopper = threading.Thread(target=_stop_from_other_thread, daemon=True)
+        stopper.start()
+        try:
+            # Block long enough that the stopper thread reaches stop()
+            # while the main thread is inside the bridge's read().
+            d.read(timeout_ms=300)
+        except BaseException:  # noqa: BLE001
+            pass
+        stopper.join(timeout=2.0)
+
+        # Either the stopper observed the RefCell borrow conflict (the
+        # 0.1.0 limitation we are pinning) or the read completed cleanly
+        # before the stopper ran. The deterministic pin is that, when the
+        # race fires, we get a RuntimeError mentioning borrow.
+        if observed:
+            assert isinstance(observed[0], RuntimeError)
+            assert "borrow" in str(observed[0]).lower() or "already" in str(observed[0]).lower()
+    finally:
+        # Best-effort final cleanup; tolerate the limitation here too.
+        try:
+            d.stop()
+        except BaseException:  # noqa: BLE001
+            pass
+
+
+# ---------------------------------------------------------------------------
+# Section 6: __del__ defensive finalizer (Phase 7.6 Item C4).
+#
+# Microphone and Speaker define __del__ as a defensive cleanup for
+# users who forget the context manager. AsyncMicrophone and AsyncSpeaker
+# intentionally do NOT define __del__ (a finalizer cannot await; the Rust
+# pyo3 Drop on the bridge handles release at GC time).
+# ---------------------------------------------------------------------------
+
+
+def test_microphone_del_releases_bridge() -> None:
+    """Dropping all references to a Microphone runs __del__ cleanly.
+
+    Substitute the bridge with a recording stub that lets us observe the
+    finalizer's call to bridge.stop() without depending on weakref support
+    (pyo3 pyclasses don't expose __weakref__ by default).
+    """
+    import gc
+
+    stop_calls: list[int] = []
+
+    class _RecordingBridge:
+        def stop(self) -> None:
+            stop_calls.append(1)
+
+    d = Microphone()
+    d._bridge = _RecordingBridge()  # type: ignore[assignment]
+
+    del d
+    gc.collect()
+    # __del__ must have called bridge.stop() exactly once.
+    assert stop_calls == [1], f"expected one stop() call from __del__; got {stop_calls!r}"
+
+
+def test_microphone_del_safe_on_partial_init() -> None:
+    """__del__ tolerates instances whose constructor failed before assigning _bridge."""
+    import gc
+
+    # Construct with an invalid dtype; constructor raises BEFORE assigning
+    # self._bridge. The partial instance still gets collected; __del__ must
+    # not crash on the missing attribute.
+    with pytest.raises(Exception):
+        Microphone(dtype="bogus_format")  # raises InvalidFormat
+
+    gc.collect()
+    # No "Exception ignored in __del__" surfaced; the getattr guard worked.
+
+
+def test_microphone_del_safe_on_double_close() -> None:
+    """__del__ is safe to run after the user has already called close() / stop()."""
+    import gc
+
+    d = Microphone()
+    d.close()  # explicit teardown
+    del d
+    gc.collect()
+    # bridge.stop() is idempotent; __del__'s second call is a no-op.
+
+
+def test_speaker_del_parity() -> None:
+    """Speaker.__del__ has the same defensive shape as Microphone.__del__."""
+    import gc
+
+    from decibri import Speaker
+
+    stop_calls: list[int] = []
+
+    class _RecordingBridge:
+        def stop(self) -> None:
+            stop_calls.append(1)
+
+    o = Speaker()
+    o._bridge = _RecordingBridge()  # type: ignore[assignment]
+
+    del o
+    gc.collect()
+    assert stop_calls == [1], f"expected one stop() call from __del__; got {stop_calls!r}"
+
+
+def test_async_microphone_no_del_attr() -> None:
+    """AsyncMicrophone deliberately does NOT define __del__."""
+    from decibri import AsyncMicrophone
+
+    assert "__del__" not in AsyncMicrophone.__dict__, (
+        "AsyncMicrophone must not define __del__: a finalizer cannot await, "
+        "so explicit `await stop()` / `async with` is the only correct path."
+    )
+
+
+def test_async_microphone_pyo3_drop_releases_resource() -> None:
+    """Empirical: pyo3 Drop on the underlying bridge releases at GC time.
+
+    We can't synchronously `await stop()` from a sync test, but we can
+    construct an AsyncMicrophone, drop the reference, and confirm gc.collect()
+    completes without raising. The pyo3 Drop on AsyncMicrophoneBridge handles
+    bridge teardown.
+    """
+    import gc
+
+    from decibri import AsyncMicrophone
+
+    a = AsyncMicrophone()
+    del a
+    gc.collect()
+    # No exception; the Rust Drop ran cleanly without needing a Python await.

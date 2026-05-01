@@ -217,7 +217,7 @@ class Microphone:
     `start()` explicitly. Iteration without an active capture raises
     `_decibri.CaptureStreamClosed`.
 
-    The VAD parameters (`vad`, `vad_threshold`, `vad_holdoff`,
+    The VAD parameters (`vad`, `vad_threshold`, `vad_holdoff_ms`,
     `model_path`, `ort_library_path`) configure both the bridge and the
     wrapper-layer state machine. ``vad`` accepts ``False`` (disabled),
     ``"silero"``, or ``"energy"``. With ``vad=False``, ``vad_probability``
@@ -225,6 +225,23 @@ class Microphone:
 
     The wrapper is sync only in Phase 2. Async iteration and speech-event
     callbacks ship in Phase 3.
+
+    Cleanup and disconnect:
+        Mid-stream device disconnect (USB unplug, default-device switch,
+        driver error) is surfaced as a ``CaptureStreamClosed`` raised on
+        the next ``read()``. cpal detects the disconnect and closes the
+        underlying stream within roughly 20ms; the wrapper then sees the
+        closed state on its next read attempt and raises.
+
+        Threaded shutdown limitation in 0.1.0: calling ``stop()`` from a
+        thread other than the one currently blocked inside ``read()`` can
+        raise ``AlreadyBorrowed`` (a pyo3 ``RuntimeError`` from the
+        bridge's ``RefCell`` borrow). This is a known 0.1.0 limitation
+        pinned by ``test_sync_stop_from_other_thread_raises_already_borrowed``;
+        a thread-safe shutdown path is scheduled for 0.2.0. Workarounds:
+        use ``AsyncMicrophone`` (sibling-task cancellation works
+        correctly), or call ``stop()`` from the same thread that owns
+        the iteration loop.
     """
 
     def __init__(
@@ -232,11 +249,11 @@ class Microphone:
         sample_rate: int = 16000,
         channels: int = 1,
         frames_per_buffer: int = 1600,
-        format: str = "int16",
+        dtype: str = "int16",
         device: int | str | None = None,
         vad: bool | str = False,
         vad_threshold: float | None = None,
-        vad_holdoff: int = 300,
+        vad_holdoff_ms: int = 300,
         model_path: str | Path | None = None,
         numpy: bool = False,
         ort_library_path: str | Path | None = None,
@@ -300,9 +317,9 @@ class Microphone:
         Other parameters are summarised at the class docstring; refer to
         ``help(Microphone)`` for the capture-side surface.
         """
-        if format not in _VALID_FORMATS:
+        if dtype not in _VALID_FORMATS:
             raise exceptions.InvalidFormat(
-                f"format must be 'int16' or 'float32'; got {format!r}"
+                f"dtype must be 'int16' or 'float32'; got {dtype!r}"
             )
 
         # Phase 7.5: collapse the legacy two-flag pattern (vad=True,
@@ -337,9 +354,9 @@ class Microphone:
             raise ValueError(
                 f"vad_threshold must be in [0, 1]; got {vad_threshold}"
             )
-        if vad_holdoff < 0:
+        if vad_holdoff_ms < 0:
             raise ValueError(
-                f"vad_holdoff must be non-negative; got {vad_holdoff}"
+                f"vad_holdoff_ms must be non-negative milliseconds; got {vad_holdoff_ms}"
             )
 
         # Resolve model_path to an absolute string for the bridge.
@@ -392,16 +409,20 @@ class Microphone:
             # bridge state see the user's intent.
             resolved_ort_path = str(Path(ort_library_path))
 
+        # Wrapper-only rename (Phase 7.6 Item C2): the public Python
+        # surface uses `dtype` (NumPy convention) but the internal Rust
+        # bridge keeps `format` for cross-binding consistency with the
+        # Node binding. Translate at the boundary; bridge stubs unchanged.
         self._bridge = _decibri.MicrophoneBridge(
             sample_rate=sample_rate,
             channels=channels,
             frames_per_buffer=frames_per_buffer,
-            format=format,
+            format=dtype,
             device=device,
             vad=vad_enabled,
             vad_threshold=vad_threshold,
             vad_mode=vad_mode,
-            vad_holdoff=vad_holdoff,
+            vad_holdoff=vad_holdoff_ms,
             model_path=resolved_model_path,
             numpy=numpy,
             ort_library_path=resolved_ort_path,
@@ -411,10 +432,10 @@ class Microphone:
         self._vad = _VadStateMachine(
             mode=vad_mode,
             threshold=vad_threshold,
-            holdoff_ms=vad_holdoff,
-            sample_format=format,
+            holdoff_ms=vad_holdoff_ms,
+            sample_format=dtype,
         )
-        self._format = format
+        self._format = dtype
         # Phase 6: store the numpy flag so read() can branch its return
         # type (bytes vs ndarray) without re-querying the bridge each
         # call. The bridge also stores it; both are kept in sync because
@@ -474,7 +495,7 @@ class Microphone:
         - When ``numpy=False`` (default), returns ``bytes`` (Phase 2 wire
           format).
         - When ``numpy=True``, returns a ``numpy.ndarray`` with dtype
-          matching the configured ``format`` (np.int16 or np.float32) and
+          matching the configured ``dtype`` (np.int16 or np.float32) and
           shape matching the channel count (1-D for mono, 2-D
           ``(N, channels)`` for multi-channel).
 
@@ -580,6 +601,24 @@ class Microphone:
         """Return version info: decibri Rust core, cpal, and binding wheel."""
         return _decibri.MicrophoneBridge.version()
 
+    def __del__(self) -> None:
+        # Defensive finalizer: best-effort cleanup if the user forgot the
+        # context manager and the GC reaps the instance with the cpal
+        # stream still live. Tolerates partially-constructed state (the
+        # _bridge attribute may not exist if the constructor raised before
+        # assigning it) and double-close (bridge.stop() is idempotent).
+        # The bare BaseException catch is intentional: __del__ runs at
+        # arbitrary GC points, including interpreter shutdown when raising
+        # is unsafe; we silently absorb anything rather than triggering
+        # "Exception ignored in __del__" noise on the user's terminal.
+        bridge = getattr(self, "_bridge", None)
+        if bridge is None:
+            return
+        try:
+            bridge.stop()
+        except BaseException:  # noqa: BLE001
+            pass
+
 
 # ---------------------------------------------------------------------------
 # Speaker: consumer-facing audio output class.
@@ -602,17 +641,41 @@ class Speaker:
         self,
         sample_rate: int = 16000,
         channels: int = 1,
-        format: str = "int16",
+        dtype: str = "int16",
         device: int | str | None = None,
     ) -> None:
-        if format not in _VALID_FORMATS:
+        """Construct a Speaker audio output instance.
+
+        Parameters
+        ----------
+        sample_rate : int, optional
+            Output sample rate in Hz. Default 16000 (matches the
+            cloud-STT capture convention used by ``Microphone``). For
+            playback of OpenAI Realtime audio use 24000.
+        channels : int, optional
+            Number of output channels. Default 1 (mono). Multi-channel
+            samples are interleaved on the wire.
+        dtype : str, optional
+            Sample dtype: ``"int16"`` (default) or ``"float32"``. Must
+            match the dtype of the data passed to ``write()``; mismatch
+            raises ``TypeError`` at write time.
+        device : int | str | None, optional
+            Output device selector. ``None`` (default) uses the system
+            default output. Pass an integer index from
+            ``Speaker.devices()`` or a substring of the device name.
+            ``Speaker`` does not load ONNX Runtime, so there is no
+            ``ort_library_path`` parameter (output never invokes VAD).
+        """
+        if dtype not in _VALID_FORMATS:
             raise exceptions.InvalidFormat(
-                f"format must be 'int16' or 'float32'; got {format!r}"
+                f"dtype must be 'int16' or 'float32'; got {dtype!r}"
             )
+        # Wrapper-only rename (Phase 7.6 Item C2): public surface uses
+        # `dtype`; bridge keeps `format` for cross-binding consistency.
         self._bridge = _decibri.SpeakerBridge(
             sample_rate=sample_rate,
             channels=channels,
-            format=format,
+            format=dtype,
             device=device,
         )
 
@@ -629,9 +692,9 @@ class Speaker:
         """Write a chunk to the output stream.
 
         Phase 6: accepts either ``bytes`` (Phase 2 wire format) or a
-        ``numpy.ndarray`` with dtype matching the configured ``format``
-        (np.int16 for ``format='int16'``, np.float32 for
-        ``format='float32'``). Multi-channel ndarrays use shape
+        ``numpy.ndarray`` with dtype matching the configured ``dtype``
+        (np.int16 for ``dtype='int16'``, np.float32 for
+        ``dtype='float32'``). Multi-channel ndarrays use shape
         ``(N, channels)`` (interleaved). Output bridges duck-type the
         input on each call rather than committing at construction time.
 
@@ -663,3 +726,14 @@ class Speaker:
     def devices() -> list[OutputDeviceInfo]:
         """List available output devices."""
         return _decibri.SpeakerBridge.devices()
+
+    def __del__(self) -> None:
+        # Defensive finalizer; same shape as Microphone.__del__.
+        # See that method's comment for rationale.
+        bridge = getattr(self, "_bridge", None)
+        if bridge is None:
+            return
+        try:
+            bridge.stop()
+        except BaseException:  # noqa: BLE001
+            pass

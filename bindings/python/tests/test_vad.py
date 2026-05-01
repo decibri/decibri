@@ -1,7 +1,7 @@
 """Phase 2 VAD tests organized in three sections.
 
 Section A: VAD config validation (no markers). Wrapper-layer validation of
-vad / vad_threshold / vad_holdoff. These overlap conceptually with
+vad / vad_threshold / vad_holdoff_ms. These overlap conceptually with
 test_config.py but live here for cohesion with the rest of the VAD surface.
 test_error_messages.py also covers a subset for byte-identity; this section
 focuses on the validation-pass-through behavior, not message text.
@@ -68,8 +68,8 @@ def test_vad_threshold_boundary_one_accepted() -> None:
 
 
 def test_vad_holdoff_zero_accepted() -> None:
-    """vad_holdoff=0 is at the lower boundary; accepted."""
-    Microphone(vad=False, vad_holdoff=0)
+    """vad_holdoff_ms=0 is at the lower boundary; accepted."""
+    Microphone(vad=False, vad_holdoff_ms=0)
 
 
 def test_vad_disabled_ignores_vad_kwargs() -> None:
@@ -321,7 +321,7 @@ def test_vad_holdoff_end_to_end() -> None:
         channels=1,
         frames_per_buffer=512,
         vad="silero",
-        vad_holdoff=100,
+        vad_holdoff_ms=100,
     ) as d:
         for _ in range(8):  # ~256ms at 32ms per chunk
             chunk = d.read(timeout_ms=500)

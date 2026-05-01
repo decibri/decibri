@@ -1,5 +1,9 @@
 """decibri exception hierarchy.
 
+This module is the public home for the decibri exception hierarchy. All
+classes are also re-exported at ``decibri.<X>`` for convenience; users
+may import from either path.
+
 29 instance classes (one per Rust DecibriError variant) plus 2 intermediate
 parent classes (OrtError, OrtPathError) for catch ergonomics, totaling 31
 class definitions. Single-inheritance hierarchy per CPython convention.
