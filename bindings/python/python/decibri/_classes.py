@@ -244,12 +244,25 @@ class Microphone:
         """Construct a Microphone audio capture instance.
 
         Most parameters control capture behaviour and are documented at
-        the class level. The argument that benefits from per-arg detail
-        is ``ort_library_path``, since its resolution involves a
-        priority chain that is invisible at the call site.
+        the class level. The arguments that benefit from per-arg detail
+        are ``sample_rate`` (cloud-STT compatibility) and
+        ``ort_library_path`` (its resolution involves a priority chain
+        that is invisible at the call site).
 
         Parameters
         ----------
+        sample_rate : int, optional
+            Sample rate in Hz. Default 16000 (the cloud-STT convention;
+            matches Silero VAD's native rate).
+
+            Note: OpenAI Realtime API requires 24000 Hz; most other
+            cloud STT providers (Deepgram, AssemblyAI, Azure, Google,
+            AWS Transcribe) prefer 16000 Hz. Silero VAD operates at
+            16000 Hz natively. If using both Silero VAD and OpenAI
+            Realtime in the same pipeline, capture at 16000 for VAD
+            then resample to 24000 (e.g., via ``resampy`` or
+            ``scipy.signal.resample_poly``) before sending to OpenAI.
+
         ort_library_path : str | Path | None, optional
             Path to the ONNX Runtime dynamic library used by Silero VAD.
             Only consulted when ``vad='silero'``; energy-mode VAD
@@ -430,6 +443,12 @@ class Microphone:
         all resources) from stop (pause but keep device open); 0.1.0
         makes them equivalent.
         """
+        # Calls self.stop() rather than self._bridge.close() so the
+        # wrapper-side cleanup (vad.reset() in stop()) runs. The
+        # bridge-level MicrophoneBridge.close() exists for symmetry
+        # with SpeakerBridge.close() and for advanced direct-bridge
+        # users; the wrapper keeps its own routing here to ensure
+        # VAD state is reset on every close.
         self.stop()
 
     def __enter__(self) -> Self:
@@ -458,6 +477,12 @@ class Microphone:
           matching the configured ``format`` (np.int16 or np.float32) and
           shape matching the channel count (1-D for mono, 2-D
           ``(N, channels)`` for multi-channel).
+
+        Future metadata (timestamps, sequence numbers, latency hints)
+        will be exposed via additional methods such as
+        ``read_with_metadata()``, not by changing this method's return
+        type. Code that relies on ``read()`` returning ``bytes`` or
+        ``ndarray`` will not break when richer metadata APIs ship.
 
         VAD state advances as a side effect when VAD is enabled
         (``vad="silero"`` or ``vad="energy"``). Consumers

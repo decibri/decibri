@@ -105,6 +105,27 @@ class AsyncMicrophone:
         numpy: bool = False,
         ort_library_path: str | Path | None = None,
     ) -> None:
+        """Construct an AsyncMicrophone audio capture instance.
+
+        Constructor signature mirrors ``Microphone`` exactly; refer to
+        ``help(Microphone)`` for the full per-parameter documentation
+        (including the ORT dylib resolution priority chain on
+        ``ort_library_path``).
+
+        Parameters
+        ----------
+        sample_rate : int, optional
+            Sample rate in Hz. Default 16000 (the cloud-STT convention;
+            matches Silero VAD's native rate).
+
+            Note: OpenAI Realtime API requires 24000 Hz; most other
+            cloud STT providers (Deepgram, AssemblyAI, Azure, Google,
+            AWS Transcribe) prefer 16000 Hz. Silero VAD operates at
+            16000 Hz natively. If using both Silero VAD and OpenAI
+            Realtime in the same pipeline, capture at 16000 for VAD
+            then resample to 24000 (e.g., via ``resampy`` or
+            ``scipy.signal.resample_poly``) before sending to OpenAI.
+        """
         if format not in _VALID_FORMATS:
             raise exceptions.InvalidFormat(
                 f"format must be 'int16' or 'float32'; got {format!r}"
@@ -228,6 +249,12 @@ class AsyncMicrophone:
         with ``AsyncSpeaker.close()``. See ``Microphone.close()`` for
         the full rationale.
         """
+        # Calls self.stop() rather than self._bridge.close() so the
+        # wrapper-side cleanup (vad.reset() in stop()) runs. The
+        # bridge-level AsyncMicrophoneBridge.close() exists for
+        # symmetry with AsyncSpeakerBridge.close() and for advanced
+        # direct-bridge users; the wrapper keeps its own routing here
+        # to ensure VAD state is reset on every close.
         await self.stop()
 
     async def __aenter__(self) -> Self:
@@ -254,6 +281,11 @@ class AsyncMicrophone:
         - When ``numpy=True``, returns a ``numpy.ndarray`` with dtype
           matching the configured ``format`` and shape matching the
           channel count (1-D mono, 2-D ``(N, channels)`` multi-channel).
+
+        Future metadata (timestamps, sequence numbers, latency hints)
+        will be exposed via additional methods such as
+        ``read_with_metadata()``, not by changing this method's return
+        type.
 
         VAD state advances as a side effect when VAD is enabled
         (``vad="silero"`` or ``vad="energy"``). In numpy
@@ -415,7 +447,14 @@ class AsyncSpeaker:
         await self._bridge.stop()
 
     async def close(self) -> None:
-        """Alias for ``stop()``; provided for symmetry with sync ``Speaker``."""
+        """Close the speaker and release resources.
+
+        Equivalent to ``await stop()``: the bridge-level ``close()`` is
+        itself a literal alias for ``stop()`` (see lib.rs). The
+        wrapper-side ``close()`` exists for API symmetry with sync
+        ``Speaker.close()`` and the asyncio / aiohttp / httpx
+        convention.
+        """
         await self._bridge.close()
 
     async def write(self, samples: SampleData) -> None:
