@@ -96,18 +96,56 @@ def test_exception_intermediate_parents_importable() -> None:
 
 
 def test_public_surface_count() -> None:
-    """The public ``__all__`` enumerates the full sync + async surface (45 names).
+    """The public ``__all__`` enumerates the full sync + async surface (48 names).
 
     Composition: 2 sync public wrappers (Microphone, Speaker) + 2 async
     public wrappers (AsyncMicrophone, AsyncSpeaker; Phase 5) + 4 lowercase
     factory functions (microphone, speaker, async_microphone, async_speaker;
-    Phase 7.5) + 2 internal pyclasses + 3 value types + 32 exception classes
-    (1 base + 20 direct subclasses + OrtError + 7 direct OrtError subclasses
-    + OrtPathError + 2 OrtPathError subclasses).
+    Phase 7.5) + 3 module-level convenience functions (devices,
+    output_devices, version; Phase 7.5) + 2 internal pyclasses + 3 value
+    types + 32 exception classes (1 base + 20 direct subclasses + OrtError
+    + 7 direct OrtError subclasses + OrtPathError + 2 OrtPathError
+    subclasses).
     """
-    assert len(decibri.__all__) == 45
+    assert len(decibri.__all__) == 48
     for name in decibri.__all__:
         assert hasattr(decibri, name), f"__all__ lists {name!r} but it is not exported"
+
+
+# ---------------------------------------------------------------------------
+# Phase 7.5: module-level convenience functions
+# ---------------------------------------------------------------------------
+
+
+def test_module_level_devices_aliases_microphone() -> None:
+    """decibri.devices() is an alias for Microphone.devices() (input devices)."""
+    result = decibri.devices()
+    assert isinstance(result, list)
+    expected = decibri.Microphone.devices()
+    assert len(result) == len(expected)
+    # DeviceInfo objects don't implement __eq__; compare by stable id field.
+    assert [d.id for d in result] == [d.id for d in expected]
+
+
+def test_module_level_output_devices_aliases_speaker() -> None:
+    """decibri.output_devices() is an alias for Speaker.devices() (output devices)."""
+    result = decibri.output_devices()
+    assert isinstance(result, list)
+    expected = decibri.Speaker.devices()
+    assert len(result) == len(expected)
+    assert [d.id for d in result] == [d.id for d in expected]
+
+
+def test_module_level_version_aliases_microphone() -> None:
+    """decibri.version() is an alias for Microphone.version()."""
+    result = decibri.version()
+    assert hasattr(result, "decibri")
+    assert hasattr(result, "audio_backend")
+    assert hasattr(result, "binding")
+    expected = decibri.Microphone.version()
+    assert result.decibri == expected.decibri
+    assert result.audio_backend == expected.audio_backend
+    assert result.binding == expected.binding
 
 
 # ---------------------------------------------------------------------------

@@ -92,6 +92,32 @@ def async_speaker(**kwargs: Any) -> AsyncSpeaker:
     return AsyncSpeaker(**kwargs)
 
 
+def devices() -> list[DeviceInfo]:
+    """List available audio input devices.
+
+    Module-level convenience for ``Microphone.devices()``. Returns input
+    devices only; for output devices use ``decibri.output_devices()``.
+    To list both, concatenate the two.
+    """
+    return Microphone.devices()
+
+
+def output_devices() -> list[OutputDeviceInfo]:
+    """List available audio output devices.
+
+    Module-level convenience for ``Speaker.devices()``.
+    """
+    return Speaker.devices()
+
+
+def version() -> VersionInfo:
+    """Return version info for decibri, the audio backend, and the binding.
+
+    Module-level convenience for ``Microphone.version()``.
+    """
+    return Microphone.version()
+
+
 __all__ = [
     # Public Python wrapper classes (sync)
     "Microphone",
@@ -104,6 +130,10 @@ __all__ = [
     "speaker",
     "async_microphone",
     "async_speaker",
+    # Module-level convenience functions (Phase 7.5)
+    "devices",
+    "output_devices",
+    "version",
     # Internal pyclasses (advanced use)
     "MicrophoneBridge",
     "SpeakerBridge",
