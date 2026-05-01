@@ -75,8 +75,8 @@ async def test_async_output_construct_start_stop() -> None:
 async def test_async_decibri_read_returns_bytes() -> None:
     """A successful read returns bytes of the expected shape.
 
-    Skipped without audio hardware. Default frame size is 512 samples at
-    16 kHz mono int16 = 1024 bytes; this test asserts the chunk is non-
+    Skipped without audio hardware. Default frame size is 1600 samples at
+    16 kHz mono int16 = 3200 bytes; this test asserts the chunk is non-
     empty bytes and lets the exact length be implementation-defined.
     """
     decibri = AsyncMicrophone(vad=False)

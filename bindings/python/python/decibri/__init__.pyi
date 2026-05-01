@@ -50,7 +50,7 @@ __all__: list[str]
 def microphone(
     sample_rate: int = 16000,
     channels: int = 1,
-    frames_per_buffer: int = 512,
+    frames_per_buffer: int = 1600,
     format: str = "int16",
     device: int | str | None = None,
     vad: bool = False,
@@ -70,7 +70,7 @@ def speaker(
 def async_microphone(
     sample_rate: int = 16000,
     channels: int = 1,
-    frames_per_buffer: int = 512,
+    frames_per_buffer: int = 1600,
     format: str = "int16",
     device: int | str | None = None,
     vad: bool = False,

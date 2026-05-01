@@ -208,7 +208,7 @@ class Microphone:
     """Audio capture with VAD policy.
 
     Example:
-        with Microphone(sample_rate=16000, channels=1, frames_per_buffer=512) as d:
+        with Microphone(sample_rate=16000, channels=1, frames_per_buffer=1600) as d:
             for chunk in d:
                 if d.is_speaking:
                     process(chunk)
@@ -230,7 +230,7 @@ class Microphone:
         self,
         sample_rate: int = 16000,
         channels: int = 1,
-        frames_per_buffer: int = 512,
+        frames_per_buffer: int = 1600,
         format: str = "int16",
         device: int | str | None = None,
         vad: bool = False,
