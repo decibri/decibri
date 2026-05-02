@@ -3,7 +3,18 @@ name: Release
 on:
   push:
     tags:
+      # Rust core / npm release tags. Phase 10 (2026-05-02) added the
+      # 'python-v*' negative pattern to exclude Python wheel tags
+      # (python-v0.1.0a1, python-v0.1.0, ...) which now route exclusively
+      # to publish-pypi.yml. Tag namespacing per LD-10-11 keeps both
+      # workflows' preflight gates intact: this workflow asserts the
+      # tag matches the workspace Cargo.toml + npm package.json versions
+      # (job below); publish-pypi.yml has its own Trusted Publisher
+      # OIDC trust chain. Without this exclusion, a Python tag would fire
+      # both workflows and release.yml's preflight would hard-fail on the
+      # version mismatch.
       - 'v*'
+      - '!python-v*'
 
 permissions:
   contents: write
@@ -324,7 +335,7 @@ jobs:
       # Copy README into npm package directory before publish. Relocated
       # upward from its previous position (between platform-package and
       # main-package publishes) so the `Verify npm package contents` gate
-      # below sees the main package fully staged — otherwise verify_pack
+      # below sees the main package fully staged. Otherwise verify_pack
       # would fail on the main package with ":README.md missing".
       - name: Copy README for npm package
         run: cp README.md npm/decibri/README.md

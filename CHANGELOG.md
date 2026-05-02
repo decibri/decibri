@@ -49,6 +49,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - New `DecibriError::ForkAfterOrtInit { init_pid: u32, current_pid: u32 }` variant. Permitted by `#[non_exhaustive]`; existing variants unchanged.
 - New `bindings/python/tests/test_repr.py` (8 tests) and `bindings/python/tests/test_fork_safety.py` (3 Linux-only tests gated by `pytest.mark.skipif(sys.platform != "linux")` + `requires_bundled_ort`). 5 new tests appended to `tests/test_async.py` for `AsyncMicrophone.open` / `AsyncSpeaker.open` behavior.
 
+### Python binding (0.1.0a1) - Phase 10 pre-publish hardening
+
+#### Internal
+
+- Phase 10: pre-publish hardening. New publish workflow at [`.github/workflows/publish-pypi.yml`](.github/workflows/publish-pypi.yml) routes prerelease tags (`python-v0.1.0a1`, `python-v0.1.0b1`, `python-v0.1.0rc1`) to TestPyPI and stable tags (`python-v0.1.0`) to production PyPI via Trusted Publisher OIDC (no API tokens). Build-and-validate matrix across 5 platforms (ubuntu-latest, ubuntu-24.04-arm, macos-14, macos-13, windows-latest) gated by abi3audit (`--strict --assume-minimum-abi3 3.10`) and an in-job wheel install-test in a clean venv with `CI=true` (Phase 9 conftest auto-skips hardware-gated tests). PEP 740 attestations generated automatically via Sigstore + OIDC (`pypa/gh-action-pypi-publish v1` default for OIDC publishes; explicit `attestations: true` for clarity).
+- Tag namespacing per LD-10-11 (Option 1): Python wheel tags use the `python-v*` prefix to disambiguate from Rust core / npm tags (`v3.4.0`, `v3.5.0`, ...). [`.github/workflows/release.yml`](.github/workflows/release.yml) tag filter updated to exclude `python-v*` (`'!python-v*'` negative pattern) so the npm + crates.io workflow does not fire on Python wheel tags. Both workflows keep their preflight gates intact.
+- New [`bindings/python/docs/PUBLISH.md`](bindings/python/docs/PUBLISH.md) documents tag patterns, the end-to-end publish flow, the Trusted Publisher setup (already configured), the `workflow_dispatch` dry-run procedure, and failure recovery for abi3audit / install-test / OIDC rejection cases.
+- No source code changes; no Rust core changes; no Python binding changes; no test additions. Phase 10 is CI infrastructure only.
+
 ## [3.4.0] - 2026-05-02
 
 ### Added
