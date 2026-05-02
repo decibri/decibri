@@ -71,8 +71,8 @@ docker run --rm decibri:base
 Verified output (Docker Desktop 4.71, manylinux_2_34 wheel):
 
 ```
-decibri 0.1.0a1
-VersionInfo(decibri='3.4.0', audio_backend='cpal 0.17', binding='0.1.0a1')
+decibri 0.1.0
+VersionInfo(decibri='3.4.0', audio_backend='cpal 0.17', binding='0.1.0')
 ```
 
 Image size: ~255 MB (`python:3.12-slim` ~50 MB + libasound2 ~3 MB + decibri wheel including bundled ORT ~50 MB + Python stdlib runtime). Well under typical production image budgets.
@@ -143,7 +143,7 @@ Expected output on a Linux host with at least one audio device (build verified o
 input_devices count: <N>
   - DeviceInfo(index=0, name='hw:0,0', ..., is_default=true)
   - ...
-decibri version: VersionInfo(decibri='3.4.0', audio_backend='cpal 0.17', binding='0.1.0a1')
+decibri version: VersionInfo(decibri='3.4.0', audio_backend='cpal 0.17', binding='0.1.0')
 ```
 
 If `input_devices count: 1` and the single device id is `alsa:null`, audio passthrough is incomplete; check the three flags above.

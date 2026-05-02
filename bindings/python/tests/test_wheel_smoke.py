@@ -29,7 +29,7 @@ def test_import_decibri() -> None:
     """The package imports successfully from the installed wheel."""
     assert decibri is not None
     assert hasattr(decibri, "__version__")
-    assert decibri.__version__ == "0.1.0a1"
+    assert decibri.__version__ == "0.1.0"
 
 
 def test_construct_decibri_default() -> None:

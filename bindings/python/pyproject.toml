@@ -4,7 +4,7 @@ build-backend = "maturin"
 
 [project]
 name = "decibri"
-version = "0.1.0a1"
+version = "0.1.0"
 description = "Cross-platform audio capture, output, and voice activity detection"
 readme = "README.md"
 requires-python = ">=3.10"

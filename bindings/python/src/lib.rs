@@ -423,7 +423,7 @@ fn build_version_info() -> VersionInfo {
     VersionInfo {
         decibri: env!("CARGO_PKG_VERSION").to_string(),
         audio_backend: format!("cpal {}", CPAL_VERSION),
-        binding: "0.1.0a1".to_string(),
+        binding: "0.1.0".to_string(),
     }
 }
 
