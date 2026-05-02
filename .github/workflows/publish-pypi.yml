@@ -24,7 +24,7 @@ name: Publish to PyPI
 # Workflow filename is locked at TPP registration time; renaming requires
 # manual TPP delete + re-add on both registries (LD-10-1).
 
-on:
+"on":
   push:
     tags:
       - 'python-v*'
