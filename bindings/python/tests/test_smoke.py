@@ -116,14 +116,19 @@ def test_exception_intermediate_parents_importable() -> None:
 
 
 def test_public_surface_count() -> None:
-    """The public ``__all__`` enumerates the trimmed top-level surface (17 names).
+    """The public ``__all__`` enumerates the top-level surface (18 names).
 
-    Phase 7.7 reshaped the public surface:
+    Phase 7.7 reshaped the public surface (17 names at lock):
       - Item A1 removed four lowercase factory functions
         (microphone, speaker, async_microphone, async_speaker).
       - Item B2 renamed `devices` -> `input_devices`.
       - Item B7 added `DeviceError` (catch-target intermediate).
       - Item B1 added `Chunk` (audio chunk with metadata).
+
+    Phase 9 Item C7 added `ForkAfterOrtInit` (5th exception entry):
+    additive single-class growth, surfaced because users are likely to
+    catch it by name to distinguish "use spawn start method" from other
+    DecibriError causes.
 
     Final composition: 2 sync wrappers (Microphone, Speaker) + 2 async
     wrappers (AsyncMicrophone, AsyncSpeaker) + 3 module-level
@@ -131,10 +136,11 @@ def test_public_surface_count() -> None:
     2 file convenience functions (record_to_file, async_record_to_file)
     + 3 value types (DeviceInfo, OutputDeviceInfo, VersionInfo)
     + 1 audio chunk dataclass (Chunk)
-    + 4 exception roots (DecibriError, DeviceError, OrtError, OrtPathError)
-    = 2 + 2 + 3 + 2 + 3 + 1 + 4 = 17.
+    + 5 exception entries (DecibriError, DeviceError, ForkAfterOrtInit,
+      OrtError, OrtPathError)
+    = 2 + 2 + 3 + 2 + 3 + 1 + 5 = 18.
     """
-    assert len(decibri.__all__) == 17
+    assert len(decibri.__all__) == 18
     for name in decibri.__all__:
         assert hasattr(decibri, name), f"__all__ lists {name!r} but it is not exported"
 

@@ -16,6 +16,7 @@ from decibri.exceptions import DeviceEnumerationFailed as DeviceEnumerationFaile
 from decibri.exceptions import DeviceError as DeviceError
 from decibri.exceptions import DeviceIndexOutOfRange as DeviceIndexOutOfRange
 from decibri.exceptions import DeviceNotFound as DeviceNotFound
+from decibri.exceptions import ForkAfterOrtInit as ForkAfterOrtInit
 from decibri.exceptions import FramesPerBufferOutOfRange as FramesPerBufferOutOfRange
 from decibri.exceptions import InvalidFormat as InvalidFormat
 from decibri.exceptions import MultipleDevicesMatch as MultipleDevicesMatch

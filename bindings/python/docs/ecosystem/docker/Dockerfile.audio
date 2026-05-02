@@ -1,0 +1,88 @@
+# Dockerfile.audio: decibri in an audio-passthrough container.
+#
+# The image itself is identical in structure to Dockerfile.base; the audio
+# integration is supplied at `docker run` time via three flags. Documented
+# inline:
+#
+#   docker run --rm \
+#       --device /dev/snd:/dev/snd \
+#       --group-add audio \
+#       -e ALSA_PCM_CARD=0 \
+#       <image>
+#
+# Flag rationale:
+#   --device /dev/snd       expose the host ALSA device nodes.
+#   --group-add audio       grant the container user membership of the
+#                           audio group. Required when the image runs as
+#                           a non-root user (most production images do).
+#                           Use `--group-add $(getent group audio | cut -d: -f3)`
+#                           on hosts whose audio gid does not match the
+#                           default 29.
+#   -e ALSA_PCM_CARD=0      pin cpal to the raw ALSA hardware device
+#                           rather than the `default` PCM, which the host
+#                           sound server (PipeWire / PulseAudio) holds
+#                           exclusively. Alternative: pass `device="hw:0"`
+#                           to `Microphone(...)` at the Python layer.
+#
+# Platform constraint: this Dockerfile builds and the image runs anywhere
+# Docker runs, but `--device /dev/snd` requires a Linux host. Docker
+# Desktop on macOS or Windows runs containers in a Linux VM that has no
+# bridge to the host audio device, so the audio scenario is end-to-end
+# verifiable on Linux hosts only.
+#
+# Build context: project root.
+#   docker build -t decibri:audio -f Dockerfile.audio .
+
+ARG ORT_VERSION=1.24.4
+
+# ---------- Stage 1: build the wheel ----------
+FROM rust:1-bookworm AS builder
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        python3 python3-pip python3-venv pkg-config libasound2-dev curl patchelf \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /src
+COPY . /src
+
+ARG ORT_VERSION
+ENV ORT_VERSION=${ORT_VERSION}
+RUN ORT_TARBALL="onnxruntime-linux-x64-${ORT_VERSION}.tgz" \
+    && curl -sL --retry 3 --retry-delay 2 \
+        -o /tmp/ort.tgz \
+        "https://github.com/microsoft/onnxruntime/releases/download/v${ORT_VERSION}/${ORT_TARBALL}" \
+    && tar -xzf /tmp/ort.tgz -C /tmp \
+    && mkdir -p /src/bindings/python/python/decibri/_ort \
+    && cp -L "/tmp/onnxruntime-linux-x64-${ORT_VERSION}/lib/libonnxruntime.so" \
+        /src/bindings/python/python/decibri/_ort/libonnxruntime.so \
+    && cp "/tmp/onnxruntime-linux-x64-${ORT_VERSION}/lib/libonnxruntime_providers_shared.so" \
+        /src/bindings/python/python/decibri/_ort/
+
+RUN python3 -m venv /opt/build-venv \
+    && /opt/build-venv/bin/pip install --upgrade pip maturin \
+    && cd /src/bindings/python \
+    && /opt/build-venv/bin/maturin build --release
+
+# ---------- Stage 2: slim runtime ----------
+FROM python:3.12-slim AS runtime
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        libasound2 alsa-utils \
+    && rm -rf /var/lib/apt/lists/*
+
+# Run as a non-root user to mirror production deployment patterns. The
+# `--group-add audio` flag at `docker run` time grants this user audio
+# group membership at container start.
+RUN useradd --create-home --shell /usr/sbin/nologin --uid 1000 decibri
+
+COPY --from=builder /src/target/wheels/*manylinux*.whl /tmp/
+RUN pip install --no-cache-dir /tmp/decibri-*.whl && rm /tmp/decibri-*.whl
+
+USER decibri
+WORKDIR /home/decibri
+
+# Audio smoke check: enumerate devices, expect at least one entry when
+# /dev/snd is passed through and audio group is granted. If devices is [],
+# audio passthrough is incomplete and the operator should consult the
+# three-flag documentation in docs/ecosystem/docker.md.
+CMD ["python", "-c", "import decibri\ndevs = decibri.input_devices()\nprint('input_devices count:', len(devs))\nfor d in devs:\n    print('  -', d)\nprint('decibri version:', decibri.version())\n"]

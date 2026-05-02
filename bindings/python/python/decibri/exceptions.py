@@ -264,3 +264,30 @@ class OrtPathInvalid(OrtPathError):
         super().__init__(msg)
         self.path = path
         self.reason = reason
+
+
+# Phase 9 Item C7: fork-safety detection (Linux). Direct DecibriError
+# subclass, NOT under OrtError, because this is a usage error (user
+# initialized ORT in parent then forked) rather than an ORT-internal
+# error. See LD-9-9. Catch via `except DecibriError` continues to work.
+
+
+class ForkAfterOrtInit(DecibriError):
+    """Raised when ONNX Runtime is used in a child process after being
+    initialized in the parent.
+
+    Python's default ``fork`` start method on Linux duplicates the
+    parent's memory into the child, but ONNX Runtime's internal state is
+    not safe to share across forked processes. Using a SileroVad-enabled
+    Microphone in a forked child produces silent wrong answers or
+    segfaults; decibri detects the pid mismatch at the start of every
+    Silero inference call and raises this exception instead.
+
+    Remediation:
+        - Set ``multiprocessing.set_start_method('spawn')`` before
+          spawning workers, OR
+        - Construct ``Microphone(vad='silero')`` inside each child
+          process, never in the parent before fork.
+
+    See ``docs/ecosystem/multiprocessing.md`` for verified examples.
+    """

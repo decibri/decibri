@@ -1,0 +1,55 @@
+# Dockerfile.headless: decibri in a no-audio container.
+#
+# Demonstrates the headless pattern: no `--device /dev/snd` passthrough,
+# no audio group, no PulseAudio socket. `decibri.input_devices()` returns
+# [] cleanly; constructing `Microphone()` raises `NoMicrophoneFound`.
+# Suitable for batch processors, CI runners, VAD-only pipelines that
+# operate on pre-recorded audio bytes.
+#
+# Build context: project root.
+#   docker build -t decibri:headless -f Dockerfile.headless .
+
+ARG ORT_VERSION=1.24.4
+
+# ---------- Stage 1: build the wheel ----------
+FROM rust:1-bookworm AS builder
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        python3 python3-pip python3-venv pkg-config libasound2-dev curl patchelf \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /src
+COPY . /src
+
+ARG ORT_VERSION
+ENV ORT_VERSION=${ORT_VERSION}
+RUN ORT_TARBALL="onnxruntime-linux-x64-${ORT_VERSION}.tgz" \
+    && curl -sL --retry 3 --retry-delay 2 \
+        -o /tmp/ort.tgz \
+        "https://github.com/microsoft/onnxruntime/releases/download/v${ORT_VERSION}/${ORT_TARBALL}" \
+    && tar -xzf /tmp/ort.tgz -C /tmp \
+    && mkdir -p /src/bindings/python/python/decibri/_ort \
+    && cp -L "/tmp/onnxruntime-linux-x64-${ORT_VERSION}/lib/libonnxruntime.so" \
+        /src/bindings/python/python/decibri/_ort/libonnxruntime.so \
+    && cp "/tmp/onnxruntime-linux-x64-${ORT_VERSION}/lib/libonnxruntime_providers_shared.so" \
+        /src/bindings/python/python/decibri/_ort/
+
+RUN python3 -m venv /opt/build-venv \
+    && /opt/build-venv/bin/pip install --upgrade pip maturin \
+    && cd /src/bindings/python \
+    && /opt/build-venv/bin/maturin build --release
+
+# ---------- Stage 2: slim runtime, no audio passthrough expected ----------
+FROM python:3.12-slim AS runtime
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        libasound2 \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY --from=builder /src/target/wheels/*manylinux*.whl /tmp/
+RUN pip install --no-cache-dir /tmp/decibri-*.whl && rm /tmp/decibri-*.whl
+
+# Headless smoke check: enumerate devices (expected []), then attempt to
+# construct a Microphone (expected NoMicrophoneFound). Both outcomes are
+# clean failures, not hangs or undefined behavior.
+CMD ["python", "-c", "import decibri\nprint('input_devices:', decibri.input_devices())\nprint('output_devices:', decibri.output_devices())\ntry:\n    mic = decibri.Microphone()\n    print('Microphone() constructed UNEXPECTEDLY in headless container')\nexcept decibri.NoMicrophoneFound as exc:\n    print('Microphone() -> NoMicrophoneFound (clean failure):', exc)\nexcept decibri.DecibriError as exc:\n    print('Microphone() ->', type(exc).__name__, ':', exc)\n"]

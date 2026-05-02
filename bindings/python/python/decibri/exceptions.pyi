@@ -54,3 +54,6 @@ class OrtLoadFailed(OrtPathError):
 class OrtPathInvalid(OrtPathError):
     path: str
     reason: str
+
+
+class ForkAfterOrtInit(DecibriError): ...
