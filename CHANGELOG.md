@@ -9,54 +9,39 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-### Python binding (0.1.0a1) - Phase 7.7 final API polish
+## [0.1.0a1] - 2026-05-03
 
-#### Removed
+### Python binding
 
-- Lowercase factory functions: `decibri.microphone()`, `decibri.speaker()`, `decibri.async_microphone()`, `decibri.async_speaker()`. Use the corresponding class constructors `Microphone()`, `Speaker()`, `AsyncMicrophone()`, `AsyncSpeaker()` instead. The factories were thin pass-throughs with no precedent in comparable libraries (gold-standard cohort survey: 0 of 10).
-- `MicrophoneBridge` and `SpeakerBridge` no longer accessible at the top-level `decibri.<X>` namespace. Bridges are internal and remain available at `decibri._decibri.<X>` for advanced users. Symmetric with the never-public `AsyncMicrophoneBridge` and `AsyncSpeakerBridge`.
-
-#### Changed
-
-- `decibri.devices()` renamed to `decibri.input_devices()` for symmetry with `decibri.output_devices()`. `Microphone.devices()` staticmethod renamed to `Microphone.input_devices()`; `Speaker.devices()` renamed to `Speaker.output_devices()`. Async equivalents follow the same shape.
-- `Microphone.vad_probability` / `AsyncMicrophone.vad_probability` property renamed to `vad_score`. Mode-agnostic (returns the Silero probability in `vad="silero"` mode and the normalized RMS energy in `vad="energy"` mode); previous name was a misnomer in energy mode. Bridge keeps `vad_probability` for cross-binding consistency per LD11.
-- `Microphone(numpy=...)` / `AsyncMicrophone(numpy=...)` kwarg renamed to `as_ndarray=...`. Reads correctly at the call site (`Microphone(as_ndarray=True)` parses as "use ndarray output"). Bridge keeps `numpy` per LD11.
-- `Microphone.close()` / `AsyncMicrophone.close()` / `Speaker.close()` / `AsyncSpeaker.close()` are now permanent aliases for `stop()`. Removed the prior "may diverge in future" hedge; the two methods are guaranteed equivalent across all decibri versions.
+The first published Python wheel of decibri. Alpha release to TestPyPI for publish-workflow validation. Production PyPI publish is `0.1.0`.
 
 #### Added
 
-- `Chunk` dataclass and `Microphone.read_with_metadata()` / `iter_with_metadata()` (and async equivalents). Returns a frozen `Chunk` with `.data`, `.timestamp`, `.sequence`, `.is_speaking`, `.vad_score` instead of a naked `bytes | ndarray`. Additive; `read()` keeps its current signature.
-- `DeviceError` catch-target intermediate (subclass of `DecibriError`, parent of all eight device-related exceptions: `DeviceNotFound`, `OutputDeviceNotFound`, `MultipleDevicesMatch`, `DeviceIndexOutOfRange`, `NoMicrophoneFound`, `NoOutputDeviceFound`, `NotAnInputDevice`, `DeviceEnumerationFailed`). Symmetric with `OrtError` and `OrtPathError`. Existing catches via `DecibriError` remain unchanged (parent chain preserved).
-- Re-entry contract documented and pinned by tests on `Microphone.start()`, `Speaker.start()`, `AsyncMicrophone.start()`, `AsyncSpeaker.start()`. Calling `start()` after `stop()` / `close()` reconstructs the underlying audio stream cleanly; VAD state resets on each new `start()`. Calling `start()` while already started raises `AlreadyRunning`.
-
-### Python binding (0.1.0a1) - Phase 9 ecosystem coexistence
-
-#### Added
-
-- `__repr__` on `Microphone`, `Speaker`, `AsyncMicrophone`, and `AsyncSpeaker` (Phase 9 Item A4). Shows construction parameters plus current `is_open` / `is_playing` state (e.g., `Microphone(sample_rate=16000, channels=1, dtype='int16', frames_per_buffer=1600, device=None, vad=False, is_open=False)`). Closes the Jupyter auto-display gap.
-- `AsyncMicrophone.open(**kwargs)` and `AsyncSpeaker.open(**kwargs)` async classmethod factories (Phase 9 Item A6). Dispatch synchronous construction to the default `ThreadPoolExecutor` via `loop.run_in_executor`, returning the constructed instance awaitably. Recommended in async contexts when `vad="silero"` is enabled (the synchronous constructor performs 100 to 500 ms of ORT model loading inline). Synchronous constructors remain supported and unchanged.
-- `ForkAfterOrtInit(DecibriError)` exception (Phase 9 Item C7). Raised on Linux when `Microphone(vad="silero")` is constructed in a parent process and then used in a forked child. Replaces silent ONNX Runtime corruption with a clean exception carrying a self-documenting remediation message (use `multiprocessing.set_start_method('spawn')` or construct VAD inside the worker). Direct `DecibriError` subclass, NOT under `OrtError` (it is a usage error rather than an ORT-internal error). `__all__` count: 17 -> 18.
-- Three docs files under `bindings/python/docs/ecosystem/`: `jupyter.md` (top-level await coexistence; auto-display behavior; kernel restart safety; logging guidance; VAD-load timing reference); `docker.md` (verified Dockerfiles for base / headless / audio scenarios; the three required flags for audio passthrough; the headless ALSA `null` device nuance; image size budget; PipeWire / PulseAudio coexistence); `multiprocessing.md` (spawn vs fork guidance; `ForkAfterOrtInit` raise behavior; pickling failure mode; recommended worker pattern; decision matrix).
-- Three reference Dockerfiles at `bindings/python/docs/ecosystem/docker/`: `Dockerfile.base`, `Dockerfile.headless`, `Dockerfile.audio`. Multi-stage builds (Rust + maturin builder stage; `python:3.12-slim` runtime stage) verified against Docker Desktop 4.71.
-
-#### Changed
-
-- `AsyncMicrophone.__init__` and `AsyncSpeaker.__init__` docstrings now point users at `AsyncMicrophone.open()` / `AsyncSpeaker.open()` for async contexts, replacing the previous "0.2.0+ roadmap" note.
+- Public API: `Microphone`, `Speaker`, `AsyncMicrophone`, `AsyncSpeaker` classes (Phase 7.5 class rename; Phase 9 async-open factories).
+- Module-level helpers: `input_devices()`, `output_devices()`, `version()`, `record_to_file()`, `async_record_to_file()`.
+- Value types: `DeviceInfo`, `OutputDeviceInfo`, `VersionInfo`, `Chunk`.
+- Exception hierarchy at `decibri.exceptions` (32 classes; 5 catch-target intermediates surfaced at `decibri.<X>`: `DecibriError`, `DeviceError`, `OrtError`, `OrtPathError`, `ForkAfterOrtInit`).
+- VAD support: `vad="energy"` (RMS threshold) and `vad="silero"` (Silero ONNX, bundled). `vad_score` property returns a `[0, 1]` value mode-agnostically; `is_speaking` returns the boolean above-threshold view.
+- NumPy ndarray return support via `as_ndarray=True` (install with `pip install decibri[numpy]`).
+- Bundled Silero VAD ONNX model (~2.3 MB) shipped in the wheel. No downloads or API keys required.
+- Bundled ONNX Runtime dylib per platform (~15-20 MB; Linux x64, Linux ARM64, macOS Apple Silicon, Windows x64). No system dependency on `pip install onnxruntime`.
+- Async `AsyncMicrophone.open()` and `AsyncSpeaker.open()` factories that dispatch synchronous ORT init off the event loop via `loop.run_in_executor`. Recommended for `vad="silero"` in async contexts (Phase 9).
+- `__repr__` on `Microphone`, `Speaker`, `AsyncMicrophone`, `AsyncSpeaker` showing construction parameters plus runtime state (Phase 9; closes the Jupyter auto-display gap).
+- `ForkAfterOrtInit` exception raised on Linux when `Microphone(vad="silero")` is constructed in a parent process and then used in a forked child (Phase 9). Carries a remediation message pointing at `multiprocessing.set_start_method('spawn')`.
+- `Chunk` dataclass and `Microphone.read_with_metadata()` / `iter_with_metadata()` returning a frozen `Chunk` with `.data`, `.timestamp`, `.sequence`, `.is_speaking`, `.vad_score`. Additive; `read()` keeps its current signature.
+- Re-entry contract on `start()` / `stop()` / `close()` for all four wrapper classes pinned by tests. Calling `start()` after `stop()` reconstructs the stream cleanly; VAD state resets per `start()`. `close()` is a permanent alias for `stop()`.
+- Ecosystem coexistence docs at `bindings/python/docs/ecosystem/{jupyter,docker,multiprocessing}.md` plus three reference Dockerfiles under `docker/` (Phase 9).
 
 #### Internal
 
-- New `static ORT_INIT_PID: OnceLock<u32>` in `crates/decibri/src/vad.rs` paired with the existing `ORT_INIT`. Captured inside the ORT init success path; compared at every `SileroVad::process()` call by the new `check_pid_for_ort()` helper. Detects Linux `fork()`-after-init silent ORT corruption and raises `DecibriError::ForkAfterOrtInit { init_pid, current_pid }`.
-- New `DecibriError::ForkAfterOrtInit { init_pid: u32, current_pid: u32 }` variant. Permitted by `#[non_exhaustive]`; existing variants unchanged.
-- New `bindings/python/tests/test_repr.py` (8 tests) and `bindings/python/tests/test_fork_safety.py` (3 Linux-only tests gated by `pytest.mark.skipif(sys.platform != "linux")` + `requires_bundled_ort`). 5 new tests appended to `tests/test_async.py` for `AsyncMicrophone.open` / `AsyncSpeaker.open` behavior.
-
-### Python binding (0.1.0a1) - Phase 10 pre-publish hardening
-
-#### Internal
-
-- Phase 10: pre-publish hardening. New publish workflow at [`.github/workflows/publish-pypi.yml`](.github/workflows/publish-pypi.yml) routes prerelease tags (`python-v0.1.0a1`, `python-v0.1.0b1`, `python-v0.1.0rc1`) to TestPyPI and stable tags (`python-v0.1.0`) to production PyPI via Trusted Publisher OIDC (no API tokens). Build-and-validate matrix across 5 platforms (ubuntu-latest, ubuntu-24.04-arm, macos-14, macos-13, windows-latest) gated by abi3audit (`--strict --assume-minimum-abi3 3.10`) and an in-job wheel install-test in a clean venv with `CI=true` (Phase 9 conftest auto-skips hardware-gated tests). PEP 740 attestations generated automatically via Sigstore + OIDC (`pypa/gh-action-pypi-publish v1` default for OIDC publishes; explicit `attestations: true` for clarity).
-- Tag namespacing per LD-10-11 (Option 1): Python wheel tags use the `python-v*` prefix to disambiguate from Rust core / npm tags (`v3.4.0`, `v3.5.0`, ...). [`.github/workflows/release.yml`](.github/workflows/release.yml) tag filter updated to exclude `python-v*` (`'!python-v*'` negative pattern) so the npm + crates.io workflow does not fire on Python wheel tags. Both workflows keep their preflight gates intact.
-- New [`bindings/python/docs/PUBLISH.md`](bindings/python/docs/PUBLISH.md) documents tag patterns, the end-to-end publish flow, the Trusted Publisher setup (already configured), the `workflow_dispatch` dry-run procedure, and failure recovery for abi3audit / install-test / OIDC rejection cases.
-- No source code changes; no Rust core changes; no Python binding changes; no test additions. Phase 10 is CI infrastructure only.
+- 4-platform wheel matrix: Linux x64 (manylinux_2_28 container build), Linux ARM64, macOS Apple Silicon, Windows x64 (Phase 10; `macos-13` Intel Mac dropped per LD-10-12 Apple platform deprecation).
+- Trusted Publisher OIDC publish workflow at `.github/workflows/publish-pypi.yml` (Phase 10). Prerelease tags (`python-v*a*`, `python-v*b*`, `python-v*rc*`) route to TestPyPI; stable tags (`python-v\d+.\d+.\d+`) route to production PyPI.
+- abi3audit (`--strict --assume-minimum-abi3 3.10`), auditwheel, and delocate gates in the publish pipeline (Phase 10 LD-10-3 / LD-10-4).
+- PEP 740 attestations generated via Sigstore + Fulcio in the publish job (Phase 10 LD-10-5).
+- In-job wheel install-test in a clean venv on each matrix platform with `CI=true` (Phase 7 install gate; Phase 9 conftest auto-skips hardware-gated tests).
+- `OnnxSession` trait abstraction in Rust core (Phase 8). `crates/decibri` 3.4.0 introduces `pub(crate) trait OnnxSession`; `SileroVad` consumes it through `Box<dyn OnnxSession>`. Future backends (CoreML, TFLite, GPU EPs) plug in additively at the `decibri-onnx` workspace split planned for 4.0.
+- New `DecibriError::ForkAfterOrtInit { init_pid, current_pid }` variant in `crates/decibri/src/error.rs` (Phase 9). Permitted by `#[non_exhaustive]`; existing variants unchanged.
+- `bindings/python/docs/PUBLISH.md` documents the publish flow, Trusted Publisher setup, `workflow_dispatch` dry-run procedure, and failure recovery for abi3audit / install-test / OIDC rejection cases.
 
 ## [3.4.0] - 2026-05-02
 
