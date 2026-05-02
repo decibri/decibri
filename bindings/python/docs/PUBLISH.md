@@ -31,7 +31,7 @@ All `python-v*` patterns are PEP 440 compliant (the `python-v` prefix is workflo
    git push origin python-v0.1.0a1
    ```
 5. CI runs `publish-pypi.yml`:
-   - `build-and-validate` matrix builds wheels across 5 platforms (ubuntu-latest, ubuntu-24.04-arm, macos-14, macos-13, windows-latest)
+   - `build-and-validate` matrix builds wheels across 4 platforms (ubuntu-latest, ubuntu-24.04-arm, macos-14, windows-latest). x86_64-apple-darwin (macos-13) was dropped 2026-05-03 because the Intel Mac platform is deprecated (last shipped 2020-2022; macOS 26 dropped support for many Intel models) and the macos-13 GitHub-hosted runner pool is severely under-provisioned. Intel Mac users can install from source via `pip install decibri --no-binary :all:`.
    - Each platform: maturin build, auditwheel/delocate repair, abi3audit gate, install-test in clean venv with `CI=true`, upload artifact
    - `fail-fast: true` means any platform failure blocks both publish jobs
 6. Tag-pattern routing kicks in:
@@ -79,10 +79,10 @@ For workflow file changes pre-tag, run the workflow manually from the Actions UI
 1. Push the workflow file change to `development` (or `main`).
 2. Navigate to `https://github.com/decibri/decibri/actions/workflows/publish-pypi.yml`.
 3. Click "Run workflow" -> select the branch -> confirm.
-4. The `build-and-validate` matrix runs across all 5 platforms.
+4. The `build-and-validate` matrix runs across all 4 platforms.
 5. The `publish-testpypi` and `publish-pypi` jobs both skip cleanly because their `if:` conditions key on `github.event_name == 'push'`.
 
-If `build-and-validate` passes on all 5 platforms during a manual dispatch, the workflow file is wired correctly. If a platform fails, fix before tagging.
+If `build-and-validate` passes on all 4 platforms during a manual dispatch, the workflow file is wired correctly. If a platform fails, fix before tagging.
 
 ## Failure recovery
 
@@ -143,7 +143,7 @@ Note: deleting a tag does NOT undo a successful PyPI publish. If the wheel alrea
 
 Phase 11 (next phase) ships the first real publishes:
 
-1. Push `python-v0.1.0a1`. CI runs build-and-validate (5 platforms); abi3audit + install-test gate; `publish-testpypi` runs. Wheel lands on TestPyPI.
+1. Push `python-v0.1.0a1`. CI runs build-and-validate (4 platforms); abi3audit + install-test gate; `publish-testpypi` runs. Wheel lands on TestPyPI.
 2. Manual validation: in a fresh local venv, run `pip install --index-url https://test.pypi.org/simple/ --extra-index-url https://pypi.org/simple/ decibri==0.1.0a1` and exercise the public API (sync construct, async construct, VAD path).
 3. If issues surface: fix on `main`, bump to `python-v0.1.0a2`, push, repeat.
 4. When the alpha is clean and the user-facing surface is finalized, push `python-v0.1.0`. CI runs build-and-validate; the `publish-pypi` job blocks on reviewer approval; on approval, the wheel ships to production PyPI.

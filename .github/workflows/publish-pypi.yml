@@ -73,10 +73,13 @@ jobs:
             target: aarch64-apple-darwin
             ort_platform_slug: osx-arm64
             ort_ext: tgz
-          - os: macos-13
-            target: x86_64-apple-darwin
-            ort_platform_slug: osx-x86_64
-            ort_ext: tgz
+          # x86_64-apple-darwin (macos-13) dropped 2026-05-03. Apple shipped
+          # the last Intel Macs between 2020-2022; macOS 26 (2025) dropped
+          # support for many Intel models. Phase 10's first workflow_dispatch
+          # validation showed the macos-13 GitHub-hosted runner pool is
+          # severely under-provisioned (12+ minute queue times). Intel Mac
+          # users (a vanishing population) can install from source via
+          # `pip install decibri --no-binary :all:`.
           - os: windows-latest
             target: x86_64-pc-windows-msvc
             ort_platform_slug: win-x64
@@ -341,7 +344,7 @@ jobs:
               -v
 
       - name: Upload validated wheel artifact
-        uses: actions/upload-artifact@v5
+        uses: actions/upload-artifact@v7
         with:
           name: wheel-${{ matrix.target }}
           path: target/wheels/decibri-*.whl
