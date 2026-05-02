@@ -488,6 +488,16 @@ class Microphone:
         # Increments on every non-None chunk emission; resets to 0 on
         # each stop() so a subsequent start() begins a fresh sequence.
         self._sequence = 0
+        # Phase 9 Item A4: capture construction parameters for __repr__.
+        # The bridge does not expose these as readable attributes, so the
+        # wrapper holds its own copies. ``vad`` stores the original public
+        # union value (``False``, ``"silero"``, or ``"energy"``) rather
+        # than the split (``vad_enabled``, ``vad_mode``) bridge form.
+        self._sample_rate = sample_rate
+        self._channels = channels
+        self._frames_per_buffer = frames_per_buffer
+        self._device = device
+        self._vad_arg = vad
 
     # -----------------------------------------------------------------------
     # Lifecycle
@@ -731,6 +741,28 @@ class Microphone:
         except BaseException:  # noqa: BLE001
             pass
 
+    def __repr__(self) -> str:
+        # Phase 9 Item A4. Show construction parameters plus current
+        # is_open state. Pattern matches VersionInfo's repr precedent;
+        # is_open is queried live from the bridge so the repr reflects
+        # actual state, not just construction-time state (LD-9-8).
+        is_open: bool | str
+        try:
+            is_open = self.is_open
+        except Exception:  # noqa: BLE001
+            # Bridge missing or partially constructed: report unknown
+            # rather than raising from __repr__.
+            is_open = "?"
+        return (
+            f"Microphone(sample_rate={self._sample_rate}, "
+            f"channels={self._channels}, "
+            f"dtype={self._format!r}, "
+            f"frames_per_buffer={self._frames_per_buffer}, "
+            f"device={self._device!r}, "
+            f"vad={self._vad_arg!r}, "
+            f"is_open={is_open})"
+        )
+
 
 # ---------------------------------------------------------------------------
 # Speaker: consumer-facing audio output class.
@@ -790,6 +822,11 @@ class Speaker:
             format=dtype,
             device=device,
         )
+        # Phase 9 Item A4: capture construction parameters for __repr__.
+        self._sample_rate = sample_rate
+        self._channels = channels
+        self._format = dtype
+        self._device = device
 
     def start(self) -> None:
         """Open and start the output stream.
@@ -869,3 +906,20 @@ class Speaker:
             bridge.stop()
         except BaseException:  # noqa: BLE001
             pass
+
+    def __repr__(self) -> str:
+        # Phase 9 Item A4. Same shape as Microphone.__repr__; Speaker has
+        # no VAD so the repr omits that field. is_playing is the analogue
+        # of is_open here (LD-9-8).
+        is_playing: bool | str
+        try:
+            is_playing = self.is_playing
+        except Exception:  # noqa: BLE001
+            is_playing = "?"
+        return (
+            f"Speaker(sample_rate={self._sample_rate}, "
+            f"channels={self._channels}, "
+            f"dtype={self._format!r}, "
+            f"device={self._device!r}, "
+            f"is_playing={is_playing})"
+        )

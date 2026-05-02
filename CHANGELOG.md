@@ -29,6 +29,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `DeviceError` catch-target intermediate (subclass of `DecibriError`, parent of all eight device-related exceptions: `DeviceNotFound`, `OutputDeviceNotFound`, `MultipleDevicesMatch`, `DeviceIndexOutOfRange`, `NoMicrophoneFound`, `NoOutputDeviceFound`, `NotAnInputDevice`, `DeviceEnumerationFailed`). Symmetric with `OrtError` and `OrtPathError`. Existing catches via `DecibriError` remain unchanged (parent chain preserved).
 - Re-entry contract documented and pinned by tests on `Microphone.start()`, `Speaker.start()`, `AsyncMicrophone.start()`, `AsyncSpeaker.start()`. Calling `start()` after `stop()` / `close()` reconstructs the underlying audio stream cleanly; VAD state resets on each new `start()`. Calling `start()` while already started raises `AlreadyRunning`.
 
+### Python binding (0.1.0a1) - Phase 9 ecosystem coexistence
+
+#### Added
+
+- `__repr__` on `Microphone`, `Speaker`, `AsyncMicrophone`, and `AsyncSpeaker` (Phase 9 Item A4). Shows construction parameters plus current `is_open` / `is_playing` state (e.g., `Microphone(sample_rate=16000, channels=1, dtype='int16', frames_per_buffer=1600, device=None, vad=False, is_open=False)`). Closes the Jupyter auto-display gap.
+- `AsyncMicrophone.open(**kwargs)` and `AsyncSpeaker.open(**kwargs)` async classmethod factories (Phase 9 Item A6). Dispatch synchronous construction to the default `ThreadPoolExecutor` via `loop.run_in_executor`, returning the constructed instance awaitably. Recommended in async contexts when `vad="silero"` is enabled (the synchronous constructor performs 100 to 500 ms of ORT model loading inline). Synchronous constructors remain supported and unchanged.
+- `ForkAfterOrtInit(DecibriError)` exception (Phase 9 Item C7). Raised on Linux when `Microphone(vad="silero")` is constructed in a parent process and then used in a forked child. Replaces silent ONNX Runtime corruption with a clean exception carrying a self-documenting remediation message (use `multiprocessing.set_start_method('spawn')` or construct VAD inside the worker). Direct `DecibriError` subclass, NOT under `OrtError` (it is a usage error rather than an ORT-internal error). `__all__` count: 17 -> 18.
+- Three docs files under `bindings/python/docs/ecosystem/`: `jupyter.md` (top-level await coexistence; auto-display behavior; kernel restart safety; logging guidance; VAD-load timing reference); `docker.md` (verified Dockerfiles for base / headless / audio scenarios; the three required flags for audio passthrough; the headless ALSA `null` device nuance; image size budget; PipeWire / PulseAudio coexistence); `multiprocessing.md` (spawn vs fork guidance; `ForkAfterOrtInit` raise behavior; pickling failure mode; recommended worker pattern; decision matrix).
+- Three reference Dockerfiles at `bindings/python/docs/ecosystem/docker/`: `Dockerfile.base`, `Dockerfile.headless`, `Dockerfile.audio`. Multi-stage builds (Rust + maturin builder stage; `python:3.12-slim` runtime stage) verified against Docker Desktop 4.71.
+
+#### Changed
+
+- `AsyncMicrophone.__init__` and `AsyncSpeaker.__init__` docstrings now point users at `AsyncMicrophone.open()` / `AsyncSpeaker.open()` for async contexts, replacing the previous "0.2.0+ roadmap" note.
+
+#### Internal
+
+- New `static ORT_INIT_PID: OnceLock<u32>` in `crates/decibri/src/vad.rs` paired with the existing `ORT_INIT`. Captured inside the ORT init success path; compared at every `SileroVad::process()` call by the new `check_pid_for_ort()` helper. Detects Linux `fork()`-after-init silent ORT corruption and raises `DecibriError::ForkAfterOrtInit { init_pid, current_pid }`.
+- New `DecibriError::ForkAfterOrtInit { init_pid: u32, current_pid: u32 }` variant. Permitted by `#[non_exhaustive]`; existing variants unchanged.
+- New `bindings/python/tests/test_repr.py` (8 tests) and `bindings/python/tests/test_fork_safety.py` (3 Linux-only tests gated by `pytest.mark.skipif(sys.platform != "linux")` + `requires_bundled_ort`). 5 new tests appended to `tests/test_async.py` for `AsyncMicrophone.open` / `AsyncSpeaker.open` behavior.
+
 ## [3.4.0] - 2026-05-02
 
 ### Added

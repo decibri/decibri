@@ -133,6 +133,18 @@ const STATE_SIZE: usize = 256;
 #[cfg(feature = "vad")]
 static ORT_INIT: OnceLock<Option<PathBuf>> = OnceLock::new();
 
+/// Process id captured alongside [`ORT_INIT`] on first successful init
+/// (Phase 9 Item C7). Compared against the current pid at every Silero
+/// inference call by [`check_pid_for_ort`]; a mismatch indicates the
+/// process forked after init and ONNX Runtime's internal state is no
+/// longer safe to use.
+///
+/// Recorded inside the `OnceLock::get_or_init` callback in
+/// [`init_ort_once`] so the pid stamp is paired with the successful ORT
+/// init, not set speculatively before init returned.
+#[cfg(feature = "vad")]
+static ORT_INIT_PID: OnceLock<u32> = OnceLock::new();
+
 /// Wrap an ORT init failure with a decibri-specific actionable message.
 ///
 /// Kept as a standalone function (rather than an inline closure in
@@ -229,10 +241,59 @@ pub(crate) fn init_ort_once(path: Option<&Path>) -> Result<(), DecibriError> {
             // First-caller-wins. If another thread set it first, discard ours;
             // ORT's own global init is idempotent (first takes effect).
             let _ = ORT_INIT.set(path.map(|p| p.to_path_buf()));
+            // Phase 9 Item C7: pair the ORT init with the pid that
+            // performed it. Subsequent `check_pid_for_ort` calls compare
+            // the current pid against this stamp and raise
+            // `ForkAfterOrtInit` on mismatch. `_ = .set(...)` because
+            // another thread may have set the pid first; under that race
+            // the existing value wins and our value is silently dropped,
+            // matching the behavior of ORT_INIT itself.
+            let _ = ORT_INIT_PID.set(std::process::id());
             Ok(())
         }
         Err(e) => Err(wrap_init_error(path, e)),
     }
+}
+
+/// Verify that the current pid matches the pid that initialized ORT
+/// (Phase 9 Item C7). Called at the start of every Silero inference
+/// call to detect Linux `fork()`-after-init silent ORT corruption.
+///
+/// On Linux, when a parent process initializes ORT (e.g. by constructing
+/// `Microphone(vad="silero")`) and then forks a child via Python's
+/// default `fork` start method, the child inherits the OnceLock's set
+/// state but the underlying ORT runtime data structures are not safe to
+/// share. Calling inference in the child without re-initializing
+/// produces silent wrong probabilities, segfaults, or hangs depending
+/// on the specific ORT configuration.
+///
+/// This function compares `std::process::id()` against the recorded
+/// `ORT_INIT_PID`. On mismatch it returns
+/// [`DecibriError::ForkAfterOrtInit`] with both pids attached so the
+/// caller can diagnose. On match (the common case: same process that
+/// did init is now doing inference) it returns `Ok(())`.
+///
+/// Returns `Ok(())` cheaply if `ORT_INIT_PID` is unset (ORT was never
+/// initialized in this process), so non-VAD code paths pay nothing.
+///
+/// Pre-fork detection: not in scope here; `init_ort_once` is the single
+/// place that sets the pid and runs only when ORT is actually used.
+/// Code paths that never construct a Silero VAD never trip this check.
+///
+/// # Errors
+/// - [`DecibriError::ForkAfterOrtInit`] if `current_pid != init_pid`.
+#[cfg(feature = "vad")]
+pub(crate) fn check_pid_for_ort() -> Result<(), DecibriError> {
+    if let Some(&init_pid) = ORT_INIT_PID.get() {
+        let current_pid = std::process::id();
+        if current_pid != init_pid {
+            return Err(DecibriError::ForkAfterOrtInit {
+                init_pid,
+                current_pid,
+            });
+        }
+    }
+    Ok(())
 }
 
 #[cfg(feature = "vad")]
@@ -277,6 +338,13 @@ impl SileroVad {
     /// Returns the maximum speech probability across all windows processed.
     /// If no complete windows were formed (chunk too small), returns probability 0.0.
     pub fn process(&mut self, samples: &[f32]) -> Result<VadResult, DecibriError> {
+        // Phase 9 Item C7: detect fork()-after-ORT-init before touching
+        // the inherited ONNX Runtime state. Single check at the outer
+        // entry point covers every inference call; the inner
+        // `infer_window` loop runs many sessions per `process` and does
+        // not need its own check (any pid mismatch already failed here).
+        check_pid_for_ort()?;
+
         self.accumulator.extend_from_slice(samples);
 
         let mut max_probability: f32 = 0.0;

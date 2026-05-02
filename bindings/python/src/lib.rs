@@ -120,6 +120,7 @@ const EXCEPTION_NAMES: &[&str] = &[
     "DeviceEnumerationFailed",
     "DeviceIndexOutOfRange",
     "DeviceNotFound",
+    "ForkAfterOrtInit",
     "FramesPerBufferOutOfRange",
     "InvalidFormat",
     "MultipleDevicesMatch",
@@ -338,6 +339,16 @@ fn to_py_err(py: Python<'_>, err: CoreDecibriError) -> PyErr {
                 Box::new(move |cls| PyErr::from_type(cls, (msg, path_str))),
             )
         }
+
+        // Phase 9 Item C7: ForkAfterOrtInit. Direct DecibriError subclass
+        // (not under OrtError); message-only constructor like the unit
+        // variants. The pid pair is embedded in the Display message; no
+        // separate `init_pid` / `current_pid` Python attributes are
+        // exposed in 0.1.0 (kept simple per LD-9-9).
+        CoreDecibriError::ForkAfterOrtInit { .. } => (
+            "ForkAfterOrtInit",
+            Box::new(move |cls| PyErr::from_type(cls, (msg,))),
+        ),
 
         // #[non_exhaustive] catch-all per F10. Fall through to the base class.
         _ => (

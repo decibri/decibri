@@ -1,0 +1,62 @@
+# Dockerfile.base: minimal decibri install + version smoke check.
+#
+# Multi-stage: stage 1 builds the wheel from source (until 0.1.0 ships to
+# PyPI; after that, the runtime stage simply runs `pip install decibri`).
+# Stage 2 is the slim runtime image users would actually deploy.
+#
+# Build context: project root (the directory containing crates/, bindings/,
+# Cargo.toml). Run from project root:
+#
+#   docker build -t decibri:base -f Dockerfile.base .
+
+ARG ORT_VERSION=1.24.4
+
+# ---------- Stage 1: build the wheel ----------
+FROM rust:1-bookworm AS builder
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        python3 python3-pip python3-venv pkg-config libasound2-dev curl patchelf \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /src
+COPY . /src
+
+# Stage the per-platform ONNX Runtime dylib into the wheel's resource
+# directory before maturin runs. Mirrors the python-ci.yml manylinux step:
+# decibri's default ort-load-dynamic feature expects libonnxruntime.so to
+# ship inside the wheel under decibri/_ort/. Without this, maturin builds
+# a wheel that has no bundled dylib and Silero VAD would only work when
+# DECIBRI_ORT_DYLIB_PATH or ORT_DYLIB_PATH is set externally.
+ARG ORT_VERSION
+ENV ORT_VERSION=${ORT_VERSION}
+RUN ORT_TARBALL="onnxruntime-linux-x64-${ORT_VERSION}.tgz" \
+    && curl -sL --retry 3 --retry-delay 2 \
+        -o /tmp/ort.tgz \
+        "https://github.com/microsoft/onnxruntime/releases/download/v${ORT_VERSION}/${ORT_TARBALL}" \
+    && tar -xzf /tmp/ort.tgz -C /tmp \
+    && mkdir -p /src/bindings/python/python/decibri/_ort \
+    && cp -L "/tmp/onnxruntime-linux-x64-${ORT_VERSION}/lib/libonnxruntime.so" \
+        /src/bindings/python/python/decibri/_ort/libonnxruntime.so \
+    && cp "/tmp/onnxruntime-linux-x64-${ORT_VERSION}/lib/libonnxruntime_providers_shared.so" \
+        /src/bindings/python/python/decibri/_ort/
+
+# Build the wheel via maturin in a dedicated venv (PEP 668 compliant).
+RUN python3 -m venv /opt/build-venv \
+    && /opt/build-venv/bin/pip install --upgrade pip maturin \
+    && cd /src/bindings/python \
+    && /opt/build-venv/bin/maturin build --release
+
+# ---------- Stage 2: slim runtime ----------
+FROM python:3.12-slim AS runtime
+
+# libasound2 is the runtime ALSA library cpal loads at first device
+# enumeration on Linux; install even in headless deployments because
+# importing decibri eagerly resolves the symbol via the cpal init path.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        libasound2 \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY --from=builder /src/target/wheels/*manylinux*.whl /tmp/
+RUN pip install --no-cache-dir /tmp/decibri-*.whl && rm /tmp/decibri-*.whl
+
+CMD ["python", "-c", "import decibri\nprint('decibri', decibri.__version__)\nv = decibri.version()\nprint(v)\n"]

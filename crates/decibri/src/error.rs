@@ -191,6 +191,32 @@ pub enum DecibriError {
         source: ort::Error,
     },
 
+    /// Raised when ONNX Runtime is used in a child process after being
+    /// initialized in the parent (Phase 9 Item C7).
+    ///
+    /// Python's `fork` start method on Linux duplicates the parent's
+    /// memory into the child, but ONNX Runtime's internal state
+    /// (allocators, thread pools, model graph state) is not safe to
+    /// share across forked processes. Without proactive detection, a
+    /// child that uses Silero VAD inherited via fork would silently
+    /// produce wrong probabilities, segfault, or hang.
+    ///
+    /// `init_pid` is the pid that first initialized ORT (typically the
+    /// parent that loaded `Microphone(vad="silero")` before fork);
+    /// `current_pid` is the pid that called the inference path and
+    /// triggered the detection.
+    ///
+    /// Remediation is in the user's hands: switch to `spawn` start
+    /// method or construct `Microphone(vad="silero")` inside the child
+    /// rather than the parent. The Display message embeds both options.
+    #[error(
+        "ONNX Runtime was initialized in pid {init_pid} but is being used in pid {current_pid}. \
+         Python's fork() start method is incompatible with ORT initialization. Use \
+         multiprocessing.set_start_method('spawn') or construct Microphone(vad='silero') \
+         inside each child process."
+    )]
+    ForkAfterOrtInit { init_pid: u32, current_pid: u32 },
+
     /// Forward-compat catch-all for non-ORT ONNX backends (CoreML, TFLite,
     /// etc.) once the workspace split lands at 4.0.
     ///

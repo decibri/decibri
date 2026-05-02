@@ -37,6 +37,7 @@ unchanged and exist alongside this module.
 
 from __future__ import annotations
 
+import asyncio
 import importlib.resources
 import time
 from pathlib import Path
@@ -153,17 +154,20 @@ class AsyncMicrophone:
 
         Notes
         -----
-        ORT load is synchronous in 0.1.0. When ``vad='silero'`` is set
-        the Silero ONNX runtime is loaded inside ``__init__`` itself,
-        which blocks for roughly 100 to 500 milliseconds depending on
-        platform and disk cache. This blocks the event loop because
-        ``__init__`` runs synchronously even on async classes. For
-        latency-sensitive event-loop hot paths, construct the
-        ``AsyncMicrophone`` once at startup (or inside an executor) and
-        reuse it for the lifetime of the process.
+        ORT load is synchronous when called via this constructor. With
+        ``vad='silero'`` the Silero ONNX runtime is loaded inside
+        ``__init__`` itself, which blocks for roughly 100 to 500
+        milliseconds depending on platform and disk cache. ``__init__``
+        runs synchronously even on async classes, so this blocks the
+        event loop in async contexts.
 
-        A future ``AsyncMicrophone.open(...)`` async factory that
-        offloads ORT load to a worker thread is on the 0.2.0+ roadmap.
+        For latency-sensitive event-loop hot paths use the
+        :meth:`AsyncMicrophone.open` async factory classmethod added in
+        Phase 9 (``mic = await AsyncMicrophone.open(vad='silero')``),
+        which dispatches the synchronous construction to the default
+        ThreadPoolExecutor and returns the constructed instance
+        awaitably. The synchronous constructor remains supported for
+        callers that construct outside an async context.
         """
         if dtype not in _VALID_FORMATS:
             raise exceptions.InvalidFormat(
@@ -271,6 +275,12 @@ class AsyncMicrophone:
         self._as_ndarray = as_ndarray
         # Phase 7.7 Item B1: chunk counter for read_with_metadata().
         self._sequence = 0
+        # Phase 9 Item A4: capture construction parameters for __repr__.
+        self._sample_rate = sample_rate
+        self._channels = channels
+        self._frames_per_buffer = frames_per_buffer
+        self._device = device
+        self._vad_arg = vad
     # -----------------------------------------------------------------------
     # Lifecycle
     # -----------------------------------------------------------------------
@@ -483,6 +493,63 @@ class AsyncMicrophone:
     # `async with AsyncMicrophone(...) as d:` or `await d.stop()`
     # explicitly. See the class docstring's "Resource cleanup" section.
 
+    def __repr__(self) -> str:
+        # Phase 9 Item A4. Mirrors Microphone.__repr__; is_open is
+        # queried from the bridge's lock-free atomic mirror so the repr
+        # reflects current bridge truth (LD-9-8).
+        is_open: bool | str
+        try:
+            is_open = self.is_open
+        except Exception:  # noqa: BLE001
+            is_open = "?"
+        return (
+            f"AsyncMicrophone(sample_rate={self._sample_rate}, "
+            f"channels={self._channels}, "
+            f"dtype={self._format!r}, "
+            f"frames_per_buffer={self._frames_per_buffer}, "
+            f"device={self._device!r}, "
+            f"vad={self._vad_arg!r}, "
+            f"is_open={is_open})"
+        )
+
+    # -----------------------------------------------------------------------
+    # Async factory (Phase 9 Item A6)
+    # -----------------------------------------------------------------------
+
+    @classmethod
+    async def open(cls, **kwargs: Any) -> "AsyncMicrophone":
+        """Construct an ``AsyncMicrophone`` without blocking the event loop.
+
+        Use this instead of the constructor in async code, especially when
+        ``vad="silero"`` is enabled. The synchronous constructor performs
+        ORT model loading inline (100 to 500 ms for Silero VAD on a cold
+        cache); calling it from an async context blocks the event loop for
+        the duration of the load, which can cause dropped websocket
+        frames, late timer callbacks, and UI jitter in voice-AI pipelines.
+
+        This classmethod dispatches the synchronous constructor to the
+        default ThreadPoolExecutor via ``loop.run_in_executor``, returning
+        the constructed instance awaitably. The synchronous constructor
+        remains available for backward compatibility and for callers that
+        construct outside an async context.
+
+        Parameters mirror ``AsyncMicrophone.__init__`` exactly; pass the
+        same keyword arguments.
+
+        Example::
+
+            mic = await AsyncMicrophone.open(vad="silero")
+            async with mic:
+                async for chunk in mic:
+                    await process(chunk)
+
+        Phase 9 LD-9-3 (pulled forward from 0.2.0 backlog) and LD-9-7
+        (default ThreadPoolExecutor; users wanting a custom executor can
+        construct synchronously inside their own thread).
+        """
+        loop = asyncio.get_running_loop()
+        return await loop.run_in_executor(None, lambda: cls(**kwargs))
+
     @staticmethod
     async def input_devices() -> list[DeviceInfo]:
         """List available audio input devices."""
@@ -582,6 +649,12 @@ class AsyncSpeaker:
             format=dtype,
             device=device,
         )
+        # Phase 9 Item A4: capture construction parameters for __repr__.
+        self._sample_rate = sample_rate
+        self._channels = channels
+        self._format = dtype
+        self._device = device
+
     async def start(self) -> None:
         """Open and start the output stream.
 
@@ -665,6 +738,39 @@ class AsyncSpeaker:
     # resource release at GC time. Consumers should always use
     # `async with AsyncSpeaker(...) as o:` or `await o.stop()` explicitly.
     # See the class docstring's "Resource cleanup" section.
+
+    def __repr__(self) -> str:
+        # Phase 9 Item A4. Mirrors Speaker.__repr__; is_playing reflects
+        # the bridge's atomic mirror so the repr is honest about current
+        # state (LD-9-8).
+        is_playing: bool | str
+        try:
+            is_playing = self.is_playing
+        except Exception:  # noqa: BLE001
+            is_playing = "?"
+        return (
+            f"AsyncSpeaker(sample_rate={self._sample_rate}, "
+            f"channels={self._channels}, "
+            f"dtype={self._format!r}, "
+            f"device={self._device!r}, "
+            f"is_playing={is_playing})"
+        )
+
+    @classmethod
+    async def open(cls, **kwargs: Any) -> "AsyncSpeaker":
+        """Construct an ``AsyncSpeaker`` without blocking the event loop.
+
+        Symmetric with :meth:`AsyncMicrophone.open`. ``Speaker`` does not
+        load ORT, so the practical event-loop blocking risk is smaller
+        here, but ``open()`` is provided for API parity so async code can
+        consistently use the factory pattern across both classes.
+
+        Parameters mirror ``AsyncSpeaker.__init__`` exactly.
+
+        Phase 9 LD-9-3, LD-9-7.
+        """
+        loop = asyncio.get_running_loop()
+        return await loop.run_in_executor(None, lambda: cls(**kwargs))
 
     @staticmethod
     async def output_devices() -> list[OutputDeviceInfo]:

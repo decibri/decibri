@@ -437,3 +437,93 @@ async def test_async_aiter_with_metadata_yields_chunks() -> None:
             if count >= 3:
                 break
         assert count == 3
+
+
+# ---------------------------------------------------------------------------
+# Phase 9 Item A6: AsyncMicrophone.open() / AsyncSpeaker.open() async
+# factory classmethods that offload synchronous construction to the
+# default ThreadPoolExecutor via loop.run_in_executor.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_async_microphone_open_returns_constructed_instance() -> None:
+    """``await AsyncMicrophone.open()`` returns an ``AsyncMicrophone``."""
+    mic = await AsyncMicrophone.open()
+    try:
+        assert isinstance(mic, AsyncMicrophone)
+        # Construction-only: no start() yet.
+        assert mic.is_open is False
+    finally:
+        # No bridge resources to release because we never started; the
+        # finalizer note on AsyncMicrophone applies (no __del__; pyo3 Drop).
+        pass
+
+
+@pytest.mark.asyncio
+async def test_async_microphone_open_forwards_kwargs() -> None:
+    """Kwargs passed to open() reach the underlying constructor."""
+    mic = await AsyncMicrophone.open(
+        sample_rate=24000,
+        channels=2,
+        dtype="float32",
+        frames_per_buffer=2400,
+    )
+    text = repr(mic)
+    assert "sample_rate=24000" in text
+    assert "channels=2" in text
+    assert "dtype='float32'" in text
+    assert "frames_per_buffer=2400" in text
+
+
+@pytest.mark.asyncio
+async def test_async_microphone_open_dispatches_to_executor() -> None:
+    """``AsyncMicrophone.open()`` calls ``loop.run_in_executor``.
+
+    Direct contract test: spy on the running loop's ``run_in_executor``
+    and verify the ``open()`` implementation routes construction through
+    it. A timing-based test would be flaky for a fast (no-VAD)
+    constructor; this test pins the implementation contract that matters
+    in practice (when ``vad='silero'`` is enabled the executor dispatch
+    is what keeps the event loop responsive during the 100 to 500 ms
+    ORT load).
+    """
+    loop = asyncio.get_running_loop()
+    original = loop.run_in_executor
+    calls: list[Any] = []
+
+    def spy(executor: Any, func: Any, *args: Any) -> Any:
+        calls.append((executor, func))
+        return original(executor, func, *args)
+
+    loop.run_in_executor = spy  # type: ignore[method-assign]
+    try:
+        mic = await AsyncMicrophone.open()
+    finally:
+        loop.run_in_executor = original  # type: ignore[method-assign]
+
+    assert isinstance(mic, AsyncMicrophone)
+    assert len(calls) == 1, f"expected one run_in_executor call, got {len(calls)}"
+    executor_arg, func = calls[0]
+    assert executor_arg is None, (
+        "open() should pass executor=None to use the default ThreadPoolExecutor (LD-9-7)"
+    )
+    assert callable(func), "the dispatched callable should be the construction lambda"
+
+
+@pytest.mark.asyncio
+async def test_async_speaker_open_returns_constructed_instance() -> None:
+    """``await AsyncSpeaker.open()`` returns an ``AsyncSpeaker``."""
+    spk = await AsyncSpeaker.open()
+    assert isinstance(spk, AsyncSpeaker)
+    assert spk.is_playing is False
+
+
+@pytest.mark.asyncio
+async def test_async_speaker_open_forwards_kwargs() -> None:
+    """Kwargs passed to AsyncSpeaker.open() reach the constructor."""
+    spk = await AsyncSpeaker.open(sample_rate=24000, channels=2, dtype="float32")
+    text = repr(spk)
+    assert "sample_rate=24000" in text
+    assert "channels=2" in text
+    assert "dtype='float32'" in text

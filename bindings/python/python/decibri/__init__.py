@@ -23,6 +23,7 @@ from decibri.exceptions import (
     DeviceError,
     DeviceIndexOutOfRange,
     DeviceNotFound,
+    ForkAfterOrtInit,
     FramesPerBufferOutOfRange,
     InvalidFormat,
     MultipleDevicesMatch,
@@ -207,16 +208,22 @@ __all__ = [
     # Audio chunk with metadata (Phase 7.7 Item B1)
     "Chunk",
     # Exception hierarchy entry points (Phase 7.6 Item C3, Shape C2;
-    # Phase 7.7 Item B7 added DeviceError):
-    # only the catch-target roots are surfaced in __all__ to keep
-    # `from decibri import *` legible. The full 32+-class hierarchy
-    # remains importable via top-level attribute lookup
-    # (``decibri.<Class>``) AND via the explicit submodule
+    # Phase 7.7 Item B7 added DeviceError; Phase 9 Item C7 added
+    # ForkAfterOrtInit):
+    # only the catch-target roots plus ForkAfterOrtInit are surfaced in
+    # __all__ to keep `from decibri import *` legible. The full
+    # 32+-class hierarchy remains importable via top-level attribute
+    # lookup (``decibri.<Class>``) AND via the explicit submodule
     # (``decibri.exceptions.<Class>``); see decibri.exceptions for the
-    # complete list. The four names below cover catch-anything,
+    # complete list. The four catch-target names cover catch-anything,
     # catch-any-device-error, catch-any-ORT, and catch-any-ORT-path-error.
+    # ForkAfterOrtInit is also surfaced because it is the rare
+    # decibri-specific exception that users are likely to want to catch
+    # by name to distinguish "must use spawn start method" from other
+    # DecibriError causes.
     "DecibriError",
     "DeviceError",
+    "ForkAfterOrtInit",
     "OrtError",
     "OrtPathError",
 ]
