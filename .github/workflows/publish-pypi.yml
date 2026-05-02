@@ -1,0 +1,425 @@
+name: Publish to PyPI
+
+# Phase 10 (2026-05-02). Publishes the decibri Python wheel to TestPyPI
+# (prerelease tags: python-v*a*, python-v*b*, python-v*rc*) or production
+# PyPI (stable tags: python-v\d+.\d+.\d+) via Trusted Publisher OIDC.
+#
+# Tag namespacing per LD-10-11 (Option 1, approved 2026-05-02):
+#   python-v0.1.0a1, python-v0.1.0     -> this workflow
+#   v3.4.0, v3.5.0                     -> release.yml (npm + crates.io)
+# release.yml's tag filter excludes 'python-v*' so the two workflows
+# never fire on the same tag.
+#
+# Design adjudication: Option D from phase-10-design-adjudication.md.
+# Tag-routed publish workflow that mirrors python-ci.yml's existing
+# in-job install-verification pattern (polars-style), adds abi3audit,
+# and uploads validated wheels to the appropriate registry; install-test
+# happens in the same job that built each wheel so each platform's wheel
+# is verified on its own platform (cross-platform artifact handoff is
+# not viable for native wheels).
+#
+# Trusted Publisher records (configured by the maintainer before Phase 10 ship):
+#   PyPI:     decibri/decibri/publish-pypi.yml/pypi
+#   TestPyPI: decibri/decibri/publish-pypi.yml/testpypi
+# Workflow filename is locked at TPP registration time; renaming requires
+# manual TPP delete + re-add on both registries (LD-10-1).
+
+on:
+  push:
+    tags:
+      - 'python-v*'
+  # workflow_dispatch lets the maintainer run build-and-validate against the current
+  # branch without pushing a tag. The publish jobs skip cleanly because
+  # their if: conditions key on github.event_name == 'push'. Used for
+  # workflow YAML validation pre-tag (LD-10-8).
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  id-token: write    # required for Trusted Publisher OIDC token issuance
+
+env:
+  # Single source of truth for the bundled ONNX Runtime version.
+  # MUST stay in sync with .github/workflows/python-ci.yml (line 52)
+  # and .github/workflows/release.yml (line 20). Updating ORT requires
+  # bumping all three workflows in lockstep per the workspace Cargo.toml
+  # maintainer comment.
+  ORT_VERSION: 1.24.4
+  # Required for maturin abi3 builds on Python 3.14 hosts targeting py310
+  # abi3. See PyO3 issue #5505. Workflow-level setting applies to every
+  # matrix entry; no-op on Python 3.10-3.13 hosts.
+  PYO3_USE_ABI3_FORWARD_COMPATIBILITY: "1"
+
+jobs:
+  build-and-validate:
+    name: Build & validate (${{ matrix.target }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    strategy:
+      # fail-fast per LD-10-7: any platform failure blocks the publish.
+      # A partial wheel set is worse than no release.
+      fail-fast: true
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            ort_platform_slug: linux-x64
+            ort_ext: tgz
+          - os: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-gnu
+            ort_platform_slug: linux-aarch64
+            ort_ext: tgz
+          - os: macos-14
+            target: aarch64-apple-darwin
+            ort_platform_slug: osx-arm64
+            ort_ext: tgz
+          - os: macos-13
+            target: x86_64-apple-darwin
+            ort_platform_slug: osx-x86_64
+            ort_ext: tgz
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            ort_platform_slug: win-x64
+            ort_ext: zip
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      # ALSA dev headers are needed for cpal -> alsa-sys on Linux. macOS and
+      # Windows pull CoreAudio / WASAPI from system frameworks.
+      # Mirrors python-ci.yml line 137-146.
+      - name: Install libasound2-dev (Linux only)
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y libasound2-dev
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@23869a5bd66c73db3c0ac40331f3206eb23791dc # v2.9.1
+        with:
+          # Distinct shared-key from python-ci.yml's "rust-python" so
+          # publish builds reach steady state independently. Tag-trigger
+          # cadence is far rarer than push CI; sharing the cache would
+          # mostly serve cold-start hits.
+          shared-key: "rust-python-publish"
+
+      - uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
+        with:
+          enable-cache: true
+          cache-dependency-glob: "bindings/python/uv.lock"
+
+      - name: Install Python (3.10 floor)
+        # abi3 contract: a wheel built against Python 3.10 stable ABI loads
+        # cleanly on every CPython 3.10+. Building once at the floor is
+        # sufficient; python-ci.yml's nightly matrix verifies forward
+        # compatibility across 3.10-3.14.
+        run: uv python install 3.10
+
+      - name: Sync dev environment (locked)
+        working-directory: bindings/python
+        run: uv sync --dev --locked
+
+      # ORT dylib download. Linux uses the manylinux container build below
+      # (ORT downloaded inside the container); macOS and Windows download
+      # on the host and stage into bindings/python/python/decibri/_ort/
+      # before maturin packages it via the [tool.maturin] include directive.
+      # Mirrors python-ci.yml lines 178-305 for the host-build paths.
+      - name: Compute ORT URL
+        if: runner.os != 'Linux'
+        id: ort-meta
+        shell: bash
+        run: |
+          URL="https://github.com/microsoft/onnxruntime/releases/download/v${ORT_VERSION}/onnxruntime-${{ matrix.ort_platform_slug }}-${ORT_VERSION}.${{ matrix.ort_ext }}"
+          echo "url=${URL}" >> "$GITHUB_OUTPUT"
+          echo "Resolved: ${URL}"
+
+      - name: Download and extract ONNX Runtime (macOS)
+        if: runner.os == 'macOS'
+        shell: bash
+        # cp -L dereferences the symlink chain so the bundled file is a real
+        # signed dylib, not a dangling link post-pip-install. Renamed to
+        # unversioned to match what _ort_resolver.py looks for.
+        run: |
+          mkdir -p bindings/python/python/decibri/_ort
+          curl -sL --retry 3 --retry-delay 2 -o ort.tgz "${{ steps.ort-meta.outputs.url }}"
+          tar -xzf ort.tgz
+          SRC="onnxruntime-${{ matrix.ort_platform_slug }}-${ORT_VERSION}"
+          cp -L "$SRC/lib/libonnxruntime.${ORT_VERSION}.dylib" bindings/python/python/decibri/_ort/libonnxruntime.dylib
+
+      - name: Download and extract ONNX Runtime (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $ProgressPreference = 'SilentlyContinue'
+          New-Item -ItemType Directory -Force -Path bindings/python/python/decibri/_ort | Out-Null
+          Invoke-WebRequest -Uri "${{ steps.ort-meta.outputs.url }}" -OutFile ort.zip -MaximumRetryCount 3 -RetryIntervalSec 2
+          Expand-Archive -Path ort.zip -DestinationPath .
+          $src = "onnxruntime-${{ matrix.ort_platform_slug }}-$env:ORT_VERSION"
+          Copy-Item "$src/lib/onnxruntime.dll" bindings/python/python/decibri/_ort/
+
+      # macOS / Windows: build the release wheel on the host. Linux uses the
+      # manylinux container step further down. Mirrors python-ci.yml line 335.
+      - name: Build release wheel (macOS / Windows host build)
+        if: runner.os != 'Linux'
+        working-directory: bindings/python
+        shell: bash
+        run: |
+          rm -rf "${GITHUB_WORKSPACE}/target/wheels/"
+          uv run maturin build --release
+
+      - name: Clean target/ before Linux container build
+        if: runner.os == 'Linux'
+        shell: bash
+        # Wipe target/ before the manylinux_2_28 container build so cached
+        # host-built artifacts (linked against ubuntu-latest's glibc 2.38)
+        # do not leak into the container's glibc 2.28 build context.
+        # Mirrors python-ci.yml line 366-391.
+        run: rm -rf "${GITHUB_WORKSPACE}/target/"
+
+      - name: Build Linux wheel in manylinux_2_28 container
+        if: runner.os == 'Linux'
+        # Mirrors python-ci.yml lines 393-472. manylinux_2_28 is the glibc
+        # floor compatible with ONNX Runtime 1.24's documented requirements.
+        # PyO3/maturin-action provides the container; before-script-linux
+        # installs alsa-lib-devel + downloads + stages the ORT dylib before
+        # maturin runs.
+        uses: PyO3/maturin-action@3e2bdf6ba6453a61e649744019b8a2d906c7eb38 # v1.51.0
+        with:
+          manylinux: 2_28
+          target: ${{ matrix.target }}
+          working-directory: bindings/python
+          args: --release --compatibility pypi --out ${{ github.workspace }}/target/wheels
+          before-script-linux: |
+            set -euo pipefail
+            dnf install -y alsa-lib-devel
+            ORT_VERSION="${{ env.ORT_VERSION }}"
+            ARCH=$(uname -m)
+            case "$ARCH" in
+              x86_64)  ORT_ARCH="linux-x64"     ;;
+              aarch64) ORT_ARCH="linux-aarch64" ;;
+              *)
+                echo "ERROR: unsupported container architecture: $ARCH"
+                exit 1
+                ;;
+            esac
+            ORT_TARBALL="onnxruntime-${ORT_ARCH}-${ORT_VERSION}.tgz"
+            ORT_URL="https://github.com/microsoft/onnxruntime/releases/download/v${ORT_VERSION}/${ORT_TARBALL}"
+            echo "Downloading ORT inside container: $ORT_URL"
+            mkdir -p bindings/python/python/decibri/_ort
+            curl -sL --retry 3 --retry-delay 2 -o /tmp/ort.tgz "$ORT_URL"
+            tar -xzf /tmp/ort.tgz -C /tmp
+            SRC="/tmp/onnxruntime-${ORT_ARCH}-${ORT_VERSION}"
+            cp -L "$SRC/lib/libonnxruntime.so" bindings/python/python/decibri/_ort/libonnxruntime.so
+            cp    "$SRC/lib/libonnxruntime_providers_shared.so" bindings/python/python/decibri/_ort/
+            ls -la bindings/python/python/decibri/_ort/
+
+      # auditwheel / delocate: bundle external deps + rewrite RPATH /
+      # install-name. Required for PyPI manylinux compliance + macOS
+      # @loader_path. Mirrors python-ci.yml lines 474-601.
+      - name: Install auditwheel (Linux only)
+        if: runner.os == 'Linux'
+        working-directory: bindings/python
+        run: uv pip install 'auditwheel>=6.0,<7.0'
+
+      - name: Run auditwheel repair (Linux only)
+        if: runner.os == 'Linux'
+        working-directory: bindings/python
+        shell: bash
+        run: |
+          set -euo pipefail
+          WHEEL=$(ls "${GITHUB_WORKSPACE}/target/wheels/decibri-"*.whl | head -1)
+          if [ -z "$WHEEL" ]; then
+            echo "ERROR: no wheel found for auditwheel"
+            exit 1
+          fi
+          echo "Auditing wheel (pre-repair): $WHEEL"
+          uv run auditwheel show "$WHEEL"
+          ARCH=$(uname -m)
+          case "$ARCH" in
+            x86_64)  PLAT="manylinux_2_28_x86_64" ;;
+            aarch64) PLAT="manylinux_2_28_aarch64" ;;
+            *)
+              echo "ERROR: unsupported architecture for auditwheel: $ARCH"
+              exit 1
+              ;;
+          esac
+          mkdir -p "${GITHUB_WORKSPACE}/target/wheels/repaired"
+          uv run auditwheel repair --plat "$PLAT" \
+            -w "${GITHUB_WORKSPACE}/target/wheels/repaired/" "$WHEEL"
+          rm "$WHEEL"
+          mv "${GITHUB_WORKSPACE}/target/wheels/repaired/decibri-"*.whl \
+             "${GITHUB_WORKSPACE}/target/wheels/"
+          rmdir "${GITHUB_WORKSPACE}/target/wheels/repaired"
+          NEW_WHEEL=$(ls "${GITHUB_WORKSPACE}/target/wheels/decibri-"*.whl | head -1)
+          echo "Repaired wheel: $NEW_WHEEL"
+          uv run auditwheel show "$NEW_WHEEL"
+
+      - name: Install delocate (macOS only)
+        if: runner.os == 'macOS'
+        working-directory: bindings/python
+        run: uv pip install 'delocate>=0.13.0,<0.14.0'
+
+      - name: Run delocate repair (macOS only)
+        if: runner.os == 'macOS'
+        working-directory: bindings/python
+        shell: bash
+        # -L _ort keeps bundled dylibs in the existing _ort/ directory
+        # (rather than delocate's default .dylibs/) so _ort_resolver.py's
+        # glob pattern continues to find the dylib.
+        run: |
+          set -euo pipefail
+          WHEEL=$(ls "${GITHUB_WORKSPACE}/target/wheels/decibri-"*.whl | head -1)
+          if [ -z "$WHEEL" ]; then
+            echo "ERROR: no wheel found for delocate"
+            exit 1
+          fi
+          echo "Delocating wheel (pre-repair): $WHEEL"
+          uv run delocate-listdeps --depending "$WHEEL"
+          mkdir -p "${GITHUB_WORKSPACE}/target/wheels/repaired"
+          uv run delocate-wheel \
+            -w "${GITHUB_WORKSPACE}/target/wheels/repaired/" \
+            -L _ort \
+            -v "$WHEEL"
+          rm "$WHEEL"
+          mv "${GITHUB_WORKSPACE}/target/wheels/repaired/decibri-"*.whl \
+             "${GITHUB_WORKSPACE}/target/wheels/"
+          rmdir "${GITHUB_WORKSPACE}/target/wheels/repaired"
+          NEW_WHEEL=$(ls "${GITHUB_WORKSPACE}/target/wheels/decibri-"*.whl | head -1)
+          uv run delocate-listdeps --depending "$NEW_WHEEL"
+
+      # abi3 compliance gate (LD-10-4). Hard fail via --strict; --assume-
+      # minimum-abi3 3.10 pins to decibri's abi3 floor and avoids the
+      # documented bare-.so abi3-cp32 false-positive case from abi3audit's
+      # README. Empirically verified passing on the existing wheel during
+      # Phase 10 prep research.
+      - name: Install abi3audit
+        run: pip install --no-deps 'abi3audit==0.0.26'
+
+      - name: Verify abi3 compliance
+        shell: bash
+        run: |
+          set -euo pipefail
+          WHEEL=$(ls "${GITHUB_WORKSPACE}/target/wheels/decibri-"*.whl | head -1)
+          if [ -z "$WHEEL" ]; then
+            echo "ERROR: no wheel found for abi3audit"
+            exit 1
+          fi
+          abi3audit --strict --verbose --assume-minimum-abi3 3.10 "$WHEEL"
+
+      # Wheel install-test gate (LD-10-3). Mirrors python-ci.yml lines
+      # 603-670. Polars-style in-job verification: install the just-built
+      # wheel into a fresh venv on the same platform that built it, run
+      # smoke tests with CI=true so hardware-gated tests skip via the
+      # Phase 9 conftest auto-skip policy.
+      - name: Wheel install-test in clean venv
+        working-directory: bindings/python
+        shell: bash
+        env:
+          CI: 'true'
+        run: |
+          set -euo pipefail
+          WHEEL=$(ls "${GITHUB_WORKSPACE}/target/wheels/decibri-"*.whl | head -1)
+          if [ -z "$WHEEL" ]; then
+            echo "ERROR: no wheel found in ${GITHUB_WORKSPACE}/target/wheels/"
+            exit 1
+          fi
+          echo "Install-test target: $WHEEL"
+          uv venv .install-test
+          if [ "$RUNNER_OS" = "Windows" ]; then
+            VENV_PY=".install-test/Scripts/python.exe"
+          else
+            VENV_PY=".install-test/bin/python"
+          fi
+          uv pip install --python "$VENV_PY" "$WHEEL" pytest
+          # Same test surface as python-ci.yml's canonical install gate
+          # (line 670): test_ort_bundling.py + test_wheel_smoke.py cover
+          # bundled ORT layout, import, sync construct, async construct,
+          # numpy=True, resolver-finds-bundled. test_smoke.py adds the
+          # public surface count + version assertions.
+          "$VENV_PY" -m pytest \
+              tests/test_wheel_smoke.py \
+              tests/test_smoke.py \
+              tests/test_ort_bundling.py \
+              -v
+
+      - name: Upload validated wheel artifact
+        uses: actions/upload-artifact@v5
+        with:
+          name: wheel-${{ matrix.target }}
+          path: target/wheels/decibri-*.whl
+          if-no-files-found: error
+          retention-days: 7
+
+  publish-testpypi:
+    name: Publish to TestPyPI
+    # Prerelease tags (PEP 440 a / b / rc segments) route to TestPyPI.
+    # The github.event_name == 'push' guard ensures workflow_dispatch
+    # validation runs (LD-10-8) never publish; build-and-validate runs
+    # the matrix and the publish jobs skip cleanly.
+    if: |
+      github.event_name == 'push' && (
+        contains(github.ref_name, 'a') ||
+        contains(github.ref_name, 'b') ||
+        contains(github.ref_name, 'rc')
+      )
+    needs: [build-and-validate]
+    runs-on: ubuntu-latest
+    environment:
+      name: testpypi
+      url: https://test.pypi.org/project/decibri/
+    permissions:
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          path: dist/
+          merge-multiple: true
+          pattern: wheel-*
+
+      - name: List artifacts (diagnostic)
+        run: ls -la dist/
+
+      - name: Publish to TestPyPI
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          packages-dir: dist/
+          repository-url: https://test.pypi.org/legacy/
+          # attestations: true is the v1.14 default for Trusted Publishing
+          # flows; explicit per LD-10-5 to protect against future v2
+          # default flips.
+          attestations: true
+          verbose: true
+          print-hash: true
+
+  publish-pypi:
+    name: Publish to PyPI
+    # Stable tags (no PEP 440 a / b / rc segments) route to production
+    # PyPI. github.event_name == 'push' guard mirrors publish-testpypi.
+    if: |
+      github.event_name == 'push' && !(
+        contains(github.ref_name, 'a') ||
+        contains(github.ref_name, 'b') ||
+        contains(github.ref_name, 'rc')
+      )
+    needs: [build-and-validate]
+    runs-on: ubuntu-latest
+    environment:
+      name: pypi
+      url: https://pypi.org/project/decibri/
+    permissions:
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          path: dist/
+          merge-multiple: true
+          pattern: wheel-*
+
+      - name: List artifacts (diagnostic)
+        run: ls -la dist/
+
+      - name: Publish to PyPI
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          packages-dir: dist/
+          attestations: true
+          verbose: true
+          print-hash: true
