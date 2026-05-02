@@ -29,6 +29,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `DeviceError` catch-target intermediate (subclass of `DecibriError`, parent of all eight device-related exceptions: `DeviceNotFound`, `OutputDeviceNotFound`, `MultipleDevicesMatch`, `DeviceIndexOutOfRange`, `NoMicrophoneFound`, `NoOutputDeviceFound`, `NotAnInputDevice`, `DeviceEnumerationFailed`). Symmetric with `OrtError` and `OrtPathError`. Existing catches via `DecibriError` remain unchanged (parent chain preserved).
 - Re-entry contract documented and pinned by tests on `Microphone.start()`, `Speaker.start()`, `AsyncMicrophone.start()`, `AsyncSpeaker.start()`. Calling `start()` after `stop()` / `close()` reconstructs the underlying audio stream cleanly; VAD state resets on each new `start()`. Calling `start()` while already started raises `AlreadyRunning`.
 
+## [3.4.0] - 2026-05-02
+
+### Added
+
+- **`OnnxSession` trait abstraction in Rust core** (Phase 8). New internal `pub(crate) trait OnnxSession` inside `crates/decibri/src/onnx.rs` abstracting ONNX Runtime usage behind a backend-agnostic interface. `SileroVad` migrates to consume the trait through `Box<dyn OnnxSession>`. ORT-backed implementation is the only impl in 3.x; future backends (CoreML at iOS time, TFLite at Android time, GPU EPs at the P4 GPU project) plug in additively at the `decibri-onnx` workspace split planned for 4.0.
+- `DecibriError::OnnxBackendFailed { backend: &'static str, source: Box<dyn std::error::Error + Send + Sync> }` variant for future non-ORT backend errors. Additive (the enum is `#[non_exhaustive]`); existing 8 ORT variants unchanged. `is_ort_path_error` continues to return false on the new variant.
+
+### Internal
+
+- Phase 8 of the Python Integration Project. `crates/decibri` 3.x public API stays byte-identical (`SileroVad`, `VadConfig`, `VadResult`, `DecibriError` keep Phase 7.x signatures). npm, Python binding, browser shim are unchanged. See `~/.claude/plans/phase-8-onnxsession-trait.md` for the plan and `~/.claude/plans/phase-8-prep-research.md` for the empirical investigation that produced the trait shape.
+- `vad::init_ort_once` visibility raised from private to `pub(crate)` so the `onnx` module's inline ORT-backed test can reuse the same process-global init path that `vad` tests use.
+
 ## [3.3.2] - 2026-04-26
 
 ### Changed

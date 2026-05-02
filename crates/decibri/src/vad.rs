@@ -21,6 +21,10 @@ use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
 use crate::error::DecibriError;
+#[cfg(feature = "vad")]
+use crate::onnx::{
+    OnnxInputs, OnnxSession, OnnxSessionBuilder, OnnxTensorData, OnnxTensorOwned, OnnxTensorView,
+};
 
 /// Configuration for Silero VAD.
 #[derive(Debug, Clone)]
@@ -104,7 +108,11 @@ pub struct VadResult {
 /// Call `process()` with each audio chunk. Call `reset()` to clear state.
 #[cfg(feature = "vad")]
 pub struct SileroVad {
-    session: ort::session::Session,
+    /// ONNX session abstracted behind the internal [`OnnxSession`] trait
+    /// (Phase 8). In 3.x this is always the ORT-backed implementation; the
+    /// trait exists so future backends (CoreML, TFLite, GPU EPs) can plug
+    /// in without changing this struct or any consumer code.
+    session: Box<dyn OnnxSession>,
     /// Combined LSTM state [2, 1, 128] = 256 floats.
     state: Vec<f32>,
     sample_rate: u32,
@@ -184,7 +192,7 @@ fn do_ort_init(_path: Option<&Path>) -> Result<bool, ort::Error> {
 /// wrapping pattern elsewhere or the `decibri:` prefix and guidance string
 /// will be duplicated in the message users see.
 #[cfg(feature = "vad")]
-fn init_ort_once(path: Option<&Path>) -> Result<(), DecibriError> {
+pub(crate) fn init_ort_once(path: Option<&Path>) -> Result<(), DecibriError> {
     // Fast path: ORT already initialized.
     if ORT_INIT.get().is_some() {
         return Ok(());
@@ -240,18 +248,15 @@ impl SileroVad {
         // instances pass through immediately regardless of their ort_library_path.
         init_ort_once(config.ort_library_path.as_deref())?;
 
-        let session = ort::session::Session::builder()
-            .map_err(DecibriError::OrtSessionBuildFailed)?
-            // `with_intra_threads` returns `ort::Error<SessionBuilder>`; use a
-            // closure with `.into()` to convert to `ort::Error<()>` via the
-            // upstream `From<Error<SessionBuilder>> for Error<()>` impl.
+        // Phase 8: session construction goes through the internal
+        // `OnnxSession` trait. The ORT-backed implementation is the only
+        // backend in 3.x; the trait exists so future backends (CoreML at
+        // iOS time, TFLite at Android time, GPU EPs at the P4 GPU project)
+        // plug in without changing this construction site. See
+        // `crates/decibri/src/onnx.rs` and Phase 8 LD15.
+        let session = OnnxSessionBuilder::from_file(config.model_path.clone())
             .with_intra_threads(1)
-            .map_err(|e| DecibriError::OrtThreadsConfigFailed(e.into()))?
-            .commit_from_file(&config.model_path)
-            .map_err(|e| DecibriError::VadModelLoadFailed {
-                path: config.model_path.clone(),
-                source: e,
-            })?;
+            .build()?;
 
         Ok(Self {
             session,
@@ -305,59 +310,77 @@ impl SileroVad {
     }
 
     /// Run inference on a single window of exactly `window_size` samples.
+    ///
+    /// Phase 8: inference goes through the internal [`OnnxSession`] trait
+    /// (`Box<dyn OnnxSession>` field on `Self`) rather than calling
+    /// `ort::Session` directly. The trait owns the marshaling between
+    /// borrowed input slices and the backend's native tensor types.
     fn infer_window(&mut self, window: &[f32]) -> Result<f32, DecibriError> {
-        // Create input tensors using actual model tensor names:
-        //   input: f32[1, window_size]
-        //   state: f32[2, 1, 128]
-        //   sr:    i64 scalar
-        let input_tensor =
-            ort::value::Tensor::from_array(([1i64, self.window_size as i64], window.to_vec()))
-                .map_err(|e| DecibriError::OrtTensorCreateFailed {
-                    kind: "input",
-                    source: e,
-                })?;
-        let state_tensor =
-            ort::value::Tensor::from_array(([2i64, 1i64, 128i64], self.state.clone())).map_err(
-                |e| DecibriError::OrtTensorCreateFailed {
-                    kind: "state",
-                    source: e,
-                },
-            )?;
-        let sr_tensor = ort::value::Tensor::from_array(([1i64], vec![self.sample_rate as i64]))
-            .map_err(|e| DecibriError::OrtTensorCreateFailed {
-                kind: "sr",
-                source: e,
-            })?;
+        let input_shape = [1i64, self.window_size as i64];
+        let state_shape = [2i64, 1i64, 128i64];
+        let sr_shape = [1i64];
+        let sr_data = [self.sample_rate as i64];
 
-        let input_values = ort::inputs![
-            "input" => input_tensor,
-            "state" => state_tensor,
-            "sr" => sr_tensor,
-        ];
-
-        let outputs = self
-            .session
-            .run(input_values)
-            .map_err(DecibriError::OrtInferenceFailed)?;
+        let outputs = self.session.run(OnnxInputs {
+            items: &[
+                (
+                    "input",
+                    OnnxTensorView {
+                        shape: &input_shape,
+                        data: OnnxTensorData::F32(window),
+                    },
+                ),
+                (
+                    "state",
+                    OnnxTensorView {
+                        shape: &state_shape,
+                        data: OnnxTensorData::F32(&self.state),
+                    },
+                ),
+                (
+                    "sr",
+                    OnnxTensorView {
+                        shape: &sr_shape,
+                        data: OnnxTensorData::I64(&sr_data),
+                    },
+                ),
+            ],
+        })?;
 
         // Read outputs using actual model tensor names:
         //   output: f32[1, 1] (speech probability)
         //   stateN: f32[2, 1, 128] (updated state)
-        let prob_tensor = outputs["output"].try_extract_tensor::<f32>().map_err(|e| {
-            DecibriError::OrtTensorExtractFailed {
-                kind: "output",
-                source: e,
+        let prob = outputs
+            .get("output")
+            .ok_or_else(|| DecibriError::OnnxBackendFailed {
+                backend: "ort",
+                source: "Silero output `output` missing from session run".into(),
+            })?;
+        let probability = match &prob.data {
+            OnnxTensorOwned::F32(v) => v[0],
+            OnnxTensorOwned::I64(_) => {
+                return Err(DecibriError::OnnxBackendFailed {
+                    backend: "ort",
+                    source: "Silero output `output` must be f32".into(),
+                });
             }
-        })?;
-        let probability = prob_tensor.1[0];
+        };
 
-        let state_tensor = outputs["stateN"].try_extract_tensor::<f32>().map_err(|e| {
-            DecibriError::OrtTensorExtractFailed {
-                kind: "state",
-                source: e,
+        let state_n = outputs
+            .get("stateN")
+            .ok_or_else(|| DecibriError::OnnxBackendFailed {
+                backend: "ort",
+                source: "Silero output `stateN` missing from session run".into(),
+            })?;
+        match &state_n.data {
+            OnnxTensorOwned::F32(v) => self.state.copy_from_slice(v),
+            OnnxTensorOwned::I64(_) => {
+                return Err(DecibriError::OnnxBackendFailed {
+                    backend: "ort",
+                    source: "Silero output `stateN` must be f32".into(),
+                });
             }
-        })?;
-        self.state.copy_from_slice(state_tensor.1);
+        }
 
         Ok(probability)
     }

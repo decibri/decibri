@@ -149,6 +149,16 @@ compile_error!(
 pub mod error;
 pub mod sample;
 
+// Internal ONNX session abstraction. Trait stays `pub(crate)` until 4.0 /
+// `decibri-onnx` workspace split per LD-8-1 and LD15. Public API of
+// `crates/decibri` 3.x is byte-identical with or without this module.
+//
+// Gated on `feature = "vad"` matching the only consumer (`vad`) and the
+// only backend (`dep:ort`). When vad is disabled, the trait has no purpose
+// since there is no inference workload and no ORT backend to wrap.
+#[cfg(feature = "vad")]
+mod onnx;
+
 /// Resolved cpal version (major.minor) extracted at build time from the
 /// crate's `Cargo.toml`.
 ///
