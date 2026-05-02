@@ -291,7 +291,7 @@ jobs:
       # README. Empirically verified passing on the existing wheel during
       # Phase 10 prep research.
       - name: Install abi3audit
-        run: pip install --no-deps 'abi3audit==0.0.26'
+        run: pip install 'abi3audit==0.0.26'
 
       - name: Verify abi3 compliance
         shell: bash
