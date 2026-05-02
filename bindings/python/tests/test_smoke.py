@@ -16,7 +16,7 @@ import decibri
 
 
 def test_package_imports() -> None:
-    assert decibri.__version__ == "0.1.0a1"
+    assert decibri.__version__ == "0.1.0"
     # Phase 7.7 Item A2: bridges are hidden behind the private _decibri
     # module. They are NOT accessible at decibri.<X> top level (sync or
     # async). The async pair was never accessible at the top level; the
@@ -72,7 +72,7 @@ def test_version_info_fields() -> None:
     info = _decibri.MicrophoneBridge.version()
     assert info.decibri == "3.4.0"
     assert info.audio_backend == "cpal 0.17"
-    assert info.binding == "0.1.0a1"
+    assert info.binding == "0.1.0"
 
 
 def test_version_info_is_frozen() -> None:

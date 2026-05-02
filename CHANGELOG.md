@@ -9,11 +9,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [0.1.0a1] - 2026-05-03
+## [0.1.0] - 2026-05-03
 
 ### Python binding
 
-The first published Python wheel of decibri. Alpha release to TestPyPI for publish-workflow validation. Production PyPI publish is `0.1.0`.
+The first production-stable Python wheel of decibri. Following the 0.1.0a1 TestPyPI rehearsal, the README quickstart was corrected (the original `mic.read(N)` examples assumed N was a sample count; the actual signature is `read(timeout_ms=None)`, so quickstarts now use the iterator pattern or the `record_to_file` convenience helper). The README was also tightened for production publication: Decibri capitalized as a proper noun in titles and sentence starts, the audio-infrastructure positioning section deferred to the website docs, the `decibri[numpy]` extras note deferred to the website docs, the Compatibility table updated to list explicit Python versions (3.10, 3.11, 3.12, 3.13, 3.14), and Intel Mac install-from-source references removed (Apple platform deprecation; macos-13 dropped per LD-10-12).
 
 #### Added
 
