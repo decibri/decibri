@@ -5,11 +5,19 @@ shows construction parameters plus current state, mirroring the
 ``VersionInfo`` precedent. Auto-display in Jupyter (the primary motivator
 per LD-9-8) shows this repr when an instance is the last expression in
 a cell.
+
+Tests that call ``mic.start()`` to verify the ``is_open=True`` lifecycle
+state are gated by ``@pytest.mark.requires_audio_input`` because opening
+the cpal stream requires a real audio input device. Pure-construction
+repr tests (defaults, kwargs, stop-state) run on every platform without
+hardware.
 """
 
 from __future__ import annotations
 
 import asyncio
+
+import pytest
 
 import decibri
 
@@ -43,6 +51,7 @@ def test_microphone_repr_reflects_custom_params() -> None:
     assert "vad='energy'" in text
 
 
+@pytest.mark.requires_audio_input
 def test_microphone_repr_state_reflects_lifecycle() -> None:
     mic = decibri.Microphone()
     assert "is_open=False" in repr(mic)
@@ -85,6 +94,7 @@ def test_async_microphone_repr_shows_defaults_and_is_open() -> None:
     assert "is_open=False" in text
 
 
+@pytest.mark.requires_audio_input
 def test_async_microphone_repr_state_reflects_lifecycle() -> None:
     async def _flow() -> tuple[str, str, str]:
         amic = decibri.AsyncMicrophone()
