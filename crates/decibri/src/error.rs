@@ -190,6 +190,29 @@ pub enum DecibriError {
         #[source]
         source: ort::Error,
     },
+
+    /// Forward-compat catch-all for non-ORT ONNX backends (CoreML, TFLite,
+    /// etc.) once the workspace split lands at 4.0.
+    ///
+    /// Not emitted by ORT-backed code paths in 3.x: ORT failures use the 8
+    /// preceding variants (`OrtSessionBuildFailed`, `OrtThreadsConfigFailed`,
+    /// `VadModelLoadFailed`, `OrtInferenceFailed`, `OrtTensorCreateFailed`,
+    /// `OrtTensorExtractFailed`, plus `OrtInitFailed` and `OrtLoadFailed`)
+    /// which carry an `ort::Error` source directly.
+    ///
+    /// Permitted by `#[non_exhaustive]` on this enum (see line 31). Existing
+    /// `is_ort_path_error` returns false on this variant: `OnnxBackendFailed`
+    /// is not an ORT path-loading failure.
+    ///
+    /// `backend` identifies which non-ORT backend produced the error
+    /// (e.g. `"coreml"`, `"tflite"`); `source` carries the backend-native
+    /// error boxed for trait-object compatibility.
+    #[error("ONNX backend error from {backend}: {source}")]
+    OnnxBackendFailed {
+        backend: &'static str,
+        #[source]
+        source: Box<dyn std::error::Error + Send + Sync>,
+    },
 }
 
 impl DecibriError {

@@ -28,7 +28,7 @@ crate-type = ["cdylib"]
 # features across both bindings silently; diverging overrides produce a build
 # that neither binding tests in isolation. Both bindings inherit decibri's
 # default features (capture, output, vad, denoise, gain, ort-load-dynamic).
-decibri = { version = "3.3.2", path = "../../crates/decibri" }
+decibri = { version = "3.4.0", path = "../../crates/decibri" }
 
 # PyO3 0.28 is the first MSRV-1.83 release line with the attach / detach /
 # initialize API renames; aligns with workspace MSRV 1.88 (headroom preserved).
