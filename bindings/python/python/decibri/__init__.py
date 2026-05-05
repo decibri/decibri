@@ -99,10 +99,9 @@ def record_to_file(
         Output WAV file path. Parent directory must exist; the file is
         created or overwritten.
     duration_seconds : float
-        Approximate recording duration. Actual duration is rounded up to
-        the nearest ``frames_per_buffer`` chunk (1600 frames = 100ms at
-        16kHz by default), so the file is at most ~100ms longer than
-        requested.
+        Approximate recording duration. The loop accumulates audio until
+        the captured frame count meets or exceeds the requested amount,
+        so the file is at most one chunk longer than requested.
     sample_rate : int, optional
         Capture sample rate in Hz. Default 16000.
     channels : int, optional
@@ -122,9 +121,7 @@ def record_to_file(
 
     bytes_per_sample = 2  # int16
     frames_per_buffer = 1600  # 100ms at 16kHz; cross-binding default
-    chunks_needed = max(
-        1, int((duration_seconds * sample_rate + frames_per_buffer - 1) // frames_per_buffer)
-    )
+    total_frames_needed = max(1, int(duration_seconds * sample_rate))
 
     with wave.open(path, "wb") as wav, Microphone(
         sample_rate=sample_rate,
@@ -137,13 +134,20 @@ def record_to_file(
         wav.setsampwidth(bytes_per_sample)
         wav.setframerate(sample_rate)
 
-        for _ in range(chunks_needed):
-            chunk = mic.read(timeout_ms=2000)
+        # Frame-count termination, not chunk-count: the cpal callback's
+        # actual buffer size depends on the platform audio backend (on
+        # Windows WASAPI it is typically the device period, not the
+        # requested frames_per_buffer), so a chunk-count loop captures
+        # the wrong duration on backends that ignore the buffer hint.
+        total_frames_written = 0
+        while total_frames_written < total_frames_needed:
+            chunk = mic.read()
             if chunk is None:
                 break
             # int16 mode + numpy=False guarantees bytes from read().
             assert isinstance(chunk, bytes)
             wav.writeframes(chunk)
+            total_frames_written += len(chunk) // (bytes_per_sample * channels)
 
 
 async def async_record_to_file(
@@ -163,9 +167,7 @@ async def async_record_to_file(
 
     bytes_per_sample = 2  # int16
     frames_per_buffer = 1600
-    chunks_needed = max(
-        1, int((duration_seconds * sample_rate + frames_per_buffer - 1) // frames_per_buffer)
-    )
+    total_frames_needed = max(1, int(duration_seconds * sample_rate))
 
     mic = AsyncMicrophone(
         sample_rate=sample_rate,
@@ -179,12 +181,16 @@ async def async_record_to_file(
         wav.setsampwidth(bytes_per_sample)
         wav.setframerate(sample_rate)
         async with mic as d:
-            for _ in range(chunks_needed):
-                chunk = await d.read(timeout_ms=2000)
+            # Frame-count termination, not chunk-count: see record_to_file
+            # for the rationale (cpal callback size is platform-dependent).
+            total_frames_written = 0
+            while total_frames_written < total_frames_needed:
+                chunk = await d.read()
                 if chunk is None:
                     break
                 assert isinstance(chunk, bytes)
                 wav.writeframes(chunk)
+                total_frames_written += len(chunk) // (bytes_per_sample * channels)
 
 
 __all__ = [
