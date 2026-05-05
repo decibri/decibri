@@ -9,6 +9,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.1] - 2026-05-04
+
+### Python binding
+
+Patch release fixing a duration bug in `record_to_file` and `async_record_to_file`.
+
+#### Fixed
+
+- `record_to_file` and `async_record_to_file` now produce WAV files with the correct duration. The 0.1.0 implementation computed `chunks_needed = duration_seconds * sample_rate / frames_per_buffer` and ran the loop that many times. On Windows WASAPI (and likely other backends), each `mic.read()` chunk delivers ~160 frames (one cpal callback's worth at default settings), not the 1600 frames implied by `frames_per_buffer`. The result was WAV files capturing ~10% of the requested duration. The fix counts actual frames written rather than chunks read, removing the dependency on `frames_per_buffer` matching the platform's actual callback size. `record_to_file(path, duration_seconds=1.0)` now produces a ~1.0s WAV file as documented (0.1.0: 0.098s; 0.1.1: ~1.008s; documented as "at most one chunk longer than requested").
+- The internal `mic.read()` call in both helpers no longer passes `timeout_ms=2000`. The loop is now bounded by the frame count, so a deadline is unnecessary; matches the iterator pattern (`for chunk in mic`) which uses `timeout_ms=None` and works correctly for arbitrary durations.
+
+#### Internal
+
+- New regression test at `bindings/python/tests/test_record_to_file_duration.py`. Six test cases verify the WAV file's actual duration matches the `duration_seconds` parameter (within the documented "at most one chunk longer" tolerance). The test fails on 0.1.0 (capturing the bug); passes on 0.1.1 (confirming the fix).
+
 ## [0.1.0] - 2026-05-03
 
 ### Python binding
