@@ -4,13 +4,13 @@ build-backend = "maturin"
 
 [project]
 name = "decibri"
-version = "0.1.0"
+version = "0.1.1"
 description = "Cross-platform audio capture, output, and voice activity detection"
 readme = "README.md"
 requires-python = ">=3.10"
 license = { text = "Apache-2.0" }
 authors = [
-    { name = "Ross Armstrong", email = "hello@decibri.com" },
+    { name = "Decibri", email = "hello@decibri.com" },
 ]
 keywords = ["audio", "microphone", "capture", "sound", "voice", "vad"]
 classifiers = [
