@@ -1,62 +1,14 @@
 <!-- markdownlint-disable MD024 -->
 
-# Changelog
+# Decibri Changelog
 
-All notable changes to this project will be documented in this file.
+This file tracks changes to the **decibri Rust core** (`crates/decibri`, published to crates.io) and the **decibri npm binding** (`npm/decibri`, published to npm). These two ship together at the same version under the `v*` tag pattern (e.g., `v3.4.0` publishes both `decibri 3.4.0` to crates.io and `@analyticsinmotion/decibri 3.4.0` to npm).
 
-The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
-and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+For decibri Python wheel changes, see [bindings/python/CHANGELOG.md](bindings/python/CHANGELOG.md). The Python wheel has its own version trajectory (currently `0.1.x`) and ships under the `python-v*` tag pattern.
+
+The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
-
-## [0.1.1] - 2026-05-04
-
-### Python binding
-
-Patch release fixing a duration bug in `record_to_file` and `async_record_to_file`.
-
-#### Fixed
-
-- `record_to_file` and `async_record_to_file` now produce WAV files with the correct duration. The 0.1.0 implementation computed `chunks_needed = duration_seconds * sample_rate / frames_per_buffer` and ran the loop that many times. On Windows WASAPI (and likely other backends), each `mic.read()` chunk delivers ~160 frames (one cpal callback's worth at default settings), not the 1600 frames implied by `frames_per_buffer`. The result was WAV files capturing ~10% of the requested duration. The fix counts actual frames written rather than chunks read, removing the dependency on `frames_per_buffer` matching the platform's actual callback size. `record_to_file(path, duration_seconds=1.0)` now produces a ~1.0s WAV file as documented (0.1.0: 0.098s; 0.1.1: ~1.008s; documented as "at most one chunk longer than requested").
-- The internal `mic.read()` call in both helpers no longer passes `timeout_ms=2000`. The loop is now bounded by the frame count, so a deadline is unnecessary; matches the iterator pattern (`for chunk in mic`) which uses `timeout_ms=None` and works correctly for arbitrary durations.
-
-#### Internal
-
-- New regression test at `bindings/python/tests/test_record_to_file_duration.py`. Six test cases verify the WAV file's actual duration matches the `duration_seconds` parameter (within the documented "at most one chunk longer" tolerance). The test fails on 0.1.0 (capturing the bug); passes on 0.1.1 (confirming the fix).
-
-## [0.1.0] - 2026-05-03
-
-### Python binding
-
-The first production-stable Python wheel of decibri. Following the 0.1.0a1 TestPyPI rehearsal, the README quickstart was corrected (the original `mic.read(N)` examples assumed N was a sample count; the actual signature is `read(timeout_ms=None)`, so quickstarts now use the iterator pattern or the `record_to_file` convenience helper). The README was also tightened for production publication: Decibri capitalized as a proper noun in titles and sentence starts, the audio-infrastructure positioning section deferred to the website docs, the `decibri[numpy]` extras note deferred to the website docs, the Compatibility table updated to list explicit Python versions (3.10, 3.11, 3.12, 3.13, 3.14), and Intel Mac install-from-source references removed (Apple platform deprecation; macos-13 dropped per LD-10-12).
-
-#### Added
-
-- Public API: `Microphone`, `Speaker`, `AsyncMicrophone`, `AsyncSpeaker` classes (Phase 7.5 class rename; Phase 9 async-open factories).
-- Module-level helpers: `input_devices()`, `output_devices()`, `version()`, `record_to_file()`, `async_record_to_file()`.
-- Value types: `DeviceInfo`, `OutputDeviceInfo`, `VersionInfo`, `Chunk`.
-- Exception hierarchy at `decibri.exceptions` (32 classes; 5 catch-target intermediates surfaced at `decibri.<X>`: `DecibriError`, `DeviceError`, `OrtError`, `OrtPathError`, `ForkAfterOrtInit`).
-- VAD support: `vad="energy"` (RMS threshold) and `vad="silero"` (Silero ONNX, bundled). `vad_score` property returns a `[0, 1]` value mode-agnostically; `is_speaking` returns the boolean above-threshold view.
-- NumPy ndarray return support via `as_ndarray=True` (install with `pip install decibri[numpy]`).
-- Bundled Silero VAD ONNX model (~2.3 MB) shipped in the wheel. No downloads or API keys required.
-- Bundled ONNX Runtime dylib per platform (~15-20 MB; Linux x64, Linux ARM64, macOS Apple Silicon, Windows x64). No system dependency on `pip install onnxruntime`.
-- Async `AsyncMicrophone.open()` and `AsyncSpeaker.open()` factories that dispatch synchronous ORT init off the event loop via `loop.run_in_executor`. Recommended for `vad="silero"` in async contexts (Phase 9).
-- `__repr__` on `Microphone`, `Speaker`, `AsyncMicrophone`, `AsyncSpeaker` showing construction parameters plus runtime state (Phase 9; closes the Jupyter auto-display gap).
-- `ForkAfterOrtInit` exception raised on Linux when `Microphone(vad="silero")` is constructed in a parent process and then used in a forked child (Phase 9). Carries a remediation message pointing at `multiprocessing.set_start_method('spawn')`.
-- `Chunk` dataclass and `Microphone.read_with_metadata()` / `iter_with_metadata()` returning a frozen `Chunk` with `.data`, `.timestamp`, `.sequence`, `.is_speaking`, `.vad_score`. Additive; `read()` keeps its current signature.
-- Re-entry contract on `start()` / `stop()` / `close()` for all four wrapper classes pinned by tests. Calling `start()` after `stop()` reconstructs the stream cleanly; VAD state resets per `start()`. `close()` is a permanent alias for `stop()`.
-- Ecosystem coexistence docs at `bindings/python/docs/ecosystem/{jupyter,docker,multiprocessing}.md` plus three reference Dockerfiles under `docker/` (Phase 9).
-
-#### Internal
-
-- 4-platform wheel matrix: Linux x64 (manylinux_2_28 container build), Linux ARM64, macOS Apple Silicon, Windows x64 (Phase 10; `macos-13` Intel Mac dropped per LD-10-12 Apple platform deprecation).
-- Trusted Publisher OIDC publish workflow at `.github/workflows/publish-pypi.yml` (Phase 10). Prerelease tags (`python-v*a*`, `python-v*b*`, `python-v*rc*`) route to TestPyPI; stable tags (`python-v\d+.\d+.\d+`) route to production PyPI.
-- abi3audit (`--strict --assume-minimum-abi3 3.10`), auditwheel, and delocate gates in the publish pipeline (Phase 10 LD-10-3 / LD-10-4).
-- PEP 740 attestations generated via Sigstore + Fulcio in the publish job (Phase 10 LD-10-5).
-- In-job wheel install-test in a clean venv on each matrix platform with `CI=true` (Phase 7 install gate; Phase 9 conftest auto-skips hardware-gated tests).
-- `OnnxSession` trait abstraction in Rust core (Phase 8). `crates/decibri` 3.4.0 introduces `pub(crate) trait OnnxSession`; `SileroVad` consumes it through `Box<dyn OnnxSession>`. Future backends (CoreML, TFLite, GPU EPs) plug in additively at the `decibri-onnx` workspace split planned for 4.0.
-- New `DecibriError::ForkAfterOrtInit { init_pid, current_pid }` variant in `crates/decibri/src/error.rs` (Phase 9). Permitted by `#[non_exhaustive]`; existing variants unchanged.
-- `bindings/python/docs/PUBLISH.md` documents the publish flow, Trusted Publisher setup, `workflow_dispatch` dry-run procedure, and failure recovery for abi3audit / install-test / OIDC rejection cases.
 
 ## [3.4.0] - 2026-05-02
 

@@ -12,7 +12,7 @@ The base and headless scenarios in this document are verified on Docker Desktop 
 
 ## Base scenario: minimal install + version smoke check
 
-Until 0.1.0 ships to PyPI, the minimal Dockerfile is multi-stage: a builder stage that compiles the wheel from source via maturin, and a slim runtime stage that pip-installs the wheel. After PyPI publish (Phase 11), the runtime stage is reduced to a single `pip install decibri` line.
+decibri 0.1.0+ is on PyPI, so the minimal Dockerfile is a single stage that runs `pip install decibri` against a slim runtime base. The multi-stage build-from-source variant below is retained for environments that need to build the wheel locally (custom Rust toolchain configurations, air-gapped builds, or pre-publish development against an unreleased commit).
 
 [Dockerfile.base](docker/Dockerfile.base):
 
@@ -71,8 +71,8 @@ docker run --rm decibri:base
 Verified output (Docker Desktop 4.71, manylinux_2_34 wheel):
 
 ```
-decibri 0.1.1
-VersionInfo(decibri='3.4.0', audio_backend='cpal 0.17', binding='0.1.1')
+decibri 0.1.2
+VersionInfo(decibri='3.4.0', audio_backend='cpal 0.17', binding='0.1.2')
 ```
 
 Image size: ~255 MB (`python:3.12-slim` ~50 MB + libasound2 ~3 MB + decibri wheel including bundled ORT ~50 MB + Python stdlib runtime). Well under typical production image budgets.
@@ -143,7 +143,7 @@ Expected output on a Linux host with at least one audio device (build verified o
 input_devices count: <N>
   - DeviceInfo(index=0, name='hw:0,0', ..., is_default=true)
   - ...
-decibri version: VersionInfo(decibri='3.4.0', audio_backend='cpal 0.17', binding='0.1.1')
+decibri version: VersionInfo(decibri='3.4.0', audio_backend='cpal 0.17', binding='0.1.2')
 ```
 
 If `input_devices count: 1` and the single device id is `alsa:null`, audio passthrough is incomplete; check the three flags above.

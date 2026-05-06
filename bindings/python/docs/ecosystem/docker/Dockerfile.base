@@ -1,8 +1,10 @@
 # Dockerfile.base: minimal decibri install + version smoke check.
 #
-# Multi-stage: stage 1 builds the wheel from source (until 0.1.0 ships to
-# PyPI; after that, the runtime stage simply runs `pip install decibri`).
-# Stage 2 is the slim runtime image users would actually deploy.
+# Multi-stage: stage 1 builds the wheel from source (retained for
+# environments that need to build the wheel locally, e.g., custom Rust
+# toolchain configurations or air-gapped builds; for the standard install,
+# the runtime stage simply runs `pip install decibri`). Stage 2 is the
+# slim runtime image users would actually deploy.
 #
 # Build context: project root (the directory containing crates/, bindings/,
 # Cargo.toml). Run from project root:
