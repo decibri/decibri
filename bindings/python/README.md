@@ -34,7 +34,7 @@ mic.stop()
 ```python
 import decibri
 
-decibri.record_to_file("output.wav", seconds=1.0, sample_rate=16000)
+decibri.record_to_file("output.wav", duration_seconds=1.0, sample_rate=16000)
 ```
 
 ### Capture with Silero VAD
@@ -91,8 +91,8 @@ spk.stop()
 - `decibri.input_devices()`: enumerate available input devices
 - `decibri.output_devices()`: enumerate available output devices
 - `decibri.version()`: version + audio backend info
-- `decibri.record_to_file(path, seconds, ...)`: record N seconds to a WAV file
-- `decibri.async_record_to_file(path, seconds, ...)`: async equivalent
+- `decibri.record_to_file(path, duration_seconds, ...)`: record N seconds to a WAV file
+- `decibri.async_record_to_file(path, duration_seconds, ...)`: async equivalent
 
 ### Value types
 
