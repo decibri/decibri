@@ -19,7 +19,9 @@ Cross-platform audio capture, playback, and voice activity detection for Python,
 
 ## What is decibri?
 
-decibri is an audio library for real-time speech and voice applications. It is designed to be fast, cross-platform, and consistent across languages. Key features are:
+Decibri is a cross-platform audio engine for real-time speech and voice applications. One unified API across Python, Rust, Node.js, and browsers.
+
+Key features:
 
 - Microphone capture and speaker playback
 - Voice activity detection (Silero or energy modes)
@@ -30,67 +32,21 @@ decibri is an audio library for real-time speech and voice applications. It is d
 
 To learn more, visit [decibri.com/docs/](https://decibri.com/docs/).
 
-## Quick Start
-
-### Python
-
-```python
-import decibri
-
-mic = decibri.Microphone(sample_rate=16000, vad="silero")
-mic.start()
-for chunk in mic:
-    print(f"Got {len(chunk)} bytes; speaking={mic.is_speaking}")
-    break
-mic.stop()
-```
-
-Full Python guide: [here](bindings/python/README.md).
-
-### Node.js
-
-```javascript
-const Decibri = require('decibri');
-
-const mic = new Decibri({ sampleRate: 16000, vad: true, vadMode: 'silero' });
-mic.on('data', (chunk) => console.log(`Got ${chunk.length} bytes`));
-mic.on('speech', () => console.log('speaking'));
-setTimeout(() => mic.stop(), 5000);
-```
-
-Full Node.js and browser guide: [here](npm/decibri/README.md).
-
-### Rust
-
-```rust
-use std::time::Duration;
-use decibri::capture::{AudioCapture, CaptureConfig};
-use decibri::vad::{SileroVad, VadConfig};
-
-fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let capture = AudioCapture::new(CaptureConfig::default())?;
-    let stream = capture.start()?;
-    let mut vad = SileroVad::new(VadConfig::default())?;
-
-    while let Ok(Some(chunk)) = stream.next_chunk(Some(Duration::from_millis(100))) {
-        let result = vad.process(&chunk.data)?;
-        if result.is_speech {
-            println!("speech @ p={:.2}", result.probability);
-        }
-    }
-    Ok(())
-}
-```
-
-Full Rust API: [here](crates/decibri/README.md).
-
 ## Installation
 
-**Python:**
+**Python** (recommended with [uv](https://docs.astral.sh/uv/)):
+
+```bash
+uv pip install decibri
+```
+
+Or with pip:
 
 ```bash
 pip install decibri
 ```
+
+<br/>
 
 **Node.js:**
 
@@ -98,11 +54,66 @@ pip install decibri
 npm install decibri
 ```
 
+<br/>
+
 **Rust:**
 
 ```bash
 cargo add decibri
 ```
+
+<br/>
+
+## Quick Start
+
+### Python
+
+```python
+import decibri
+
+mic = decibri.Microphone(sample_rate=16000)
+mic.start()
+for chunk in mic:
+    print(f"Got {len(chunk)} bytes")
+mic.stop()
+```
+
+Full Python guide: [here](bindings/python/README.md).
+
+<br/>
+
+### Node.js
+
+```javascript
+const Decibri = require('decibri');
+
+const mic = new Decibri({ sampleRate: 16000 });
+mic.on('data', (chunk) => console.log(`Got ${chunk.length} bytes`));
+setTimeout(() => mic.stop(), 5000);
+```
+
+Full Node.js and browser guide: [here](npm/decibri/README.md).
+
+<br/>
+
+### Rust
+
+```rust
+use decibri::capture::{AudioCapture, CaptureConfig};
+
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let capture = AudioCapture::new(CaptureConfig::default())?;
+    let stream = capture.start()?;
+    while let Ok(Some(chunk)) = stream.next_chunk(None) {
+        println!("Got {} bytes", chunk.data.len());
+    }
+    Ok(())
+}
+```
+
+Full Rust guide: [here](crates/decibri/README.md).
+
+<br/>
 
 ## Platform Support
 
@@ -113,9 +124,11 @@ Supports:
 - Linux x64
 - Linux arm64
 
+<br/>
+
 ## Voice Activity Detection
 
-decibri ships two VAD modes:
+Decibri ships two VAD modes:
 
 - **Energy mode**: lightweight RMS threshold.
 - **Silero mode**: ML-based detection using the Silero VAD v5 ONNX model. More accurate, especially in noisy environments. The model (~2.3 MB) is bundled; no downloads or API keys required.
@@ -128,45 +141,45 @@ mic.start()
 for chunk in mic:
     if mic.is_speaking:
         print(f"speech (score={mic.vad_score:.2f})")
-    break  # demo: exit after first chunk
 mic.stop()
 ```
 
-Language-specific VAD examples and tuning advice live in each binding's README.
+The same VAD API is available in Node.js and Rust. Language-specific examples and tuning advice live in each binding's README.
+
+<br/>
 
 ## Integrations
 
-decibri pipes microphone audio directly into cloud and local speech services. Full guides at [decibri.com/docs/integrations](https://decibri.com/docs/integrations).
+Decibri pipes microphone audio directly into cloud and local speech services. Full guides at [decibri.com/docs/integrations](https://decibri.com/docs/integrations).
 
-| Provider | Capability | Supported |
-| --- | --- | --- |
-| OpenAI Realtime | STT (cloud) | ✓ |
-| Deepgram | STT (cloud) | ✓ |
-| AssemblyAI | STT (cloud) | ✓ |
-| Mistral Voxtral | STT (cloud) | ✓ |
-| AWS Transcribe | STT (cloud) | ✓ |
-| Google Speech | STT (cloud) | ✓ |
-| Azure Speech | STT (cloud) | ✓ |
-| Sherpa-ONNX | STT (local) | ✓ |
-| Whisper.cpp | STT (local) | ✓ |
+| Provider | Environment | STT | TTS | VAD | KWS |
+| :--- | :---: | :---: | :---: | :---: | :---: |
+| OpenAI Realtime | Cloud | ✅ | ✅ | | |
+| Deepgram | Cloud | ✅ | ✅ | | |
+| AssemblyAI | Cloud | ✅ | | | |
+| Mistral Voxtral | Cloud | ✅ | | | |
+| AWS Transcribe | Cloud | ✅ | | | |
+| Google Speech | Cloud | ✅ | ✅ | | |
+| Azure Speech | Cloud | ✅ | ✅ | | |
+| Sherpa-ONNX | Local | ✅ | ✅ | ✅ | ✅ |
+| Whisper.cpp | Local | ✅ | | | |
+
+<br/>
 
 ## Architecture
 
-decibri is built on a single Rust core with bindings for Python, Node.js, and Rust. Browsers run the same API via a JavaScript implementation in the npm package.
+Decibri is built on a single Rust core. The same audio engine powers all three language bindings, ensuring consistent behavior regardless of which language you use.
 
-## Documentation
+Python and Node.js install pre-built native binaries for your platform. Browsers run the same API via a JavaScript implementation that ships inside the npm package.
 
-- Python guide: [here](bindings/python/README.md)
-- Rust guide: [here](crates/decibri/README.md) (full API at [docs.rs/decibri](https://docs.rs/decibri/))
-- Node.js and browser guide: [here](npm/decibri/README.md)
-- Integration guides: [decibri.com/docs/integrations](https://decibri.com/docs/integrations)
+<br/>
 
 ## Contributing
 
-Issues and PRs welcome at [github.com/decibri/decibri/issues](https://github.com/decibri/decibri/issues). See [CONTRIBUTING.md](CONTRIBUTING.md) for development setup.
+[Issues](https://github.com/decibri/decibri/issues) and PRs welcome. See [CONTRIBUTING.md](CONTRIBUTING.md) for development setup.
+
+<br/>
 
 ## License
 
-Apache-2.0. See [LICENSE](LICENSE) for details.
-
-Copyright (c) 2026 Decibri.
+Apache-2.0 © 2026 [Decibri](https://github.com/decibri).
