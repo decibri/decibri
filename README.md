@@ -1,4 +1,4 @@
-<!-- markdownlint-disable MD033 MD041 -->
+<!-- markdownlint-disable MD033 MD041 MD059 -->
 <div align="center">
   <img width="100" height="100" alt="decibri" src="https://github.com/user-attachments/assets/a1a7aa23-6954-4cac-9490-76354f0865ee" />
 
@@ -19,15 +19,16 @@ Cross-platform audio capture, playback, and voice activity detection for Python,
 
 ## What is decibri?
 
-decibri is a cross-platform audio library for capture, playback, and voice activity detection. A single Rust core (using [cpal](https://github.com/RustAudio/cpal) for audio I/O and the [Silero VAD](https://github.com/snakers4/silero-vad) ONNX model for speech detection) ships through three first-class bindings: a Python wheel via PyO3, a Node.js native addon via napi-rs, and a browser AudioWorklet implementation under the same npm package.
+decibri is an audio library for real-time speech and voice applications. It is designed to be fast, cross-platform, and consistent across languages. Key features are:
 
-## Features
+- Microphone capture and speaker playback
+- Voice activity detection (Silero or energy modes)
+- Async and streaming APIs
+- Cross-platform: Windows, macOS, Linux, browsers
+- Available in Python, Node.js, and Rust
+- Cloud and local speech-to-text integrations
 
-- Microphone capture and speaker playback for Windows, macOS, Linux, and modern browsers
-- Voice activity detection in two modes: lightweight RMS energy threshold or Silero ONNX (~2.3 MB; bundled, no API keys required)
-- Async and streaming APIs in each binding (async iterators in Python, `Readable` streams in Node.js, channels in Rust)
-- Pre-built binaries for Windows x64, macOS arm64, Linux x64, and Linux arm64; no system audio toolkit required on macOS or Windows; libasound2 only on Linux
-- Cloud and local STT/TTS integration guides at [decibri.com/docs/integrations](https://decibri.com/docs/integrations) covering OpenAI Realtime, Deepgram, AssemblyAI, AWS Transcribe, Google Speech, Azure Speech, Sherpa-ONNX, Whisper.cpp, and more
+To learn more, visit [decibri.com/docs/](https://decibri.com/docs/).
 
 ## Quick Start
 
@@ -40,11 +41,11 @@ mic = decibri.Microphone(sample_rate=16000, vad="silero")
 mic.start()
 for chunk in mic:
     print(f"Got {len(chunk)} bytes; speaking={mic.is_speaking}")
-    break  # exit after first chunk for demo
+    break
 mic.stop()
 ```
 
-Full Python guide: [bindings/python/README.md](bindings/python/README.md).
+Full Python guide: [here](bindings/python/README.md).
 
 ### Node.js
 
@@ -57,7 +58,7 @@ mic.on('speech', () => console.log('speaking'));
 setTimeout(() => mic.stop(), 5000);
 ```
 
-Full Node.js and browser guide: [npm/decibri/README.md](npm/decibri/README.md).
+Full Node.js and browser guide: [here](npm/decibri/README.md).
 
 ### Rust
 
@@ -81,41 +82,43 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 ```
 
-Full Rust API: [crates/decibri/README.md](crates/decibri/README.md) and [docs.rs/decibri](https://docs.rs/decibri/).
+Full Rust API: [here](crates/decibri/README.md).
 
 ## Installation
 
+**Python:**
+
 ```bash
-# Python
 pip install decibri
+```
 
-# Node.js (and browsers)
+**Node.js:**
+
+```bash
 npm install decibri
+```
 
-# Rust
+**Rust:**
+
+```bash
 cargo add decibri
 ```
 
-Each binding ships pre-built binaries for the supported platforms below. No additional system audio libraries are required on Windows or macOS; Linux requires `libasound2` (preinstalled on most desktop distributions).
-
 ## Platform Support
 
-| Platform | Architecture | Audio Backend | Python wheel | npm native | Rust crate |
-| --- | --- | --- | --- | --- | --- |
-| Windows | x64 | WASAPI | yes | yes | yes |
-| macOS | arm64 (Apple Silicon) | CoreAudio | yes | yes | yes |
-| Linux | x64 (gnu) | ALSA | yes | yes | yes |
-| Linux | arm64 (gnu) | ALSA | yes | yes | yes |
-| Browser | n/a | Web Audio API (AudioWorklet) | n/a | yes | n/a |
+Supports:
 
-Intel macOS and Windows arm64 are not currently shipped as pre-built binaries. Source builds via `cargo build` work on those targets but are not part of the release matrix.
+- Windows x64
+- macOS arm64
+- Linux x64
+- Linux arm64
 
 ## Voice Activity Detection
 
 decibri ships two VAD modes:
 
-- **Energy mode** (`vad="energy"` / `vadMode: 'energy'`): lightweight RMS threshold; no model required.
-- **Silero mode** (`vad="silero"` / `vadMode: 'silero'`): ML-based detection using the Silero VAD v5 ONNX model (~2.3 MB, bundled in every binding's distribution; no downloads or API keys required). More accurate than energy mode, especially in noisy environments.
+- **Energy mode**: lightweight RMS threshold.
+- **Silero mode**: ML-based detection using the Silero VAD v5 ONNX model. More accurate, especially in noisy environments. The model (~2.3 MB) is bundled; no downloads or API keys required.
 
 ```python
 import decibri
@@ -125,34 +128,42 @@ mic.start()
 for chunk in mic:
     if mic.is_speaking:
         print(f"speech (score={mic.vad_score:.2f})")
-    if some_stop_condition:
-        break
+    break  # demo: exit after first chunk
 mic.stop()
 ```
 
 Language-specific VAD examples and tuning advice live in each binding's README.
 
+## Integrations
+
+decibri pipes microphone audio directly into cloud and local speech services. Full guides at [decibri.com/docs/integrations](https://decibri.com/docs/integrations).
+
+| Provider | Capability | Supported |
+| --- | --- | --- |
+| OpenAI Realtime | STT (cloud) | ✓ |
+| Deepgram | STT (cloud) | ✓ |
+| AssemblyAI | STT (cloud) | ✓ |
+| Mistral Voxtral | STT (cloud) | ✓ |
+| AWS Transcribe | STT (cloud) | ✓ |
+| Google Speech | STT (cloud) | ✓ |
+| Azure Speech | STT (cloud) | ✓ |
+| Sherpa-ONNX | STT (local) | ✓ |
+| Whisper.cpp | STT (local) | ✓ |
+
 ## Architecture
 
-The Rust core in [`crates/decibri`](crates/decibri/) handles audio I/O via [cpal](https://github.com/RustAudio/cpal) and Silero VAD inference via the [`ort`](https://crates.io/crates/ort) crate (ONNX Runtime). Three bindings expose this core to their respective ecosystems:
-
-- The **Python wheel** ([`bindings/python`](bindings/python/)) is a PyO3 / abi3 binding compiled to a shared library; `pip install decibri` ships pre-built wheels for the four supported platforms.
-- The **Node.js native addon** ([`bindings/node`](bindings/node/)) is a napi-rs binding compiled to a `.node` cdylib; the [`decibri`](npm/decibri/) npm package ships per-platform binaries via optional dependencies.
-- The **browser implementation** ([`npm/decibri/src/browser`](npm/decibri/src/browser/)) is a parallel pure-JavaScript port using `getUserMedia` and `AudioWorklet`. It loads automatically from the same `decibri` npm package via conditional exports when the build target is a browser.
-
-The Silero ONNX model is bundled inside every binding's distribution. ONNX Runtime is loaded dynamically (the `ort-load-dynamic` feature flag) by default; the npm and Python bindings ship the ORT shared library alongside the model.
+decibri is built on a single Rust core with bindings for Python, Node.js, and Rust. Browsers run the same API via a JavaScript implementation in the npm package.
 
 ## Documentation
 
-- **Python guide**: [bindings/python/README.md](bindings/python/README.md) and [decibri.com/docs/](https://decibri.com/docs/)
-- **Rust guide**: [crates/decibri/README.md](crates/decibri/README.md) and [docs.rs/decibri](https://docs.rs/decibri/)
-- **Node.js and browser guide**: [npm/decibri/README.md](npm/decibri/README.md) and [decibri.com/docs/node/](https://decibri.com/docs/node/)
-- **Integration guides** (cloud and local STT/TTS providers): [decibri.com/docs/integrations](https://decibri.com/docs/integrations)
-- **Changelogs**: [CHANGELOG.md](CHANGELOG.md) (Rust core and npm), [bindings/python/CHANGELOG.md](bindings/python/CHANGELOG.md) (Python wheel)
+- Python guide: [here](bindings/python/README.md)
+- Rust guide: [here](crates/decibri/README.md) (full API at [docs.rs/decibri](https://docs.rs/decibri/))
+- Node.js and browser guide: [here](npm/decibri/README.md)
+- Integration guides: [decibri.com/docs/integrations](https://decibri.com/docs/integrations)
 
 ## Contributing
 
-Contributions, issue reports, and feature requests are welcome at [github.com/decibri/decibri/issues](https://github.com/decibri/decibri/issues). See [CONTRIBUTING.md](CONTRIBUTING.md) for development setup, code style, and how to run the cross-platform test suite.
+Issues and PRs welcome at [github.com/decibri/decibri/issues](https://github.com/decibri/decibri/issues). See [CONTRIBUTING.md](CONTRIBUTING.md) for development setup.
 
 ## License
 
