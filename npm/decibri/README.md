@@ -1,6 +1,6 @@
 <!-- markdownlint-disable MD024 -->
 
-# decibri (Node.js and browsers)
+# decibri
 
 Cross-platform audio capture, playback, and voice activity detection for Node.js applications and modern browsers.
 
@@ -8,7 +8,7 @@ Cross-platform audio capture, playback, and voice activity detection for Node.js
 [![npm downloads](https://img.shields.io/npm/dm/decibri)](https://www.npmjs.com/package/decibri)
 [![License](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](https://github.com/decibri/decibri/blob/main/LICENSE)
 
-This is the Node.js and browser binding of decibri. The same Rust core powers decibri's Python wheel and Rust crate; see the [main README](https://github.com/decibri/decibri) for the polyglot project context.
+This is the Node.js and browser binding of decibri. The same audio engine powers decibri's Python and Rust bindings; see the [Main Project Readme](https://github.com/decibri/decibri) for the full project context.
 
 ## Installation
 
@@ -16,7 +16,7 @@ This is the Node.js and browser binding of decibri. The same Rust core powers de
 npm install decibri
 ```
 
-One package serves both Node.js and browsers via conditional exports. Node.js gets a native addon (Rust via [napi-rs](https://napi.rs/)). Browsers get a JavaScript [AudioWorklet](https://developer.mozilla.org/en-US/docs/Web/API/AudioWorklet) implementation. Platform-specific binaries are installed automatically through optional dependencies.
+One package serves both Node.js and browsers via conditional exports. Node.js gets a native addon. Browsers get a JavaScript [AudioWorklet](https://developer.mozilla.org/en-US/docs/Web/API/AudioWorklet) implementation. Platform-specific binaries are installed automatically through optional dependencies.
 
 Requires Node.js >= 18 for Node.js consumers. TypeScript definitions are bundled.
 
@@ -129,7 +129,7 @@ Standard `WritableOptions` (e.g. `highWaterMark`) are also accepted.
 | `DecibriOutput.devices()` | List available output devices |
 | `DecibriOutput.version()` | Same as `Decibri.version()` |
 
-## Browser API
+## API: Browser
 
 The browser API uses `getUserMedia` and `AudioWorklet`. It differs from the Node.js API because browser audio is fundamentally async.
 
@@ -152,31 +152,28 @@ Same options as Node.js, plus:
 | Base class | `Readable` stream | Custom `Emitter` |
 | Data type | `Buffer` | `Int16Array` / `Float32Array` |
 | `devices()` | Sync, returns array | Async, returns `Promise` |
-| Sample rate | Direct via cpal | Resampled from native rate |
+| Sample rate | Direct | Resampled from native rate |
 
 ## Voice Activity Detection
 
-### Energy mode (default)
+Decibri ships two VAD modes:
 
-Lightweight RMS energy threshold. No model required.
+- **Energy mode** (default): lightweight RMS energy threshold. No model required.
+- **Silero mode**: ML-based detection using the Silero VAD v5 ONNX model. More accurate, especially in noisy environments. The model (~2.3 MB) ships inside the npm package; no downloads or API keys required.
 
 ```javascript
+// Energy mode
 const mic = new Decibri({ vad: true, vadThreshold: 0.01 });
 mic.on('speech', () => console.log('speaking'));
 mic.on('silence', () => console.log('silent'));
-```
 
-### Silero mode
-
-ML-based detection using the Silero VAD v5 ONNX model. More accurate than energy mode, especially in noisy environments.
-
-```javascript
+// Silero mode
 const mic = new Decibri({ vad: true, vadMode: 'silero', vadThreshold: 0.5 });
 mic.on('speech', () => console.log('speaking'));
 mic.on('silence', () => console.log('silent'));
 ```
 
-The Silero model (~2.3 MB) ships inside the npm package. No downloads or API keys required.
+The same VAD modes are available in Decibri's Python and Rust bindings.
 
 ## Device Selection
 
@@ -202,32 +199,39 @@ Decibri.devices();
 
 ## Examples
 
-Runnable Node.js examples are in the [`examples/`](https://github.com/decibri/decibri/tree/main/examples) directory of the repo.
+Runnable Node.js examples are in the [examples](https://github.com/decibri/decibri/tree/main/examples) directory of the repo.
+
+Capture to WAV file (no dependencies):
 
 ```bash
-# Capture to WAV file (no dependencies)
 node examples/wav-capture.js
+```
 
-# Stream to WebSocket (requires: npm install ws)
-node examples/websocket-server.js   # terminal 1
-node examples/websocket-stream.js   # terminal 2
+Stream to WebSocket (requires `npm install ws`):
+
+```bash
+# Terminal 1
+node examples/websocket-server.js
+
+# Terminal 2
+node examples/websocket-stream.js
 ```
 
 ## Integrations
 
-decibri's capture output and playback input can pipe directly into cloud and local STT/TTS services. Integration guides at [decibri.com/docs/integrations](https://decibri.com/docs/integrations) cover:
+Decibri's capture output and playback input pipe directly into cloud and local STT/TTS services. Integration guides at [decibri.com/docs/integrations](https://decibri.com/docs/integrations) cover:
 
-| Provider | Type | Guide |
+| Provider | Environment | Guide |
 | --- | --- | --- |
-| OpenAI Realtime | cloud | [decibri.com/docs/node/integrations/openai-realtime](https://decibri.com/docs/node/integrations/openai-realtime) |
-| Deepgram | cloud | [decibri.com/docs/node/integrations/deepgram](https://decibri.com/docs/node/integrations/deepgram) |
-| AssemblyAI | cloud | [decibri.com/docs/node/integrations/assemblyai](https://decibri.com/docs/node/integrations/assemblyai) |
-| Mistral Voxtral | cloud | [decibri.com/docs/node/integrations/mistral-voxtral](https://decibri.com/docs/node/integrations/mistral-voxtral) |
-| AWS Transcribe | cloud | [decibri.com/docs/node/integrations/aws-transcribe](https://decibri.com/docs/node/integrations/aws-transcribe) |
-| Google Speech-to-Text | cloud | [decibri.com/docs/node/integrations/google-speech](https://decibri.com/docs/node/integrations/google-speech) |
-| Azure Speech-to-Text | cloud | [decibri.com/docs/node/integrations/azure-speech](https://decibri.com/docs/node/integrations/azure-speech) |
-| Sherpa-ONNX | local | [decibri.com/docs/node/integrations/sherpa-onnx-stt](https://decibri.com/docs/node/integrations/sherpa-onnx-stt) |
-| Whisper.cpp | local | [decibri.com/docs/node/integrations/whisper-cpp](https://decibri.com/docs/node/integrations/whisper-cpp) |
+| OpenAI Realtime | Cloud | [Guide](https://decibri.com/docs/node/integrations/openai-realtime) |
+| Deepgram | Cloud | [Guide](https://decibri.com/docs/node/integrations/deepgram) |
+| AssemblyAI | Cloud | [Guide](https://decibri.com/docs/node/integrations/assemblyai) |
+| Mistral Voxtral | Cloud | [Guide](https://decibri.com/docs/node/integrations/mistral-voxtral) |
+| AWS Transcribe | Cloud | [Guide](https://decibri.com/docs/node/integrations/aws-transcribe) |
+| Google Speech-to-Text | Cloud | [Guide](https://decibri.com/docs/node/integrations/google-speech) |
+| Azure Speech-to-Text | Cloud | [Guide](https://decibri.com/docs/node/integrations/azure-speech) |
+| Sherpa-ONNX | Local | [Guide](https://decibri.com/docs/node/integrations/sherpa-onnx-stt) |
+| Whisper.cpp | Local | [Guide](https://decibri.com/docs/node/integrations/whisper-cpp) |
 
 ## Platform Support
 
@@ -239,26 +243,21 @@ decibri's capture output and playback input can pipe directly into cloud and loc
 | Linux | arm64 (gnu) | ALSA |
 | Browser | n/a | Web Audio API (AudioWorklet) |
 
-Pre-built native binaries ship via per-platform optional dependencies (`@decibri/decibri-win32-x64-msvc`, `@decibri/decibri-darwin-arm64`, `@decibri/decibri-linux-x64-gnu`, `@decibri/decibri-linux-arm64-gnu`). The browser entry point is pure JavaScript and requires no native binary.
+Pre-built native binaries ship via per-platform optional dependencies. The browser entry point is pure JavaScript and requires no native binary.
 
 ## How It Works
 
-decibri is a Rust library using [cpal](https://github.com/RustAudio/cpal) for cross-platform audio I/O. The Rust core compiles to a Node.js native addon via [napi-rs](https://napi.rs/) and ships pre-built binaries for each platform. Browser support uses a JavaScript AudioWorklet implementation with the same event-driven API.
+Decibri is built on a single Rust core. Audio flows from the OS audio device through the engine, through frame-exact buffering (which guarantees consistent chunk sizes), and into Node.js as a standard `Readable` stream. Browser support uses a JavaScript AudioWorklet implementation with the same event-driven API.
 
-Audio flows from the OS audio device through cpal's callback, into a [crossbeam-channel](https://github.com/crossbeam-rs/crossbeam), through frame-exact buffering (guarantees consistent chunk sizes), and into Node.js via a threadsafe function. The JavaScript layer wraps this in a standard `Readable` stream.
-
-The same Rust core is also published to [crates.io](https://crates.io/crates/decibri) for direct Rust consumers and to [PyPI](https://pypi.org/project/decibri/) (via PyO3) for Python consumers.
+The same audio engine is also published to [crates.io](https://crates.io/crates/decibri) for direct Rust consumers and to [PyPI](https://pypi.org/project/decibri/) for Python consumers.
 
 ## Cross-references
 
-- **Polyglot project context**: [github.com/decibri/decibri](https://github.com/decibri/decibri)
-- **Python wheel**: [bindings/python/README.md](https://github.com/decibri/decibri/blob/main/bindings/python/README.md)
-- **Rust crate**: [crates/decibri/README.md](https://github.com/decibri/decibri/blob/main/crates/decibri/README.md) and [docs.rs/decibri](https://docs.rs/decibri/)
-- **CHANGELOG**: [CHANGELOG.md](https://github.com/decibri/decibri/blob/main/CHANGELOG.md)
-- **TypeScript types**: bundled in the npm package; types entry is `src/decibri.d.ts`
+- Main Project Readme: [here](https://github.com/decibri/decibri)
+- Python: [here](https://github.com/decibri/decibri/blob/main/bindings/python/README.md)
+- Rust: [here](https://github.com/decibri/decibri/blob/main/crates/decibri/README.md) (full API at [docs.rs/decibri](https://docs.rs/decibri/))
+- CHANGELOG: [here](https://github.com/decibri/decibri/blob/main/CHANGELOG.md)
 
 ## License
 
-Apache-2.0. See [LICENSE](https://github.com/decibri/decibri/blob/main/LICENSE) for details.
-
-Copyright (c) 2026 Decibri.
+Apache-2.0 © 2026 [Decibri](https://github.com/decibri).
