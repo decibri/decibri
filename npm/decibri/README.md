@@ -1,6 +1,6 @@
 <!-- markdownlint-disable MD024 -->
 
-# decibri
+# Decibri
 
 Cross-platform audio capture, playback, and voice activity detection for Node.js applications and modern browsers.
 
