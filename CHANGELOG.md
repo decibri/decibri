@@ -2,7 +2,7 @@
 
 # Decibri Changelog
 
-This file tracks changes to the **decibri Rust core** (`crates/decibri`, published to crates.io) and the **decibri npm binding** (`npm/decibri`, published to npm). These two ship together at the same version under the `v*` tag pattern (e.g., `v3.4.0` publishes both `decibri 3.4.0` to crates.io and `@analyticsinmotion/decibri 3.4.0` to npm).
+This file tracks changes to the **decibri Rust core** (`crates/decibri`, published to crates.io) and the **decibri npm binding** (`npm/decibri`, published to npm). These two ship together at the same version under the `v*` tag pattern (e.g., `v3.4.0` publishes both `decibri 3.4.0` to crates.io and `decibri 3.4.0` to npm).
 
 For decibri Python wheel changes, see [bindings/python/CHANGELOG.md](bindings/python/CHANGELOG.md). The Python wheel has its own version trajectory (currently `0.1.x`) and ships under the `python-v*` tag pattern.
 
