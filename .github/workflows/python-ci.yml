@@ -600,6 +600,31 @@ jobs:
           echo "External dependencies (post-repair):"
           uv run delocate-listdeps --depending "$NEW_WHEEL"
 
+      # abi3 compliance gate, shifted left from publish-pypi.yml to PR CI in
+      # 0.1.3. Mirrors publish-pypi.yml lines 296-308 verbatim. Defense in
+      # depth: abi3audit also continues to run at publish time so a wheel that
+      # somehow escapes PR review still cannot reach PyPI without the gate.
+      # The audit runs after auditwheel / delocate so the wheel under audit
+      # is the repaired artifact that publish would actually upload, not the
+      # raw maturin output. --strict fails on any abi3 violation;
+      # --assume-minimum-abi3 3.10 pins to decibri's abi3 floor and avoids
+      # the documented bare-.so abi3-cp32 false-positive case from abi3audit's
+      # README. Pinned version (0.0.26) matches publish-pypi.yml so a single
+      # cross-workflow bump is the only place the version lives.
+      - name: Install abi3audit
+        run: pip install 'abi3audit==0.0.26'
+
+      - name: Verify abi3 compliance
+        shell: bash
+        run: |
+          set -euo pipefail
+          WHEEL=$(ls "${GITHUB_WORKSPACE}/target/wheels/decibri-"*.whl | head -1)
+          if [ -z "$WHEEL" ]; then
+            echo "ERROR: no wheel found for abi3audit"
+            exit 1
+          fi
+          abi3audit --strict --verbose --assume-minimum-abi3 3.10 "$WHEEL"
+
       - name: Wheel install-test (Phase 3 acceptance gate)
         working-directory: bindings/python
         shell: bash

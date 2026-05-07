@@ -4,7 +4,7 @@ build-backend = "maturin"
 
 [project]
 name = "decibri"
-version = "0.1.2"
+version = "0.1.3"
 description = "Cross-platform audio capture, output, and voice activity detection"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -68,6 +68,18 @@ dev = [
     "numpy>=1.20",
     "mypy>=1.20,<2.0",
     "typing-extensions>=4.15",
+    # 0.1.3: hypothesis powers the property-based constructor tests in
+    # tests/test_microphone_properties.py (Phase 9 Tier 1 testing per
+    # prerelease-decibri-additional-testing-reqs.md). Floor 6.0 covers
+    # the modern strategy API surface; upper bound left open until a
+    # 7.0 release lands and we can re-pin.
+    "hypothesis>=6.0",
+    # 0.1.3: psutil powers the RSS sampling in tests/test_lifecycle_leak.py.
+    # tracemalloc covers Python-allocated memory; psutil covers native
+    # allocations (cpal stream buffers, ORT session handles) that
+    # tracemalloc cannot see. Both are needed to detect different leak
+    # surfaces. Pin matches numpy's lower-bound style (no upper).
+    "psutil>=5.9",
 ]
 
 [tool.maturin]
