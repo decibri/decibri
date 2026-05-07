@@ -1,237 +1,139 @@
-<!-- markdownlint-disable MD024 -->
-
 # Decibri
 
-Cross-platform audio capture, playback, and voice activity detection for Node.js applications and modern browsers.
+Cross-platform audio capture, playback, and voice activity detection for Rust applications.
 
-[![npm version](https://img.shields.io/npm/v/decibri)](https://www.npmjs.com/package/decibri)
-[![npm downloads](https://img.shields.io/npm/dm/decibri)](https://www.npmjs.com/package/decibri)
+[![crates.io](https://img.shields.io/crates/v/decibri)](https://crates.io/crates/decibri)
+[![docs.rs](https://img.shields.io/docsrs/decibri)](https://docs.rs/decibri/)
 [![License](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](https://github.com/decibri/decibri/blob/main/LICENSE)
 
-This is the Node.js and browser binding of decibri. The same audio engine powers decibri's Python and Rust bindings; see the [Main Project Readme](https://github.com/decibri/decibri) for the full project context.
+This is the Rust core of decibri. The same audio engine powers decibri's Python and Node.js bindings; see the [Main Project Readme](https://github.com/decibri/decibri) for the full project context.
 
-## Installation
+## Add to Cargo.toml
 
 ```bash
-npm install decibri
+cargo add decibri
 ```
 
-One package serves both Node.js and browsers via conditional exports. Node.js gets a native addon. Browsers get a JavaScript [AudioWorklet](https://developer.mozilla.org/en-US/docs/Web/API/AudioWorklet) implementation. Platform-specific binaries are installed automatically through optional dependencies.
+Or directly:
 
-Requires Node.js >= 18 for Node.js consumers. TypeScript definitions are bundled.
+```toml
+[dependencies]
+decibri = "3"
+```
+
+The default feature set (`capture`, `output`, `vad`, `denoise`, `gain`, `ort-load-dynamic`) covers most use cases. See [Feature flags](#feature-flags) below for opt-in or trimmed configurations.
 
 ## Quick Start
 
-### Capture audio (Node.js)
+### Capture and run VAD
 
-```javascript
-const Decibri = require('decibri');
+```rust
+use std::time::Duration;
+use decibri::capture::{AudioCapture, CaptureConfig};
+use decibri::vad::{SileroVad, VadConfig};
 
-const mic = new Decibri({ sampleRate: 16000, channels: 1 });
-mic.on('data', (chunk) => { /* Buffer of Int16 PCM samples */ });
-setTimeout(() => mic.stop(), 5000);
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let capture = AudioCapture::new(CaptureConfig::default())?;
+    let stream = capture.start()?;
+    let mut vad = SileroVad::new(VadConfig::default())?;
+
+    while let Ok(Some(chunk)) = stream.next_chunk(Some(Duration::from_millis(100))) {
+        let result = vad.process(&chunk.data)?;
+        if result.is_speech {
+            println!("speech @ p={:.2}", result.probability);
+        }
+    }
+    Ok(())
+}
 ```
 
-### Play audio (Node.js)
+`CaptureStream::next_chunk` returns a three-state `Result`: `Ok(Some(chunk))` on data, `Ok(None)` on timeout (stream still open), and `Err(DecibriError::CaptureStreamClosed)` once the stream ends.
 
-```javascript
-const { DecibriOutput } = require('decibri');
+### Speaker output
 
-const speaker = new DecibriOutput({ sampleRate: 16000, channels: 1 });
-speaker.write(pcmBuffer);
-speaker.end();
+```rust
+use decibri::output::{AudioOutput, OutputConfig};
+
+let output = AudioOutput::new(OutputConfig::default())?;
+let stream = output.start()?;
+stream.send(&pcm_int16_bytes)?;
+stream.drain()?;
+stream.stop()?;
 ```
 
-### Browser capture
+`OutputStream::send` accepts byte slices in the format declared by `OutputConfig` (default: int16 LE). `drain` blocks until the device has finished playing; `stop` is immediate.
 
-```javascript
-import { Decibri } from 'decibri'; // browser entry via conditional export
+### Energy-mode VAD without ONNX Runtime
 
-const mic = new Decibri({ sampleRate: 16000 });
-mic.on('data', (chunk) => { /* Int16Array of PCM samples */ });
-await mic.start(); // requires user gesture in Safari
-```
+If you do not need Silero, the lightweight RMS energy mode in `vad` does not require ORT. You can also disable the `vad` feature entirely to avoid the `ort` dependency.
 
-### Pipe capture to playback (echo)
+## Feature flags
 
-```javascript
-const mic = new Decibri({ sampleRate: 16000, channels: 1 });
-const speaker = new DecibriOutput({ sampleRate: 16000, channels: 1 });
-mic.pipe(speaker);
-```
-
-## API: Decibri (Capture)
-
-### `new Decibri(options?)`
-
-Creates a `Readable` stream that captures from the microphone.
-
-| Option | Type | Default | Description |
-| --- | --- | --- | --- |
-| `sampleRate` | number | `16000` | Samples per second (1000 to 384000) |
-| `channels` | number | `1` | Input channels (1 to 32) |
-| `framesPerBuffer` | number | `1600` | Frames per chunk (64 to 65536). At 16kHz mono, 1600 = 100ms = 3200 bytes |
-| `device` | number \| string | system default | Device index or case-insensitive name substring |
-| `format` | `'int16'` \| `'float32'` | `'int16'` | Sample encoding |
-| `vad` | boolean | `false` | Enable voice activity detection |
-| `vadMode` | `'energy'` \| `'silero'` | `'energy'` | VAD engine: RMS threshold or Silero ML model |
-| `vadThreshold` | number | `0.01` / `0.5` | Speech threshold. Default depends on vadMode |
-| `vadHoldoff` | number | `300` | Silence holdoff in ms |
-
-Standard `ReadableOptions` (e.g. `highWaterMark`) are also accepted.
-
-### Methods
-
-| Method | Description |
-| --- | --- |
-| `mic.stop()` | Stop capture and end stream. Safe to call multiple times |
-| `Decibri.devices()` | List available input devices |
-| `Decibri.version()` | Version info: `{ decibri: '3.x.y', portaudio: 'cpal 0.17' }` |
-
-### Properties
-
-| Property | Type | Description |
+| Flag | Default | Purpose |
 | --- | --- | --- |
-| `mic.isOpen` | boolean | `true` while capturing |
+| `capture` | on | Microphone input stream support |
+| `output` | on | Speaker output stream support |
+| `vad` | on | Silero VAD ONNX inference |
+| `denoise` | on | Reserved (stub) |
+| `gain` | on | Reserved (stub) |
+| `ort-load-dynamic` | on | ORT loaded at runtime from a user-supplied path |
+| `ort-download-binaries` | off | ORT downloaded at build time and embedded in the binary |
 
-### Events
+`ort-load-dynamic` and `ort-download-binaries` are mutually exclusive; selecting both is a compile error.
 
-| Event | Payload | Description |
-| --- | --- | --- |
-| `'data'` | `Buffer` | Audio chunk (Int16 LE or Float32 LE) |
-| `'backpressure'` | (none) | Internal buffer full, consumer too slow |
-| `'speech'` | (none) | VAD: audio crosses threshold |
-| `'silence'` | (none) | VAD: audio below threshold for `vadHoldoff` ms |
-| `'end'` | (none) | Stream ended |
-| `'error'` | `Error` | An error occurred |
+Execution-provider passthrough features (off by default; opt in for GPU acceleration on specific platforms): `coreml`, `cuda`, `directml`, `rocm`. See [docs/features.md](https://github.com/decibri/decibri/blob/main/docs/features.md) for the full reference.
 
-## API: DecibriOutput (Playback)
+### Common configurations
 
-### `new DecibriOutput(options?)`
+**Zero-config builds** (ORT downloaded at `cargo build`, embedded):
 
-Creates a `Writable` stream for speaker playback.
-
-| Option | Type | Default | Description |
-| --- | --- | --- | --- |
-| `sampleRate` | number | `16000` | Playback sample rate (1000 to 384000) |
-| `channels` | number | `1` | Output channels (1 to 32) |
-| `format` | `'int16'` \| `'float32'` | `'int16'` | Sample encoding of incoming data |
-| `device` | number \| string | system default | Output device index or name substring |
-
-Standard `WritableOptions` (e.g. `highWaterMark`) are also accepted.
-
-| Method / Property | Description |
-| --- | --- |
-| `speaker.write(chunk)` | Write PCM data for playback |
-| `speaker.end()` | Signal end. Drains remaining audio, then emits `'finish'` |
-| `speaker.stop()` | Immediate stop. Discards remaining audio |
-| `speaker.isPlaying` | `true` while audio is being output |
-| `DecibriOutput.devices()` | List available output devices |
-| `DecibriOutput.version()` | Same as `Decibri.version()` |
-
-## API: Browser
-
-The browser API uses `getUserMedia` and `AudioWorklet`. It differs from the Node.js API because browser audio is fundamentally async.
-
-### `new Decibri(options?)`
-
-Same options as Node.js, plus:
-
-| Option | Type | Default | Description |
-| --- | --- | --- | --- |
-| `device` | string | system default | Device ID from `Decibri.devices()` (not index) |
-| `echoCancellation` | boolean | `true` | Browser echo cancellation |
-| `noiseSuppression` | boolean | `true` | Browser noise suppression |
-| `workletUrl` | string | inline blob | Custom worklet URL for strict CSP |
-
-### Key differences from Node.js
-
-| Aspect | Node.js | Browser |
-| --- | --- | --- |
-| Start | Automatic on first read | `await mic.start()` |
-| Base class | `Readable` stream | Custom `Emitter` |
-| Data type | `Buffer` | `Int16Array` / `Float32Array` |
-| `devices()` | Sync, returns array | Async, returns `Promise` |
-| Sample rate | Direct | Resampled from native rate |
-
-## Voice Activity Detection
-
-Decibri ships two VAD modes:
-
-- **Energy mode** (default): lightweight RMS energy threshold. No model required.
-- **Silero mode**: ML-based detection using the Silero VAD v5 ONNX model. More accurate, especially in noisy environments. The model (~2.3 MB) ships inside the npm package; no downloads or API keys required.
-
-```javascript
-// Energy mode
-const mic = new Decibri({ vad: true, vadThreshold: 0.01 });
-mic.on('speech', () => console.log('speaking'));
-mic.on('silence', () => console.log('silent'));
-
-// Silero mode
-const mic = new Decibri({ vad: true, vadMode: 'silero', vadThreshold: 0.5 });
-mic.on('speech', () => console.log('speaking'));
-mic.on('silence', () => console.log('silent'));
+```toml
+decibri = { version = "3", features = ["ort-download-binaries"], default-features = false }
 ```
 
-The same VAD modes are available in Decibri's Python and Rust bindings.
+Add back the other features you want (`capture`, `output`, `vad`, `denoise`, `gain`).
 
-## Device Selection
+**Production deployments with bundled ORT** (default; ORT loaded at runtime from a path you control):
 
-```javascript
-// System default
-const mic = new Decibri();
-
-// By name (case-insensitive substring match)
-const mic = new Decibri({ device: 'USB' });
-
-// By index
-const devices = Decibri.devices();
-const mic = new Decibri({ device: devices[1].index });
+```toml
+decibri = "3"
 ```
 
-```javascript
-Decibri.devices();
-// [
-//   { index: 0, name: 'Microphone', maxInputChannels: 2, defaultSampleRate: 48000, isDefault: true },
-//   { index: 1, name: 'USB Headset', maxInputChannels: 1, defaultSampleRate: 44100, isDefault: false }
-// ]
+Then either set `ORT_DYLIB_PATH=/path/to/libonnxruntime.{so,dylib,dll}` before first use, or call `ort::init_from(path).commit()` at startup. ORT initializes exactly once per process; the first successful path wins and later constructions silently reuse it.
+
+**Capture and output without VAD** (no `ort` dependency at all):
+
+```toml
+decibri = { version = "3", features = ["capture", "output"], default-features = false }
 ```
 
-## Examples
+## ONNX Runtime configuration
 
-Runnable Node.js examples are in the [examples](https://github.com/decibri/decibri/tree/main/examples) directory of the repo.
+Under `ort-load-dynamic` (default), the `ort` crate locates the ONNX Runtime shared library at runtime via either a `VadConfig::ort_library_path`, the `ORT_DYLIB_PATH` environment variable, or a process-wide `ort::init_from(...).commit()` call. Decibri performs a filesystem-level path check before handing the path to `ort::init_from`, so a missing or wrong-arch dylib surfaces as `DecibriError::OrtPathInvalid` rather than hanging on dynamic load.
 
-Capture to WAV file (no dependencies):
+See the [ort crate linking docs](https://ort.pyke.io/setup/linking) for the full runtime-loading reference.
 
-```bash
-node examples/wav-capture.js
-```
+### Fork safety (Linux)
 
-Stream to WebSocket (requires `npm install ws`):
+ORT initialized in a parent process does not survive `fork()` cleanly: internal threads, memory pools, and device handles belonging to the parent may misbehave in the child. Decibri detects this at the start of every VAD inference call and returns `DecibriError::ForkAfterOrtInit` when the calling process ID does not match the process ID that initialized ORT.
 
-```bash
-# Terminal 1
-node examples/websocket-server.js
+## Public API surface
 
-# Terminal 2
-node examples/websocket-stream.js
-```
+The 3.x stable surface includes:
 
-## Integrations
+- **Capture**: `AudioCapture`, `CaptureConfig`, `CaptureStream`
+- **Output**: `AudioOutput`, `OutputConfig`, `OutputStream`
+- **VAD**: `SileroVad`, `VadConfig`, `VadResult`
+- **Device**: enumeration and selection helpers (by index, case-insensitive name substring, or stable per-host ID)
+- **Errors**: `DecibriError` (`#[non_exhaustive]` enum covering capture, output, device, ORT, and fork-detection variants)
 
-Decibri's capture output and playback input pipe directly into cloud and local STT/TTS services. Integration guides at [decibri.com/docs/integrations](https://decibri.com/docs/integrations) cover:
+The `OnnxSession` trait abstracting ONNX Runtime is `pub(crate)` in 3.x and graduates to public at the planned 4.0 / `decibri-onnx` workspace split.
 
-| Provider | Environment | Guide |
-| --- | --- | --- |
-| OpenAI Realtime | Cloud | [Guide](https://decibri.com/docs/node/integrations/openai-realtime) |
-| Deepgram | Cloud | [Guide](https://decibri.com/docs/node/integrations/deepgram) |
-| AssemblyAI | Cloud | [Guide](https://decibri.com/docs/node/integrations/assemblyai) |
-| Mistral Voxtral | Cloud | [Guide](https://decibri.com/docs/node/integrations/mistral-voxtral) |
-| AWS Transcribe | Cloud | [Guide](https://decibri.com/docs/node/integrations/aws-transcribe) |
-| Google Speech-to-Text | Cloud | [Guide](https://decibri.com/docs/node/integrations/google-speech) |
-| Azure Speech-to-Text | Cloud | [Guide](https://decibri.com/docs/node/integrations/azure-speech) |
-| Sherpa-ONNX | Local | [Guide](https://decibri.com/docs/node/integrations/sherpa-onnx-stt) |
-| Whisper.cpp | Local | [Guide](https://decibri.com/docs/node/integrations/whisper-cpp) |
+Full API reference: [docs.rs/decibri](https://docs.rs/decibri/).
+
+## Thread safety
+
+All public types are `Send` and suitable for cross-thread handoff. `CaptureStream` and `OutputStream` are `!Sync` because they hold a `cpal::Stream` internally; wrap them in a mutex or move them into a dedicated thread for shared access.
 
 ## Platform Support
 
@@ -241,22 +143,18 @@ Decibri's capture output and playback input pipe directly into cloud and local S
 | macOS | arm64 (Apple Silicon) | CoreAudio |
 | Linux | x64 (gnu) | ALSA |
 | Linux | arm64 (gnu) | ALSA |
-| Browser | n/a | Web Audio API (AudioWorklet) |
 
-Pre-built native binaries ship via per-platform optional dependencies. The browser entry point is pure JavaScript and requires no native binary.
-
-## How It Works
-
-Decibri is built on a single Rust core. Audio flows from the OS audio device through the engine, through frame-exact buffering (which guarantees consistent chunk sizes), and into Node.js as a standard `Readable` stream. Browser support uses a JavaScript AudioWorklet implementation with the same event-driven API.
-
-The same audio engine is also published to [crates.io](https://crates.io/crates/decibri) for direct Rust consumers and to [PyPI](https://pypi.org/project/decibri/) for Python consumers.
+Source builds work on additional targets (Intel macOS, Windows arm64, musl Linux) but are not part of the binary release matrix.
 
 ## Cross-references
 
 - Main Project Readme: [here](https://github.com/decibri/decibri)
 - Python: [here](https://github.com/decibri/decibri/blob/main/bindings/python/README.md)
-- Rust: [here](https://github.com/decibri/decibri/blob/main/crates/decibri/README.md) (full API at [docs.rs/decibri](https://docs.rs/decibri/))
+- Node.js and browser: [here](https://github.com/decibri/decibri/blob/main/npm/decibri/README.md)
+- Full Rust API: [docs.rs/decibri](https://docs.rs/decibri/)
+- Feature flag reference: [docs/features.md](https://github.com/decibri/decibri/blob/main/docs/features.md)
 - CHANGELOG: [here](https://github.com/decibri/decibri/blob/main/CHANGELOG.md)
+- ORT linking docs: [ort.pyke.io/setup/linking](https://ort.pyke.io/setup/linking)
 
 ## License
 
