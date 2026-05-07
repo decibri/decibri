@@ -10,6 +10,14 @@ Decibri is a native Python package that delivers microphone capture, speaker out
 
 ## Install
 
+Recommended with [uv](https://docs.astral.sh/uv/):
+
+```bash
+uv pip install decibri
+```
+
+Or with pip:
+
 ```bash
 pip install decibri
 ```

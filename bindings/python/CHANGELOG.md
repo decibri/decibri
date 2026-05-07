@@ -10,6 +10,24 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+## [0.1.3] - 2026-05-07
+
+### Python binding
+
+Patch release adding source distribution publication, property-based and soak/leak tests, and a shift-left of the abi3 compliance gate to PR-time CI. Mechanical version bump only on the version-handling surface; full single-source-of-truth consolidation deferred to the 4.0 platform decoupling release.
+
+#### Added
+
+- Source distribution (sdist) publication to PyPI alongside binary wheels. Users on platforms outside the 4-platform wheel matrix, security-conscious environments that require source builds, and consumers running `pip install --no-binary :all: decibri` now have an install path. The Silero VAD ONNX model is included in the sdist via the existing `[tool.maturin] include` directive (`format = ["sdist", "wheel"]`, pre-positioned in 0.1.0). Source-build prerequisites: Rust toolchain, a C++ toolchain (cpal transitive dep on macOS/Linux), and an ORT dylib at runtime (the wheel bundles ORT; sdist users supply via `ORT_DYLIB_PATH` or system-installed `onnxruntime`). Cohort majority pattern: pydantic-core, ruff, uv, tokenizers, polars all publish sdist; decibri was the lone holdout. New `build-sdist` job in `publish-pypi.yml` runs on Linux (sdist is platform-neutral), validates via `twine check`, and uploads alongside per-platform wheel artifacts. Both `publish-testpypi` and `publish-pypi` jobs depend on it and pull the sdist in their artifact glob.
+- Hypothesis property tests for `Microphone` constructor validation at `bindings/python/tests/test_microphone_properties.py`. Five tests covering `sample_rate`, `channels`, `frames_per_buffer`, `dtype`, and the positive valid-input path. Each test runs `max_examples=20` Hypothesis-generated cases against the existing typed-exception contract (`SampleRateOutOfRange`, `ChannelsOutOfRange`, `FramesPerBufferOutOfRange`, `InvalidFormat`). The property under test is "validation always lands on a typed decibri exception, never a panic / abort / untyped exception under fuzz". Total file runtime ~1.5 seconds. Tier 1 testing per `prerelease-decibri-additional-testing-reqs.md` Test 3.
+- Soak and leak detection tests at `bindings/python/tests/test_lifecycle_leak.py`. Three bounded loops (5-iteration warmup + 15-iteration measurement window) with `tracemalloc` (Python-side allocations) and `psutil` RSS sampling (native allocations under cpal / pyo3 / ort). Tests cover `Microphone`, `AsyncMicrophone`, and `Microphone(vad="silero")` construct/destroy cycles. Thresholds: 1 MB tracemalloc growth, 5 MB RSS growth (10 MB for the silero variant to absorb ORT allocator behavior). The silero test uses the `requires_bundled_ort` marker so it auto-skips on dev installs where `_ort/` is empty and runs in CI where the dylib is staged. Total combined runtime ~3 seconds locally. Tier 1 testing per `prerelease-decibri-additional-testing-reqs.md` Test 4.
+- abi3 compliance gate shifted left from publish-time to PR-time. The `abi3audit --strict --verbose --assume-minimum-abi3 3.10` step in `python-ci.yml` mirrors the existing `publish-pypi.yml` step verbatim and runs after auditwheel / delocate repair on every PR matrix entry. Defense in depth: the existing `publish-pypi.yml` step is retained untouched, so a wheel that somehow escapes PR review still cannot reach PyPI without the gate. Pinned at `abi3audit==0.0.26` matching `publish-pypi.yml`; cross-workflow version bumps remain a single-touchpoint action.
+- `hypothesis>=6.0` and `psutil>=5.9` added to `[dependency-groups] dev` in `bindings/python/pyproject.toml`. Both are dev-only; not propagated to the wheel's runtime dependencies.
+
+#### Internal
+
+- Master plan `~/.claude/plans/python-integration-project.md` Section 3 directory-tree comment for `python-ci.yml` corrected. The prior comment incorrectly attributed an abi3audit addition to Phase 10 in `python-ci.yml`; Phase 10 actually created `publish-pypi.yml` as a separate workflow file and the abi3audit step lived only there until 0.1.3. Phase 10 section gained a "0.1.3 update" note documenting the shift-left.
+
 ## [0.1.2] - 2026-05-06
 
 ### Python binding

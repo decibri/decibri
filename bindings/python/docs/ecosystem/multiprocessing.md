@@ -36,8 +36,8 @@ if __name__ == "__main__":
 Verified output:
 
 ```
-3.4.0|cpal 0.17|0.1.2
-3.4.0|cpal 0.17|0.1.2
+3.4.0|cpal 0.17|0.1.3
+3.4.0|cpal 0.17|0.1.3
 ```
 
 The same pattern works for `Microphone`, `Speaker`, `AsyncMicrophone`, `AsyncSpeaker`, and `decibri.input_devices()`. Each child constructs its own bridge; no cross-process state is shared.
