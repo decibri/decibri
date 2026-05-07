@@ -384,9 +384,14 @@ jobs:
       - name: Install Python (3.10 floor)
         run: uv python install 3.10
 
-      - name: Sync dev environment (locked)
+      - name: Sync dev environment (locked, no editable build)
         working-directory: bindings/python
-        run: uv sync --dev --locked
+        # --no-editable suppresses uv's default editable install of the local
+        # decibri package. The sdist job only needs maturin + twine (dev
+        # dependencies); it does NOT need a built decibri wheel. Without this
+        # flag, uv sync invokes maturin.build_editable which compiles the Rust
+        # extension and requires libasound2-dev on Linux runners.
+        run: uv sync --dev --locked --no-editable
 
       - name: Build sdist
         working-directory: bindings/python
