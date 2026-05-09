@@ -125,7 +125,7 @@ Standard `WritableOptions` (e.g. `highWaterMark`) are also accepted.
 
 The browser API uses `getUserMedia` and `AudioWorklet`. It differs from the Node.js API because browser audio is fundamentally async.
 
-### `new Decibri(options?)`
+### `new Decibri(options?)` (browser)
 
 Same options as Node.js, plus:
 

@@ -1,7 +1,8 @@
 'use strict';
 // Captures audio for DURATION_MS and writes a valid WAV file.
 // No external dependencies. Uses Node.js built-ins only.
-// Usage: node examples/wav-capture.js
+// Usage (after npm install decibri):  node node_modules/decibri/examples/wav-capture.js
+// Usage (from repo clone):            node npm/decibri/examples/wav-capture.js
 
 const fs = require('fs');
 const Decibri = require('decibri');
