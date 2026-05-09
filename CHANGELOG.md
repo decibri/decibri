@@ -13,6 +13,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 ### Fixed
 
 - Speaker example in `crates/decibri/README.md`: defined `pcm_int16_bytes` as `Vec<u8>` of 48000 zero bytes (1 second of int16 silence at 24kHz mono) so the example has a real value to send. Previously the example referenced `pcm_int16_bytes` without defining it, raising `error[E0425]: cannot find value 'pcm_int16_bytes' in this scope` on copy-paste.
+- `npm/decibri/README.md`: replaced the accidental Rust crate README copy with a Node.js and browser focused README. Users on npmjs.com landing on the decibri package were previously shown Rust documentation (`cargo add decibri`, Rust feature flags, etc.) instead of Node.js installation and API documentation. The new README documents the actual Node.js API surface (`Decibri` capture stream, `DecibriOutput` playback stream, events, browser conditional export, VAD modes, device selection by index / name / stable per-host ID).
 
 ## [3.4.0] - 2026-05-02
 
