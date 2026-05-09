@@ -10,6 +10,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+### Python binding
+
+#### Fixed
+
+- Speaker quickstart in `bindings/python/README.md`: defined `audio_bytes` as 1 second of int16 silence at 24kHz (`b"\x00\x00" * 24000`) so the example is copy-paste runnable. Previously the example referenced `audio_bytes` without defining it, raising `NameError: name 'audio_bytes' is not defined` on first use.
+
 ## [0.1.3] - 2026-05-07
 
 ### Python binding

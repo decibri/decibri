@@ -80,6 +80,7 @@ import decibri
 
 spk = decibri.Speaker(sample_rate=24000, channels=1)
 spk.start()
+audio_bytes = b"\x00\x00" * 24000  # 1 second of silence at 24kHz int16
 spk.write(audio_bytes)  # int16 PCM
 spk.drain()
 spk.stop()
