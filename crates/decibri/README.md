@@ -56,6 +56,7 @@ use decibri::output::{AudioOutput, OutputConfig};
 
 let output = AudioOutput::new(OutputConfig::default())?;
 let stream = output.start()?;
+let pcm_int16_bytes: Vec<u8> = vec![0; 48_000]; // 1 second of silence at 24kHz int16 mono
 stream.send(&pcm_int16_bytes)?;
 stream.drain()?;
 stream.stop()?;
