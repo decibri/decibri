@@ -4,8 +4,7 @@
 // Usage: node examples/wav-capture.js
 
 const fs = require('fs');
-// In your own project: const Decibri = require('decibri');
-const Decibri = require('../npm/decibri/src/decibri.js');
+const Decibri = require('decibri');
 
 const SAMPLE_RATE     = 16000;
 const CHANNELS        = 1;

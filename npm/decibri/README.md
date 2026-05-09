@@ -193,6 +193,19 @@ Decibri.devices();
 // ]
 ```
 
+## Examples
+
+Runnable examples ship with the package. After `npm install decibri`, find them under `node_modules/decibri/examples/`. From a clone of the repo they live at `npm/decibri/examples/`.
+
+```bash
+# Capture to WAV file (no extra dependencies)
+node node_modules/decibri/examples/wav-capture.js
+
+# Stream to WebSocket (requires: npm install ws)
+node node_modules/decibri/examples/websocket-server.js   # terminal 1
+node node_modules/decibri/examples/websocket-stream.js   # terminal 2
+```
+
 ## Platform Support
 
 | Platform | Architecture | Audio Backend |

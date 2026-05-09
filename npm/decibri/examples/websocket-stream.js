@@ -4,8 +4,7 @@
 // Usage:    node examples/websocket-stream.js [ws://localhost:8080]
 
 const { WebSocket } = require('ws');
-// In your own project: const Decibri = require('decibri');
-const Decibri       = require('../npm/decibri/src/decibri.js');
+const Decibri       = require('decibri');
 
 const url = process.argv[2] || 'ws://localhost:8080';
 const ws  = new WebSocket(url);
