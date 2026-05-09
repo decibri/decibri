@@ -29,12 +29,10 @@ pip install decibri
 ```python
 import decibri
 
-mic = decibri.Microphone(sample_rate=16000, channels=1)
-mic.start()
-for chunk in mic:
-    print(f"Got {len(chunk)} bytes")
-    break  # exit after first chunk for demo
-mic.stop()
+with decibri.Microphone(sample_rate=16000, channels=1) as mic:
+    for chunk in mic:
+        print(f"Got {len(chunk)} bytes")
+        break  # exit after first chunk for demo
 ```
 
 ### Record one second to a WAV file
@@ -50,12 +48,10 @@ decibri.record_to_file("output.wav", duration_seconds=1.0, sample_rate=16000)
 ```python
 import decibri
 
-mic = decibri.Microphone(sample_rate=16000, vad="silero")
-mic.start()
-for chunk in mic:
-    print(f"Got {len(chunk)} bytes; VAD score {mic.vad_score}; speaking={mic.is_speaking}")
-    break  # exit after first chunk for demo
-mic.stop()
+with decibri.Microphone(sample_rate=16000, vad="silero") as mic:
+    for chunk in mic:
+        print(f"Got {len(chunk)} bytes; VAD score {mic.vad_score}; speaking={mic.is_speaking}")
+        break  # exit after first chunk for demo
 ```
 
 ### Async capture
@@ -78,12 +74,10 @@ asyncio.run(main())
 ```python
 import decibri
 
-spk = decibri.Speaker(sample_rate=24000, channels=1)
-spk.start()
-audio_bytes = b"\x00\x00" * 24000  # 1 second of silence at 24kHz int16
-spk.write(audio_bytes)  # int16 PCM
-spk.drain()
-spk.stop()
+with decibri.Speaker(sample_rate=24000, channels=1) as spk:
+    audio_bytes = b"\x00\x00" * 24000  # 1 second of silence at 24kHz int16
+    spk.write(audio_bytes)  # int16 PCM
+    spk.drain()
 ```
 
 ## Public API

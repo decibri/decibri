@@ -71,11 +71,10 @@ cargo add decibri
 ```python
 import decibri
 
-mic = decibri.Microphone(sample_rate=16000)
-mic.start()
-for chunk in mic:
-    print(f"Got {len(chunk)} bytes")
-mic.stop()
+with decibri.Microphone(sample_rate=16000) as mic:
+    for chunk in mic:
+        print(f"Got {len(chunk)} bytes")
+        break
 ```
 
 Full Python guide: [here](bindings/python/README.md).
@@ -136,12 +135,10 @@ Decibri ships two VAD modes:
 ```python
 import decibri
 
-mic = decibri.Microphone(sample_rate=16000, vad="silero", vad_threshold=0.5)
-mic.start()
-for chunk in mic:
-    if mic.is_speaking:
-        print(f"speech (score={mic.vad_score:.2f})")
-mic.stop()
+with decibri.Microphone(sample_rate=16000, vad="silero", vad_threshold=0.5) as mic:
+    for chunk in mic:
+        print(f"VAD score {mic.vad_score}; speaking={mic.is_speaking}")
+        break
 ```
 
 The same VAD API is available in Node.js and Rust. Language-specific examples and tuning advice live in each binding's README.
