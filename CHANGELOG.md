@@ -10,6 +10,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+### Fixed
+
+- Speaker example in `crates/decibri/README.md`: defined `pcm_int16_bytes` as `Vec<u8>` of 48000 zero bytes (1 second of int16 silence at 24kHz mono) so the example has a real value to send. Previously the example referenced `pcm_int16_bytes` without defining it, raising `error[E0425]: cannot find value 'pcm_int16_bytes' in this scope` on copy-paste.
+- `npm/decibri/README.md`: replaced the accidental Rust crate README copy with a Node.js and browser focused README. Users on npmjs.com landing on the decibri package were previously shown Rust documentation (`cargo add decibri`, Rust feature flags, etc.) instead of Node.js installation and API documentation. The new README documents the actual Node.js API surface (`Decibri` capture stream, `DecibriOutput` playback stream, events, browser conditional export, VAD modes, device selection by index / name / stable per-host ID).
+- `npm/decibri/examples/`: moved three runnable examples (`wav-capture.js`, `websocket-server.js`, `websocket-stream.js`) from the top-level `examples/` directory into the npm package directory, rewrote imports to use `require('decibri')`, and added `examples/` to `package.json` `files` so the examples ship in the published tarball. The Examples section in `npm/decibri/README.md` was previously removed in error during an audit pass that searched only `npm/decibri/examples/` rather than the top-level `examples/` where the files actually lived; this restoration corrects that and ensures `npm install decibri` users actually receive the example files.
+
 ## [3.4.0] - 2026-05-02
 
 ### Added

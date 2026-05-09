@@ -2,7 +2,8 @@
 // Minimal WebSocket server that receives raw PCM chunks and logs byte counts.
 // Use this to test examples/websocket-stream.js.
 // Requires: npm install ws
-// Usage:    node examples/websocket-server.js
+// Usage (after npm install decibri):  node node_modules/decibri/examples/websocket-server.js
+// Usage (from repo clone):            node npm/decibri/examples/websocket-server.js
 
 const { WebSocketServer } = require('ws');
 

@@ -1,11 +1,11 @@
 'use strict';
 // Streams raw PCM audio to a WebSocket server.
 // Requires: npm install ws
-// Usage:    node examples/websocket-stream.js [ws://localhost:8080]
+// Usage (after npm install decibri):  node node_modules/decibri/examples/websocket-stream.js [ws://localhost:8080]
+// Usage (from repo clone):            node npm/decibri/examples/websocket-stream.js [ws://localhost:8080]
 
 const { WebSocket } = require('ws');
-// In your own project: const Decibri = require('decibri');
-const Decibri       = require('../npm/decibri/src/decibri.js');
+const Decibri       = require('decibri');
 
 const url = process.argv[2] || 'ws://localhost:8080';
 const ws  = new WebSocket(url);

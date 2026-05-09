@@ -10,6 +10,17 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+### Python binding
+
+#### Changed
+
+- Migrated Python quickstart examples in root `README.md` and `bindings/python/README.md` to context manager (`with`) pattern. Aligns with decibri's internal test conventions (`bindings/python/tests/test_capture.py` uses `with Microphone(...) as d:` 8 times on normal-path tests), the existing async README style (`async with await decibri.AsyncMicrophone.open(...)`), and Python community precedent for resource-lifecycle types. Pattern A (explicit `start()` / `stop()`) is retained in the ecosystem guides (`docs/ecosystem/jupyter.md`, `docs/ecosystem/multiprocessing.md`) where lifecycle stepping is the point of the example.
+
+#### Fixed
+
+- Speaker quickstart in `bindings/python/README.md`: defined `audio_bytes` as 1 second of int16 silence at 24kHz (`b"\x00\x00" * 24000`) so the example is copy-paste runnable. Previously the example referenced `audio_bytes` without defining it, raising `NameError: name 'audio_bytes' is not defined` on first use.
+- Root `README.md` Python quickstarts (capture and VAD): the iterator loops previously had no `break`, making the trailing `mic.stop()` calls unreachable in normal flow. The Pattern B migration above resolves this as a side effect; the `with` block guarantees cleanup regardless of how the loop body exits.
+
 ## [0.1.3] - 2026-05-07
 
 ### Python binding
