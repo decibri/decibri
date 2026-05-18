@@ -2,17 +2,17 @@
 
 decibri runs cleanly in Linux containers. The integration points worth knowing about are the runtime ALSA library (always required, even headless), the audio device passthrough flags (three of them, not one), and the headless behavior on hosts without `/dev/snd` (cpal exposes a null device, not an empty list).
 
-This document covers the patterns verified in the Phase 9 implementation against Docker Desktop 4.71 (Server: linux/amd64, Engine 29.4.1, manylinux_2_34 wheel built inline). Reference Dockerfiles ship under `bindings/python/docs/ecosystem/docker/`.
+This document covers the patterns verified against Docker Desktop 4.71 (Server: linux/amd64, Engine 29.4.1, manylinux_2_34 wheel built inline). Reference Dockerfiles ship under `bindings/python/docs/ecosystem/docker/`.
 
 ## Platform constraint
 
 `--device /dev/snd` is a Linux-host concept. Docker Desktop on Windows or macOS runs containers in a Linux VM that has no bridge to the host audio device, so the audio-passthrough scenario is end-to-end verifiable on Linux hosts only. The image itself builds and runs anywhere Docker runs; only the audio-passthrough integration is Linux-host-only.
 
-The base and headless scenarios in this document are verified on Docker Desktop 4.71 (Windows host, WSL2 Linux backend); the audio-passthrough scenario is verified for image build and structural correctness only. Phase 11 adds a Linux-host validation note from a CI runner or production deployment.
+The base and headless scenarios in this document are verified on Docker Desktop 4.71 (Windows host, WSL2 Linux backend); the audio-passthrough scenario is verified for image build and structural correctness only. End-to-end audio-passthrough validation requires a Linux host and is not yet covered by this document.
 
 ## Base scenario: minimal install + version smoke check
 
-decibri 0.1.0+ is on PyPI, so the minimal Dockerfile is a single stage that runs `pip install decibri` against a slim runtime base. The multi-stage build-from-source variant below is retained for environments that need to build the wheel locally (custom Rust toolchain configurations, air-gapped builds, or pre-publish development against an unreleased commit).
+decibri 0.1.0+ is on PyPI, so the minimal Dockerfile is a single stage that runs `pip install decibri` against a slim runtime base. The multi-stage build-from-source variant below is retained for environments that need to build the wheel locally (custom Rust toolchain configurations, air-gapped builds, or development against an unpublished commit).
 
 [Dockerfile.base](docker/Dockerfile.base):
 
@@ -111,7 +111,7 @@ if not real_devs:
     )
 ```
 
-For VAD-only pipelines that operate on pre-recorded audio bytes, the headless null device is irrelevant; you do not call `Microphone` at all and instead feed bytes to a `vad="silero"` pipeline directly via the SileroVad core API (or, in 0.2.0+, via a documented Python helper). The container needs only the runtime image; no audio passthrough flags.
+For VAD-only pipelines that operate on pre-recorded audio bytes, the headless null device is irrelevant; you do not call `Microphone` at all and instead feed bytes to a `vad="silero"` pipeline directly via the SileroVad core API. The container needs only the runtime image; no audio passthrough flags.
 
 ## Audio passthrough scenario: three flags, not one
 
@@ -137,7 +137,7 @@ docker run --rm \
     decibri:audio
 ```
 
-Expected output on a Linux host with at least one audio device (build verified on Docker Desktop 4.71; end-to-end audio runtime verified separately on Linux host as a Phase 11 docs note):
+Expected output on a Linux host with at least one audio device (build verified on Docker Desktop 4.71; end-to-end audio runtime verified separately on a Linux host):
 
 ```
 input_devices count: <N>
@@ -173,7 +173,7 @@ Verified on Docker Desktop 4.71, all three images using `python:3.12-slim` runti
 | `decibri:headless`       | 255 MB | identical to base; differs only in expected behavior   |
 | `decibri:audio`          | 267 MB | base + alsa-utils + non-root user setup                |
 
-The bundled ORT dylib accounts for ~15 to 20 MB inside the wheel; the Python wheel itself ships at ~25 MB. A 0.2.0+ `decibri-no-ort` variant for `vad=False` / `vad="energy"` users would shave roughly 20 MB from the runtime layer; tracked in the 0.2.0 backlog.
+The bundled ORT dylib accounts for ~15 to 20 MB inside the wheel; the Python wheel itself ships at ~25 MB.
 
 ## Recommended deployment patterns
 
@@ -190,4 +190,4 @@ The bundled ORT dylib accounts for ~15 to 20 MB inside the wheel; the Python whe
 - [docker/Dockerfile.headless](docker/Dockerfile.headless)
 - [docker/Dockerfile.audio](docker/Dockerfile.audio)
 
-All three are verified to build cleanly against Docker Desktop 4.71 (Server: linux/amd64, Engine 29.4.1, BuildKit). The base and headless runtime behaviors are verified end-to-end; the audio-passthrough runtime requires a Linux host (Phase 11 verification).
+All three are verified to build cleanly against Docker Desktop 4.71 (Server: linux/amd64, Engine 29.4.1, BuildKit). The base and headless runtime behaviors are verified end-to-end; the audio-passthrough runtime requires a Linux host.

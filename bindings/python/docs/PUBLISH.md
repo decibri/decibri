@@ -2,7 +2,7 @@
 
 This document describes how decibri Python wheels are published to PyPI and TestPyPI via the [`publish-pypi.yml`](../../../.github/workflows/publish-pypi.yml) GitHub Actions workflow. The workflow uses Trusted Publisher OIDC (no API tokens) and produces PEP 740 attestations via Sigstore.
 
-Phase 10 (2026-05-02) shipped this workflow. The first publish (decibri 0.1.0a1 to TestPyPI) is Phase 11 work.
+This workflow shipped on 2026-05-02 alongside the 0.1.0a1 publish to TestPyPI.
 
 ## Tag patterns
 
@@ -90,7 +90,7 @@ If `build-and-validate` passes on all 4 platforms during a manual dispatch, the 
 
 Symptom: `build-and-validate` matrix entry fails on the "Verify abi3 compliance" step with output like `1 ABI version mismatches and N ABI violations found`.
 
-Cause: a Rust dependency added a non-abi3 export that ended up in the compiled extension. Phase 10 prep research empirically verified the existing wheel passes; a regression here is from a Phase 8 / Phase 9 / later change.
+Cause: a Rust dependency added a non-abi3 export that ended up in the compiled extension. Prior validation confirmed the existing wheel passes abi3audit; a regression here is from a recent crate-side or binding-side change.
 
 Recovery: inspect `Cargo.lock` for new dependencies since the last successful publish; check whether the new dep links a non-abi3 symbol (`pyo3-build-config` output is the usual diagnostic). Pin the dep to a known-good version or remove the offending export.
 
@@ -123,7 +123,7 @@ Symptom: `publish-pypi` job sits in "Waiting for review" state.
 
 This is intentional gating per the GitHub `pypi` environment configuration. The required reviewer approves via the Actions UI's reviewer prompt before the publish proceeds.
 
-To remove the gate (e.g., at 0.2.0+ when the workflow is proven), edit the `pypi` environment in repo Settings -> Environments and remove the required reviewer or replace with a wait timer.
+To remove the gate, edit the `pypi` environment in repo Settings -> Environments and remove the required reviewer or replace with a wait timer.
 
 ### Tag pushed to wrong workflow
 
@@ -139,23 +139,19 @@ git push origin python-v0.1.0a1
 
 Note: deleting a tag does NOT undo a successful PyPI publish. If the wheel already uploaded, you must bump the version (PyPI does not allow re-uploading the same version).
 
-## Phase 11 alpha cycle expectations
+## Alpha cycle procedure
 
-Phase 11 (next phase) ships the first real publishes:
+The alpha cycle catches issues the install-test gate cannot reproduce: real-world `pip install` from a registry, dependency resolution conflicts with user environments, missing classifiers in project metadata, README rendering on the PyPI project page, and so on. The flow:
 
-1. Push `python-v0.1.0a1`. CI runs build-and-validate (4 platforms); abi3audit + install-test gate; `publish-testpypi` runs. Wheel lands on TestPyPI.
-2. Manual validation: in a fresh local venv, run `pip install --index-url https://test.pypi.org/simple/ --extra-index-url https://pypi.org/simple/ decibri==0.1.0a1` and exercise the public API (sync construct, async construct, VAD path).
-3. If issues surface: fix on `main`, bump to `python-v0.1.0a2`, push, repeat.
-4. When the alpha is clean and the user-facing surface is finalized, push `python-v0.1.0`. CI runs build-and-validate; the `publish-pypi` job blocks on reviewer approval; on approval, the wheel ships to production PyPI.
-
-The alpha cycle's purpose is to catch issues that the install-test gate cannot reproduce: real-world `pip install` from a registry, dependency resolution conflicts with user environments, missing classifiers in the project metadata, README rendering on the PyPI project page, and so on.
+1. Push a prerelease tag (e.g. `python-v0.1.0a1`). CI runs build-and-validate (4 platforms), the abi3audit + install-test gate, and `publish-testpypi`. The wheel lands on TestPyPI.
+2. Manual validation: in a fresh local venv, run `pip install --index-url https://test.pypi.org/simple/ --extra-index-url https://pypi.org/simple/ decibri==<version>` and exercise the public API (sync construct, async construct, VAD path).
+3. If issues surface: fix on `main`, bump the alpha number (`a2`, `a3`, ...), push, repeat.
+4. When the alpha is clean and the user-facing surface is finalized, push the stable tag (e.g. `python-v0.1.0`). CI runs build-and-validate; the `publish-pypi` job blocks on reviewer approval; on approval, the wheel ships to production PyPI.
 
 ## Implementation references
 
 - Workflow file: [`.github/workflows/publish-pypi.yml`](../../../.github/workflows/publish-pypi.yml)
 - Existing matrix patterns mirrored: [`.github/workflows/python-ci.yml`](../../../.github/workflows/python-ci.yml) lines 393-601 (manylinux container build, auditwheel, delocate) and lines 603-670 (install-test gate)
-- Tag-routing rationale: `~/.claude/plans/phase-10-design-adjudication.md` (Option D verdict; cohort survey of ruff, uv, polars, tokenizers, pydantic-core)
-- abi3audit empirical verification: `~/.claude/plans/phase-10-prep-research.md` Section 2.3 (existing decibri wheel passes `abi3audit --strict --assume-minimum-abi3 3.10` with 0 violations and 0 mismatches)
 - PEP 740 attestation specification: https://peps.python.org/pep-0740/
 - pypa/gh-action-pypi-publish v1.14: https://github.com/pypa/gh-action-pypi-publish (attestations on by default for OIDC publishes)
 - PyPI Trusted Publisher docs: https://docs.pypi.org/trusted-publishers/

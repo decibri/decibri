@@ -2,7 +2,7 @@
 
 decibri composes cleanly with `multiprocessing.Process` and `concurrent.futures.ProcessPoolExecutor` when the `spawn` start method is used. On Linux, where the default start method is `fork`, decibri detects the dangerous case (Silero VAD initialized in the parent process before fork) and raises a clean `ForkAfterOrtInit` exception in the child rather than allowing silent ONNX Runtime corruption.
 
-This document covers the patterns verified in the Phase 9 prep research plus the Phase 9 fork-detection fix.
+This document covers the patterns verified in the prep research plus the fork-detection fix shipped in `crates/decibri` 3.4.0.
 
 ## TL;DR
 
@@ -12,7 +12,7 @@ This document covers the patterns verified in the Phase 9 prep research plus the
 
 ## Spawn start method works for everything
 
-Verified on Windows (Phase 9 prep research; spawn is the only option) and consistent with the cross-platform Python multiprocessing semantics. Spawn re-imports your module in the child process and re-runs construction from scratch, so each child gets its own decibri state without inheriting anything from the parent.
+Verified on Windows (where spawn is the only option) and consistent with the cross-platform Python multiprocessing semantics. Spawn re-imports your module in the child process and re-runs construction from scratch, so each child gets its own decibri state without inheriting anything from the parent.
 
 ```python
 # spawn_basic.py: import + version in spawned children
@@ -123,7 +123,7 @@ The same shape works for any consumer-producer split: capture in one worker, ML 
 
 ONNX Runtime is not safe to share across forked processes. The runtime's internal state (thread pools, allocators, model graph state) is initialized in the parent's address space and is not transparently fork-safe. A child that inherits an ORT-initialized parent and then calls `session.run` produces silent wrong answers, segfaults, or hangs depending on the specific configuration.
 
-Phase 9 added proactive detection: decibri records the parent process id alongside the global ORT init, and on every Silero inference call compares the current pid to the recorded pid. If they differ, decibri raises `ForkAfterOrtInit` (a `DecibriError` subclass) instead of allowing ORT to silently misbehave.
+decibri ships proactive detection: it records the parent process id alongside the global ORT init, and on every Silero inference call compares the current pid to the recorded pid. If they differ, decibri raises `ForkAfterOrtInit` (a `DecibriError` subclass) instead of allowing ORT to silently misbehave.
 
 ```python
 # fork_after_init.py: the dangerous pattern, now caught proactively
@@ -209,13 +209,13 @@ except decibri.DecibriError:
     ...
 ```
 
-The `__all__` count grew from 17 to 18 in Phase 9 to expose `ForkAfterOrtInit` as a top-level catch target. The class is also accessible at `decibri.exceptions.ForkAfterOrtInit`.
+`ForkAfterOrtInit` is exposed as a top-level catch target on `decibri` and also accessible at `decibri.exceptions.ForkAfterOrtInit`.
 
 ## cpal stream is process-local
 
 The cpal capture stream uses platform-specific OS resources (Windows WASAPI handles, Linux ALSA file descriptors, macOS CoreAudio AudioUnit objects) that are not transparently shared across forked processes. Constructing a `Microphone` in the parent and using it in a forked child does not produce a shared stream; depending on the platform, it produces either a dead handle in the child or undefined behavior. The recommended pattern remains: construct decibri objects inside the worker, never share via fork.
 
-This is a less consequential failure mode than the ORT case because it surfaces immediately on the first read (dead handle) rather than producing silent wrong answers; no proactive detection is added in Phase 9 for this case.
+This is a less consequential failure mode than the ORT case because it surfaces immediately on the first read (dead handle) rather than producing silent wrong answers; no proactive detection is added for this case.
 
 ## Decision matrix
 

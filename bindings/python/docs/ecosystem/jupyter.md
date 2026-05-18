@@ -2,7 +2,7 @@
 
 decibri composes cleanly with the IPython kernel (ipykernel 7.x; IPython 9.x; verified 2026-05-02 against IPython 9.13.0 + ipykernel 7.2.0). The two integration points worth knowing about are the ambient asyncio event loop (top-level `await` works) and ORT model loading (use the async factory to avoid blocking cell rendering).
 
-This document covers the patterns verified in the Phase 9 prep research, with copy-paste examples that run end-to-end in a fresh notebook.
+This document covers the patterns verified in the prep research for ipykernel 7.x / IPython 9.x, with copy-paste examples that run end-to-end in a fresh notebook.
 
 ## Top-level await works
 
@@ -11,7 +11,7 @@ IPython 9 + ipykernel 7 runs a persistent asyncio event loop per kernel (`_Windo
 ```python
 # Cell 1
 import decibri
-
+    
 amic = decibri.AsyncMicrophone(sample_rate=16000, channels=1)
 await amic.start()
 chunk = await amic.read(timeout_ms=1000)
@@ -37,7 +37,7 @@ Constructing a fresh `AsyncMicrophone` in a subsequent cell works without any lo
 
 `Microphone(vad="silero")` and `AsyncMicrophone(vad="silero")` perform synchronous ONNX Runtime model loading inside `__init__`, which takes 100 to 500 ms (CPU-bound; slower on cold disk caches). Calling the constructor from inside an `async` cell blocks the kernel's event loop for the duration of the load, which can stall other coroutines (websocket pings, timer callbacks, JupyterLab UI updates).
 
-The async factory `AsyncMicrophone.open()` (added in Phase 9) dispatches construction to the default ThreadPoolExecutor via `loop.run_in_executor`, returning the constructed instance awaitably.
+The async factory `AsyncMicrophone.open()` dispatches construction to the default ThreadPoolExecutor via `loop.run_in_executor`, returning the constructed instance awaitably.
 
 ```python
 # Cell: prefer .open() over the constructor in async code
@@ -58,7 +58,7 @@ The synchronous `__init__` constructor remains supported for back-compat and for
 
 ## Auto-display shows useful state
 
-A bare `Microphone` or `AsyncMicrophone` instance evaluated as the last expression in a cell auto-displays the `__repr__` (Phase 9 added a useful `__repr__` to all four wrapper classes). The repr shows construction parameters plus `is_open` so you can see at a glance whether the stream is currently running:
+A bare `Microphone` or `AsyncMicrophone` instance evaluated as the last expression in a cell auto-displays the `__repr__`. All four wrapper classes (`Microphone`, `Speaker`, `AsyncMicrophone`, `AsyncSpeaker`) implement a `__repr__` that shows construction parameters plus `is_open`, so you can see at a glance whether the stream is currently running:
 
 ```python
 # Cell: auto-display shows construction state
