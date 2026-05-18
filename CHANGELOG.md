@@ -20,15 +20,15 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Added
 
-- **`OnnxSession` trait abstraction in Rust core** (Phase 8). New internal `pub(crate) trait OnnxSession` inside `crates/decibri/src/onnx.rs` abstracting ONNX Runtime usage behind a backend-agnostic interface. `SileroVad` migrates to consume the trait through `Box<dyn OnnxSession>`. ORT-backed implementation is the only impl in 3.x; future backends (CoreML at iOS time, TFLite at Android time, GPU EPs at the P4 GPU project) plug in additively at the `decibri-onnx` workspace split planned for 4.0.
-- `DecibriError::OnnxBackendFailed { backend: &'static str, source: Box<dyn std::error::Error + Send + Sync> }` variant for future non-ORT backend errors. Additive (the enum is `#[non_exhaustive]`); existing 8 ORT variants unchanged. `is_ort_path_error` continues to return false on the new variant.
-- **`DecibriError::ForkAfterOrtInit { init_pid: u32, current_pid: u32 }` variant + runtime fork detection** (Phase 9 Item C7). Linux-only failure-mode hardening: a process that forks after a successful `SileroVad::new` previously inherited `static ORT_INIT` flagged as set while the underlying ORT runtime state (allocators, thread pools) was unsafe to reuse, producing silent wrong probabilities, segfaults, or hangs in the child. 3.4.0 stamps the initializing pid into a paired `static ORT_INIT_PID: OnceLock<u32>` inside the same `init_ort_once` success path; a `pub(crate) fn check_pid_for_ort()` runs at the entry of `SileroVad::process()` and returns `Err(ForkAfterOrtInit { init_pid, current_pid })` on pid mismatch. The `Display` message embeds both pids and the two remediation options ("Use `multiprocessing.set_start_method('spawn')` or construct `Microphone(vad='silero')` inside each child process"). Single-check coverage at the outer entry point applies to every inference call without per-window overhead. macOS and Windows are unaffected by fork semantics. Additive on the `#[non_exhaustive]` `DecibriError` enum; mapped through to npm via the napi `_ =>` catch-all (`Status::GenericFailure` carrying `e.to_string()`) and to Python via an explicit `ForkAfterOrtInit(DecibriError)` subclass in the wheel.
+- **`OnnxSession` trait abstraction in Rust core.** New internal `pub(crate) trait OnnxSession` inside `crates/decibri/src/onnx.rs` abstracts ONNX Runtime usage behind a backend-agnostic interface. `SileroVad` consumes the trait through `Box<dyn OnnxSession>`. The ORT-backed implementation is the only impl in 3.x.
+- `DecibriError::OnnxBackendFailed { backend: &'static str, source: Box<dyn std::error::Error + Send + Sync> }` variant. Reserved on the `#[non_exhaustive]` enum. Additive; existing 8 ORT variants unchanged. `is_ort_path_error` continues to return false on the new variant.
+- **`DecibriError::ForkAfterOrtInit { init_pid: u32, current_pid: u32 }` variant + runtime fork detection.** Linux-only failure-mode hardening: a process that forks after a successful `SileroVad::new` previously inherited `static ORT_INIT` flagged as set while the underlying ORT runtime state (allocators, thread pools) was unsafe to reuse, producing silent wrong probabilities, segfaults, or hangs in the child. 3.4.0 stamps the initializing pid into a paired `static ORT_INIT_PID: OnceLock<u32>` inside the same `init_ort_once` success path; a `pub(crate) fn check_pid_for_ort()` runs at the entry of `SileroVad::process()` and returns `Err(ForkAfterOrtInit { init_pid, current_pid })` on pid mismatch. The `Display` message embeds both pids and the two remediation options ("Use `multiprocessing.set_start_method('spawn')` or construct `Microphone(vad='silero')` inside each child process"). Single-check coverage at the outer entry point applies to every inference call without per-window overhead. macOS and Windows are unaffected by fork semantics. Additive on the `#[non_exhaustive]` `DecibriError` enum; mapped through to npm via the napi `_ =>` catch-all (`Status::GenericFailure` carrying `e.to_string()`) and to Python via an explicit `ForkAfterOrtInit(DecibriError)` subclass in the wheel.
 
 ### Internal
 
-- Phase 8 of the Python Integration Project. `crates/decibri` 3.x public API stays byte-identical (`SileroVad`, `VadConfig`, `VadResult`, `DecibriError` keep Phase 7.x signatures). npm, Python binding, browser shim are unchanged. See `~/.claude/plans/phase-8-onnxsession-trait.md` for the plan and `~/.claude/plans/phase-8-prep-research.md` for the empirical investigation that produced the trait shape.
+- `crates/decibri` 3.x public API stays byte-identical (`SileroVad`, `VadConfig`, `VadResult`, `DecibriError` keep their 3.3.x signatures). npm binding, Python binding, browser shim are unchanged.
 - `vad::init_ort_once` visibility raised from private to `pub(crate)` so the `onnx` module's inline ORT-backed test can reuse the same process-global init path that `vad` tests use.
-- Phase 9 Item C7 (continued): `static ORT_INIT_PID: OnceLock<u32>` paired with the existing `ORT_INIT`, set inside the `OnceLock::get_or_init` callback so the pid stamp is paired with the successful ORT init rather than a speculative pre-init value. `pub(crate) fn check_pid_for_ort()` exposes the comparison to inference call sites within the crate. Linux-only `test_fork_safety.py` tests in the Python wheel pin the behavior end-to-end (gated `skipif sys.platform != "linux"`); they run on CI's `ubuntu-latest` job and skip on other hosts.
+- `static ORT_INIT_PID: OnceLock<u32>` paired with the existing `ORT_INIT`, set inside the `OnceLock::get_or_init` callback so the pid stamp is paired with the successful ORT init rather than a speculative pre-init value. `pub(crate) fn check_pid_for_ort()` exposes the comparison to inference call sites within the crate. Linux-only `test_fork_safety.py` tests in the Python wheel pin the behavior end-to-end (gated `skipif sys.platform != "linux"`); they run on CI's `ubuntu-latest` job and skip on other hosts.
 
 ## [3.3.2] - 2026-04-26
 
@@ -60,136 +60,52 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Migration notes
 
-Error message wording on shipped `DecibriError` variants has historically been stable across the 3.x line. 3.3.1 explicitly refines five messages to remove audience-leak issues identified during P3 Phase 2 planning: Node-API-targeted camelCase parameter names, class-name hardcoding in `AlreadyRunning`, a Rust-internal type reference (`VadConfig`) in `OrtInitFailed`, npm-internal phrasing ("platform package") in `OrtLoadFailed` / `OrtPathInvalid`, and macOS-only platform guidance in `PermissionDenied`. Future releases re-establish wording stability; 3.3.1 is the consolidation point.
+Error message wording on shipped `DecibriError` variants has historically been stable across the 3.x line. 3.3.1 explicitly refines five messages to remove audience-leak issues: Node-API-targeted camelCase parameter names, class-name hardcoding in `AlreadyRunning`, a Rust-internal type reference (`VadConfig`) in `OrtInitFailed`, npm-internal phrasing ("platform package") in `OrtLoadFailed` / `OrtPathInvalid`, and macOS-only platform guidance in `PermissionDenied`. 3.3.1 is the consolidation point.
 
 - **Direct Rust crate consumers** asserting on `DecibriError::Display` strings should update assertions for the five refined messages. Type-level matching on `DecibriError` variants is unaffected; only string-text assertions need updating.
 - **Node consumers** using `e.message.includes(prefix)` or `e.message.startsWith(prefix)` patterns should update for `sampleRate` -> `sample rate`, `framesPerBuffer` -> `frames per buffer`, and the `AlreadyRunning` message text. Type-level matching on `RangeError` / `TypeError` is unaffected.
-- **Python consumers**: P3 Phase 2's first wheel (still pre-release) consumes `decibri@3.3.1`, so the messages it sees are the corrected forms from day one. No migration needed (Phase 1 wheel was scaffold-only with no error message surface).
+- **Python consumers**: the in-development Python wheel consumes `decibri@3.3.1`, so the messages it sees are the corrected forms.
 
 ## [3.3.0] - 2026-04-23
 
-Groundwork release for upcoming P3 Python bindings. Adds a stable-ID form
-for audio device selection (`DeviceSelector::Id`), fixes a long-standing
-direction bug in `DecibriError::DeviceNotFound` when resolving output
-devices, exposes both in the Node binding, and extends the reference
-documentation with a Cargo feature flag guide plus additional crate-level
-rustdoc. No Node.js or browser API break. Direct Rust crate consumers
-pattern-matching on `DeviceSelector` or struct-literal-constructing
-`DeviceInfo` / `OutputDeviceInfo` need to update for the new
-`#[non_exhaustive]` attributes (see Migration notes below).
+Groundwork release for upcoming P3 Python bindings. Adds a stable-ID form for audio device selection (`DeviceSelector::Id`), fixes a long-standing direction bug in `DecibriError::DeviceNotFound` when resolving output devices, exposes both in the Node binding, and extends the reference documentation with a Cargo feature flag guide plus additional crate-level rustdoc. No Node.js or browser API break. Direct Rust crate consumers pattern-matching on `DeviceSelector` or struct-literal-constructing `DeviceInfo` / `OutputDeviceInfo` need to update for the new `#[non_exhaustive]` attributes (see Migration notes below).
 
 ### Changed
 
-- `DeviceSelector`, `DeviceInfo`, and `OutputDeviceInfo` are now
-  `#[non_exhaustive]`. External Rust consumers pattern-matching on
-  `DeviceSelector` must add a `_ =>` catch-all arm; consumers
-  constructing `DeviceInfo` or `OutputDeviceInfo` via struct literal
-  from outside the crate must switch to reading fields off instances
-  returned by `enumerate_input_devices` / `enumerate_output_devices`.
-  Field names and display strings are unchanged. This future-proofs
-  the API: subsequent variant or field additions are source-compatible
-  for consumers who include the catch-all.
+- `DeviceSelector`, `DeviceInfo`, and `OutputDeviceInfo` are now `#[non_exhaustive]`. External Rust consumers pattern-matching on `DeviceSelector` must add a `_ =>` catch-all arm; consumers constructing `DeviceInfo` or `OutputDeviceInfo` via struct literal from outside the crate must switch to reading fields off instances returned by `enumerate_input_devices` / `enumerate_output_devices`. Field names and display strings are unchanged. This future-proofs the API: subsequent variant or field additions are source-compatible for consumers who include the catch-all.
 
 ### Added
 
-- `DeviceSelector::Id(String)` for selecting audio devices by stable
-  per-host identifier (WASAPI endpoint ID on Windows, CoreAudio UID on
-  macOS, ALSA pcm_id on Linux). Unlike `DeviceSelector::Name`
-  (case-insensitive substring) and `DeviceSelector::Index` (positional),
-  `Id` survives across enumerations: display names can shift when other
-  devices are plugged in but per-host IDs do not.
-- `id: String` field on `DeviceInfo` and `OutputDeviceInfo`, populated
-  from `cpal::DeviceId`'s `Display` output. Empty string if cpal cannot
-  produce a stable ID for a given device (rare; some host backends
-  cannot assign IDs to every enumerated device). Obtain the ID from
-  these fields and pass to `DeviceSelector::Id`.
-- `DecibriError::OutputDeviceNotFound(String)` variant, the output-device
-  equivalent of `DeviceNotFound`. See Fixed below for the motivating
-  bug.
-- Node binding accepts `device: { id: string }` as a third form
-  alongside `device: <number>` (index) and `device: <string>` (name
-  substring). The JS wrapper passes it through to Rust unchanged; Rust
-  resolves via cpal's `DeviceId`.
-- `DeviceInfoJs.id` and `OutputDeviceInfoJs.id` fields on the Node
-  binding types, mirroring the Rust `DeviceInfo.id` / `OutputDeviceInfo.id`
-  additions. Visible in the auto-regenerated `npm/decibri/index.d.ts`
-  and in the hand-authored `npm/decibri/src/decibri.d.ts`.
-- `npm/decibri/src/errors.js` helper that re-wraps plain `Error`
-  instances thrown from the native boundary as `TypeError` or
-  `RangeError`, matching the JS wrapper's existing validation error
-  classes. Brought in by `decibri.js` and `decibri-output.js`
-  constructors to align Rust-originated errors with the JS wrapper's
-  error class contract. Triggered only by code paths that reach Rust's
-  `to_napi_error` (currently only `device: { id: ... }` selection); all
-  other validation paths continue to throw from the JS wrapper directly
-  with no behavior change.
-- `docs/features.md`: comprehensive Cargo feature reference covering
-  ORT distribution mode tradeoffs, execution-provider features,
-  binding-author guidance, and feature compatibility constraints.
-  Targeted at Rust crate consumers and FFI binding authors; lib.rs
-  rustdoc now links to it for deep-dive reference.
+- `DeviceSelector::Id(String)` for selecting audio devices by stable per-host identifier (WASAPI endpoint ID on Windows, CoreAudio UID on macOS, ALSA pcm_id on Linux). Unlike `DeviceSelector::Name` (case-insensitive substring) and `DeviceSelector::Index` (positional), `Id` survives across enumerations: display names can shift when other devices are plugged in but per-host IDs do not.
+- `id: String` field on `DeviceInfo` and `OutputDeviceInfo`, populated from `cpal::DeviceId`'s `Display` output. Empty string if cpal cannot produce a stable ID for a given device (rare; some host backends cannot assign IDs to every enumerated device). Obtain the ID from these fields and pass to `DeviceSelector::Id`.
+- `DecibriError::OutputDeviceNotFound(String)` variant, the output-device equivalent of `DeviceNotFound`. See Fixed below for the motivating bug.
+- Node binding accepts `device: { id: string }` as a third form alongside `device: <number>` (index) and `device: <string>` (name substring). The JS wrapper passes it through to Rust unchanged; Rust resolves via cpal's `DeviceId`.
+- `DeviceInfoJs.id` and `OutputDeviceInfoJs.id` fields on the Node binding types, mirroring the Rust `DeviceInfo.id` / `OutputDeviceInfo.id` additions. Visible in the auto-regenerated `npm/decibri/index.d.ts` and in the hand-authored `npm/decibri/src/decibri.d.ts`.
+- `npm/decibri/src/errors.js` helper that re-wraps plain `Error` instances thrown from the native boundary as `TypeError` or `RangeError`, matching the JS wrapper's existing validation error classes. Brought in by `decibri.js` and `decibri-output.js` constructors to align Rust-originated errors with the JS wrapper's error class contract. Triggered only by code paths that reach Rust's `to_napi_error` (currently only `device: { id: ... }` selection); all other validation paths continue to throw from the JS wrapper directly with no behavior change.
+- `docs/features.md`: comprehensive Cargo feature reference covering ORT distribution mode tradeoffs, execution-provider features, binding-author guidance, and feature compatibility constraints. Targeted at Rust crate consumers and FFI binding authors; lib.rs rustdoc now links to it for deep-dive reference.
 
 ### Fixed
 
-- `DecibriError::DeviceNotFound`'s display string hardcoded
-  "No audio input device found matching..." regardless of whether
-  the lookup was against input or output devices. Direct Rust
-  consumers and the new `device: { id: ... }` Node path now receive
-  the correct direction via `DecibriError::OutputDeviceNotFound`
-  for output-device misses. No change visible through the Node
-  binding for existing name- and index-based lookups: those are
-  intercepted by the JS wrapper and always threw direction-correct
-  messages from JS before reaching Rust.
+- `DecibriError::DeviceNotFound`'s display string hardcoded "No audio input device found matching..." regardless of whether the lookup was against input or output devices. Direct Rust consumers and the new `device: { id: ... }` Node path now receive the correct direction via `DecibriError::OutputDeviceNotFound` for output-device misses. No change visible through the Node binding for existing name- and index-based lookups: those are intercepted by the JS wrapper and always threw direction-correct messages from JS before reaching Rust.
 
 ### Internal
 
-- `DeviceDirection` trait gains a `not_found_error(String) -> DecibriError`
-  method so `resolve_device_generic`'s `Name` and `Id` arms produce
-  direction-correct errors via the `Input` / `Output` impls.
-- Unit tests for `Arc<Mutex<CaptureStream>>` confirming the wrapping is
-  `Send + Sync` (compile-time assertion) and serializes concurrent
-  access across two threads (runtime test with `Barrier`). Documents
-  the wrapping strategy the P3 Python binding will apply to share
-  `!Sync` capture streams across Python threads.
-- Crate-level rustdoc additions in `lib.rs`: a section on ORT error
-  construction FFI side effects (the `ortsys![CreateStatus]` dylib-load
-  trigger that motivates the `OrtPathInvalid` split from
-  `OrtLoadFailed`) and a section on fork safety (guidance for Python
-  `multiprocessing` consumers to use `spawn` start method).
-- `lib.rs` rustdoc "Feature flags" section cross-references
-  `docs/features.md` for consumers wanting the deep-dive reference.
-- Em-dash cleanup across 19 code locations in `lib.rs`, `capture.rs`,
-  `output.rs`, `vad.rs`, `error.rs`, `vad_integration.rs`, and
-  `vad_ort_load_failure.rs`. Per CLAUDE.md, the codebase forbids em
-  dashes; these were pre-existing violations.
-- CLAUDE.md corrections: validation-gate commands updated to the
-  canonical set (`cargo clippy --workspace -- -D warnings`,
-  `cargo fmt --all -- --check`, `cargo test-decibri`); stale
-  `## [3.0.0] - Unreleased` reference replaced with a template
-  placeholder.
+- `DeviceDirection` trait gains a `not_found_error(String) -> DecibriError` method so `resolve_device_generic`'s `Name` and `Id` arms produce direction-correct errors via the `Input` / `Output` impls.
+- Unit tests for `Arc<Mutex<CaptureStream>>` confirming the wrapping is `Send + Sync` (compile-time assertion) and serializes concurrent access across two threads (runtime test with `Barrier`). Documents the wrapping strategy the P3 Python binding will apply to share `!Sync` capture streams across Python threads.
+- Crate-level rustdoc additions in `lib.rs`: a section on ORT error construction FFI side effects (the `ortsys![CreateStatus]` dylib-load trigger that motivates the `OrtPathInvalid` split from `OrtLoadFailed`) and a section on fork safety (guidance for Python `multiprocessing` consumers to use `spawn` start method).
+- `lib.rs` rustdoc "Feature flags" section cross-references `docs/features.md` for consumers wanting the deep-dive reference.
+- Em-dash cleanup across 19 code locations in `lib.rs`, `capture.rs`, `output.rs`, `vad.rs`, `error.rs`, `vad_integration.rs`, and `vad_ort_load_failure.rs`. Per CLAUDE.md, the codebase forbids em dashes; these were pre-existing violations.
+- CLAUDE.md corrections: validation-gate commands updated to the canonical set (`cargo clippy --workspace -- -D warnings`, `cargo fmt --all -- --check`, `cargo test-decibri`); stale `## [3.0.0] - Unreleased` reference replaced with a template placeholder.
 - `ort` crate version unchanged at `2.0.0-rc.12`.
 - Bundled ONNX Runtime version unchanged at `1.24.4`.
 - No Node.js API signatures, event names, or error messages changed.
-- TypeScript declaration files in both `npm/decibri/index.d.ts`
-  (auto-regenerated) and `npm/decibri/src/decibri.d.ts` (hand-authored)
-  updated for the new `id` field and extended `device` option type.
+- TypeScript declaration files in both `npm/decibri/index.d.ts` (auto-regenerated) and `npm/decibri/src/decibri.d.ts` (hand-authored) updated for the new `id` field and extended `device` option type.
 
 ### Migration notes for direct Rust crate consumers
 
-- Exhaustive matches on `DeviceSelector` will stop compiling. Add a
-  `_ =>` catch-all arm. Display strings and existing variant names
-  are unchanged; code using `to_string()` or only constructing variants
-  (not matching them) continues to work unaffected.
-- Struct literal construction of `DeviceInfo` and `OutputDeviceInfo`
-  from outside the `decibri` crate will stop compiling (added
-  `#[non_exhaustive]`, added `id: String` field). External consumers
-  should read these structs from `enumerate_input_devices()` /
-  `enumerate_output_devices()` rather than constructing them directly.
-- Consumers matching specifically on `DecibriError::DeviceNotFound`
-  for output-device misses should now also match
-  `DecibriError::OutputDeviceNotFound`. The convenience predicate
-  `DecibriError::is_ort_path_error` remains unchanged and already
-  groups only ORT-path variants.
+- Exhaustive matches on `DeviceSelector` will stop compiling. Add a `_ =>` catch-all arm. Display strings and existing variant names are unchanged; code using `to_string()` or only constructing variants (not matching them) continues to work unaffected.
+- Struct literal construction of `DeviceInfo` and `OutputDeviceInfo` from outside the `decibri` crate will stop compiling (added `#[non_exhaustive]`, added `id: String` field). External consumers should read these structs from `enumerate_input_devices()` / `enumerate_output_devices()` rather than constructing them directly.
+- Consumers matching specifically on `DecibriError::DeviceNotFound` for output-device misses should now also match `DecibriError::OutputDeviceNotFound`. The convenience predicate `DecibriError::is_ort_path_error` remains unchanged and already groups only ORT-path variants.
 - MSRV unchanged at rustc 1.88.
 
 ## [3.2.0] - 2026-04-22
@@ -316,8 +232,8 @@ the 38-assertion CI suite).
   semantics are identical.
 - docs.rs metadata added to target all 4 production platforms (Linux x64/ARM64,
   macOS ARM64, Windows x64) for full platform-specific rustdoc rendering.
-  Future-proofs against the docs.rs change effective 2026-05-01 (building
-  fewer targets by default).
+  Aligns with the docs.rs change effective 2026-05-01 (which builds fewer
+  targets by default).
 
 ## [3.1.0] - 2026-04-22
 
@@ -405,7 +321,7 @@ Complete rewrite from C++ (PortAudio) to Rust (cpal). One unified package for No
 
 - Complete rewrite from C++ (PortAudio) to Rust (cpal)
 - Native addon built with napi-rs (replaces node-gyp / prebuildify)
-- JS API unchanged: drop-in replacement for v1.x consumers (mcp-listen, voxagent, Wake Word verified)
+- JS API unchanged: drop-in replacement for v1.x consumers (verified against the in-house consumer surface)
 
 ### Added
 
@@ -442,4 +358,3 @@ Initial release. C++ native addon wrapping PortAudio with pre-built binaries.
 [3.2.0]: https://github.com/decibri/decibri/compare/v3.1.0...v3.2.0
 [3.1.0]: https://github.com/decibri/decibri/compare/v3.0.0...v3.1.0
 [3.0.0]: https://github.com/decibri/decibri/compare/v1.0.0...v3.0.0
-[1.0.0]: https://github.com/analyticsinmotion/decibri/releases/tag/v1.0.0

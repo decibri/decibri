@@ -75,8 +75,8 @@ If you do not need Silero, the lightweight RMS energy mode in `vad` does not req
 | `capture` | on | Microphone input stream support |
 | `output` | on | Speaker output stream support |
 | `vad` | on | Silero VAD ONNX inference |
-| `denoise` | on | Reserved (stub) |
-| `gain` | on | Reserved (stub) |
+| `denoise` | on | On by default; no runtime cost when off |
+| `gain` | on | On by default; no runtime cost when off |
 | `ort-load-dynamic` | on | ORT loaded at runtime from a user-supplied path |
 | `ort-download-binaries` | off | ORT downloaded at build time and embedded in the binary |
 
@@ -127,8 +127,6 @@ The 3.x stable surface includes:
 - [`vad::SileroVad`](https://docs.rs/decibri/latest/decibri/vad/struct.SileroVad.html), [`vad::VadConfig`](https://docs.rs/decibri/latest/decibri/vad/struct.VadConfig.html), [`vad::VadResult`](https://docs.rs/decibri/latest/decibri/vad/struct.VadResult.html)
 - [`device`](https://docs.rs/decibri/latest/decibri/device/index.html) module: device enumeration and selection by index, case-insensitive name substring, or stable per-host ID
 - [`error::DecibriError`](https://docs.rs/decibri/latest/decibri/error/enum.DecibriError.html): `#[non_exhaustive]` enum covering capture, output, device, ORT, and fork-detection error variants
-
-The `OnnxSession` trait abstracting ONNX Runtime is `pub(crate)` in 3.x and graduates to public at the planned 4.0 / `decibri-onnx` workspace split.
 
 Full API reference: [docs.rs/decibri](https://docs.rs/decibri/).
 
