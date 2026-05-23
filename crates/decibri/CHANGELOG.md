@@ -11,6 +11,12 @@ For other decibri packages, see:
 
 ## [Unreleased]
 
+## [3.4.1] - 2026-05-24
+
+### Fixed
+
+- Speaker example in `crates/decibri/README.md`: defined `pcm_int16_bytes` as `Vec<u8>` of 48000 zero bytes (1 second of int16 silence at 24kHz mono) so the example has a real value to send. Previously the example referenced `pcm_int16_bytes` without defining it, raising `error[E0425]: cannot find value 'pcm_int16_bytes' in this scope` on copy-paste.
+
 ## [3.4.0] - 2026-05-02
 
 ### Added
