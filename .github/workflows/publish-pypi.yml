@@ -28,11 +28,17 @@ on:
   push:
     tags:
       - 'python-v*'
-  # workflow_dispatch lets the maintainer run build-and-validate against the current
-  # branch without pushing a tag. The publish jobs skip cleanly because
-  # their if: conditions key on github.event_name == 'push'. Used for
-  # workflow YAML validation pre-tag (LD-10-8).
+  # workflow_dispatch lets the maintainer run build-and-validate against the
+  # current branch without pushing a tag. By default the publish jobs skip
+  # cleanly so workflow_dispatch acts as a dry run. Ticking the `publish`
+  # input promotes the run to a real publish (build-and-validate, then
+  # TestPyPI or PyPI per the same prerelease/stable routing as tag pushes).
   workflow_dispatch:
+    inputs:
+      publish:
+        type: boolean
+        default: false
+        description: 'Tick to actually publish. Unticked = dry run (build and validate only).'
 
 permissions:
   contents: read
@@ -424,15 +430,20 @@ jobs:
   publish-testpypi:
     name: Publish to TestPyPI
     # Prerelease tags (PEP 440 a / b / rc segments) route to TestPyPI.
-    # The github.event_name == 'push' guard ensures workflow_dispatch
-    # validation runs (LD-10-8) never publish; build-and-validate runs
-    # the matrix and the publish jobs skip cleanly.
+    # Tag pushes publish automatically. workflow_dispatch publishes only
+    # when the `publish` input is ticked; otherwise build-and-validate
+    # runs and this job skips, giving a dry-run path.
     if: |
-      github.event_name == 'push' && (
+      (github.event_name == 'push' && (
         contains(github.ref_name, 'a') ||
         contains(github.ref_name, 'b') ||
         contains(github.ref_name, 'rc')
-      )
+      )) ||
+      (github.event_name == 'workflow_dispatch' && inputs.publish == true && (
+        contains(github.ref_name, 'a') ||
+        contains(github.ref_name, 'b') ||
+        contains(github.ref_name, 'rc')
+      ))
     needs: [build-and-validate, build-sdist]
     runs-on: ubuntu-latest
     environment:
@@ -469,13 +480,18 @@ jobs:
   publish-pypi:
     name: Publish to PyPI
     # Stable tags (no PEP 440 a / b / rc segments) route to production
-    # PyPI. github.event_name == 'push' guard mirrors publish-testpypi.
+    # PyPI. The push guard and workflow_dispatch gate mirror publish-testpypi.
     if: |
-      github.event_name == 'push' && !(
+      (github.event_name == 'push' && !(
         contains(github.ref_name, 'a') ||
         contains(github.ref_name, 'b') ||
         contains(github.ref_name, 'rc')
-      )
+      )) ||
+      (github.event_name == 'workflow_dispatch' && inputs.publish == true && !(
+        contains(github.ref_name, 'a') ||
+        contains(github.ref_name, 'b') ||
+        contains(github.ref_name, 'rc')
+      ))
     needs: [build-and-validate, build-sdist]
     runs-on: ubuntu-latest
     environment:
