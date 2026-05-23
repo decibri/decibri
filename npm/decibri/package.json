@@ -67,7 +67,8 @@
     "examples/",
     "index.js",
     "index.d.ts",
-    "README.md"
+    "README.md",
+    "CHANGELOG.md"
   ],
   "optionalDependencies": {
     "@decibri/decibri-win32-x64-msvc": "3.4.2",
