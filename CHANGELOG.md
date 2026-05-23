@@ -10,6 +10,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+## [3.4.2] - 2026-05-24
+
+### Fixed
+
+- npm package now ships its Node.js-specific README to npmjs.com. The publish workflow previously copied the root README into the npm package directory at publish time, which meant the npmjs.com page for `decibri` showed a generic multi-language overview instead of the Node-focused documentation at `npm/decibri/README.md`. Removing the copy step lets the proper README ship.
+
 ## [3.4.1] - 2026-05-23
 
 ### Fixed
