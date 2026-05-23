@@ -136,14 +136,14 @@ jobs:
       - name: Get decibri's pinned ORT_VERSION
         id: pinned
         run: |
-          # Anchored to the workflow-level `env:` declaration in release.yml,
-          # which is the single source of truth for ORT_VERSION. The anchor
-          # `^  ORT_VERSION:` (two-space indent) matches the env block line
-          # exactly and rejects any stray per-job bash assignments that might
-          # sneak in later.
-          VERSION=$(grep -oP '^\s+ORT_VERSION:\s*\K[0-9]+\.[0-9]+\.[0-9]+' .github/workflows/release.yml | head -1)
+          # Anchored to the workflow-level `env:` declaration in
+          # publish-npm.yml, which is the single source of truth for
+          # ORT_VERSION. The anchor `^  ORT_VERSION:` (two-space indent)
+          # matches the env block line exactly and rejects any stray
+          # per-job bash assignments that might sneak in later.
+          VERSION=$(grep -oP '^\s+ORT_VERSION:\s*\K[0-9]+\.[0-9]+\.[0-9]+' .github/workflows/publish-npm.yml | head -1)
           if [ -z "$VERSION" ]; then
-            echo "ERROR: could not extract ORT_VERSION from release.yml env block"
+            echo "ERROR: could not extract ORT_VERSION from publish-npm.yml env block"
             echo "Expected a workflow-level env: block containing 'ORT_VERSION: X.Y.Z'"
             exit 1
           fi
@@ -191,7 +191,7 @@ jobs:
           if [ "$LATEST_MINOR" -gt "$API_N" ]; then
             ABI_WARNING="
 
-          ⚠️ **ABI mismatch**: Microsoft released ORT 1.${LATEST_MINOR}.x but the \`ort\` crate is pinned to an \`api-${API_N}\` target (ONNX Runtime 1.${API_N}.x ABI). **Upgrading the bundled ORT to 1.${LATEST_MINOR}.x requires first upgrading the \`ort\` crate to a version that targets api-${LATEST_MINOR}**. Do NOT bump \`ORT_VERSION\` in \`release.yml\` until the crate upgrade is complete."
+          ⚠️ **ABI mismatch**: Microsoft released ORT 1.${LATEST_MINOR}.x but the \`ort\` crate is pinned to an \`api-${API_N}\` target (ONNX Runtime 1.${API_N}.x ABI). **Upgrading the bundled ORT to 1.${LATEST_MINOR}.x requires first upgrading the \`ort\` crate to a version that targets api-${LATEST_MINOR}**. Do NOT bump \`ORT_VERSION\` in \`publish-npm.yml\` until the crate upgrade is complete."
           fi
 
           TITLE="ONNX Runtime ${LATEST} available (pinned: ${PINNED})"
@@ -204,9 +204,9 @@ jobs:
 
           **Review upgrade path:**
           1. Check that the current \`ort\` crate version still supports \`api-${LATEST_MINOR}\` (compare against [ort.pyke.io/setup/multiversion](https://ort.pyke.io/setup/multiversion)).
-          2. Update \`ORT_VERSION\` in \`.github/workflows/release.yml\`.
+          2. Update \`ORT_VERSION\` in \`.github/workflows/publish-npm.yml\`.
           3. Update the \`api_n\` baseline in \`.github/workflows/check-upstream.yml\` if the ort crate was also upgraded.
-          4. Trigger \`release-dryrun.yml\` manually to confirm the new tarball URLs resolve and the bundled dylib loads across all four platforms.${ABI_WARNING}"
+          4. Trigger \`publish-npm.yml\` manually via workflow_dispatch with \`publish\` left unticked to confirm the new tarball URLs resolve and the bundled dylib loads across all four platforms.${ABI_WARNING}"
 
           if [ "$COUNT" = "0" ]; then
             gh issue create \
