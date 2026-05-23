@@ -38,7 +38,7 @@ All commits, tags, and registry publishes are performed manually. If a task appe
 - Hardware tests (`test-capture.js`, `test-api.js`, `test-output.js`, `test-vad-silero.js`) require a microphone/speaker and are local-only. They do NOT run in CI.
 - Browser tests (`npx vitest run`) mock browser globals and run in Node.js. Safe for CI.
 - CI runs on every push to main and on PRs. See `.github/workflows/ci.yml`.
-- Release dry-run (`.github/workflows/release-dryrun.yml`) is manually triggered to validate multi-platform builds before tagging a release.
+- Pre-tag validation: run `publish-crates.yml`, `publish-npm.yml`, or `publish-pypi.yml` manually via `workflow_dispatch` from the Actions tab with the `publish` input unticked. Each workflow runs its build and validation steps without publishing.
 
 ## Changelog
 
