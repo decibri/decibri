@@ -2,7 +2,7 @@
 
 # Decibri Rust Core Changelog
 
-Changes to the decibri Rust core crate, published to crates.io. Tags use the `crate-v*` pattern (e.g., `crate-v3.4.1`).
+Changes to the decibri Rust core crate, published to crates.io. Tags use the `crate-v*` pattern (e.g., `crate-v3.4.2`).
 
 For other decibri packages, see:
 
@@ -11,7 +11,7 @@ For other decibri packages, see:
 
 ## [Unreleased]
 
-## [3.4.1] - 2026-05-24
+## [3.4.2] - 2026-05-25
 
 ### Fixed
 
