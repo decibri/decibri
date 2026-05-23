@@ -1,4 +1,4 @@
-# decibri (Rust)
+# Decibri (Rust)
 
 Cross-platform audio capture, playback, and voice activity detection for Rust applications.
 
@@ -6,7 +6,7 @@ Cross-platform audio capture, playback, and voice activity detection for Rust ap
 [![docs.rs](https://img.shields.io/docsrs/decibri)](https://docs.rs/decibri/)
 [![License](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](https://github.com/decibri/decibri/blob/main/LICENSE)
 
-This is the Rust core of decibri. The same crate powers decibri's Python wheel (via PyO3) and Node.js native addon (via napi-rs); see the [main README](https://github.com/decibri/decibri) for the polyglot project context.
+This is the Rust core of decibri. The same crate powers decibri's Python wheel (via PyO3) and Node.js native addon (via napi-rs); see the [main README](https://github.com/decibri/decibri) for cross-language project context.
 
 ## Add to Cargo.toml
 
