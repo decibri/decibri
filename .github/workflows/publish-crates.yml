@@ -88,19 +88,14 @@ jobs:
         # Exchanges a GitHub OIDC token for a short-lived crates.io publish
         # token. The token is exposed via `steps.auth.outputs.token` and
         # consumed by the next step's `CARGO_REGISTRY_TOKEN` env var.
-        if: |
-          (github.event_name == 'push' && !contains(github.ref, '-')) ||
-          (github.event_name == 'workflow_dispatch' && inputs.publish == true)
+        if: github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.publish == true)
         id: auth
         uses: rust-lang/crates-io-auth-action@v1
 
       - name: Publish to crates.io
         # Tag-push always publishes. workflow_dispatch publishes only when
-        # the `publish` input is ticked. Pre-release tags (containing `-`
-        # after the prefix-stripped version) skip the publish.
-        if: |
-          (github.event_name == 'push' && !contains(github.ref, '-')) ||
-          (github.event_name == 'workflow_dispatch' && inputs.publish == true)
+        # the `publish` input is ticked.
+        if: github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.publish == true)
         env:
           CARGO_REGISTRY_TOKEN: ${{ steps.auth.outputs.token }}
         run: cargo publish -p decibri
