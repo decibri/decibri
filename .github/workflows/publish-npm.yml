@@ -325,12 +325,6 @@ jobs:
           ls -la npm/decibri/index.js
           ls -la npm/decibri/index.d.ts
 
-      - name: Copy README for npm package
-        # Copy the workspace README into the main npm package directory
-        # before the verify_pack gate runs so the main package's required
-        # README.md file check passes.
-        run: cp README.md npm/decibri/README.md
-
       - name: Verify npm package contents (pre-publish gate)
         # Defense-in-depth: verify npm package contents before any publish.
         # Runs in both publish and dry-run modes.
