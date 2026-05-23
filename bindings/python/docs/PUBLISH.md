@@ -8,17 +8,18 @@ This workflow shipped on 2026-05-02 alongside the 0.1.0a1 publish to TestPyPI.
 
 decibri's repository is polyglot: the Rust core, npm package, and Python wheel each have their own version cadences. Tag namespacing keeps each registry's publish workflow scoped to its own tags.
 
-| Tag pattern              | Workflow                                                          | Registry                  |
-| ------------------------ | ----------------------------------------------------------------- | ------------------------- |
-| `python-v0.1.0a1`        | [`publish-pypi.yml`](../../../.github/workflows/publish-pypi.yml) | TestPyPI (alpha)          |
-| `python-v0.1.0b1`        | [`publish-pypi.yml`](../../../.github/workflows/publish-pypi.yml) | TestPyPI (beta)           |
-| `python-v0.1.0rc1`       | [`publish-pypi.yml`](../../../.github/workflows/publish-pypi.yml) | TestPyPI (release candidate) |
-| `python-v0.1.0`          | [`publish-pypi.yml`](../../../.github/workflows/publish-pypi.yml) | PyPI (stable)             |
-| `v3.4.0`, `v3.5.0`, etc. | [`release.yml`](../../../.github/workflows/release.yml)           | npm + crates.io           |
+| Tag pattern        | Workflow                                                              | Registry                     |
+| ------------------ | --------------------------------------------------------------------- | ---------------------------- |
+| `python-v0.1.0a1`  | [`publish-pypi.yml`](../../../.github/workflows/publish-pypi.yml)     | TestPyPI (alpha)             |
+| `python-v0.1.0b1`  | [`publish-pypi.yml`](../../../.github/workflows/publish-pypi.yml)     | TestPyPI (beta)              |
+| `python-v0.1.0rc1` | [`publish-pypi.yml`](../../../.github/workflows/publish-pypi.yml)     | TestPyPI (release candidate) |
+| `python-v0.1.0`    | [`publish-pypi.yml`](../../../.github/workflows/publish-pypi.yml)     | PyPI (stable)                |
+| `npm-v*`           | [`publish-npm.yml`](../../../.github/workflows/publish-npm.yml)       | npm                          |
+| `crate-v*`         | [`publish-crates.yml`](../../../.github/workflows/publish-crates.yml) | crates.io                    |
 
 All `python-v*` patterns are PEP 440 compliant (the `python-v` prefix is workflow-routing only; the `v0.1.0a1` portion is what PyPI sees as the version after the wheel filename strips the namespace). Detection of TestPyPI vs PyPI is done via `contains(github.ref_name, 'a' | 'b' | 'rc')` inside the workflow `if:` conditions.
 
-`release.yml`'s tag filter explicitly excludes `python-v*` (`'!python-v*'` in its trigger), so the npm + crates.io workflow does not fire on Python wheel tags.
+Tag patterns are mutually exclusive (`python-v*` for PyPI, `npm-v*` for npm, `crate-v*` for crates.io), so each workflow fires only on its own tag namespace.
 
 ## End-to-end publish flow
 
@@ -127,7 +128,7 @@ To remove the gate, edit the `pypi` environment in repo Settings -> Environments
 
 ### Tag pushed to wrong workflow
 
-Symptom: tag does not match the expected `python-v*` namespace, so `publish-pypi.yml` does not fire (or `release.yml` fires when it shouldn't).
+Symptom: tag does not match the expected `python-v*` namespace, so `publish-pypi.yml` does not fire.
 
 Recovery: delete the tag locally and remotely, push the correctly-namespaced tag:
 ```bash

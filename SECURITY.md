@@ -30,7 +30,7 @@ Decibri ships prebuilt native binaries for four platforms (Windows x64, macOS AR
 - All binaries are compiled exclusively in GitHub Actions CI on GitHub-hosted runners. No binaries are built or uploaded manually.
 - Builds are triggered only by tagged releases from the `main` branch of the `decibri/decibri` repository.
 - The release workflow verifies all four platform binaries are present and pass smoke tests before publishing to npm or crates.io.
-- The full build configuration is open source and auditable in `.github/workflows/release.yml`.
+- The full build configuration is open source and auditable in `.github/workflows/publish-crates.yml`, `.github/workflows/publish-npm.yml`, and `.github/workflows/publish-pypi.yml`.
 
 ### Publishing and authentication
 
