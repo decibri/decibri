@@ -1,11 +1,11 @@
-#[cfg(feature = "output")]
+#[cfg(feature = "playback")]
 use std::sync::atomic::{AtomicBool, Ordering};
-#[cfg(feature = "output")]
+#[cfg(feature = "playback")]
 use std::sync::Arc;
 
-#[cfg(feature = "output")]
+#[cfg(feature = "playback")]
 use cpal::traits::{DeviceTrait, StreamTrait};
-#[cfg(feature = "output")]
+#[cfg(feature = "playback")]
 use crossbeam_channel::{Receiver, Sender};
 
 use crate::device::DeviceSelector;
@@ -13,7 +13,7 @@ use crate::error::DecibriError;
 
 /// Configuration for audio output.
 #[derive(Debug, Clone)]
-pub struct OutputConfig {
+pub struct SpeakerConfig {
     /// Sample rate in Hz. Range: 1000–384000. Default: 16000.
     pub sample_rate: u32,
     /// Number of output channels. Range: 1–32. Default: 1.
@@ -22,7 +22,7 @@ pub struct OutputConfig {
     pub device: DeviceSelector,
 }
 
-impl Default for OutputConfig {
+impl Default for SpeakerConfig {
     fn default() -> Self {
         Self {
             sample_rate: 16000,
@@ -32,7 +32,7 @@ impl Default for OutputConfig {
     }
 }
 
-impl OutputConfig {
+impl SpeakerConfig {
     /// Validate configuration values match the JS API constraints.
     pub fn validate(&self) -> Result<(), DecibriError> {
         if !(1000..=384000).contains(&self.sample_rate) {
@@ -46,16 +46,16 @@ impl OutputConfig {
 }
 
 /// Handle to an active audio output stream.
-#[cfg(feature = "output")]
-pub struct OutputStream {
+#[cfg(feature = "playback")]
+pub struct SpeakerStream {
     _stream: cpal::Stream,
     sender: Sender<Vec<f32>>,
     running: Arc<AtomicBool>,
     drain_complete: Arc<AtomicBool>,
 }
 
-#[cfg(feature = "output")]
-impl OutputStream {
+#[cfg(feature = "playback")]
+impl SpeakerStream {
     /// Send f32 samples for playback.
     ///
     /// Samples are queued into an internal bounded channel feeding the cpal
@@ -69,7 +69,7 @@ impl OutputStream {
     /// # Returns
     /// - `Ok(())`: samples accepted into the playback queue (or buffer was
     ///   empty).
-    /// - `Err(DecibriError::OutputStreamClosed)`: the output stream has
+    /// - `Err(DecibriError::SpeakerStreamClosed)`: the output stream has
     ///   been stopped or dropped; no further samples can be played.
     ///
     /// # Thread safety
@@ -88,7 +88,7 @@ impl OutputStream {
         }
         self.sender
             .send(samples)
-            .map_err(|_| DecibriError::OutputStreamClosed)
+            .map_err(|_| DecibriError::SpeakerStreamClosed)
     }
 
     /// Graceful drain: sends a sentinel (empty vec), then blocks until the
@@ -117,23 +117,33 @@ impl OutputStream {
 }
 
 /// Audio output engine.
-#[cfg(feature = "output")]
-pub struct AudioOutput {
-    config: OutputConfig,
+#[cfg(feature = "playback")]
+pub struct Speaker {
+    config: SpeakerConfig,
     device: cpal::Device,
 }
 
-#[cfg(feature = "output")]
-impl AudioOutput {
-    /// Create a new output instance. Validates config and resolves the device.
-    pub fn new(config: OutputConfig) -> Result<Self, DecibriError> {
+#[cfg(feature = "playback")]
+impl Speaker {
+    /// Create a new speaker instance. Validates config and resolves the device.
+    pub fn new(config: SpeakerConfig) -> Result<Self, DecibriError> {
         config.validate()?;
         let device = crate::device::resolve_output_device(&config.device)?;
         Ok(Self { config, device })
     }
 
+    /// List the available output devices.
+    pub fn devices() -> Result<Vec<crate::device::SpeakerInfo>, DecibriError> {
+        crate::device::output_devices()
+    }
+
+    /// Resolve a [`DeviceSelector`] to a concrete output device.
+    pub fn resolve_device(selector: &DeviceSelector) -> Result<cpal::Device, DecibriError> {
+        crate::device::resolve_output_device(selector)
+    }
+
     /// Start the output stream. Returns a handle for sending samples.
-    pub fn start(&self) -> Result<OutputStream, DecibriError> {
+    pub fn start(&self) -> Result<SpeakerStream, DecibriError> {
         let (sender, receiver): (Sender<Vec<f32>>, Receiver<Vec<f32>>) =
             crossbeam_channel::bounded(32);
 
@@ -216,7 +226,7 @@ impl AudioOutput {
             .play()
             .map_err(|e| DecibriError::StreamStartFailed(e.to_string()))?;
 
-        Ok(OutputStream {
+        Ok(SpeakerStream {
             _stream: stream,
             sender,
             running,

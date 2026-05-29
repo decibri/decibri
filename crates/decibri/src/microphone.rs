@@ -12,10 +12,12 @@ use crossbeam_channel::{Receiver, RecvTimeoutError, Sender, TryRecvError};
 
 use crate::device::DeviceSelector;
 use crate::error::DecibriError;
+#[cfg(feature = "vad")]
+use crate::vad::Vad;
 
-/// Configuration for audio capture.
+/// Configuration for a microphone capture session.
 #[derive(Debug, Clone)]
-pub struct CaptureConfig {
+pub struct MicrophoneConfig {
     /// Sample rate in Hz. Range: 1000–384000. Default: 16000.
     pub sample_rate: u32,
     /// Number of input channels. Range: 1–32. Default: 1.
@@ -24,20 +26,28 @@ pub struct CaptureConfig {
     pub frames_per_buffer: u32,
     /// Device selection. Default: system default input.
     pub device: DeviceSelector,
+    /// Voice-activity-detection mode. Default: [`Vad::Disabled`].
+    ///
+    /// Only present when the `vad` feature is enabled, since the [`Vad`]
+    /// enum wraps [`crate::vad::VadConfig`] which requires that feature.
+    #[cfg(feature = "vad")]
+    pub vad: Vad,
 }
 
-impl Default for CaptureConfig {
+impl Default for MicrophoneConfig {
     fn default() -> Self {
         Self {
             sample_rate: 16000,
             channels: 1,
             frames_per_buffer: 1600,
             device: DeviceSelector::Default,
+            #[cfg(feature = "vad")]
+            vad: Vad::Disabled,
         }
     }
 }
 
-impl CaptureConfig {
+impl MicrophoneConfig {
     /// Validate configuration values match the JS API constraints.
     pub fn validate(&self) -> Result<(), DecibriError> {
         if !(1000..=384000).contains(&self.sample_rate) {
@@ -66,10 +76,10 @@ pub struct AudioChunk {
 
 /// Handle to an active audio capture session.
 #[cfg(feature = "capture")]
-pub struct CaptureStream {
+pub struct MicrophoneStream {
     /// Holds the cpal stream alive for the lifetime of this handle. Wrapped
     /// in `Option` purely so the test-only `tests::test_stream()` helper can
-    /// construct a `CaptureStream` without a real audio device. Production
+    /// construct a `MicrophoneStream` without a real audio device. Production
     /// code always stores `Some(stream)`; drop semantics are identical (the
     /// `Option`'s drop runs the inner `cpal::Stream`'s drop).
     _stream: Option<cpal::Stream>,
@@ -82,7 +92,7 @@ pub struct CaptureStream {
 }
 
 #[cfg(feature = "capture")]
-impl CaptureStream {
+impl MicrophoneStream {
     /// Direct access to the underlying `crossbeam_channel::Receiver`.
     ///
     /// Intended for **in-process Rust consumers** and for bindings (like the
@@ -93,7 +103,7 @@ impl CaptureStream {
     /// support, such as Python and the eventual mobile platforms, should
     /// prefer [`try_next_chunk`](Self::try_next_chunk) and
     /// [`next_chunk`](Self::next_chunk): they expose the same data with a
-    /// three-state return (`Some` / `None` / `Err(CaptureStreamClosed)`)
+    /// three-state return (`Some` / `None` / `Err(MicrophoneStreamClosed)`)
     /// that maps cleanly across a language boundary.
     pub fn receiver(&self) -> &Receiver<AudioChunk> {
         &self.receiver
@@ -107,7 +117,7 @@ impl CaptureStream {
     /// - `Ok(None)`: the stream is open and running, but no chunk is
     ///   currently buffered. Try again shortly, or call
     ///   [`next_chunk`](Self::next_chunk) to block.
-    /// - `Err(DecibriError::CaptureStreamClosed)`: the stream is closed
+    /// - `Err(DecibriError::MicrophoneStreamClosed)`: the stream is closed
     ///   (either by explicit [`stop`](Self::stop) or by an audio-driver
     ///   error reported via the cpal error callback). No further chunks
     ///   will ever be available.
@@ -130,10 +140,10 @@ impl CaptureStream {
                 if self.is_open() {
                     Ok(None)
                 } else {
-                    Err(DecibriError::CaptureStreamClosed)
+                    Err(DecibriError::MicrophoneStreamClosed)
                 }
             }
-            Err(TryRecvError::Disconnected) => Err(DecibriError::CaptureStreamClosed),
+            Err(TryRecvError::Disconnected) => Err(DecibriError::MicrophoneStreamClosed),
         }
     }
 
@@ -150,7 +160,7 @@ impl CaptureStream {
     /// - `Ok(Some(chunk))`: chunk received within the deadline.
     /// - `Ok(None)`: `timeout` elapsed without a chunk arriving. The stream
     ///   is still open.
-    /// - `Err(DecibriError::CaptureStreamClosed)`: stream closed before a
+    /// - `Err(DecibriError::MicrophoneStreamClosed)`: stream closed before a
     ///   chunk could be delivered. Any chunks that were buffered at the time
     ///   of close are delivered first; this error is only returned once the
     ///   buffer is empty.
@@ -162,7 +172,7 @@ impl CaptureStream {
     ///
     /// Implementation note: `stop()` does not disconnect the underlying
     /// channel (the cpal `Stream` still holds the sender until the
-    /// `CaptureStream` is dropped), so this method internally polls both
+    /// `MicrophoneStream` is dropped), so this method internally polls both
     /// the channel and [`is_open`](Self::is_open) at a short interval
     /// rather than relying on channel disconnection alone to wake up.
     ///
@@ -202,13 +212,13 @@ impl CaptureStream {
                         // Drain any buffered chunk (stop() does not flush).
                         return match self.receiver.try_recv() {
                             Ok(chunk) => Ok(Some(chunk)),
-                            Err(_) => Err(DecibriError::CaptureStreamClosed),
+                            Err(_) => Err(DecibriError::MicrophoneStreamClosed),
                         };
                     }
                     // Stream still alive; loop with whatever deadline remains.
                 }
                 Err(RecvTimeoutError::Disconnected) => {
-                    return Err(DecibriError::CaptureStreamClosed);
+                    return Err(DecibriError::MicrophoneStreamClosed);
                 }
             }
         }
@@ -224,7 +234,7 @@ impl CaptureStream {
     /// Signals the capture callback to stop producing chunks. Already-buffered
     /// chunks remain readable via [`try_next_chunk`](Self::try_next_chunk) or
     /// [`next_chunk`](Self::next_chunk) until the buffer is drained, at which
-    /// point those methods return `Err(CaptureStreamClosed)`.
+    /// point those methods return `Err(MicrophoneStreamClosed)`.
     ///
     /// May be called from any thread; wakes a concurrent
     /// [`next_chunk`](Self::next_chunk) waiter within approximately 20 ms.
@@ -235,22 +245,32 @@ impl CaptureStream {
 
 /// Audio capture engine.
 #[cfg(feature = "capture")]
-pub struct AudioCapture {
-    config: CaptureConfig,
+pub struct Microphone {
+    config: MicrophoneConfig,
     device: cpal::Device,
 }
 
 #[cfg(feature = "capture")]
-impl AudioCapture {
-    /// Create a new capture instance. Validates config and resolves the device.
-    pub fn new(config: CaptureConfig) -> Result<Self, DecibriError> {
+impl Microphone {
+    /// Create a new microphone instance. Validates config and resolves the device.
+    pub fn new(config: MicrophoneConfig) -> Result<Self, DecibriError> {
         config.validate()?;
         let device = crate::device::resolve_device(&config.device)?;
         Ok(Self { config, device })
     }
 
+    /// List the available input devices.
+    pub fn devices() -> Result<Vec<crate::device::MicrophoneInfo>, DecibriError> {
+        crate::device::input_devices()
+    }
+
+    /// Resolve a [`DeviceSelector`] to a concrete input device.
+    pub fn resolve_device(selector: &DeviceSelector) -> Result<cpal::Device, DecibriError> {
+        crate::device::resolve_device(selector)
+    }
+
     /// Start capturing audio. Returns a stream handle with a receiver for audio chunks.
-    pub fn start(&self) -> Result<CaptureStream, DecibriError> {
+    pub fn start(&self) -> Result<MicrophoneStream, DecibriError> {
         let (sender, receiver): (Sender<AudioChunk>, Receiver<AudioChunk>) =
             crossbeam_channel::unbounded();
 
@@ -297,7 +317,7 @@ impl AudioCapture {
             .play()
             .map_err(|e| DecibriError::StreamStartFailed(e.to_string()))?;
 
-        Ok(CaptureStream {
+        Ok(MicrophoneStream {
             _stream: Some(stream),
             receiver,
             running,
@@ -312,13 +332,13 @@ mod tests {
     use super::*;
     use std::thread;
 
-    /// Construct a synthetic `CaptureStream` with no underlying cpal device
+    /// Construct a synthetic `MicrophoneStream` with no underlying cpal device
     /// for unit-testing the channel-reading methods. Returns the stream
     /// plus test-side handles to inject chunks and flip the running flag.
-    fn test_stream() -> (CaptureStream, Sender<AudioChunk>, Arc<AtomicBool>) {
+    fn test_stream() -> (MicrophoneStream, Sender<AudioChunk>, Arc<AtomicBool>) {
         let (sender, receiver) = crossbeam_channel::unbounded::<AudioChunk>();
         let running = Arc::new(AtomicBool::new(true));
-        let stream = CaptureStream {
+        let stream = MicrophoneStream {
             _stream: None,
             receiver,
             running: running.clone(),
@@ -363,7 +383,7 @@ mod tests {
         running.store(false, Ordering::Relaxed);
 
         let err = stream.try_next_chunk().unwrap_err();
-        assert!(matches!(err, DecibriError::CaptureStreamClosed));
+        assert!(matches!(err, DecibriError::MicrophoneStreamClosed));
     }
 
     #[test]
@@ -418,7 +438,7 @@ mod tests {
         let err = stream
             .next_chunk(Some(Duration::from_millis(100)))
             .unwrap_err();
-        assert!(matches!(err, DecibriError::CaptureStreamClosed));
+        assert!(matches!(err, DecibriError::MicrophoneStreamClosed));
     }
 
     #[test]
@@ -438,7 +458,7 @@ mod tests {
         let err = stream.next_chunk(None).unwrap_err();
         let elapsed = start.elapsed();
 
-        assert!(matches!(err, DecibriError::CaptureStreamClosed));
+        assert!(matches!(err, DecibriError::MicrophoneStreamClosed));
         assert!(
             elapsed < Duration::from_millis(250),
             "next_chunk took too long to detect stop(): {elapsed:?}"
@@ -447,21 +467,21 @@ mod tests {
         stopper.join().unwrap();
     }
 
-    /// Compile-time assertion that `Arc<Mutex<CaptureStream>>` is `Send + Sync`,
-    /// which requires `CaptureStream: Send`. This is the wrapping strategy PyO3
+    /// Compile-time assertion that `Arc<Mutex<MicrophoneStream>>` is `Send + Sync`,
+    /// which requires `MicrophoneStream: Send`. This is the wrapping strategy PyO3
     /// will document for Python consumers needing shared access from multiple
     /// threads.
     ///
-    /// If `CaptureStream` ever becomes `!Send` (for example by adding an `Rc<_>`
+    /// If `MicrophoneStream` ever becomes `!Send` (for example by adding an `Rc<_>`
     /// or `RefCell<_>` field), this test fails to compile, catching the
     /// regression at build time rather than at a PyO3 wrap call site.
     #[test]
-    fn test_arc_mutex_capture_stream_is_send_and_sync() {
+    fn test_arc_mutex_microphone_stream_is_send_and_sync() {
         fn assert_send_sync<T: Send + Sync>() {}
-        assert_send_sync::<Arc<std::sync::Mutex<CaptureStream>>>();
+        assert_send_sync::<Arc<std::sync::Mutex<MicrophoneStream>>>();
     }
 
-    /// `Arc<Mutex<CaptureStream>>` exercised from two threads racing for
+    /// `Arc<Mutex<MicrophoneStream>>` exercised from two threads racing for
     /// the lock: each thread reads one injected chunk, the Mutex
     /// serializes access, and together they consume exactly the chunks
     /// injected (no duplicates, no losses, no deadlock).
@@ -470,7 +490,7 @@ mod tests {
     /// simultaneously so the test exercises contention rather than
     /// sequential non-overlapping access.
     #[test]
-    fn test_arc_mutex_capture_stream_serializes_two_threads() {
+    fn test_arc_mutex_microphone_stream_serializes_two_threads() {
         use std::sync::{Barrier, Mutex};
 
         let (stream, sender, _running) = test_stream();

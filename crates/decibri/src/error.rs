@@ -44,17 +44,17 @@ pub enum DecibriError {
     InvalidFormat,
 
     // ── Device errors ──────────────────────────────────────────────────
-    #[error("No audio input device found matching \"{0}\"")]
-    DeviceNotFound(String),
+    #[error("No microphone found matching \"{0}\"")]
+    MicrophoneNotFound(String),
 
     /// No output device matched a `Name` or `Id` selector.
     ///
-    /// The split from [`Self::DeviceNotFound`] exists because the display
-    /// message needs to say "output" when the lookup was against output
-    /// devices, not "input". Issued by [`crate::device::resolve_output_device`]
-    /// via the internal direction-specific `not_found_error` hook.
-    #[error("No audio output device found matching \"{0}\"")]
-    OutputDeviceNotFound(String),
+    /// Distinct from [`Self::MicrophoneNotFound`] so the display message names
+    /// the speaker when the lookup was against output devices. Issued via
+    /// [`crate::Speaker::resolve_device`] and the internal direction-specific
+    /// `not_found_error` hook.
+    #[error("No speaker found matching \"{0}\"")]
+    SpeakerNotFound(String),
 
     #[error("Multiple devices match \"{name}\":\n{matches}")]
     MultipleDevicesMatch { name: String, matches: String },
@@ -65,10 +65,10 @@ pub enum DecibriError {
     #[error("No microphone found. Check system audio input settings.")]
     NoMicrophoneFound,
 
-    #[error("No audio output device found. Check system audio settings.")]
-    NoOutputDeviceFound,
+    #[error("No speaker found. Check system audio settings.")]
+    NoSpeakerFound,
 
-    #[error("Selected device is not a valid input device.")]
+    #[error("Selected device is not a valid microphone.")]
     NotAnInputDevice,
 
     #[error("Failed to enumerate devices: {0}")]
@@ -87,16 +87,16 @@ pub enum DecibriError {
     #[error("Microphone permission denied. {}", PERMISSION_HINT)]
     PermissionDenied,
 
-    /// Capture stream has closed (stopped explicitly or by driver error).
-    /// Returned from `CaptureStream::try_next_chunk` / `next_chunk` when the
+    /// Microphone stream has closed (stopped explicitly or by driver error).
+    /// Returned from `MicrophoneStream::try_next_chunk` / `next_chunk` when the
     /// underlying channel has disconnected.
-    #[error("Capture stream is closed")]
-    CaptureStreamClosed,
+    #[error("Microphone stream is closed")]
+    MicrophoneStreamClosed,
 
-    /// Output stream has closed. Returned from `OutputStream::send` when the
+    /// Speaker stream has closed. Returned from `SpeakerStream::send` when the
     /// underlying channel has disconnected.
-    #[error("Output stream closed")]
-    OutputStreamClosed,
+    #[error("Speaker stream is closed")]
+    SpeakerStreamClosed,
 
     // ── VAD config validation ──────────────────────────────────────────
     /// Payload carries the offending sample rate; not formatted into the

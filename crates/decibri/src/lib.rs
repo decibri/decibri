@@ -16,7 +16,7 @@
 //! | Flag                    | Default | Purpose                                      |
 //! |-------------------------|---------|----------------------------------------------|
 //! | `capture`               | on      | Microphone input stream support              |
-//! | `output`                | on      | Speaker output stream support                |
+//! | `playback`              | on      | Speaker output stream support                |
 //! | `vad`                   | on      | Silero VAD ONNX inference                    |
 //! | `denoise`               | on      | Reserved (stub)                              |
 //! | `gain`                  | on      | Reserved (stub)                              |
@@ -32,19 +32,17 @@
 //!
 //! # Example: capture and run VAD
 //!
-//! [`CaptureStream::next_chunk`](capture::CaptureStream::next_chunk) is the
-//! recommended FFI-ready interface for reading audio chunks, returning a
+//! [`MicrophoneStream::next_chunk`](microphone::MicrophoneStream::next_chunk) is
+//! the recommended FFI-ready interface for reading audio chunks, returning a
 //! three-state `Result`: `Ok(Some(chunk))` / `Ok(None)` (timeout, stream
-//! still open) / `Err(DecibriError::CaptureStreamClosed)`.
+//! still open) / `Err(DecibriError::MicrophoneStreamClosed)`.
 //!
-//! ```ignore
+//! ```no_run
 //! use std::time::Duration;
-//! use decibri::capture::{AudioCapture, CaptureConfig};
-//! use decibri::error::DecibriError;
-//! use decibri::vad::{SileroVad, VadConfig};
+//! use decibri::{Microphone, MicrophoneConfig, SileroVad, VadConfig, DecibriError};
 //!
-//! let capture = AudioCapture::new(CaptureConfig::default())?;
-//! let stream  = capture.start()?;
+//! let microphone = Microphone::new(MicrophoneConfig::default())?;
+//! let stream = microphone.start()?;
 //! let mut vad = SileroVad::new(VadConfig::default())?;
 //!
 //! loop {
@@ -56,7 +54,7 @@
 //!             }
 //!         }
 //!         Ok(None) => continue,
-//!         Err(DecibriError::CaptureStreamClosed) => break,
+//!         Err(DecibriError::MicrophoneStreamClosed) => break,
 //!         Err(e) => return Err(e.into()),
 //!     }
 //! }
@@ -119,7 +117,7 @@
 //! # Thread safety
 //!
 //! All public types are `Send` and suitable for cross-thread handoff.
-//! [`capture::CaptureStream`] and [`output::OutputStream`] are `!Sync`
+//! [`microphone::MicrophoneStream`] and [`speaker::SpeakerStream`] are `!Sync`
 //! because they hold a `cpal::Stream` internally; wrap them in a mutex or
 //! move them into a dedicated thread for shared access.
 //!
@@ -128,16 +126,16 @@
 //! Within 3.x, the following FFI-consumer surface is declared stable and
 //! will not change signature without a breaking version bump:
 //!
-//! - [`capture::CaptureStream`][]:
-//!   [`try_next_chunk`](capture::CaptureStream::try_next_chunk),
-//!   [`next_chunk`](capture::CaptureStream::next_chunk),
-//!   [`is_open`](capture::CaptureStream::is_open),
-//!   [`stop`](capture::CaptureStream::stop).
-//! - [`output::OutputStream`][]:
-//!   [`send`](output::OutputStream::send),
-//!   [`drain`](output::OutputStream::drain),
-//!   [`is_playing`](output::OutputStream::is_playing),
-//!   [`stop`](output::OutputStream::stop).
+//! - [`microphone::MicrophoneStream`][]:
+//!   [`try_next_chunk`](microphone::MicrophoneStream::try_next_chunk),
+//!   [`next_chunk`](microphone::MicrophoneStream::next_chunk),
+//!   [`is_open`](microphone::MicrophoneStream::is_open),
+//!   [`stop`](microphone::MicrophoneStream::stop).
+//! - [`speaker::SpeakerStream`][]:
+//!   [`send`](speaker::SpeakerStream::send),
+//!   [`drain`](speaker::SpeakerStream::drain),
+//!   [`is_playing`](speaker::SpeakerStream::is_playing),
+//!   [`stop`](speaker::SpeakerStream::stop).
 
 #[cfg(all(feature = "ort-load-dynamic", feature = "ort-download-binaries"))]
 compile_error!(
@@ -188,14 +186,14 @@ mod onnx;
 /// unused without cost.
 pub const CPAL_VERSION: &str = env!("DECIBRI_CPAL_VERSION");
 
-#[cfg(any(feature = "capture", feature = "output"))]
+#[cfg(any(feature = "capture", feature = "playback"))]
 pub mod device;
 
 #[cfg(feature = "capture")]
-pub mod capture;
+pub mod microphone;
 
-#[cfg(feature = "output")]
-pub mod output;
+#[cfg(feature = "playback")]
+pub mod speaker;
 
 #[cfg(feature = "vad")]
 pub mod vad;
@@ -205,3 +203,19 @@ pub mod denoise;
 
 #[cfg(feature = "gain")]
 pub mod gain;
+
+// Crate-root re-exports so consumers can write `use decibri::Microphone`
+// rather than reaching through the module path.
+#[cfg(feature = "capture")]
+pub use microphone::{AudioChunk, Microphone, MicrophoneConfig, MicrophoneStream};
+
+#[cfg(feature = "playback")]
+pub use speaker::{Speaker, SpeakerConfig, SpeakerStream};
+
+#[cfg(any(feature = "capture", feature = "playback"))]
+pub use device::{input_devices, output_devices, DeviceSelector, MicrophoneInfo, SpeakerInfo};
+
+#[cfg(feature = "vad")]
+pub use vad::{EnergyConfig, SileroVad, Vad, VadConfig, VadResult};
+
+pub use error::DecibriError;
