@@ -38,24 +38,24 @@ release; see [MIGRATION.md](MIGRATION.md) for the full upgrade path from 3.x.
 - **Error message text.** `Display` strings now use the microphone/speaker
   vocabulary, for example `No microphone found matching "{name}"`, `No speaker
   found matching "{name}"`, and `Microphone stream is closed`.
+- **ORT error variants are `vad`-gated.** The `DecibriError` variants carrying
+  an `ort::Error` (the `Ort*` family and `OrtPathInvalid`) are compiled only
+  with the `vad` feature, so `capture` and `playback` builds without `vad` no
+  longer pull in ONNX Runtime.
 
 ### Added
 
-- `Vad` enum (`Disabled`, `Silero(VadConfig)`, `Energy(EnergyConfig)`) and the
-  `EnergyConfig` struct. `MicrophoneConfig` carries a `vad: Vad` field that
-  defaults to `Vad::Disabled`.
-- `Microphone::devices()` and `Speaker::devices()` associated functions, and
-  `Microphone::resolve_device()` / `Speaker::resolve_device()` for device
-  resolution.
+- `Microphone::devices()` and `Speaker::devices()` associated functions for
+  listing input and output devices.
 
 ### Removed
 
 - The `enumerate_input_devices()` and `enumerate_output_devices()` free
   functions, replaced by `input_devices()` and `output_devices()` (and the
   associated `Microphone::devices()` / `Speaker::devices()`).
-- The standalone `resolve_device()` and `resolve_output_device()` free
-  functions are no longer public; use `Microphone::resolve_device()` and
-  `Speaker::resolve_device()`.
+- The `resolve_device()` and `resolve_output_device()` free functions are
+  removed from the public API. Select a device via `DeviceSelector` on
+  `MicrophoneConfig` / `SpeakerConfig`; it is resolved internally.
 
 ## [3.4.2] - 2026-05-25
 

@@ -93,40 +93,6 @@ impl VadConfig {
     }
 }
 
-/// Configuration for energy-based voice activity detection.
-#[derive(Debug, Clone)]
-pub struct EnergyConfig {
-    /// Energy threshold above which a frame is treated as speech.
-    pub threshold: f32,
-    /// Sample rate in Hz of the audio the detector will see.
-    pub sample_rate: u32,
-}
-
-impl Default for EnergyConfig {
-    fn default() -> Self {
-        Self {
-            threshold: 0.01,
-            sample_rate: 16000,
-        }
-    }
-}
-
-/// Voice-activity-detection mode for a [`crate::MicrophoneConfig`].
-///
-/// `Disabled` performs no detection. `Silero` runs the Silero VAD model
-/// with the given [`VadConfig`]. `Energy` runs a lightweight energy-threshold
-/// detector with the given [`EnergyConfig`].
-#[derive(Debug, Clone, Default)]
-pub enum Vad {
-    /// No voice activity detection.
-    #[default]
-    Disabled,
-    /// Silero VAD with the given configuration.
-    Silero(VadConfig),
-    /// Energy-threshold VAD with the given configuration.
-    Energy(EnergyConfig),
-}
-
 /// Result of processing an audio chunk through Silero VAD.
 #[derive(Debug, Clone)]
 pub struct VadResult {

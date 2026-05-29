@@ -170,11 +170,6 @@ impl Speaker {
         crate::device::output_devices()
     }
 
-    /// Resolve a [`DeviceSelector`] to a concrete output device.
-    pub fn resolve_device(selector: &DeviceSelector) -> Result<cpal::Device, DecibriError> {
-        crate::device::resolve_output_device(selector)
-    }
-
     /// Start the output stream. Returns a handle for sending samples.
     pub fn start(&self) -> Result<SpeakerStream, DecibriError> {
         let (sender, receiver): (Sender<Vec<f32>>, Receiver<Vec<f32>>) =

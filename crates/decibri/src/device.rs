@@ -387,16 +387,16 @@ pub fn output_devices() -> Result<Vec<SpeakerInfo>, DecibriError> {
 
 /// Resolve a device selector to a cpal input device.
 ///
-/// Crate-internal; the public entry point is [`crate::Microphone::resolve_device`].
-#[cfg(any(feature = "capture", feature = "playback"))]
+/// Crate-internal device resolution for [`crate::Microphone`].
+#[cfg(feature = "capture")]
 pub(crate) fn resolve_device(selector: &DeviceSelector) -> Result<cpal::Device, DecibriError> {
     resolve_device_generic::<Input>(selector)
 }
 
 /// Resolve a device selector to a cpal output device.
 ///
-/// Crate-internal; the public entry point is [`crate::Speaker::resolve_device`].
-#[cfg(any(feature = "capture", feature = "playback"))]
+/// Crate-internal device resolution for [`crate::Speaker`].
+#[cfg(feature = "playback")]
 pub(crate) fn resolve_output_device(
     selector: &DeviceSelector,
 ) -> Result<cpal::Device, DecibriError> {

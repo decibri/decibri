@@ -20,8 +20,6 @@ use crossbeam_channel::{Receiver, RecvTimeoutError, Sender, TryRecvError};
 
 use crate::device::DeviceSelector;
 use crate::error::DecibriError;
-#[cfg(feature = "vad")]
-use crate::vad::Vad;
 
 /// Configuration for a microphone capture session.
 #[derive(Debug, Clone)]
@@ -34,12 +32,6 @@ pub struct MicrophoneConfig {
     pub frames_per_buffer: u32,
     /// Device selection. Default: system default input.
     pub device: DeviceSelector,
-    /// Voice-activity-detection mode. Default: [`Vad::Disabled`].
-    ///
-    /// Only present when the `vad` feature is enabled, since the [`Vad`]
-    /// enum wraps [`crate::vad::VadConfig`] which requires that feature.
-    #[cfg(feature = "vad")]
-    pub vad: Vad,
 }
 
 impl Default for MicrophoneConfig {
@@ -49,8 +41,6 @@ impl Default for MicrophoneConfig {
             channels: 1,
             frames_per_buffer: 1600,
             device: DeviceSelector::Default,
-            #[cfg(feature = "vad")]
-            vad: Vad::Disabled,
         }
     }
 }
@@ -291,11 +281,6 @@ impl Microphone {
     /// List the available input devices.
     pub fn devices() -> Result<Vec<crate::device::MicrophoneInfo>, DecibriError> {
         crate::device::input_devices()
-    }
-
-    /// Resolve a [`DeviceSelector`] to a concrete input device.
-    pub fn resolve_device(selector: &DeviceSelector) -> Result<cpal::Device, DecibriError> {
-        crate::device::resolve_device(selector)
     }
 
     /// Start capturing audio. Returns a stream handle with a receiver for audio chunks.

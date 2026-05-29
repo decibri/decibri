@@ -52,7 +52,7 @@ use decibri::sample::{
     f32_le_bytes_to_f32, f32_to_f32_le_bytes, f32_to_i16_le_bytes, i16_le_bytes_to_f32,
 };
 use decibri::speaker::{Speaker, SpeakerConfig, SpeakerStream};
-use decibri::vad::{SileroVad, Vad, VadConfig};
+use decibri::vad::{SileroVad, VadConfig};
 use decibri::CPAL_VERSION;
 
 // ---------------------------------------------------------------------------
@@ -807,7 +807,6 @@ impl MicrophoneBridge {
             channels,
             frames_per_buffer,
             device: device_selector,
-            vad: Vad::Disabled,
         };
 
         // VAD construction gate (Option (b)+(h)). The bridge constructs

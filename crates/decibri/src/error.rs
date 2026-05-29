@@ -1,3 +1,4 @@
+#[cfg(feature = "vad")]
 use std::path::PathBuf;
 
 use thiserror::Error;
@@ -50,9 +51,8 @@ pub enum DecibriError {
     /// No output device matched a `Name` or `Id` selector.
     ///
     /// Distinct from [`Self::MicrophoneNotFound`] so the display message names
-    /// the speaker when the lookup was against output devices. Issued via
-    /// [`crate::Speaker::resolve_device`] and the internal direction-specific
-    /// `not_found_error` hook.
+    /// the speaker when the lookup was against output devices. Issued when a
+    /// `Name` or `Id` selector matches no output device.
     #[error("No speaker found matching \"{0}\"")]
     SpeakerNotFound(String),
 
@@ -115,6 +115,7 @@ pub enum DecibriError {
     // downstream consumers can walk `error.source()` to the underlying
     // ORT error for programmatic handling. Paths are `PathBuf` (not
     // `String`) so consumers retain path semantics without re-parsing.
+    #[cfg(feature = "vad")]
     #[error(
         "decibri: failed to initialize ONNX Runtime: {source}. \
          Either pass ort_library_path when constructing the VAD, set \
@@ -126,6 +127,7 @@ pub enum DecibriError {
         source: ort::Error,
     },
 
+    #[cfg(feature = "vad")]
     #[error(
         "decibri: failed to load ONNX Runtime from {}: {source}. \
          If ORT_DYLIB_PATH is set, verify it points to a valid ONNX Runtime \
@@ -152,6 +154,7 @@ pub enum DecibriError {
     /// Display message matches [`Self::OrtLoadFailed`] so Node, Python, and
     /// future FFI consumers see the same actionable hint regardless of which
     /// failure path was taken.
+    #[cfg(feature = "vad")]
     #[error(
         "decibri: failed to load ONNX Runtime from {}: {reason}. \
          If ORT_DYLIB_PATH is set, verify it points to a valid ONNX Runtime \
@@ -161,12 +164,15 @@ pub enum DecibriError {
     )]
     OrtPathInvalid { path: PathBuf, reason: &'static str },
 
+    #[cfg(feature = "vad")]
     #[error("Failed to create ort session builder: {0}")]
     OrtSessionBuildFailed(#[source] ort::Error),
 
+    #[cfg(feature = "vad")]
     #[error("Failed to set ort threads: {0}")]
     OrtThreadsConfigFailed(#[source] ort::Error),
 
+    #[cfg(feature = "vad")]
     #[error("Failed to load Silero VAD model from {}: {source}", path.display())]
     VadModelLoadFailed {
         path: PathBuf,
@@ -174,9 +180,11 @@ pub enum DecibriError {
         source: ort::Error,
     },
 
+    #[cfg(feature = "vad")]
     #[error("Silero VAD inference failed: {0}")]
     OrtInferenceFailed(#[source] ort::Error),
 
+    #[cfg(feature = "vad")]
     #[error("Failed to create {kind} tensor: {source}")]
     OrtTensorCreateFailed {
         kind: &'static str,
@@ -184,6 +192,7 @@ pub enum DecibriError {
         source: ort::Error,
     },
 
+    #[cfg(feature = "vad")]
     #[error("Failed to extract {kind} tensor: {source}")]
     OrtTensorExtractFailed {
         kind: &'static str,
@@ -258,9 +267,16 @@ impl DecibriError {
     /// rustdoc on [`Self::OrtPathInvalid`]), not a categorization users
     /// need to care about.
     pub fn is_ort_path_error(&self) -> bool {
-        matches!(
-            self,
-            Self::OrtLoadFailed { .. } | Self::OrtPathInvalid { .. }
-        )
+        #[cfg(feature = "vad")]
+        {
+            matches!(
+                self,
+                Self::OrtLoadFailed { .. } | Self::OrtPathInvalid { .. }
+            )
+        }
+        #[cfg(not(feature = "vad"))]
+        {
+            false
+        }
     }
 }

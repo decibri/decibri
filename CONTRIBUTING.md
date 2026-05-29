@@ -92,6 +92,14 @@ To build from source you will need:
 - `npm/decibri/`: JavaScript package (Node.js + browser)
 - `npm/platform-*/`: platform-specific binary packages
 
+### Dependencies
+
+The workspace `Cargo.lock` is committed so CI builds from a fixed dependency
+resolution. It holds `bitflags` at 2.11.0: `bitflags` 2.12.0 expands the
+`dispatch2` flag set past the default macro recursion limit and fails to compile
+for Apple targets. If a `cargo update` raises `bitflags` and the macOS build
+fails with a recursion-limit error in `dispatch2`, hold `bitflags` at 2.11.0.
+
 ### Reporting a bug
 
 We use GitHub Issues to track bugs. All open, pending, and closed cases are at [decibri Issue Tracking](https://github.com/decibri/decibri/issues).

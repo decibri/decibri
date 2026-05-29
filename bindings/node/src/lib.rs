@@ -10,7 +10,7 @@ use decibri::device::{self, DeviceSelector};
 use decibri::microphone::{Microphone, MicrophoneConfig, MicrophoneStream};
 use decibri::sample;
 use decibri::speaker::{Speaker, SpeakerConfig, SpeakerStream};
-use decibri::vad::{SileroVad, Vad, VadConfig};
+use decibri::vad::{SileroVad, VadConfig};
 use decibri::CPAL_VERSION;
 
 /// Audio sample format.
@@ -100,7 +100,6 @@ impl DecibriBridge {
             channels,
             frames_per_buffer,
             device,
-            vad: Vad::Disabled,
         };
 
         let capture = Microphone::new(config).map_err(to_napi_error)?;

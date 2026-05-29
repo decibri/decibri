@@ -67,42 +67,26 @@ The return element types follow the type renames: `Vec<DeviceInfo>` becomes
 
 ## Device resolution
 
-The standalone resolve functions are now crate-internal. Use the associated
-functions:
-
-| 3.x | 4.0 |
-| --- | --- |
-| `decibri::device::resolve_device(&selector)` | `Microphone::resolve_device(&selector)` |
-| `decibri::device::resolve_output_device(&selector)` | `Speaker::resolve_device(&selector)` |
+The free `resolve_device` and `resolve_output_device` functions are no longer
+part of the public API. Select a device by setting the `device` field of
+`MicrophoneConfig` or `SpeakerConfig` to a `DeviceSelector` (by default, index,
+name substring, or stable id); `Microphone::new` and `Speaker::new` resolve it
+internally. If you previously called the free functions to obtain a
+`cpal::Device`, use `cpal` directly for that.
 
 ## VAD
 
-`SileroVad` and `VadConfig` are unchanged. Existing VAD code runs as before:
-construct a `SileroVad` and call `process` on each chunk's samples.
+`SileroVad` and `VadConfig` are unchanged. Run VAD exactly as in 3.x: construct
+a `SileroVad` and call `process` on each chunk's samples.
 
 ```rust
 let mut vad = SileroVad::new(VadConfig::default())?;
 let result = vad.process(&chunk.data)?;
 ```
 
-New in 4.0, `MicrophoneConfig` carries a `vad: Vad` field (default
-`Vad::Disabled`), and there is a `Vad` enum with `Disabled`,
-`Silero(VadConfig)`, and `Energy(EnergyConfig)` variants. If you build a
-`MicrophoneConfig` with a full struct literal rather than `..Default::default()`,
-add the new field:
-
-```rust
-let config = MicrophoneConfig {
-    sample_rate: 16_000,
-    channels: 1,
-    frames_per_buffer: 1600,
-    device: DeviceSelector::Default,
-    vad: Vad::Silero(VadConfig::default()),
-};
-```
-
-Using `MicrophoneConfig::default()` (or `..Default::default()`) requires no
-change; the field defaults to `Vad::Disabled`.
+`MicrophoneConfig` does not carry a VAD field. Capture configuration and VAD are
+separate concerns: configure the microphone with `MicrophoneConfig`, and run
+detection with a separately constructed `SileroVad`.
 
 ## Error handling
 

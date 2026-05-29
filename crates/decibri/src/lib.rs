@@ -226,6 +226,6 @@ pub use speaker::{Speaker, SpeakerConfig, SpeakerStream};
 pub use device::{input_devices, output_devices, DeviceSelector, MicrophoneInfo, SpeakerInfo};
 
 #[cfg(feature = "vad")]
-pub use vad::{EnergyConfig, SileroVad, Vad, VadConfig, VadResult};
+pub use vad::{SileroVad, VadConfig, VadResult};
 
 pub use error::DecibriError;
