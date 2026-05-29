@@ -100,12 +100,12 @@ pub enum DecibriError {
 
     // ── VAD config validation ──────────────────────────────────────────
     /// Payload carries the offending sample rate; not formatted into the
-    /// Display string to preserve the 3.1.x message text.
+    /// Display string to keep the message text stable.
     #[error("Silero VAD only supports sample rates 8000 and 16000")]
     VadSampleRateUnsupported(u32),
 
     /// Payload carries the offending threshold; not formatted into the
-    /// Display string to preserve the 3.1.x message text.
+    /// Display string to keep the message text stable.
     #[error("VAD threshold must be between 0.0 and 1.0")]
     VadThresholdOutOfRange(f32),
 
@@ -192,7 +192,7 @@ pub enum DecibriError {
     },
 
     /// Raised when ONNX Runtime is used in a child process after being
-    /// initialized in the parent (Phase 9 Item C7).
+    /// initialized in the parent.
     ///
     /// Python's `fork` start method on Linux duplicates the parent's
     /// memory into the child, but ONNX Runtime's internal state
@@ -217,10 +217,9 @@ pub enum DecibriError {
     )]
     ForkAfterOrtInit { init_pid: u32, current_pid: u32 },
 
-    /// Forward-compat catch-all for non-ORT ONNX backends (CoreML, TFLite,
-    /// etc.) once the workspace split lands at 4.0.
+    /// Reserved catch-all for non-ORT ONNX backends.
     ///
-    /// Not emitted by ORT-backed code paths in 3.x: ORT failures use the 8
+    /// Not emitted by ORT-backed code paths: ORT failures use the eight
     /// preceding variants (`OrtSessionBuildFailed`, `OrtThreadsConfigFailed`,
     /// `VadModelLoadFailed`, `OrtInferenceFailed`, `OrtTensorCreateFailed`,
     /// `OrtTensorExtractFailed`, plus `OrtInitFailed` and `OrtLoadFailed`)

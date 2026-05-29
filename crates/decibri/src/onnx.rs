@@ -1,48 +1,32 @@
 //! Internal ONNX session abstraction.
 //!
-//! This module defines the [`OnnxSession`] trait that decibri uses to talk to
-//! ONNX Runtime today, and that future backends (CoreML at iOS time, TFLite
-//! at Android time, GPU EPs at the P4 GPU project) will plug into without
-//! changing any consumer code.
+//! Defines the [`OnnxSession`] trait that decibri uses to talk to ONNX Runtime,
+//! decoupling the VAD code from the `ort` API behind a small backend-agnostic
+//! interface.
 //!
 //! # Visibility
 //!
-//! Everything in this module is `pub(crate)`. The trait is invisible to
-//! external consumers of `decibri` 3.x. It goes public at 4.0 alongside the
-//! `decibri-onnx` workspace split, at which point this file becomes the
-//! public API of the new `decibri-onnx` crate. See locked decision LD15 in
-//! `~/.claude/plans/python-integration-project.md` and Phase 8 plan
-//! `~/.claude/plans/phase-8-onnxsession-trait.md` LD-8-1.
+//! Everything in this module is `pub(crate)`; the trait is not part of the
+//! public API.
 //!
 //! # Trait shape
 //!
 //! The trait surface mirrors the four operations [`crate::vad`] performs
-//! against `ort::session::Session`: builder construction, input tensor
-//! creation, run, output tensor extraction. The closed-enum
-//! [`OnnxTensorData`] / [`OnnxTensorOwned`] design avoids an `ndarray`
-//! workspace dep and keeps the VAD hot path (~50 calls per second) free of
-//! tensor-type vtable dispatch.
-//!
-//! Adding a new dtype variant (e.g. `F16` or `I32`) is technically a closed-
-//! enum break, but is acceptable while the trait stays `pub(crate)`. Once
-//! the trait goes public at 4.0, dtype additions become a major-version
-//! event.
+//! against an `ort` session: builder construction, input tensor creation, run,
+//! and output tensor extraction. The closed-enum [`OnnxTensorData`] /
+//! [`OnnxTensorOwned`] design avoids an `ndarray` dependency and keeps the VAD
+//! hot path (~50 calls per second) free of tensor-type vtable dispatch.
 //!
 //! # Backend selection
 //!
-//! Backend dispatch happens inside [`OnnxSessionBuilder::build`]. In 3.x the
-//! ORT-backed implementation is the only one, so `build` always returns an
-//! `OrtSession`. At 0.3.0+ when the trait goes public and CoreML / TFLite
-//! land, `build` becomes a `cfg!`/runtime dispatch point. Adding execution-
-//! provider selection (`with_execution_providers`) at that point is purely
-//! additive (LD-8-3).
+//! [`OnnxSessionBuilder::build`] returns the ORT-backed implementation, which
+//! is the only backend.
 //!
 //! # Error handling
 //!
-//! The trait reuses [`crate::error::DecibriError`]. The 8 existing ORT
-//! variants cover ORT failures. The forward-compat
-//! [`crate::error::DecibriError::OnnxBackendFailed`] variant covers future
-//! non-ORT backend errors and is not emitted by the ORT impl in 3.x.
+//! The trait reuses [`crate::error::DecibriError`]: the ORT variants cover ORT
+//! failures, and [`crate::error::DecibriError::OnnxBackendFailed`] is reserved
+//! for non-ORT backend errors.
 
 use std::path::PathBuf;
 
@@ -87,9 +71,9 @@ pub(crate) struct OnnxOutputs {
 
 /// One owned named output.
 ///
-/// `shape` is part of the trait API (future workloads with dynamic-shape
-/// outputs need it) but is unused by Silero VAD's known-shape outputs in
-/// 3.x. Kept allowed-dead until a non-Silero consumer reads it.
+/// `shape` is part of the trait API (workloads with dynamic-shape outputs
+/// need it) but is unused by Silero VAD's known-shape outputs. Kept
+/// allowed-dead until a non-Silero consumer reads it.
 pub(crate) struct OnnxOutputTensor {
     #[allow(dead_code)]
     pub shape: Vec<i64>,
@@ -100,8 +84,8 @@ pub(crate) struct OnnxOutputTensor {
 ///
 /// `I64` is part of the trait API (some ONNX workloads emit i64 outputs;
 /// e.g., classification logits-as-class-ids) but is unused by Silero VAD's
-/// f32-only outputs in 3.x. Kept allowed-dead until a non-Silero consumer
-/// emits an i64 output.
+/// f32-only outputs. Kept allowed-dead until a non-Silero consumer emits an
+/// i64 output.
 pub(crate) enum OnnxTensorOwned {
     F32(Vec<f32>),
     #[allow(dead_code)]
@@ -118,18 +102,15 @@ impl OnnxOutputs {
 
 /// Internal ONNX session abstraction.
 ///
-/// `pub(crate)` until 4.0 (LD-8-1). At 4.0 / `decibri-onnx` workspace split
-/// this becomes the public surface that ORT, CoreML, and TFLite backends all
-/// implement.
+/// `pub(crate)`: not part of the public API. A single backend (ORT) implements
+/// it today.
 ///
-/// `Send + Sync` is required because [`crate::vad::SileroVad`] is moved into
-/// the cpal capture-thread processing path (Phase 5 architecture). ORT's
-/// `Session` already satisfies both bounds; future backends needing
-/// `unsafe impl Send + Sync` wrappers absorb that cost in their impls.
+/// `Send + Sync` is required because [`crate::vad::SileroVad`] can be moved into
+/// a capture-thread processing path. ORT's `Session` already satisfies both
+/// bounds.
 ///
-/// `run` takes `&mut self` to match ORT's `Session::run` signature; backends
-/// whose native API takes `&self` (CoreML's `MLModel.prediction`, TFLite's
-/// `Interpreter::invoke`) implement the mutable receiver trivially.
+/// `run` takes `&mut self` to match ORT's `Session::run` signature; a backend
+/// whose native API takes `&self` implements the mutable receiver trivially.
 pub(crate) trait OnnxSession: Send + Sync {
     /// Execute one inference.
     ///
@@ -141,15 +122,12 @@ pub(crate) trait OnnxSession: Send + Sync {
 
 /// Builder for an [`OnnxSession`].
 ///
-/// Concrete struct, not a trait: backend dispatch happens inside
-/// [`Self::build`]. In 3.x there is exactly one backend (ORT), so `build`
-/// always returns an `OrtSession`. At 0.3.0+ when CoreML / TFLite / etc.
-/// land, this is the dispatch point.
+/// Concrete struct, not a trait: backend selection happens inside
+/// [`Self::build`], which returns the ORT-backed `OrtSession` (the only
+/// backend).
 ///
-/// `with_execution_providers([EP])` is deferred to 0.3.0+ per LD-8-3. The
-/// trait is `pub(crate)`, so no external consumer can call it; the only
-/// internal consumer (`SileroVad`) does not need EP selection (Silero is
-/// CPU-only). Adding EP selection at 0.3.0+ is purely additive.
+/// There is no execution-provider selection: the only consumer (`SileroVad`)
+/// runs Silero on CPU.
 pub(crate) struct OnnxSessionBuilder {
     model_path: PathBuf,
     intra_threads: usize,
@@ -172,9 +150,9 @@ impl OnnxSessionBuilder {
 
     /// Build the session.
     ///
-    /// In 3.x always returns the ORT-backed implementation. The entire
-    /// `onnx` module is gated on `feature = "vad"` (see `lib.rs`), so this
-    /// method only exists when ORT is available.
+    /// Always returns the ORT-backed implementation. The entire `onnx` module
+    /// is gated on `feature = "vad"` (see `lib.rs`), so this method only exists
+    /// when ORT is available.
     pub(crate) fn build(self) -> Result<Box<dyn OnnxSession>, DecibriError> {
         let session = ort_impl::OrtSession::open(&self.model_path, self.intra_threads)?;
         Ok(Box::new(session))
@@ -204,9 +182,8 @@ mod ort_impl {
     }
 
     impl OrtSession {
-        /// Construct an [`OrtSession`] from a model file path. Pattern
-        /// matches the pre-Phase-8 `crates/decibri/src/vad.rs:243-254`
-        /// session-creation block: builder, with_intra_threads, commit_from_file.
+        /// Construct an [`OrtSession`] from a model file path: builder,
+        /// `with_intra_threads`, `commit_from_file`.
         pub(super) fn open(path: &Path, intra: usize) -> Result<Self, DecibriError> {
             let session = Session::builder()
                 .map_err(DecibriError::OrtSessionBuildFailed)?
@@ -224,9 +201,8 @@ mod ort_impl {
     /// Map a runtime input or output name back to a `&'static str` for the
     /// existing [`DecibriError::OrtTensorCreateFailed`] /
     /// [`DecibriError::OrtTensorExtractFailed`] `kind` field. Preserves the
-    /// exact pre-Phase-8 error message text for the well-known Silero names
-    /// without forcing a breaking change to the error variant signatures
-    /// (LD-8-1: public API byte-identical).
+    /// error message text for the well-known Silero names without changing the
+    /// error variant signatures.
     fn known_kind(name: &str) -> &'static str {
         match name {
             "input" => "input",
@@ -241,21 +217,16 @@ mod ort_impl {
     impl OnnxSession for OrtSession {
         /// Run one inference through the ORT session.
         ///
-        /// Hardcoded to the ValueMap (runtime-named) input path per LD-8-10:
-        /// Silero VAD has exactly 3 inputs and ORT 2.x's
-        /// `SessionInputs<'i, 'v, N>` const-generic input count is awkward
-        /// to use from a runtime slice. The ValueMap variant accepts a
-        /// `Vec<(Cow<'_, str>, SessionInputValue<'_>)>` which `Session::run`
-        /// consumes via `From<Vec<(K, V)>> for SessionInputs<_, _, 0>`.
-        /// Generic-N construction lands at 0.3.0+ when a second backend or
-        /// non-VAD workload needs different input cardinality.
+        /// Hardcoded to the ValueMap (runtime-named) input path: Silero VAD has
+        /// exactly 3 inputs and ORT 2.x's `SessionInputs<'i, 'v, N>`
+        /// const-generic input count is awkward to use from a runtime slice. The
+        /// ValueMap variant accepts a `Vec<(Cow<'_, str>, SessionInputValue<'_>)>`
+        /// which `Session::run` consumes via
+        /// `From<Vec<(K, V)>> for SessionInputs<_, _, 0>`.
         ///
         /// Output dtype dispatch reads `Value::dtype().tensor_type()` per
-        /// output and copies into an owned `OnnxOutputTensor`. Copy is
-        /// trivial for Silero's outputs (`output` is 1 float, `stateN` is
-        /// 256 floats). Whisper-style large outputs would benefit from a
-        /// future `run_zero_copy` variant; deferred per Phase 8 plan
-        /// Section 4 "Items NOT in scope".
+        /// output and copies into an owned `OnnxOutputTensor`. Copy is trivial
+        /// for Silero's outputs (`output` is 1 float, `stateN` is 256 floats).
         fn run(&mut self, inputs: OnnxInputs<'_>) -> Result<OnnxOutputs, DecibriError> {
             let mut input_pairs: Vec<(Cow<'_, str>, SessionInputValue<'_>)> =
                 Vec::with_capacity(inputs.items.len());
@@ -326,20 +297,18 @@ mod ort_impl {
     }
 }
 
-// Inline tests: the trait is `pub(crate)` (LD-8-1), so an integration test in
-// `tests/onnx_trait.rs` could not see it. Inline `#[cfg(test)] mod tests`
-// preserves the plan's intent (test the trait API in isolation, with a
-// MockSession and an ORT-backed round trip) while honoring the visibility
-// constraint. Documented in the Phase 8 implementation report.
+// Inline tests: the trait is `pub(crate)`, so an integration test under
+// `tests/` could not see it. Inline `#[cfg(test)] mod tests` exercises the
+// trait API in isolation (a MockSession plus an ORT-backed round trip) from
+// within the crate.
 #[cfg(test)]
 mod tests {
     use super::*;
 
     /// Sanity-check that `Box<dyn OnnxSession>` is `Send + Sync`. This is the
-    /// load-bearing bound (`SileroVad` lives in the cpal capture-thread path
-    /// per Phase 5; the bridge already asserts `Send + 'static`). If a future
-    /// trait change drops one of these bounds, this assertion fails at
-    /// compile time.
+    /// load-bearing bound (`SileroVad` can live on a capture thread; the
+    /// bindings already assert `Send + 'static`). If a future trait change
+    /// drops one of these bounds, this assertion fails at compile time.
     #[allow(dead_code)]
     fn assert_send_sync<T: Send + Sync>() {}
 

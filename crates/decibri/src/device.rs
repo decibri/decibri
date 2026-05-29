@@ -1,9 +1,21 @@
+//! Audio device discovery and selection.
+//!
+//! [`input_devices`] and [`output_devices`] list the available microphones and
+//! speakers as [`MicrophoneInfo`] / [`SpeakerInfo`]. A [`DeviceSelector`] picks
+//! one by system default, index, case-insensitive name substring, or stable
+//! per-host id, and is the value [`crate::MicrophoneConfig`] and
+//! [`crate::SpeakerConfig`] carry in their `device` field.
+
 #[cfg(any(feature = "capture", feature = "playback"))]
 use cpal::traits::{DeviceTrait, HostTrait};
 
 use crate::error::DecibriError;
 
-/// Information about an audio input device.
+/// Information about a microphone (audio input) device.
+///
+/// Returned by [`input_devices`] and
+/// [`Microphone::devices`](crate::Microphone::devices). For speakers, see
+/// [`SpeakerInfo`].
 #[derive(Debug, Clone)]
 #[non_exhaustive]
 pub struct MicrophoneInfo {
@@ -13,12 +25,12 @@ pub struct MicrophoneInfo {
     /// [`DeviceSelector::Id`] for selection that survives across
     /// enumerations.
     ///
-    /// The string is cpal's `DeviceId` [`Display`] output:
+    /// The string is the platform device identifier:
     /// - Windows (WASAPI): endpoint ID (e.g. `{0.0.1.00000000}.{...}`)
     /// - macOS (CoreAudio): device UID
     /// - Linux (ALSA): PCM identifier
     ///
-    /// Empty string if cpal could not produce a stable ID for this
+    /// Empty string if the platform could not produce a stable ID for this
     /// device (rare; some host backends cannot assign IDs to every
     /// enumerated device). A device with an empty `id` cannot be
     /// selected by [`DeviceSelector::Id`] and must be selected via
@@ -31,7 +43,11 @@ pub struct MicrophoneInfo {
     pub is_default: bool,
 }
 
-/// Information about an audio output device.
+/// Information about a speaker (audio output) device.
+///
+/// Returned by [`output_devices`] and
+/// [`Speaker::devices`](crate::Speaker::devices). For microphones, see
+/// [`MicrophoneInfo`].
 #[derive(Debug, Clone)]
 #[non_exhaustive]
 pub struct SpeakerInfo {
@@ -353,13 +369,17 @@ fn resolve_device_generic<D: DeviceDirection>(
     }
 }
 
-/// Enumerate all available audio input devices.
+/// List the available microphone (input) devices.
+///
+/// Also available as [`Microphone::devices`](crate::Microphone::devices).
 #[cfg(any(feature = "capture", feature = "playback"))]
 pub fn input_devices() -> Result<Vec<MicrophoneInfo>, DecibriError> {
     enumerate_devices::<Input>()
 }
 
-/// Enumerate all available audio output devices.
+/// List the available speaker (output) devices.
+///
+/// Also available as [`Speaker::devices`](crate::Speaker::devices).
 #[cfg(any(feature = "capture", feature = "playback"))]
 pub fn output_devices() -> Result<Vec<SpeakerInfo>, DecibriError> {
     enumerate_devices::<Output>()

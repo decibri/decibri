@@ -1,9 +1,7 @@
-//! Phase 8 micro-benchmark: SileroVad inference latency.
+//! VAD micro-benchmark: SileroVad inference latency.
 //!
 //! Measures wall-time per `SileroVad::process()` call on a deterministic
-//! 16 kHz audio chunk. Used to validate LD-8-9: VAD inference latency post-
-//! Phase-8 must stay within 0.5% (p50) / 1% (p99) of the pre-Phase-8 baseline
-//! after `SileroVad` migrates to consume `Box<dyn OnnxSession>`.
+//! 16 kHz audio chunk.
 //!
 //! # Run
 //!
@@ -11,13 +9,11 @@
 //! cargo run --release --example bench_vad \
 //!     -p decibri \
 //!     --no-default-features \
-//!     --features capture,output,vad,denoise,gain,ort-download-binaries
+//!     --features capture,playback,vad,denoise,gain,ort-download-binaries
 //! ```
 //!
-//! Output is two lines: `p50 = <ns>` and `p99 = <ns>`. Compare across
-//! pre-Phase-8 (vad.rs using direct ORT) and post-Phase-8 (vad.rs through
-//! the trait) builds; the two builds must have run on the same hardware
-//! back-to-back with no machine reboot in between.
+//! Output is two lines: `p50 = <ns>` and `p99 = <ns>`. For a fair comparison,
+//! run the builds being compared on the same hardware back-to-back.
 
 use std::path::Path;
 use std::time::Instant;

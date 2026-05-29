@@ -1,3 +1,11 @@
+//! Microphone capture: open an input device and pull [`AudioChunk`]s from it.
+//!
+//! Build a [`MicrophoneConfig`], construct a [`Microphone`], then
+//! [`start`](Microphone::start) it to obtain a [`MicrophoneStream`]. Read audio
+//! with [`next_chunk`](MicrophoneStream::next_chunk) (blocking, with a timeout)
+//! or [`try_next_chunk`](MicrophoneStream::try_next_chunk) (non-blocking). The
+//! playback counterpart is [`crate::speaker`].
+
 #[cfg(feature = "capture")]
 use std::sync::atomic::{AtomicBool, Ordering};
 #[cfg(feature = "capture")]
@@ -48,7 +56,8 @@ impl Default for MicrophoneConfig {
 }
 
 impl MicrophoneConfig {
-    /// Validate configuration values match the JS API constraints.
+    /// Validate the configuration: sample rate, channel count, and buffer size
+    /// must fall within the supported ranges.
     pub fn validate(&self) -> Result<(), DecibriError> {
         if !(1000..=384000).contains(&self.sample_rate) {
             return Err(DecibriError::SampleRateOutOfRange);
@@ -74,7 +83,13 @@ pub struct AudioChunk {
     pub channels: u16,
 }
 
-/// Handle to an active audio capture session.
+/// An open capture stream you pull [`AudioChunk`]s from.
+///
+/// Obtained from [`Microphone::start`]. Read audio with
+/// [`next_chunk`](Self::next_chunk) (blocking, with a timeout) or
+/// [`try_next_chunk`](Self::try_next_chunk) (non-blocking). Call
+/// [`stop`](Self::stop) to end capture, or drop the stream to release the
+/// device. The type is `!Sync`: keep it on one thread or wrap it in a mutex.
 #[cfg(feature = "capture")]
 pub struct MicrophoneStream {
     /// Holds the cpal stream alive for the lifetime of this handle. Wrapped
@@ -132,7 +147,7 @@ impl MicrophoneStream {
     /// # Stability
     /// Part of decibri's stable FFI-consumer API surface, alongside
     /// [`next_chunk`](Self::next_chunk). Guaranteed signature-stable across
-    /// 3.x; any change will be a breaking version bump.
+    /// 4.x; any change will be a breaking version bump.
     pub fn try_next_chunk(&self) -> Result<Option<AudioChunk>, DecibriError> {
         match self.receiver.try_recv() {
             Ok(chunk) => Ok(Some(chunk)),
@@ -243,7 +258,19 @@ impl MicrophoneStream {
     }
 }
 
-/// Audio capture engine.
+/// An input device you capture audio from.
+///
+/// Build one from a [`MicrophoneConfig`], then [`start`](Self::start) it to open
+/// the device and obtain a [`MicrophoneStream`] of [`AudioChunk`]s. The playback
+/// counterpart is [`Speaker`](crate::Speaker).
+///
+/// ```no_run
+/// use decibri::{Microphone, MicrophoneConfig};
+///
+/// let mic = Microphone::new(MicrophoneConfig::default())?;
+/// let stream = mic.start()?;
+/// # Ok::<(), decibri::DecibriError>(())
+/// ```
 #[cfg(feature = "capture")]
 pub struct Microphone {
     config: MicrophoneConfig,
@@ -252,7 +279,9 @@ pub struct Microphone {
 
 #[cfg(feature = "capture")]
 impl Microphone {
-    /// Create a new microphone instance. Validates config and resolves the device.
+    /// Create a microphone: validates the [`MicrophoneConfig`] and resolves the
+    /// selected input device. Does not open the stream; call [`start`](Self::start)
+    /// for that.
     pub fn new(config: MicrophoneConfig) -> Result<Self, DecibriError> {
         config.validate()?;
         let device = crate::device::resolve_device(&config.device)?;
@@ -468,13 +497,13 @@ mod tests {
     }
 
     /// Compile-time assertion that `Arc<Mutex<MicrophoneStream>>` is `Send + Sync`,
-    /// which requires `MicrophoneStream: Send`. This is the wrapping strategy PyO3
-    /// will document for Python consumers needing shared access from multiple
+    /// which requires `MicrophoneStream: Send`. This is the wrapping strategy the
+    /// bindings document for consumers needing shared access from multiple
     /// threads.
     ///
     /// If `MicrophoneStream` ever becomes `!Send` (for example by adding an `Rc<_>`
     /// or `RefCell<_>` field), this test fails to compile, catching the
-    /// regression at build time rather than at a PyO3 wrap call site.
+    /// regression at build time rather than at a binding wrap call site.
     #[test]
     fn test_arc_mutex_microphone_stream_is_send_and_sync() {
         fn assert_send_sync<T: Send + Sync>() {}

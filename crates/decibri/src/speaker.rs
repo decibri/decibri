@@ -1,3 +1,12 @@
+//! Speaker playback: open an output device and push `f32` samples to it.
+//!
+//! Build a [`SpeakerConfig`], construct a [`Speaker`], then
+//! [`start`](Speaker::start) it to obtain a [`SpeakerStream`]. Push audio with
+//! [`send`](SpeakerStream::send), block until the queue empties with
+//! [`drain`](SpeakerStream::drain), or end immediately with
+//! [`stop`](SpeakerStream::stop). The capture counterpart is
+//! [`crate::microphone`].
+
 #[cfg(feature = "playback")]
 use std::sync::atomic::{AtomicBool, Ordering};
 #[cfg(feature = "playback")]
@@ -33,7 +42,8 @@ impl Default for SpeakerConfig {
 }
 
 impl SpeakerConfig {
-    /// Validate configuration values match the JS API constraints.
+    /// Validate the configuration: sample rate and channel count must fall
+    /// within the supported ranges.
     pub fn validate(&self) -> Result<(), DecibriError> {
         if !(1000..=384000).contains(&self.sample_rate) {
             return Err(DecibriError::SampleRateOutOfRange);
@@ -45,7 +55,14 @@ impl SpeakerConfig {
     }
 }
 
-/// Handle to an active audio output stream.
+/// An open playback stream you push `f32` samples to.
+///
+/// Obtained from [`Speaker::start`]. Queue samples with [`send`](Self::send),
+/// which applies backpressure when the internal buffer is full. Call
+/// [`drain`](Self::drain) to block until everything queued has played, or
+/// [`stop`](Self::stop) to end immediately and discard what remains. Dropping
+/// the stream releases the device. The type is `!Sync`: keep it on one thread
+/// or wrap it in a mutex.
 #[cfg(feature = "playback")]
 pub struct SpeakerStream {
     _stream: cpal::Stream,
@@ -81,7 +98,7 @@ impl SpeakerStream {
     /// # Stability
     /// Part of decibri's stable FFI-consumer API surface. Signature and
     /// three-state semantics (ok / empty-noop / closed) are guaranteed
-    /// stable across 3.x; any change will be a breaking version bump.
+    /// stable across 4.x; any change will be a breaking version bump.
     pub fn send(&self, samples: Vec<f32>) -> Result<(), DecibriError> {
         if samples.is_empty() {
             return Ok(());
@@ -116,7 +133,21 @@ impl SpeakerStream {
     }
 }
 
-/// Audio output engine.
+/// An output device you play audio to.
+///
+/// Build one from a [`SpeakerConfig`], then [`start`](Self::start) it to open
+/// the device and obtain a [`SpeakerStream`] you push `f32` samples to. The
+/// capture counterpart is [`Microphone`](crate::Microphone).
+///
+/// ```no_run
+/// use decibri::{Speaker, SpeakerConfig};
+///
+/// let speaker = Speaker::new(SpeakerConfig::default())?;
+/// let stream = speaker.start()?;
+/// stream.send(vec![0.0_f32; 16_000])?; // one second of silence at 16 kHz mono
+/// stream.drain();
+/// # Ok::<(), decibri::DecibriError>(())
+/// ```
 #[cfg(feature = "playback")]
 pub struct Speaker {
     config: SpeakerConfig,
@@ -125,7 +156,9 @@ pub struct Speaker {
 
 #[cfg(feature = "playback")]
 impl Speaker {
-    /// Create a new speaker instance. Validates config and resolves the device.
+    /// Create a speaker: validates the [`SpeakerConfig`] and resolves the
+    /// selected output device. Does not open the stream; call
+    /// [`start`](Self::start) for that.
     pub fn new(config: SpeakerConfig) -> Result<Self, DecibriError> {
         config.validate()?;
         let device = crate::device::resolve_output_device(&config.device)?;

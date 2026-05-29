@@ -7,9 +7,55 @@ Changes to the decibri Rust core crate, published to crates.io. Tags use the `cr
 For other decibri packages, see:
 
 - npm package: [npm/decibri/CHANGELOG.md](../../npm/decibri/CHANGELOG.md)
-- Python wheel: [bindings/python/CHANGELOG.md](../../bindings/python/CHANGELOG.md)
+- Python package: [bindings/python/CHANGELOG.md](../../bindings/python/CHANGELOG.md)
 
 ## [Unreleased]
+
+## [4.0.0] - 2026-05-30
+
+Renames the public API to a microphone/speaker vocabulary. This is a breaking
+release; see [MIGRATION.md](MIGRATION.md) for the full upgrade path from 3.x.
+
+### Changed
+
+- **Type renames (breaking).** Capture side: `AudioCapture` to `Microphone`,
+  `CaptureStream` to `MicrophoneStream`, `CaptureConfig` to `MicrophoneConfig`.
+  Output side: `AudioOutput` to `Speaker`, `OutputStream` to `SpeakerStream`,
+  `OutputConfig` to `SpeakerConfig`. Device info: `DeviceInfo` to
+  `MicrophoneInfo`, `OutputDeviceInfo` to `SpeakerInfo`. The channel fields
+  `max_input_channels` and `max_output_channels` are unchanged. `AudioChunk`,
+  `VadConfig`, `VadResult`, and `SileroVad` keep their names and signatures.
+- **Module renames (breaking).** `capture` to `microphone`, `output` to
+  `speaker`. The common types are now re-exported at the crate root, so
+  `use decibri::Microphone;` works without naming the module.
+- **Feature rename (breaking).** `output` to `playback`. The `capture` feature
+  is unchanged.
+- **Error variant renames (breaking).** `DeviceNotFound` to
+  `MicrophoneNotFound`, `OutputDeviceNotFound` to `SpeakerNotFound`,
+  `NoOutputDeviceFound` to `NoSpeakerFound`, `CaptureStreamClosed` to
+  `MicrophoneStreamClosed`, `OutputStreamClosed` to `SpeakerStreamClosed`.
+  `NoMicrophoneFound` and `NotAnInputDevice` keep their names.
+- **Error message text.** `Display` strings now use the microphone/speaker
+  vocabulary, for example `No microphone found matching "{name}"`, `No speaker
+  found matching "{name}"`, and `Microphone stream is closed`.
+
+### Added
+
+- `Vad` enum (`Disabled`, `Silero(VadConfig)`, `Energy(EnergyConfig)`) and the
+  `EnergyConfig` struct. `MicrophoneConfig` carries a `vad: Vad` field that
+  defaults to `Vad::Disabled`.
+- `Microphone::devices()` and `Speaker::devices()` associated functions, and
+  `Microphone::resolve_device()` / `Speaker::resolve_device()` for device
+  resolution.
+
+### Removed
+
+- The `enumerate_input_devices()` and `enumerate_output_devices()` free
+  functions, replaced by `input_devices()` and `output_devices()` (and the
+  associated `Microphone::devices()` / `Speaker::devices()`).
+- The standalone `resolve_device()` and `resolve_output_device()` free
+  functions are no longer public; use `Microphone::resolve_device()` and
+  `Speaker::resolve_device()`.
 
 ## [3.4.2] - 2026-05-25
 
@@ -69,7 +115,7 @@ Error message wording on shipped `DecibriError` variants has historically been s
 
 ## [3.3.0] - 2026-04-23
 
-Groundwork release for upcoming P3 Python bindings. Adds a stable-ID form for audio device selection (`DeviceSelector::Id`), fixes a long-standing direction bug in `DecibriError::DeviceNotFound` when resolving output devices, exposes both in the Node binding, and extends the reference documentation with a Cargo feature flag guide plus additional crate-level rustdoc. No Node.js or browser API break. Direct Rust crate consumers pattern-matching on `DeviceSelector` or struct-literal-constructing `DeviceInfo` / `OutputDeviceInfo` need to update for the new `#[non_exhaustive]` attributes (see Migration notes below).
+Groundwork release for the Python bindings. Adds a stable-ID form for audio device selection (`DeviceSelector::Id`), fixes a long-standing direction bug in `DecibriError::DeviceNotFound` when resolving output devices, exposes both in the Node binding, and extends the reference documentation with a Cargo feature flag guide plus additional crate-level rustdoc. No Node.js or browser API break. Direct Rust crate consumers pattern-matching on `DeviceSelector` or struct-literal-constructing `DeviceInfo` / `OutputDeviceInfo` need to update for the new `#[non_exhaustive]` attributes (see Migration notes below).
 
 ### Changed
 
@@ -92,7 +138,7 @@ Groundwork release for upcoming P3 Python bindings. Adds a stable-ID form for au
 ### Internal
 
 - `DeviceDirection` trait gains a `not_found_error(String) -> DecibriError` method so `resolve_device_generic`'s `Name` and `Id` arms produce direction-correct errors via the `Input` / `Output` impls.
-- Unit tests for `Arc<Mutex<CaptureStream>>` confirming the wrapping is `Send + Sync` (compile-time assertion) and serializes concurrent access across two threads (runtime test with `Barrier`). Documents the wrapping strategy the P3 Python binding will apply to share `!Sync` capture streams across Python threads.
+- Unit tests for `Arc<Mutex<CaptureStream>>` confirming the wrapping is `Send + Sync` (compile-time assertion) and serializes concurrent access across two threads (runtime test with `Barrier`). Documents the wrapping strategy the Python binding will apply to share `!Sync` capture streams across Python threads.
 - Crate-level rustdoc additions in `lib.rs`: a section on ORT error construction FFI side effects (the `ortsys![CreateStatus]` dylib-load trigger that motivates the `OrtPathInvalid` split from `OrtLoadFailed`) and a section on fork safety (guidance for Python `multiprocessing` consumers to use `spawn` start method).
 - `lib.rs` rustdoc "Feature flags" section cross-references `docs/features.md` for consumers wanting the deep-dive reference.
 - Em-dash cleanup across 19 code locations in `lib.rs`, `capture.rs`, `output.rs`, `vad.rs`, `error.rs`, `vad_integration.rs`, and `vad_ort_load_failure.rs`. Per CLAUDE.md, the codebase forbids em dashes; these were pre-existing violations.
