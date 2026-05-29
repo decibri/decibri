@@ -42,16 +42,16 @@ use pyo3_async_runtimes::tokio::future_into_py;
 use numpy::ndarray::Array2;
 use numpy::{IntoPyArray, PyArray1, PyArray2, PyArrayMethods};
 
-use decibri::capture::{AudioCapture, AudioChunk, CaptureConfig, CaptureStream};
 use decibri::device::{
-    enumerate_input_devices, enumerate_output_devices, DeviceInfo as CoreDeviceInfo,
-    DeviceSelector, OutputDeviceInfo as CoreOutputDeviceInfo,
+    input_devices, output_devices, DeviceSelector, MicrophoneInfo as CoreDeviceInfo,
+    SpeakerInfo as CoreOutputDeviceInfo,
 };
 use decibri::error::DecibriError as CoreDecibriError;
-use decibri::output::{AudioOutput, OutputConfig, OutputStream};
+use decibri::microphone::{AudioChunk, Microphone, MicrophoneConfig, MicrophoneStream};
 use decibri::sample::{
     f32_le_bytes_to_f32, f32_to_f32_le_bytes, f32_to_i16_le_bytes, i16_le_bytes_to_f32,
 };
+use decibri::speaker::{Speaker, SpeakerConfig, SpeakerStream};
 use decibri::vad::{SileroVad, VadConfig};
 use decibri::CPAL_VERSION;
 
@@ -82,8 +82,8 @@ use decibri::CPAL_VERSION;
 // (extract owned data instead).
 //
 // Sendability of the sync bridges is empirically backed: the Rust core's
-// `CaptureStream` is asserted `Send + Sync` at
-// `crates/decibri/src/capture.rs:459` (compile-time, unconditional, runs
+// `MicrophoneStream` is asserted `Send + Sync` at
+// `crates/decibri/src/microphone.rs:481` (compile-time, unconditional, runs
 // on every CI platform), and the documented `Send` contract for all
 // public capture/output types lives at `crates/decibri/src/lib.rs:119-140`.
 // ---------------------------------------------------------------------------
@@ -226,7 +226,7 @@ fn to_py_err(py: Python<'_>, err: CoreDecibriError) -> PyErr {
             "NoMicrophoneFound",
             Box::new(move |cls| PyErr::from_type(cls, (msg,))),
         ),
-        CoreDecibriError::NoOutputDeviceFound => (
+        CoreDecibriError::NoSpeakerFound => (
             "NoOutputDeviceFound",
             Box::new(move |cls| PyErr::from_type(cls, (msg,))),
         ),
@@ -242,21 +242,21 @@ fn to_py_err(py: Python<'_>, err: CoreDecibriError) -> PyErr {
             "PermissionDenied",
             Box::new(move |cls| PyErr::from_type(cls, (msg,))),
         ),
-        CoreDecibriError::CaptureStreamClosed => (
+        CoreDecibriError::MicrophoneStreamClosed => (
             "CaptureStreamClosed",
             Box::new(move |cls| PyErr::from_type(cls, (msg,))),
         ),
-        CoreDecibriError::OutputStreamClosed => (
+        CoreDecibriError::SpeakerStreamClosed => (
             "OutputStreamClosed",
             Box::new(move |cls| PyErr::from_type(cls, (msg,))),
         ),
 
         // Tuple variants with String (5).
-        CoreDecibriError::DeviceNotFound(_) => (
+        CoreDecibriError::MicrophoneNotFound(_) => (
             "DeviceNotFound",
             Box::new(move |cls| PyErr::from_type(cls, (msg,))),
         ),
-        CoreDecibriError::OutputDeviceNotFound(_) => (
+        CoreDecibriError::SpeakerNotFound(_) => (
             "OutputDeviceNotFound",
             Box::new(move |cls| PyErr::from_type(cls, (msg,))),
         ),
@@ -674,19 +674,19 @@ fn numpy_smoke(py: Python<'_>) -> Bound<'_, PyArray1<i16>> {
 // compile-time assertion at the top of this module enforces the property;
 // do not add a field whose type lacks `Send + 'static` without first
 // removing the assertion (which would also block Phase 5's async work).
-// Sendability comes from the Rust core's `CaptureStream` already being
-// `Send` (see `crates/decibri/src/lib.rs:119-140` for the contract and
-// `crates/decibri/src/capture.rs:459` for the unconditional compile-time
+// Sendability comes from the Rust core's `MicrophoneStream` already being
+// `Send` (see `crates/decibri/src/lib.rs` for the contract and
+// `crates/decibri/src/microphone.rs:481` for the unconditional compile-time
 // assertion). The bridge holds the stream directly; no pump thread or
 // channel proxy is needed.
 //
 // Owns:
-//   - capture_config: CaptureConfig (built from constructor args, retained
+//   - capture_config: MicrophoneConfig (built from constructor args, retained
 //     for diagnostic introspection)
 //   - format: BindingSampleFormat (parsed from constructor 'format' arg)
 //   - vad_holdoff_ms: u32 (inert; wrapper layer reads this if it wants to)
-//   - capture: Option<AudioCapture> (None until start())
-//   - stream: Option<CaptureStream> (None until start())
+//   - capture: Option<Microphone> (None until start())
+//   - stream: Option<MicrophoneStream> (None until start())
 //   - vad: Option<SileroVad> (None unless constructor's vad=True AND
 //     vad_mode=="silero"; per VAD Option (b)+(h) decision)
 //   - last_vad_probability: f32 (most recent Silero raw probability; updated
@@ -695,11 +695,11 @@ fn numpy_smoke(py: Python<'_>) -> Bound<'_, PyArray1<i16>> {
 
 #[pyclass(module = "decibri._decibri")]
 struct MicrophoneBridge {
-    capture_config: CaptureConfig,
+    capture_config: MicrophoneConfig,
     format: BindingSampleFormat,
     vad_holdoff_ms: u32,
-    capture: Option<AudioCapture>,
-    stream: Option<CaptureStream>,
+    capture: Option<Microphone>,
+    stream: Option<MicrophoneStream>,
     vad: Option<SileroVad>,
     last_vad_probability: f32,
     /// Phase 6: when true, `read()` returns a numpy.ndarray instead of
@@ -802,7 +802,7 @@ impl MicrophoneBridge {
         let parsed_format = parse_sample_format(&format).map_err(|e| to_py_err(py, e))?;
         let device_selector = build_device_selector(device.as_ref())?;
 
-        let capture_config = CaptureConfig {
+        let capture_config = MicrophoneConfig {
             sample_rate,
             channels,
             frames_per_buffer,
@@ -848,8 +848,7 @@ impl MicrophoneBridge {
                 "capture is already running",
             ));
         }
-        let capture =
-            AudioCapture::new(self.capture_config.clone()).map_err(|e| to_py_err(py, e))?;
+        let capture = Microphone::new(self.capture_config.clone()).map_err(|e| to_py_err(py, e))?;
         let stream = capture.start().map_err(|e| to_py_err(py, e))?;
         self.capture = Some(capture);
         self.stream = Some(stream);
@@ -949,9 +948,7 @@ impl MicrophoneBridge {
 
     #[staticmethod]
     fn devices(py: Python<'_>) -> PyResult<Vec<DeviceInfo>> {
-        let core_devices = py
-            .detach(enumerate_input_devices)
-            .map_err(|e| to_py_err(py, e))?;
+        let core_devices = py.detach(input_devices).map_err(|e| to_py_err(py, e))?;
         Ok(core_devices.into_iter().map(DeviceInfo::from).collect())
     }
 
@@ -966,26 +963,26 @@ impl MicrophoneBridge {
 //
 // This pyclass is `Send + 'static` and may cross thread boundaries; the
 // compile-time assertion at the top of this module enforces the property.
-// Sendability comes from the Rust core's `OutputStream` being `Send` per
-// the documented contract at `crates/decibri/src/lib.rs:119-140`. There
-// is no analogous compile-time assertion in `output.rs` (capture has one
-// at line 459); CI on the four-platform matrix is the empirical gate.
+// Sendability comes from the Rust core's `SpeakerStream` being `Send` per
+// the documented contract at `crates/decibri/src/lib.rs`. There
+// is no analogous compile-time assertion in `speaker.rs` (microphone.rs has
+// one at line 481); CI on the four-platform matrix is the empirical gate.
 // Do not add a field whose type lacks `Send + 'static` without first
 // removing the module-level assertion.
 //
 // Owns:
-//   - output_config: OutputConfig (no frames_per_buffer per F2)
+//   - output_config: SpeakerConfig (no frames_per_buffer per F2)
 //   - format: BindingSampleFormat
-//   - output: Option<AudioOutput>
-//   - stream: Option<OutputStream>
+//   - output: Option<Speaker>
+//   - stream: Option<SpeakerStream>
 // ---------------------------------------------------------------------------
 
 #[pyclass(module = "decibri._decibri")]
 struct SpeakerBridge {
-    output_config: OutputConfig,
+    output_config: SpeakerConfig,
     format: BindingSampleFormat,
-    output: Option<AudioOutput>,
-    stream: Option<OutputStream>,
+    output: Option<Speaker>,
+    stream: Option<SpeakerStream>,
 }
 
 // Phase 6 internal helpers for SpeakerBridge. Not exposed to
@@ -1073,7 +1070,7 @@ impl SpeakerBridge {
         let parsed_format = parse_sample_format(&format).map_err(|e| to_py_err(py, e))?;
         let device_selector = build_device_selector(device.as_ref())?;
 
-        let output_config = OutputConfig {
+        let output_config = SpeakerConfig {
             sample_rate,
             channels,
             device: device_selector,
@@ -1095,7 +1092,7 @@ impl SpeakerBridge {
                 "output is already running",
             ));
         }
-        let output = AudioOutput::new(self.output_config.clone()).map_err(|e| to_py_err(py, e))?;
+        let output = Speaker::new(self.output_config.clone()).map_err(|e| to_py_err(py, e))?;
         let stream = output.start().map_err(|e| to_py_err(py, e))?;
         self.output = Some(output);
         self.stream = Some(stream);
@@ -1204,9 +1201,7 @@ impl SpeakerBridge {
 
     #[staticmethod]
     fn devices(py: Python<'_>) -> PyResult<Vec<OutputDeviceInfo>> {
-        let core_devices = py
-            .detach(enumerate_output_devices)
-            .map_err(|e| to_py_err(py, e))?;
+        let core_devices = py.detach(output_devices).map_err(|e| to_py_err(py, e))?;
         Ok(core_devices
             .into_iter()
             .map(OutputDeviceInfo::from)

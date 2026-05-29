@@ -1,50 +1,59 @@
 //! Cross-platform audio capture, playback, and voice-activity detection.
 //!
-//! `decibri` is the Rust core behind the `decibri` npm package. It provides:
+//! decibri records from a microphone, plays audio to a speaker, and runs Silero
+//! voice-activity detection through one API on Windows, macOS, and Linux. It is
+//! the Rust core that also powers decibri's Python and Node.js packages.
 //!
-//! - **Audio capture** ([`capture`]): microphone input with frame-exact
-//!   buffering, built on cpal.
-//! - **Audio playback** ([`output`]): speaker output with graceful drain
-//!   and immediate-stop semantics.
-//! - **Voice activity detection** ([`vad`]): Silero VAD v5 inference via
-//!   ONNX Runtime, per-call stateful.
-//! - **Device enumeration** ([`device`]): list and select audio devices
-//!   by index, case-insensitive name substring, or stable per-host ID.
+//! # Orientation
+//!
+//! There are two primary types: [`Microphone`] for input and [`Speaker`] for
+//! output. Both follow the same shape: build a configuration, construct the
+//! object, then call `start()` to open the device and obtain a stream.
+//!
+//! - A [`Microphone`] yields a [`MicrophoneStream`] you pull [`AudioChunk`]s
+//!   from with [`next_chunk`](MicrophoneStream::next_chunk).
+//! - A [`Speaker`] yields a [`SpeakerStream`] you push `f32` samples to with
+//!   [`send`](SpeakerStream::send).
+//!
+//! Voice-activity detection runs through [`SileroVad`]: construct it once, then
+//! call [`process`](SileroVad::process) on each chunk's samples.
+//!
+//! List devices with [`input_devices`] / [`output_devices`] (or
+//! [`Microphone::devices`] / [`Speaker::devices`]) and pick one with a
+//! [`DeviceSelector`]. Every fallible operation returns [`DecibriError`].
 //!
 //! # Feature flags
 //!
 //! | Flag                    | Default | Purpose                                      |
 //! |-------------------------|---------|----------------------------------------------|
 //! | `capture`               | on      | Microphone input stream support              |
-//! | `output`                | on      | Speaker output stream support                |
-//! | `vad`                   | on      | Silero VAD ONNX inference                    |
-//! | `denoise`               | on      | Reserved (stub)                              |
-//! | `gain`                  | on      | Reserved (stub)                              |
-//! | `ort-load-dynamic`      | on      | ORT loaded at runtime from a user path       |
-//! | `ort-download-binaries` | off     | ORT downloaded at build time, embedded       |
+//! | `playback`              | on      | Speaker output stream support                |
+//! | `vad`                   | on      | Silero voice-activity detection (pulls `ort`)|
+//! | `ort-load-dynamic`      | on      | ONNX Runtime loaded at runtime from a path   |
+//! | `ort-download-binaries` | off     | ONNX Runtime downloaded at build time        |
 //!
 //! `ort-load-dynamic` and `ort-download-binaries` are mutually exclusive;
-//! selecting both is a compile error.
+//! selecting both is a compile error. Disabling `vad` drops the ONNX Runtime
+//! dependency entirely.
 //!
-//! See [`docs/features.md`](https://github.com/decibri/decibri/blob/main/docs/features.md)
-//! for a comprehensive reference including execution-provider features,
-//! tradeoff analysis, and guidance for FFI binding authors.
+//! Execution-provider features (`coreml`, `cuda`, `directml`, `rocm`) are off by
+//! default and opt in to GPU acceleration on specific platforms. See
+//! [`docs/features.md`](https://github.com/decibri/decibri/blob/main/docs/features.md)
+//! for the full reference.
 //!
-//! # Example: capture and run VAD
+//! # Example: capture and detect speech
 //!
-//! [`CaptureStream::next_chunk`](capture::CaptureStream::next_chunk) is the
-//! recommended FFI-ready interface for reading audio chunks, returning a
-//! three-state `Result`: `Ok(Some(chunk))` / `Ok(None)` (timeout, stream
-//! still open) / `Err(DecibriError::CaptureStreamClosed)`.
+//! [`MicrophoneStream::next_chunk`](microphone::MicrophoneStream::next_chunk)
+//! returns a three-state `Result`: `Ok(Some(chunk))` with data, `Ok(None)` on a
+//! timeout while the stream is still open, and
+//! `Err(DecibriError::MicrophoneStreamClosed)` once the stream ends.
 //!
-//! ```ignore
+//! ```no_run
 //! use std::time::Duration;
-//! use decibri::capture::{AudioCapture, CaptureConfig};
-//! use decibri::error::DecibriError;
-//! use decibri::vad::{SileroVad, VadConfig};
+//! use decibri::{Microphone, MicrophoneConfig, SileroVad, VadConfig, DecibriError};
 //!
-//! let capture = AudioCapture::new(CaptureConfig::default())?;
-//! let stream  = capture.start()?;
+//! let microphone = Microphone::new(MicrophoneConfig::default())?;
+//! let stream = microphone.start()?;
 //! let mut vad = SileroVad::new(VadConfig::default())?;
 //!
 //! loop {
@@ -56,7 +65,7 @@
 //!             }
 //!         }
 //!         Ok(None) => continue,
-//!         Err(DecibriError::CaptureStreamClosed) => break,
+//!         Err(DecibriError::MicrophoneStreamClosed) => break,
 //!         Err(e) => return Err(e.into()),
 //!     }
 //! }
@@ -80,7 +89,7 @@
 //!
 //! For authors writing FFI bindings on top of decibri: when you need to
 //! surface a "this ORT path is wrong" failure from a pre-load check, use
-//! [`DecibriError::OrtPathInvalid`](error::DecibriError::OrtPathInvalid)
+//! [`DecibriError::OrtPathInvalid`]
 //! (carries `path: PathBuf` and `reason: &'static str`, never touches ORT
 //! symbols) rather than reconstructing an `ort::Error`. decibri's internal
 //! `init_ort_once` follows this pattern: it performs a filesystem-level
@@ -88,7 +97,7 @@
 //! [`OrtPathInvalid`](error::DecibriError::OrtPathInvalid) on rejection,
 //! only handing the path to `ort::init_from` once the check passes.
 //!
-//! This constraint is why [`DecibriError`](error::DecibriError) splits
+//! This constraint is why [`DecibriError`] splits
 //! "ORT path failure" across two variants:
 //! [`OrtLoadFailed`](error::DecibriError::OrtLoadFailed) carries an
 //! `ort::Error` source (reached after `ort::init_from` genuinely failed,
@@ -119,25 +128,25 @@
 //! # Thread safety
 //!
 //! All public types are `Send` and suitable for cross-thread handoff.
-//! [`capture::CaptureStream`] and [`output::OutputStream`] are `!Sync`
-//! because they hold a `cpal::Stream` internally; wrap them in a mutex or
-//! move them into a dedicated thread for shared access.
+//! [`microphone::MicrophoneStream`] and [`speaker::SpeakerStream`] are `!Sync`
+//! because they hold a live platform audio stream internally; wrap them in a
+//! mutex or move them into a dedicated thread for shared access.
 //!
 //! # Stability
 //!
-//! Within 3.x, the following FFI-consumer surface is declared stable and
-//! will not change signature without a breaking version bump:
+//! Within 4.x, the following stream surface is stable and will not change
+//! signature without a breaking version bump:
 //!
-//! - [`capture::CaptureStream`][]:
-//!   [`try_next_chunk`](capture::CaptureStream::try_next_chunk),
-//!   [`next_chunk`](capture::CaptureStream::next_chunk),
-//!   [`is_open`](capture::CaptureStream::is_open),
-//!   [`stop`](capture::CaptureStream::stop).
-//! - [`output::OutputStream`][]:
-//!   [`send`](output::OutputStream::send),
-//!   [`drain`](output::OutputStream::drain),
-//!   [`is_playing`](output::OutputStream::is_playing),
-//!   [`stop`](output::OutputStream::stop).
+//! - [`microphone::MicrophoneStream`][]:
+//!   [`try_next_chunk`](microphone::MicrophoneStream::try_next_chunk),
+//!   [`next_chunk`](microphone::MicrophoneStream::next_chunk),
+//!   [`is_open`](microphone::MicrophoneStream::is_open),
+//!   [`stop`](microphone::MicrophoneStream::stop).
+//! - [`speaker::SpeakerStream`][]:
+//!   [`send`](speaker::SpeakerStream::send),
+//!   [`drain`](speaker::SpeakerStream::drain),
+//!   [`is_playing`](speaker::SpeakerStream::is_playing),
+//!   [`stop`](speaker::SpeakerStream::stop).
 
 #[cfg(all(feature = "ort-load-dynamic", feature = "ort-download-binaries"))]
 compile_error!(
@@ -149,9 +158,8 @@ compile_error!(
 pub mod error;
 pub mod sample;
 
-// Internal ONNX session abstraction. Trait stays `pub(crate)` until 4.0 /
-// `decibri-onnx` workspace split per LD-8-1 and LD15. Public API of
-// `crates/decibri` 3.x is byte-identical with or without this module.
+// Internal ONNX session abstraction. The trait is `pub(crate)` and not part
+// of the public API.
 //
 // Gated on `feature = "vad"` matching the only consumer (`vad`) and the
 // only backend (`dep:ort`). When vad is disabled, the trait has no purpose
@@ -188,14 +196,14 @@ mod onnx;
 /// unused without cost.
 pub const CPAL_VERSION: &str = env!("DECIBRI_CPAL_VERSION");
 
-#[cfg(any(feature = "capture", feature = "output"))]
+#[cfg(any(feature = "capture", feature = "playback"))]
 pub mod device;
 
 #[cfg(feature = "capture")]
-pub mod capture;
+pub mod microphone;
 
-#[cfg(feature = "output")]
-pub mod output;
+#[cfg(feature = "playback")]
+pub mod speaker;
 
 #[cfg(feature = "vad")]
 pub mod vad;
@@ -205,3 +213,19 @@ pub mod denoise;
 
 #[cfg(feature = "gain")]
 pub mod gain;
+
+// Crate-root re-exports so consumers can write `use decibri::Microphone`
+// rather than reaching through the module path.
+#[cfg(feature = "capture")]
+pub use microphone::{AudioChunk, Microphone, MicrophoneConfig, MicrophoneStream};
+
+#[cfg(feature = "playback")]
+pub use speaker::{Speaker, SpeakerConfig, SpeakerStream};
+
+#[cfg(any(feature = "capture", feature = "playback"))]
+pub use device::{input_devices, output_devices, DeviceSelector, MicrophoneInfo, SpeakerInfo};
+
+#[cfg(feature = "vad")]
+pub use vad::{SileroVad, VadConfig, VadResult};
+
+pub use error::DecibriError;

@@ -27,8 +27,8 @@ crate-type = ["cdylib"]
 # changes in `bindings/node/Cargo.toml`. Cargo's workspace resolver unifies
 # features across both bindings silently; diverging overrides produce a build
 # that neither binding tests in isolation. Both bindings inherit decibri's
-# default features (capture, output, vad, denoise, gain, ort-load-dynamic).
-decibri = { version = "3.4.0", path = "../../crates/decibri" }
+# default features (capture, playback, vad, denoise, gain, ort-load-dynamic).
+decibri = { version = "4.0.0", path = "../../crates/decibri" }
 
 # PyO3 0.28 is the first MSRV-1.83 release line with the attach / detach /
 # initialize API renames; aligns with workspace MSRV 1.88 (headroom preserved).

@@ -108,10 +108,8 @@ pub struct VadResult {
 /// Call `process()` with each audio chunk. Call `reset()` to clear state.
 #[cfg(feature = "vad")]
 pub struct SileroVad {
-    /// ONNX session abstracted behind the internal [`OnnxSession`] trait
-    /// (Phase 8). In 3.x this is always the ORT-backed implementation; the
-    /// trait exists so future backends (CoreML, TFLite, GPU EPs) can plug
-    /// in without changing this struct or any consumer code.
+    /// ONNX session abstracted behind the internal [`OnnxSession`] trait. The
+    /// ORT-backed implementation is the only backend.
     session: Box<dyn OnnxSession>,
     /// Combined LSTM state [2, 1, 128] = 256 floats.
     state: Vec<f32>,
@@ -133,11 +131,10 @@ const STATE_SIZE: usize = 256;
 #[cfg(feature = "vad")]
 static ORT_INIT: OnceLock<Option<PathBuf>> = OnceLock::new();
 
-/// Process id captured alongside [`ORT_INIT`] on first successful init
-/// (Phase 9 Item C7). Compared against the current pid at every Silero
-/// inference call by [`check_pid_for_ort`]; a mismatch indicates the
-/// process forked after init and ONNX Runtime's internal state is no
-/// longer safe to use.
+/// Process id captured alongside [`ORT_INIT`] on first successful init.
+/// Compared against the current pid at every Silero inference call by
+/// [`check_pid_for_ort`]; a mismatch indicates the process forked after
+/// init and ONNX Runtime's internal state is no longer safe to use.
 ///
 /// Recorded inside the `OnceLock::get_or_init` callback in
 /// [`init_ort_once`] so the pid stamp is paired with the successful ORT
@@ -241,7 +238,7 @@ pub(crate) fn init_ort_once(path: Option<&Path>) -> Result<(), DecibriError> {
             // First-caller-wins. If another thread set it first, discard ours;
             // ORT's own global init is idempotent (first takes effect).
             let _ = ORT_INIT.set(path.map(|p| p.to_path_buf()));
-            // Phase 9 Item C7: pair the ORT init with the pid that
+            // Pair the ORT init with the pid that
             // performed it. Subsequent `check_pid_for_ort` calls compare
             // the current pid against this stamp and raise
             // `ForkAfterOrtInit` on mismatch. `_ = .set(...)` because
@@ -255,9 +252,9 @@ pub(crate) fn init_ort_once(path: Option<&Path>) -> Result<(), DecibriError> {
     }
 }
 
-/// Verify that the current pid matches the pid that initialized ORT
-/// (Phase 9 Item C7). Called at the start of every Silero inference
-/// call to detect Linux `fork()`-after-init silent ORT corruption.
+/// Verify that the current pid matches the pid that initialized ORT.
+/// Called at the start of every Silero inference call to detect Linux
+/// `fork()`-after-init silent ORT corruption.
 ///
 /// On Linux, when a parent process initializes ORT (e.g. by constructing
 /// `Microphone(vad="silero")`) and then forks a child via Python's
@@ -309,12 +306,9 @@ impl SileroVad {
         // instances pass through immediately regardless of their ort_library_path.
         init_ort_once(config.ort_library_path.as_deref())?;
 
-        // Phase 8: session construction goes through the internal
-        // `OnnxSession` trait. The ORT-backed implementation is the only
-        // backend in 3.x; the trait exists so future backends (CoreML at
-        // iOS time, TFLite at Android time, GPU EPs at the P4 GPU project)
-        // plug in without changing this construction site. See
-        // `crates/decibri/src/onnx.rs` and Phase 8 LD15.
+        // Session construction goes through the internal `OnnxSession` trait.
+        // The ORT-backed implementation is the only backend. See
+        // `crates/decibri/src/onnx.rs`.
         let session = OnnxSessionBuilder::from_file(config.model_path.clone())
             .with_intra_threads(1)
             .build()?;
@@ -338,7 +332,7 @@ impl SileroVad {
     /// Returns the maximum speech probability across all windows processed.
     /// If no complete windows were formed (chunk too small), returns probability 0.0.
     pub fn process(&mut self, samples: &[f32]) -> Result<VadResult, DecibriError> {
-        // Phase 9 Item C7: detect fork()-after-ORT-init before touching
+        // Detect fork()-after-ORT-init before touching
         // the inherited ONNX Runtime state. Single check at the outer
         // entry point covers every inference call; the inner
         // `infer_window` loop runs many sessions per `process` and does
@@ -379,7 +373,7 @@ impl SileroVad {
 
     /// Run inference on a single window of exactly `window_size` samples.
     ///
-    /// Phase 8: inference goes through the internal [`OnnxSession`] trait
+    /// Inference goes through the internal [`OnnxSession`] trait
     /// (`Box<dyn OnnxSession>` field on `Self`) rather than calling
     /// `ort::Session` directly. The trait owns the marshaling between
     /// borrowed input slices and the backend's native tensor types.

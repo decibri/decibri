@@ -1,3 +1,4 @@
+#[cfg(feature = "vad")]
 use std::path::PathBuf;
 
 use thiserror::Error;
@@ -44,17 +45,16 @@ pub enum DecibriError {
     InvalidFormat,
 
     // ── Device errors ──────────────────────────────────────────────────
-    #[error("No audio input device found matching \"{0}\"")]
-    DeviceNotFound(String),
+    #[error("No microphone found matching \"{0}\"")]
+    MicrophoneNotFound(String),
 
     /// No output device matched a `Name` or `Id` selector.
     ///
-    /// The split from [`Self::DeviceNotFound`] exists because the display
-    /// message needs to say "output" when the lookup was against output
-    /// devices, not "input". Issued by [`crate::device::resolve_output_device`]
-    /// via the internal direction-specific `not_found_error` hook.
-    #[error("No audio output device found matching \"{0}\"")]
-    OutputDeviceNotFound(String),
+    /// Distinct from [`Self::MicrophoneNotFound`] so the display message names
+    /// the speaker when the lookup was against output devices. Issued when a
+    /// `Name` or `Id` selector matches no output device.
+    #[error("No speaker found matching \"{0}\"")]
+    SpeakerNotFound(String),
 
     #[error("Multiple devices match \"{name}\":\n{matches}")]
     MultipleDevicesMatch { name: String, matches: String },
@@ -65,10 +65,10 @@ pub enum DecibriError {
     #[error("No microphone found. Check system audio input settings.")]
     NoMicrophoneFound,
 
-    #[error("No audio output device found. Check system audio settings.")]
-    NoOutputDeviceFound,
+    #[error("No speaker found. Check system audio settings.")]
+    NoSpeakerFound,
 
-    #[error("Selected device is not a valid input device.")]
+    #[error("Selected device is not a valid microphone.")]
     NotAnInputDevice,
 
     #[error("Failed to enumerate devices: {0}")]
@@ -87,25 +87,25 @@ pub enum DecibriError {
     #[error("Microphone permission denied. {}", PERMISSION_HINT)]
     PermissionDenied,
 
-    /// Capture stream has closed (stopped explicitly or by driver error).
-    /// Returned from `CaptureStream::try_next_chunk` / `next_chunk` when the
+    /// Microphone stream has closed (stopped explicitly or by driver error).
+    /// Returned from `MicrophoneStream::try_next_chunk` / `next_chunk` when the
     /// underlying channel has disconnected.
-    #[error("Capture stream is closed")]
-    CaptureStreamClosed,
+    #[error("Microphone stream is closed")]
+    MicrophoneStreamClosed,
 
-    /// Output stream has closed. Returned from `OutputStream::send` when the
+    /// Speaker stream has closed. Returned from `SpeakerStream::send` when the
     /// underlying channel has disconnected.
-    #[error("Output stream closed")]
-    OutputStreamClosed,
+    #[error("Speaker stream is closed")]
+    SpeakerStreamClosed,
 
     // ── VAD config validation ──────────────────────────────────────────
     /// Payload carries the offending sample rate; not formatted into the
-    /// Display string to preserve the 3.1.x message text.
+    /// Display string to keep the message text stable.
     #[error("Silero VAD only supports sample rates 8000 and 16000")]
     VadSampleRateUnsupported(u32),
 
     /// Payload carries the offending threshold; not formatted into the
-    /// Display string to preserve the 3.1.x message text.
+    /// Display string to keep the message text stable.
     #[error("VAD threshold must be between 0.0 and 1.0")]
     VadThresholdOutOfRange(f32),
 
@@ -115,6 +115,7 @@ pub enum DecibriError {
     // downstream consumers can walk `error.source()` to the underlying
     // ORT error for programmatic handling. Paths are `PathBuf` (not
     // `String`) so consumers retain path semantics without re-parsing.
+    #[cfg(feature = "vad")]
     #[error(
         "decibri: failed to initialize ONNX Runtime: {source}. \
          Either pass ort_library_path when constructing the VAD, set \
@@ -126,6 +127,7 @@ pub enum DecibriError {
         source: ort::Error,
     },
 
+    #[cfg(feature = "vad")]
     #[error(
         "decibri: failed to load ONNX Runtime from {}: {source}. \
          If ORT_DYLIB_PATH is set, verify it points to a valid ONNX Runtime \
@@ -152,6 +154,7 @@ pub enum DecibriError {
     /// Display message matches [`Self::OrtLoadFailed`] so Node, Python, and
     /// future FFI consumers see the same actionable hint regardless of which
     /// failure path was taken.
+    #[cfg(feature = "vad")]
     #[error(
         "decibri: failed to load ONNX Runtime from {}: {reason}. \
          If ORT_DYLIB_PATH is set, verify it points to a valid ONNX Runtime \
@@ -161,12 +164,15 @@ pub enum DecibriError {
     )]
     OrtPathInvalid { path: PathBuf, reason: &'static str },
 
+    #[cfg(feature = "vad")]
     #[error("Failed to create ort session builder: {0}")]
     OrtSessionBuildFailed(#[source] ort::Error),
 
+    #[cfg(feature = "vad")]
     #[error("Failed to set ort threads: {0}")]
     OrtThreadsConfigFailed(#[source] ort::Error),
 
+    #[cfg(feature = "vad")]
     #[error("Failed to load Silero VAD model from {}: {source}", path.display())]
     VadModelLoadFailed {
         path: PathBuf,
@@ -174,9 +180,11 @@ pub enum DecibriError {
         source: ort::Error,
     },
 
+    #[cfg(feature = "vad")]
     #[error("Silero VAD inference failed: {0}")]
     OrtInferenceFailed(#[source] ort::Error),
 
+    #[cfg(feature = "vad")]
     #[error("Failed to create {kind} tensor: {source}")]
     OrtTensorCreateFailed {
         kind: &'static str,
@@ -184,6 +192,7 @@ pub enum DecibriError {
         source: ort::Error,
     },
 
+    #[cfg(feature = "vad")]
     #[error("Failed to extract {kind} tensor: {source}")]
     OrtTensorExtractFailed {
         kind: &'static str,
@@ -192,7 +201,7 @@ pub enum DecibriError {
     },
 
     /// Raised when ONNX Runtime is used in a child process after being
-    /// initialized in the parent (Phase 9 Item C7).
+    /// initialized in the parent.
     ///
     /// Python's `fork` start method on Linux duplicates the parent's
     /// memory into the child, but ONNX Runtime's internal state
@@ -217,10 +226,9 @@ pub enum DecibriError {
     )]
     ForkAfterOrtInit { init_pid: u32, current_pid: u32 },
 
-    /// Forward-compat catch-all for non-ORT ONNX backends (CoreML, TFLite,
-    /// etc.) once the workspace split lands at 4.0.
+    /// Reserved catch-all for non-ORT ONNX backends.
     ///
-    /// Not emitted by ORT-backed code paths in 3.x: ORT failures use the 8
+    /// Not emitted by ORT-backed code paths: ORT failures use the eight
     /// preceding variants (`OrtSessionBuildFailed`, `OrtThreadsConfigFailed`,
     /// `VadModelLoadFailed`, `OrtInferenceFailed`, `OrtTensorCreateFailed`,
     /// `OrtTensorExtractFailed`, plus `OrtInitFailed` and `OrtLoadFailed`)
@@ -259,9 +267,16 @@ impl DecibriError {
     /// rustdoc on [`Self::OrtPathInvalid`]), not a categorization users
     /// need to care about.
     pub fn is_ort_path_error(&self) -> bool {
-        matches!(
-            self,
-            Self::OrtLoadFailed { .. } | Self::OrtPathInvalid { .. }
-        )
+        #[cfg(feature = "vad")]
+        {
+            matches!(
+                self,
+                Self::OrtLoadFailed { .. } | Self::OrtPathInvalid { .. }
+            )
+        }
+        #[cfg(not(feature = "vad"))]
+        {
+            false
+        }
     }
 }

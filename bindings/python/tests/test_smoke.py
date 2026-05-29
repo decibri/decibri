@@ -51,10 +51,10 @@ def test_version_returns_version_info() -> None:
 def test_version_decibri_matches_rust_core() -> None:
     from decibri import _decibri
 
-    # Literal equality per Phase 1 plan. When the Rust workspace bumps past
-    # 3.4.0 this assertion breaks deliberately: force a conscious update of
-    # the Python test expectation alongside the Rust version bump.
-    assert _decibri.MicrophoneBridge.version().decibri == "3.4.2"
+    # Literal equality is intentional. When the Rust workspace bumps past
+    # 4.0.0 this assertion breaks deliberately, to force a conscious update of
+    # the Python expectation alongside the Rust version bump.
+    assert _decibri.MicrophoneBridge.version().decibri == "4.0.0"
 
 
 def test_version_audio_backend_matches_cpal() -> None:
@@ -70,7 +70,7 @@ def test_version_info_fields() -> None:
     from decibri import _decibri
 
     info = _decibri.MicrophoneBridge.version()
-    assert info.decibri == "3.4.2"
+    assert info.decibri == "4.0.0"
     assert info.audio_backend == "cpal 0.17"
     assert info.binding == "0.1.3"
 

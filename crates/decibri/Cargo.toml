@@ -5,7 +5,7 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
-description = "Cross-platform audio capture, output, and processing"
+description = "Cross-platform audio capture, playback, and voice activity detection for Rust"
 readme = "README.md"
 keywords = ["audio", "microphone", "capture", "sound", "voice"]
 categories = ["multimedia::audio"]
@@ -24,17 +24,17 @@ targets = [
 # docs.rs uses ort-download-binaries since ort-load-dynamic requires a runtime
 # dylib that docs.rs builders don't have. Mutually exclusive with ort-load-dynamic
 # per the compile_error! guard in lib.rs.
-features = ["capture", "output", "vad", "denoise", "gain", "ort-download-binaries"]
+features = ["capture", "playback", "vad", "denoise", "gain", "ort-download-binaries"]
 no-default-features = true
 
 [features]
 # Default stack for consumers who want the full decibri experience on Node/Python bindings.
-# `ort-load-dynamic` is the distribution mode used by npm platform packages and P3 Python wheels.
-default = ["capture", "output", "vad", "denoise", "gain", "ort-load-dynamic"]
+# `ort-load-dynamic` is the distribution mode used by the npm and Python packages.
+default = ["capture", "playback", "vad", "denoise", "gain", "ort-load-dynamic"]
 
-# Core feature set (unchanged from 3.0.x).
+# Core feature set.
 capture = ["dep:cpal", "dep:crossbeam-channel"]
-output = ["dep:cpal", "dep:crossbeam-channel"]
+playback = ["dep:cpal", "dep:crossbeam-channel"]
 vad = ["dep:ort"]
 denoise = []
 gain = []

@@ -84,7 +84,7 @@ assertThrows(
 assertThrows(
   () => new Decibri({ device: { id: '__nonexistent_id__' } }),
   TypeError,
-  'No audio input device found matching "__nonexistent_id__"'
+  'No microphone found matching "__nonexistent_id__"'
 );
 
 // device by id, wrong id type
@@ -163,7 +163,7 @@ assertThrows(
 assertThrows(
   () => new DecibriOutput({ device: { id: '__nonexistent_id__' } }),
   TypeError,
-  'No audio output device found matching "__nonexistent_id__"'
+  'No speaker found matching "__nonexistent_id__"'
 );
 
 // device by id, wrong id type

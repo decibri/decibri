@@ -6,7 +6,7 @@ Cross-platform audio capture, playback, and voice activity detection for Rust ap
 [![docs.rs](https://img.shields.io/docsrs/decibri)](https://docs.rs/decibri/)
 [![License](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](https://github.com/decibri/decibri/blob/main/LICENSE)
 
-This is the Rust core of decibri. The same crate powers decibri's Python wheel (via PyO3) and Node.js native addon (via napi-rs); see the [main README](https://github.com/decibri/decibri) for cross-language project context.
+This is the Rust core of decibri. The same core powers decibri's Python and Node.js packages; see the [main README](https://github.com/decibri/decibri) for cross-language context.
 
 ## Add to Cargo.toml
 
@@ -18,67 +18,87 @@ Or directly:
 
 ```toml
 [dependencies]
-decibri = "3"
+decibri = "4"
 ```
 
-The default feature set (`capture`, `output`, `vad`, `denoise`, `gain`, `ort-load-dynamic`) covers most use cases. See [Feature flags](#feature-flags) below for opt-in or trimmed configurations.
+The default feature set (`capture`, `playback`, `vad`, `ort-load-dynamic`) covers most use cases. See [Feature flags](#feature-flags) below for opt-in or trimmed configurations.
 
-## Quick Start
+## Quick start
 
-### Capture and run VAD
+The two primary types are `Microphone` for input and `Speaker` for output. Each follows the same shape: build a config, construct the object, then `start()` it to open the device and get a stream.
+
+### Capture and detect speech
 
 ```rust
 use std::time::Duration;
-use decibri::capture::{AudioCapture, CaptureConfig};
-use decibri::vad::{SileroVad, VadConfig};
+use decibri::{Microphone, MicrophoneConfig, SileroVad, VadConfig, DecibriError};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let capture = AudioCapture::new(CaptureConfig::default())?;
-    let stream = capture.start()?;
+    let microphone = Microphone::new(MicrophoneConfig::default())?;
+    let stream = microphone.start()?;
     let mut vad = SileroVad::new(VadConfig::default())?;
 
-    while let Ok(Some(chunk)) = stream.next_chunk(Some(Duration::from_millis(100))) {
-        let result = vad.process(&chunk.data)?;
-        if result.is_speech {
-            println!("speech @ p={:.2}", result.probability);
+    loop {
+        match stream.next_chunk(Some(Duration::from_millis(100))) {
+            Ok(Some(chunk)) => {
+                let result = vad.process(&chunk.data)?;
+                if result.is_speech {
+                    println!("speech @ p={:.2}", result.probability);
+                }
+            }
+            Ok(None) => continue,
+            Err(DecibriError::MicrophoneStreamClosed) => break,
+            Err(e) => return Err(e.into()),
         }
     }
     Ok(())
 }
 ```
 
-`CaptureStream::next_chunk` returns a three-state `Result`: `Ok(Some(chunk))` on data, `Ok(None)` on timeout (stream still open), and `Err(DecibriError::CaptureStreamClosed)` once the stream ends.
+`MicrophoneStream::next_chunk` returns a three-state `Result`: `Ok(Some(chunk))` with data, `Ok(None)` on a timeout while the stream is still open, and `Err(DecibriError::MicrophoneStreamClosed)` once the stream ends.
 
 ### Speaker output
 
 ```rust
-use decibri::output::{AudioOutput, OutputConfig};
+use decibri::{Speaker, SpeakerConfig};
 
-let output = AudioOutput::new(OutputConfig::default())?;
-let stream = output.start()?;
-let pcm_int16_bytes: Vec<u8> = vec![0; 48_000]; // 1 second of silence at 24kHz int16 mono
-stream.send(&pcm_int16_bytes)?;
-stream.drain()?;
-stream.stop()?;
+let speaker = Speaker::new(SpeakerConfig::default())?;
+let stream = speaker.start()?;
+
+// f32 samples in [-1.0, 1.0]; here, one second of silence at 16 kHz mono.
+let samples: Vec<f32> = vec![0.0; 16_000];
+stream.send(samples)?;
+stream.drain(); // block until everything queued has played
+stream.stop();  // immediate; discards anything remaining
 ```
 
-`OutputStream::send` accepts byte slices in the format declared by `OutputConfig` (default: int16 LE). `drain` blocks until the device has finished playing; `stop` is immediate.
+`SpeakerStream::send` takes a `Vec<f32>` of samples in the range [-1.0, 1.0]. `drain` blocks until the device has finished playing the queue; `stop` is immediate and discards what remains.
 
-### Energy-mode VAD without ONNX Runtime
+### List devices
 
-If you do not need Silero, the lightweight RMS energy mode in `vad` does not require ORT. You can also disable the `vad` feature entirely to avoid the `ort` dependency.
+```rust
+use decibri::Microphone;
+
+for device in Microphone::devices()? {
+    println!("[{}] {}", device.index, device.name);
+}
+```
+
+`Speaker::devices()` is the playback equivalent. The free functions `decibri::input_devices()` and `decibri::output_devices()` return the same lists.
+
+### Without ONNX Runtime
+
+If you do not need Silero VAD, disable the `vad` feature to drop the ONNX Runtime dependency entirely.
 
 ## Feature flags
 
 | Flag | Default | Purpose |
 | --- | --- | --- |
 | `capture` | on | Microphone input stream support |
-| `output` | on | Speaker output stream support |
-| `vad` | on | Silero VAD ONNX inference |
-| `denoise` | on | On by default; no runtime cost when off |
-| `gain` | on | On by default; no runtime cost when off |
-| `ort-load-dynamic` | on | ORT loaded at runtime from a user-supplied path |
-| `ort-download-binaries` | off | ORT downloaded at build time and embedded in the binary |
+| `playback` | on | Speaker output stream support |
+| `vad` | on | Silero voice-activity detection (pulls in ONNX Runtime) |
+| `ort-load-dynamic` | on | ONNX Runtime loaded at runtime from a path you control |
+| `ort-download-binaries` | off | ONNX Runtime downloaded at build time and embedded |
 
 `ort-load-dynamic` and `ort-download-binaries` are mutually exclusive; selecting both is a compile error.
 
@@ -86,55 +106,55 @@ Execution-provider passthrough features (off by default; opt in for GPU accelera
 
 ### Common configurations
 
-**Zero-config builds** (ORT downloaded at `cargo build`, embedded):
+**Zero-config builds** (ONNX Runtime downloaded at `cargo build`, embedded):
 
 ```toml
-decibri = { version = "3", features = ["ort-download-binaries"], default-features = false }
+decibri = { version = "4", features = ["ort-download-binaries"], default-features = false }
 ```
 
-Add back the other features you want (`capture`, `output`, `vad`, `denoise`, `gain`).
+Add back the other features you want (`capture`, `playback`, `vad`).
 
-**Production deployments with bundled ORT** (default; ORT loaded at runtime from a path you control):
+**Production deployments with a bundled runtime** (default; ONNX Runtime loaded at runtime from a path you control):
 
 ```toml
-decibri = "3"
+decibri = "4"
 ```
 
-Then either set `ORT_DYLIB_PATH=/path/to/libonnxruntime.{so,dylib,dll}` before first use, or call `ort::init_from(path).commit()` at startup. ORT initializes exactly once per process; the first successful path wins and later constructions silently reuse it.
+Then either set `ORT_DYLIB_PATH=/path/to/libonnxruntime.{so,dylib,dll}` before first use, or call `ort::init_from(path).commit()` at startup. ONNX Runtime initializes exactly once per process; the first successful path wins and later constructions silently reuse it.
 
-**Capture and output without VAD** (no `ort` dependency at all):
+**Capture and playback without VAD** (no ONNX Runtime dependency at all):
 
 ```toml
-decibri = { version = "3", features = ["capture", "output"], default-features = false }
+decibri = { version = "4", features = ["capture", "playback"], default-features = false }
 ```
 
 ## ONNX Runtime configuration
 
-Under `ort-load-dynamic` (default), the `ort` crate locates the ONNX Runtime shared library at runtime via either a `VadConfig::ort_library_path`, the `ORT_DYLIB_PATH` environment variable, or a process-wide `ort::init_from(...).commit()` call. decibri performs a filesystem-level path check before handing the path to `ort::init_from`, so a missing or wrong-arch dylib surfaces as `DecibriError::OrtPathInvalid` rather than hanging on dynamic load.
+Under `ort-load-dynamic` (default), the ONNX Runtime shared library is located at runtime via a `VadConfig::ort_library_path`, the `ORT_DYLIB_PATH` environment variable, or a process-wide `ort::init_from(...).commit()` call. decibri performs a filesystem-level path check before handing the path off, so a missing or wrong-arch library surfaces as `DecibriError::OrtPathInvalid` rather than hanging on dynamic load.
 
-See the [`ort` crate linking docs](https://ort.pyke.io/setup/linking) for the full runtime-loading reference.
+See the [ONNX Runtime linking docs](https://ort.pyke.io/setup/linking) for the full runtime-loading reference.
 
 ### Fork safety (Linux)
 
-ORT initialized in a parent process does not survive `fork()` cleanly: internal threads, memory pools, and device handles belonging to the parent may misbehave in the child. Python consumers should use `multiprocessing.set_start_method('spawn', force=True)` before importing decibri. Node.js consumers using `child_process` or `worker_threads` are unaffected.
+ONNX Runtime initialized in a parent process does not survive `fork()` cleanly: internal threads, memory pools, and device handles belonging to the parent may misbehave in the child. Python consumers should use `multiprocessing.set_start_method('spawn', force=True)` before importing decibri. Node.js consumers using `child_process` or `worker_threads` are unaffected.
 
 ## Public API surface
 
-The 3.x stable surface includes:
+The stable 4.x surface includes:
 
-- [`capture::AudioCapture`](https://docs.rs/decibri/latest/decibri/capture/struct.AudioCapture.html), [`capture::CaptureConfig`](https://docs.rs/decibri/latest/decibri/capture/struct.CaptureConfig.html), [`capture::CaptureStream`](https://docs.rs/decibri/latest/decibri/capture/struct.CaptureStream.html) (`try_next_chunk`, `next_chunk`, `is_open`, `stop`)
-- [`output::AudioOutput`](https://docs.rs/decibri/latest/decibri/output/struct.AudioOutput.html), [`output::OutputConfig`](https://docs.rs/decibri/latest/decibri/output/struct.OutputConfig.html), [`output::OutputStream`](https://docs.rs/decibri/latest/decibri/output/struct.OutputStream.html) (`send`, `drain`, `is_playing`, `stop`)
+- [`microphone::Microphone`](https://docs.rs/decibri/latest/decibri/microphone/struct.Microphone.html), [`microphone::MicrophoneConfig`](https://docs.rs/decibri/latest/decibri/microphone/struct.MicrophoneConfig.html), [`microphone::MicrophoneStream`](https://docs.rs/decibri/latest/decibri/microphone/struct.MicrophoneStream.html) (`try_next_chunk`, `next_chunk`, `is_open`, `stop`)
+- [`speaker::Speaker`](https://docs.rs/decibri/latest/decibri/speaker/struct.Speaker.html), [`speaker::SpeakerConfig`](https://docs.rs/decibri/latest/decibri/speaker/struct.SpeakerConfig.html), [`speaker::SpeakerStream`](https://docs.rs/decibri/latest/decibri/speaker/struct.SpeakerStream.html) (`send`, `drain`, `is_playing`, `stop`)
 - [`vad::SileroVad`](https://docs.rs/decibri/latest/decibri/vad/struct.SileroVad.html), [`vad::VadConfig`](https://docs.rs/decibri/latest/decibri/vad/struct.VadConfig.html), [`vad::VadResult`](https://docs.rs/decibri/latest/decibri/vad/struct.VadResult.html)
-- [`device`](https://docs.rs/decibri/latest/decibri/device/index.html) module: device enumeration and selection by index, case-insensitive name substring, or stable per-host ID
-- [`error::DecibriError`](https://docs.rs/decibri/latest/decibri/error/enum.DecibriError.html): `#[non_exhaustive]` enum covering capture, output, device, ORT, and fork-detection error variants
+- [`device`](https://docs.rs/decibri/latest/decibri/device/index.html) module: `input_devices()` / `output_devices()`, `MicrophoneInfo` / `SpeakerInfo`, and selection by index, case-insensitive name substring, or stable per-host ID
+- [`error::DecibriError`](https://docs.rs/decibri/latest/decibri/error/enum.DecibriError.html): `#[non_exhaustive]` enum covering capture, playback, device, ONNX Runtime, and fork-detection error variants
 
-Full API reference: [docs.rs/decibri](https://docs.rs/decibri/).
+The common types are re-exported at the crate root, so `use decibri::Microphone;` works directly. Full API reference: [docs.rs/decibri](https://docs.rs/decibri/).
 
 ## Thread safety
 
-All public types are `Send` and suitable for cross-thread handoff. `CaptureStream` and `OutputStream` are `!Sync` because they hold a `cpal::Stream` internally; wrap them in a mutex or move them into a dedicated thread for shared access.
+All public types are `Send` and suitable for cross-thread handoff. `MicrophoneStream` and `SpeakerStream` are `!Sync` because they hold a live platform audio stream internally; wrap them in a mutex or move them into a dedicated thread for shared access.
 
-## Platform Support
+## Platform support
 
 | Platform | Architecture | Audio Backend |
 | --- | --- | --- |
@@ -143,20 +163,18 @@ All public types are `Send` and suitable for cross-thread handoff. `CaptureStrea
 | Linux | x64 (gnu) | ALSA |
 | Linux | arm64 (gnu) | ALSA |
 
-Source builds work on additional targets (Intel macOS, Windows arm64, musl Linux) but are not part of the npm and PyPI binary release matrix. The Rust crate itself has no per-target restriction beyond cpal's host support.
+Source builds work on additional targets (Intel macOS, Windows arm64, musl Linux) but are not part of the npm and PyPI binary release matrix. The crate itself has no per-target restriction beyond what the platform audio host supports.
 
 ## Cross-references
 
-- **Polyglot project context**: [github.com/decibri/decibri](https://github.com/decibri/decibri)
-- **Python wheel**: [bindings/python/README.md](https://github.com/decibri/decibri/blob/main/bindings/python/README.md)
-- **Node.js and browser package**: [npm/decibri/README.md](https://github.com/decibri/decibri/blob/main/npm/decibri/README.md)
-- **Full Rust API**: [docs.rs/decibri](https://docs.rs/decibri/)
-- **Feature flag reference**: [docs/features.md](https://github.com/decibri/decibri/blob/main/docs/features.md)
-- **CHANGELOG**: [CHANGELOG.md](https://github.com/decibri/decibri/blob/main/CHANGELOG.md)
-- **ORT linking docs**: [ort.pyke.io/setup/linking](https://ort.pyke.io/setup/linking)
+- Project home: [github.com/decibri/decibri](https://github.com/decibri/decibri)
+- Python package: [bindings/python/README.md](https://github.com/decibri/decibri/blob/main/bindings/python/README.md)
+- Node.js and browser package: [npm/decibri/README.md](https://github.com/decibri/decibri/blob/main/npm/decibri/README.md)
+- Full Rust API: [docs.rs/decibri](https://docs.rs/decibri/)
+- Migration from 3.x: [MIGRATION.md](https://github.com/decibri/decibri/blob/main/crates/decibri/MIGRATION.md)
+- Changelog: [CHANGELOG.md](https://github.com/decibri/decibri/blob/main/crates/decibri/CHANGELOG.md)
+- ONNX Runtime linking docs: [ort.pyke.io/setup/linking](https://ort.pyke.io/setup/linking)
 
 ## License
 
-Apache-2.0. See [LICENSE](https://github.com/decibri/decibri/blob/main/LICENSE) for details.
-
-Copyright (c) 2026 Decibri.
+Apache-2.0 (c) 2026 [Decibri](https://github.com/decibri/decibri).

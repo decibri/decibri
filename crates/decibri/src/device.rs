@@ -1,24 +1,36 @@
-#[cfg(any(feature = "capture", feature = "output"))]
+//! Audio device discovery and selection.
+//!
+//! [`input_devices`] and [`output_devices`] list the available microphones and
+//! speakers as [`MicrophoneInfo`] / [`SpeakerInfo`]. A [`DeviceSelector`] picks
+//! one by system default, index, case-insensitive name substring, or stable
+//! per-host id, and is the value [`crate::MicrophoneConfig`] and
+//! [`crate::SpeakerConfig`] carry in their `device` field.
+
+#[cfg(any(feature = "capture", feature = "playback"))]
 use cpal::traits::{DeviceTrait, HostTrait};
 
 use crate::error::DecibriError;
 
-/// Information about an audio input device.
+/// Information about a microphone (audio input) device.
+///
+/// Returned by [`input_devices`] and
+/// [`Microphone::devices`](crate::Microphone::devices). For speakers, see
+/// [`SpeakerInfo`].
 #[derive(Debug, Clone)]
 #[non_exhaustive]
-pub struct DeviceInfo {
+pub struct MicrophoneInfo {
     pub index: usize,
     pub name: String,
     /// Stable per-host device ID, suitable for passing to
     /// [`DeviceSelector::Id`] for selection that survives across
     /// enumerations.
     ///
-    /// The string is cpal's `DeviceId` [`Display`] output:
+    /// The string is the platform device identifier:
     /// - Windows (WASAPI): endpoint ID (e.g. `{0.0.1.00000000}.{...}`)
     /// - macOS (CoreAudio): device UID
     /// - Linux (ALSA): PCM identifier
     ///
-    /// Empty string if cpal could not produce a stable ID for this
+    /// Empty string if the platform could not produce a stable ID for this
     /// device (rare; some host backends cannot assign IDs to every
     /// enumerated device). A device with an empty `id` cannot be
     /// selected by [`DeviceSelector::Id`] and must be selected via
@@ -31,13 +43,17 @@ pub struct DeviceInfo {
     pub is_default: bool,
 }
 
-/// Information about an audio output device.
+/// Information about a speaker (audio output) device.
+///
+/// Returned by [`output_devices`] and
+/// [`Speaker::devices`](crate::Speaker::devices). For microphones, see
+/// [`MicrophoneInfo`].
 #[derive(Debug, Clone)]
 #[non_exhaustive]
-pub struct OutputDeviceInfo {
+pub struct SpeakerInfo {
     pub index: usize,
     pub name: String,
-    /// Stable per-host device ID. See [`DeviceInfo::id`] for format and
+    /// Stable per-host device ID. See [`MicrophoneInfo::id`] for format and
     /// fallback semantics; the rules are identical for output devices.
     pub id: String,
     pub max_output_channels: u16,
@@ -61,8 +77,8 @@ pub enum DeviceSelector {
     /// (WASAPI endpoint ID on Windows, CoreAudio UID on macOS, ALSA pcm_id
     /// on Linux). Matching is exact string equality, not substring.
     ///
-    /// Obtain an ID from [`DeviceInfo::id`] / [`OutputDeviceInfo::id`]
-    /// returned by [`enumerate_input_devices`] / [`enumerate_output_devices`].
+    /// Obtain an ID from [`MicrophoneInfo::id`] / [`SpeakerInfo::id`]
+    /// returned by [`input_devices`] / [`output_devices`].
     ///
     /// Prefer `Id` over [`Self::Name`] when you need stable device selection
     /// across enumerations: display names can shift across OS versions or
@@ -76,12 +92,12 @@ pub enum DeviceSelector {
 /// Used as the output of the pure `compute_is_default` helper so both input
 /// and output enumeration can share the same device-identity matching logic
 /// (and so the logic is testable without mocking `cpal::Host`).
-#[cfg(any(feature = "capture", feature = "output"))]
+#[cfg(any(feature = "capture", feature = "playback"))]
 struct ComputedRow {
     index: usize,
     name: String,
     /// Stable per-host device ID as a string, or empty if the device has no
-    /// cpal-assignable ID. Forwarded to `DeviceInfo.id` / `OutputDeviceInfo.id`.
+    /// cpal-assignable ID. Forwarded to `MicrophoneInfo.id` / `SpeakerInfo.id`.
     id: String,
     channels: u16,
     sample_rate: u32,
@@ -106,7 +122,7 @@ struct ComputedRow {
 ///
 /// Generic over `Id: PartialEq` so unit tests can use `String` ids and verify
 /// the matching logic without depending on a live cpal host.
-#[cfg(any(feature = "capture", feature = "output"))]
+#[cfg(any(feature = "capture", feature = "playback"))]
 fn compute_is_default<Id: PartialEq + ToString>(
     rows: Vec<(Option<Id>, String, u16, u32)>,
     default_id: Option<Id>,
@@ -141,7 +157,7 @@ fn compute_is_default<Id: PartialEq + ToString>(
 ///
 /// Not part of the public API; lives here only to deduplicate the per-direction
 /// code paths. Each `impl` is a small table of function pointers into cpal.
-#[cfg(any(feature = "capture", feature = "output"))]
+#[cfg(any(feature = "capture", feature = "playback"))]
 trait DeviceDirection {
     type Info;
 
@@ -154,22 +170,22 @@ trait DeviceDirection {
     fn build_info(row: ComputedRow) -> Self::Info;
     fn no_device_error() -> DecibriError;
     /// Direction-specific "not found" error for a `Name` / `Id` lookup miss.
-    /// Input returns [`DecibriError::DeviceNotFound`]; Output returns
-    /// [`DecibriError::OutputDeviceNotFound`]. Keeping this on the trait
+    /// Input returns [`DecibriError::MicrophoneNotFound`]; Output returns
+    /// [`DecibriError::SpeakerNotFound`]. Keeping this on the trait
     /// avoids hardcoding the input-oriented variant in the shared
     /// `resolve_device_generic` body.
     fn not_found_error(query: String) -> DecibriError;
 }
 
-#[cfg(any(feature = "capture", feature = "output"))]
+#[cfg(any(feature = "capture", feature = "playback"))]
 struct Input;
 
-#[cfg(any(feature = "capture", feature = "output"))]
+#[cfg(any(feature = "capture", feature = "playback"))]
 struct Output;
 
-#[cfg(any(feature = "capture", feature = "output"))]
+#[cfg(any(feature = "capture", feature = "playback"))]
 impl DeviceDirection for Input {
-    type Info = DeviceInfo;
+    type Info = MicrophoneInfo;
 
     fn default_device(host: &cpal::Host) -> Option<cpal::Device> {
         host.default_input_device()
@@ -189,7 +205,7 @@ impl DeviceDirection for Input {
     }
 
     fn build_info(row: ComputedRow) -> Self::Info {
-        DeviceInfo {
+        MicrophoneInfo {
             index: row.index,
             name: row.name,
             id: row.id,
@@ -204,13 +220,13 @@ impl DeviceDirection for Input {
     }
 
     fn not_found_error(query: String) -> DecibriError {
-        DecibriError::DeviceNotFound(query)
+        DecibriError::MicrophoneNotFound(query)
     }
 }
 
-#[cfg(any(feature = "capture", feature = "output"))]
+#[cfg(any(feature = "capture", feature = "playback"))]
 impl DeviceDirection for Output {
-    type Info = OutputDeviceInfo;
+    type Info = SpeakerInfo;
 
     fn default_device(host: &cpal::Host) -> Option<cpal::Device> {
         host.default_output_device()
@@ -230,7 +246,7 @@ impl DeviceDirection for Output {
     }
 
     fn build_info(row: ComputedRow) -> Self::Info {
-        OutputDeviceInfo {
+        SpeakerInfo {
             index: row.index,
             name: row.name,
             id: row.id,
@@ -241,17 +257,17 @@ impl DeviceDirection for Output {
     }
 
     fn no_device_error() -> DecibriError {
-        DecibriError::NoOutputDeviceFound
+        DecibriError::NoSpeakerFound
     }
 
     fn not_found_error(query: String) -> DecibriError {
-        DecibriError::OutputDeviceNotFound(query)
+        DecibriError::SpeakerNotFound(query)
     }
 }
 
-/// Shared implementation for `enumerate_input_devices` / `enumerate_output_devices`.
+/// Shared implementation for `input_devices` / `output_devices`.
 /// Direction-generic via the `DeviceDirection` trait.
-#[cfg(any(feature = "capture", feature = "output"))]
+#[cfg(any(feature = "capture", feature = "playback"))]
 fn enumerate_devices<D: DeviceDirection>() -> Result<Vec<D::Info>, DecibriError> {
     let host = cpal::default_host();
 
@@ -283,7 +299,7 @@ fn enumerate_devices<D: DeviceDirection>() -> Result<Vec<D::Info>, DecibriError>
 }
 
 /// Shared implementation for `resolve_device` / `resolve_output_device`.
-#[cfg(any(feature = "capture", feature = "output"))]
+#[cfg(any(feature = "capture", feature = "playback"))]
 fn resolve_device_generic<D: DeviceDirection>(
     selector: &DeviceSelector,
 ) -> Result<cpal::Device, DecibriError> {
@@ -353,31 +369,41 @@ fn resolve_device_generic<D: DeviceDirection>(
     }
 }
 
-/// Enumerate all available audio input devices.
-#[cfg(any(feature = "capture", feature = "output"))]
-pub fn enumerate_input_devices() -> Result<Vec<DeviceInfo>, DecibriError> {
+/// List the available microphone (input) devices.
+///
+/// Also available as [`Microphone::devices`](crate::Microphone::devices).
+#[cfg(any(feature = "capture", feature = "playback"))]
+pub fn input_devices() -> Result<Vec<MicrophoneInfo>, DecibriError> {
     enumerate_devices::<Input>()
 }
 
-/// Enumerate all available audio output devices.
-#[cfg(any(feature = "capture", feature = "output"))]
-pub fn enumerate_output_devices() -> Result<Vec<OutputDeviceInfo>, DecibriError> {
+/// List the available speaker (output) devices.
+///
+/// Also available as [`Speaker::devices`](crate::Speaker::devices).
+#[cfg(any(feature = "capture", feature = "playback"))]
+pub fn output_devices() -> Result<Vec<SpeakerInfo>, DecibriError> {
     enumerate_devices::<Output>()
 }
 
-/// Resolve a device selector to a cpal Device.
-#[cfg(any(feature = "capture", feature = "output"))]
-pub fn resolve_device(selector: &DeviceSelector) -> Result<cpal::Device, DecibriError> {
+/// Resolve a device selector to a cpal input device.
+///
+/// Crate-internal device resolution for [`crate::Microphone`].
+#[cfg(feature = "capture")]
+pub(crate) fn resolve_device(selector: &DeviceSelector) -> Result<cpal::Device, DecibriError> {
     resolve_device_generic::<Input>(selector)
 }
 
-/// Resolve an output device selector to a cpal Device.
-#[cfg(any(feature = "capture", feature = "output"))]
-pub fn resolve_output_device(selector: &DeviceSelector) -> Result<cpal::Device, DecibriError> {
+/// Resolve a device selector to a cpal output device.
+///
+/// Crate-internal device resolution for [`crate::Speaker`].
+#[cfg(feature = "playback")]
+pub(crate) fn resolve_output_device(
+    selector: &DeviceSelector,
+) -> Result<cpal::Device, DecibriError> {
     resolve_device_generic::<Output>(selector)
 }
 
-#[cfg(all(test, any(feature = "capture", feature = "output")))]
+#[cfg(all(test, any(feature = "capture", feature = "playback")))]
 mod tests {
     use super::*;
 
@@ -462,7 +488,7 @@ mod tests {
 
     /// The `id` field on `ComputedRow` is populated from the input `Option<Id>`
     /// via `ToString`, with `None` becoming an empty string. This field flows
-    /// through to `DeviceInfo.id` / `OutputDeviceInfo.id` and backs
+    /// through to `MicrophoneInfo.id` / `SpeakerInfo.id` and backs
     /// `DeviceSelector::Id` selection.
     #[test]
     fn test_id_is_propagated_to_computed_row() {
@@ -485,35 +511,32 @@ mod tests {
 
     /// Verifies that the direction-specific `not_found_error` trait method
     /// produces the correct `DecibriError` variant and display string for
-    /// each direction. Input lookups must say "input" in the message;
-    /// output lookups must say "output". This catches the regression that
-    /// motivated adding `OutputDeviceNotFound`: before the split, both
-    /// directions produced `DeviceNotFound` whose hardcoded message said
-    /// "input" regardless of whether the lookup was against input or
-    /// output devices.
+    /// each direction. Input lookups return `MicrophoneNotFound` and name the
+    /// microphone in the message; output lookups return `SpeakerNotFound` and
+    /// name the speaker.
     #[test]
     fn test_not_found_error_produces_direction_correct_variant() {
         let input_err = Input::not_found_error("nonexistent-input".to_string());
         let output_err = Output::not_found_error("nonexistent-output".to_string());
 
         assert!(
-            matches!(input_err, DecibriError::DeviceNotFound(ref s) if s == "nonexistent-input"),
-            "Input direction must return DecibriError::DeviceNotFound"
+            matches!(input_err, DecibriError::MicrophoneNotFound(ref s) if s == "nonexistent-input"),
+            "Input direction must return DecibriError::MicrophoneNotFound"
         );
         assert!(
-            matches!(output_err, DecibriError::OutputDeviceNotFound(ref s) if s == "nonexistent-output"),
-            "Output direction must return DecibriError::OutputDeviceNotFound"
+            matches!(output_err, DecibriError::SpeakerNotFound(ref s) if s == "nonexistent-output"),
+            "Output direction must return DecibriError::SpeakerNotFound"
         );
 
         assert_eq!(
             input_err.to_string(),
-            "No audio input device found matching \"nonexistent-input\"",
-            "Input variant's Display must say \"input\""
+            "No microphone found matching \"nonexistent-input\"",
+            "Input variant's Display must name the microphone"
         );
         assert_eq!(
             output_err.to_string(),
-            "No audio output device found matching \"nonexistent-output\"",
-            "Output variant's Display must say \"output\""
+            "No speaker found matching \"nonexistent-output\"",
+            "Output variant's Display must name the speaker"
         );
     }
 }

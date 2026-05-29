@@ -6,10 +6,10 @@ use napi::bindgen_prelude::*;
 use napi::threadsafe_function::ThreadsafeFunctionCallMode;
 use napi_derive::napi;
 
-use decibri::capture::{AudioCapture, CaptureConfig, CaptureStream};
 use decibri::device::{self, DeviceSelector};
-use decibri::output::{AudioOutput, OutputConfig, OutputStream};
+use decibri::microphone::{Microphone, MicrophoneConfig, MicrophoneStream};
 use decibri::sample;
+use decibri::speaker::{Speaker, SpeakerConfig, SpeakerStream};
 use decibri::vad::{SileroVad, VadConfig};
 use decibri::CPAL_VERSION;
 
@@ -60,8 +60,8 @@ pub struct DecibriOptions {
 /// Native bridge class exposed to Node.js via napi-rs.
 #[napi]
 pub struct DecibriBridge {
-    capture: Option<AudioCapture>,
-    stream: Option<CaptureStream>,
+    capture: Option<Microphone>,
+    stream: Option<MicrophoneStream>,
     format: SampleFormat,
     frames_per_buffer: u32,
     channels: u16,
@@ -95,14 +95,14 @@ impl DecibriBridge {
 
         let device = resolve_device_option(&opts.device)?;
 
-        let config = CaptureConfig {
+        let config = MicrophoneConfig {
             sample_rate,
             channels,
             frames_per_buffer,
             device,
         };
 
-        let capture = AudioCapture::new(config).map_err(to_napi_error)?;
+        let capture = Microphone::new(config).map_err(to_napi_error)?;
 
         // Silero VAD: load model if vadMode is 'silero'
         let vad_mode = opts.vad_mode.as_deref().unwrap_or("energy");
@@ -256,7 +256,7 @@ impl DecibriBridge {
     /// List all available audio input devices.
     #[napi]
     pub fn devices() -> Result<Vec<DeviceInfoJs>> {
-        let devices = device::enumerate_input_devices().map_err(to_napi_error)?;
+        let devices = device::input_devices().map_err(to_napi_error)?;
         Ok(devices
             .into_iter()
             .map(|d| DeviceInfoJs {
@@ -347,22 +347,22 @@ fn to_napi_error(e: decibri::error::DecibriError) -> Error {
         | VadThresholdOutOfRange(_) => Status::InvalidArg,
 
         // Device selection (bad caller input)
-        DeviceNotFound(_)
-        | OutputDeviceNotFound(_)
+        MicrophoneNotFound(_)
+        | SpeakerNotFound(_)
         | MultipleDevicesMatch { .. }
         | DeviceIndexOutOfRange
         | NotAnInputDevice => Status::InvalidArg,
 
         // Runtime / environmental failures
         NoMicrophoneFound
-        | NoOutputDeviceFound
+        | NoSpeakerFound
         | DeviceEnumerationFailed(_)
         | AlreadyRunning
         | StreamOpenFailed(_)
         | StreamStartFailed(_)
         | PermissionDenied
-        | CaptureStreamClosed
-        | OutputStreamClosed
+        | MicrophoneStreamClosed
+        | SpeakerStreamClosed
         | OrtInitFailed { .. }
         | OrtLoadFailed { .. }
         | OrtPathInvalid { .. }
@@ -413,8 +413,8 @@ pub struct OutputDeviceInfoJs {
 /// Native bridge class for audio output, exposed to Node.js via napi-rs.
 #[napi]
 pub struct DecibriOutputBridge {
-    output: Option<AudioOutput>,
-    stream: Option<OutputStream>,
+    output: Option<Speaker>,
+    stream: Option<SpeakerStream>,
     format: SampleFormat,
 }
 
@@ -441,13 +441,13 @@ impl DecibriOutputBridge {
 
         let device = resolve_device_option(&opts.device)?;
 
-        let config = OutputConfig {
+        let config = SpeakerConfig {
             sample_rate,
             channels,
             device,
         };
 
-        let output = AudioOutput::new(config).map_err(to_napi_error)?;
+        let output = Speaker::new(config).map_err(to_napi_error)?;
 
         Ok(Self {
             output: Some(output),
@@ -512,7 +512,7 @@ impl DecibriOutputBridge {
     /// List all available audio output devices.
     #[napi]
     pub fn devices() -> Result<Vec<OutputDeviceInfoJs>> {
-        let devices = device::enumerate_output_devices().map_err(to_napi_error)?;
+        let devices = device::output_devices().map_err(to_napi_error)?;
         Ok(devices
             .into_iter()
             .map(|d| OutputDeviceInfoJs {
