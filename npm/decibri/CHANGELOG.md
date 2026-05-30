@@ -11,6 +11,23 @@ For other decibri packages, see:
 
 ## [Unreleased]
 
+## [4.0.0] - 2026-05-30
+
+### Changed
+
+- BREAKING: the package now uses named exports. Import with `const { Microphone, Speaker, inputDevices, outputDevices, version } = require('decibri')` instead of the previous single default export.
+- BREAKING: the capture class `Decibri` is now `Microphone`, and the playback class `DecibriOutput` is now `Speaker`. The browser capture class is `Microphone` too.
+- BREAKING: the sample-encoding option `format` is now `dtype` (the `'int16'` and `'float32'` values are unchanged).
+- BREAKING: the device-info types are now `MicrophoneInfo` and `SpeakerInfo` (were `DeviceInfo` and `OutputDeviceInfo`).
+- BREAKING: voice activity detection is now a single `vad` option accepting `false`, `'silero'`, or `'energy'`. The `vad: true` plus `vadMode` pair is no longer accepted; pass the mode directly as `vad: 'silero'` or `vad: 'energy'`. The browser runs energy mode only.
+- BREAKING: `version()` now returns `{ decibri, audioBackend, binding }` (was `{ decibri, portaudio }`). `audioBackend` replaces the inaccurate `portaudio` name, and `binding` reports the npm package version.
+
+### Added
+
+- Error classes `DecibriError`, `DeviceError`, `OrtError`, and `OrtPathError`, each with a `code` property, for `instanceof` and `err.code` handling.
+- `vadScore` getter on the capture class: the Silero probability in `'silero'` mode, the normalized RMS in `'energy'` mode, 0 when disabled.
+- Module-level `inputDevices()`, `outputDevices()`, and `version()` free functions, alongside the static `Microphone.devices()` and `Speaker.devices()` methods.
+
 ## [3.4.2] - 2026-05-24
 
 ### Fixed

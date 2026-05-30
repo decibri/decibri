@@ -56,3 +56,7 @@ venv/
 # develop` drops the `_decibri` editable install.
 bindings/python/python/decibri/_decibri.so
 bindings/python/python/decibri/_decibri.dylib
+
+# Stray napi-generated JS in the crate dir (the npm package ships npm/decibri/index.*)
+bindings/node/index.js
+bindings/node/index.d.ts

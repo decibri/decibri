@@ -3,7 +3,10 @@
 const { Emitter } = require('./emitter.js');
 const { WORKLET_SOURCE } = require('./worklet-inline.js');
 
-const VERSION = '3.0.0';
+// Browser build version. Keep in sync with package.json on each release; the
+// browser bundle cannot read package.json at runtime the way the Node wrapper
+// does, so this is a maintained constant.
+const VERSION = '4.0.0';
 
 /**
  * Browser microphone capture.

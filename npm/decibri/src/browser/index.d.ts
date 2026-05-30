@@ -8,9 +8,10 @@ export interface MicrophoneInfo {
   groupId: string;
 }
 
-/** Version information. */
+/** Version information (browser). The browser surface has no native audio
+ *  backend, so it reports only the decibri version. */
 export interface VersionInfo {
-  /** decibri package version (e.g. `"3.0.0"`). */
+  /** decibri version. */
   decibri: string;
 }
 
