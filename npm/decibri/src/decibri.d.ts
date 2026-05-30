@@ -74,36 +74,33 @@ export interface MicrophoneOptions extends ReadableOptions {
   dtype?: 'int16' | 'float32';
 
   /**
-   * Enable energy-based voice activity detection.
-   * When enabled, emits `'speech'` and `'silence'` events.
+   * Voice activity detection mode. One of:
+   * - `false`: disabled (default)
+   * - `'silero'`: Silero VAD v5 ML model (more accurate, ~1ms inference)
+   * - `'energy'`: RMS energy threshold (lightweight)
+   *
+   * When enabled, emits `'speech'` and `'silence'` events and updates `vadScore`.
+   * The legacy `vad: true` form is rejected; specify the mode explicitly.
    * @default false
    */
-  vad?: boolean;
+  vad?: false | 'silero' | 'energy';
 
   /**
-   * RMS energy threshold for speech detection (VAD mode only).
-   * @default 0.01
+   * Speech-detection threshold for the active VAD mode.
+   * @default 0.5 for `'silero'`, 0.01 for `'energy'`
    * @range 0–1
    */
   vadThreshold?: number;
 
   /**
-   * Milliseconds of sub-threshold audio before emitting `'silence'` (VAD mode only).
+   * Milliseconds of sub-threshold audio before emitting `'silence'`.
    * @default 300
    */
   vadHoldoff?: number;
 
   /**
-   * VAD engine to use.
-   * - `'energy'`: RMS energy threshold (default, lightweight)
-   * - `'silero'`: Silero VAD v5 ML model (more accurate, ~1ms inference)
-   * @default 'energy'
-   */
-  vadMode?: 'energy' | 'silero';
-
-  /**
    * Path to the Silero VAD ONNX model file.
-   * Only used when `vadMode` is `'silero'`.
+   * Only used when `vad` is `'silero'`.
    * Defaults to `models/silero_vad.onnx` relative to the package.
    */
   modelPath?: string;
@@ -130,6 +127,13 @@ export declare class Microphone extends Readable {
 
   /** Whether the microphone is currently capturing audio. */
   readonly isOpen: boolean;
+
+  /**
+   * Most recent VAD score for the active mode: the Silero speech probability in
+   * `'silero'` mode, the normalized RMS of the last chunk in `'energy'` mode.
+   * 0 when VAD is disabled or before the first chunk is processed.
+   */
+  readonly vadScore: number;
 
   /** List all available audio input devices. */
   static devices(): MicrophoneInfo[];

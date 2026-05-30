@@ -54,8 +54,7 @@ async function testSileroCapture() {
   const mic = new Microphone({
     sampleRate: 16000,
     channels: 1,
-    vad: true,
-    vadMode: 'silero',
+    vad: 'silero',
     vadThreshold: 0.5,
   });
 
@@ -88,8 +87,7 @@ async function testEnergyRegression() {
   const mic = new Microphone({
     sampleRate: 16000,
     channels: 1,
-    vad: true,
-    vadMode: 'energy',
+    vad: 'energy',
     vadThreshold: 0.001,
   });
 
@@ -108,19 +106,20 @@ async function testEnergyRegression() {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
-// Group 3: Default vadMode is energy (backward compat)
+// Group 3: vadScore in energy mode
 // ═══════════════════════════════════════════════════════════════════════════════
 
-async function testDefaultVadMode() {
-  console.log('--- Group 3: Default vadMode is energy ---');
+async function testEnergyVadScore() {
+  console.log('--- Group 3: vadScore in energy mode (1 second) ---');
 
-  // No vadMode specified, should default to energy
   const mic = new Microphone({
     sampleRate: 16000,
     channels: 1,
-    vad: true,
+    vad: 'energy',
     vadThreshold: 0.001,
   });
+
+  assert(mic.vadScore === 0, 'vadScore starts at 0 before any audio');
 
   let chunkCount = 0;
   mic.on('data', () => { chunkCount++; });
@@ -128,21 +127,33 @@ async function testDefaultVadMode() {
   await sleep(1000);
   mic.stop();
 
-  assert(chunkCount > 0, `received ${chunkCount} chunks (default vadMode)`);
+  assert(chunkCount > 0, `received ${chunkCount} chunks`);
+  assert(
+    typeof mic.vadScore === 'number' && mic.vadScore >= 0,
+    `vadScore is a non-negative number (got ${mic.vadScore})`
+  );
   console.log('  Group 3 done\n');
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
-// Group 4: Invalid vadMode throws
+// Group 4: vad union rejections
 // ═══════════════════════════════════════════════════════════════════════════════
 
-async function testInvalidVadMode() {
-  console.log('--- Group 4: Invalid vadMode ---');
+async function testVadUnionRejections() {
+  console.log('--- Group 4: vad union rejections ---');
 
+  // Legacy two-flag form is rejected with a migration error.
   assertThrows(
-    () => new Microphone({ vadMode: 'invalid' }),
+    () => new Microphone({ vad: true }),
     TypeError,
-    "vadMode must be 'energy' or 'silero'"
+    'vad: true is no longer supported'
+  );
+
+  // An unrecognized vad value is rejected.
+  assertThrows(
+    () => new Microphone({ vad: 'loud' }),
+    TypeError,
+    'Invalid vad value'
   );
 
   console.log('  Group 4 done\n');
@@ -159,8 +170,7 @@ async function testSileroFloat32() {
     sampleRate: 16000,
     channels: 1,
     dtype: 'float32',
-    vad: true,
-    vadMode: 'silero',
+    vad: 'silero',
     vadThreshold: 0.5,
   });
 
@@ -192,8 +202,7 @@ async function testMissingModel() {
 
   try {
     new Microphone({
-      vad: true,
-      vadMode: 'silero',
+      vad: 'silero',
       modelPath: '/nonexistent/path/model.onnx',
     });
     console.log('  FAIL: should have thrown for missing model');
@@ -212,9 +221,9 @@ async function testMissingModel() {
 async function main() {
   console.log('decibri Silero VAD test suite\n');
 
-  await testInvalidVadMode();
+  await testVadUnionRejections();
   await testMissingModel();
-  await testDefaultVadMode();
+  await testEnergyVadScore();
   await testEnergyRegression();
   await testSileroCapture();
   await testSileroFloat32();

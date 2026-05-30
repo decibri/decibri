@@ -284,7 +284,7 @@ async function testVAD() {
   const mic = new Microphone({
     sampleRate: 16000,
     channels: 1,
-    vad: true,
+    vad: 'energy',
     vadThreshold: 0.001, // very low, ambient noise should trigger
   });
 
@@ -301,6 +301,7 @@ async function testVAD() {
 
   assert(dataCount > 0, `received ${dataCount} data chunks`);
   assert(speechFired, 'speech event fired (threshold 0.001)');
+  assert(typeof mic.vadScore === 'number' && mic.vadScore >= 0, `vadScore is a non-negative number (got ${mic.vadScore})`);
   // silence may or may not fire depending on ambient conditions, so don't assert
   console.log(`  speech: ${speechFired}, silence: ${silenceFired}, chunks: ${dataCount}`);
   console.log('  Group 6 done\n');

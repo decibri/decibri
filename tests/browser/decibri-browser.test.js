@@ -114,7 +114,7 @@ describe('Microphone constructor', () => {
       framesPerBuffer: 800,
       device: 'mic2',
       dtype: 'float32',
-      vad: true,
+      vad: 'energy',
       vadThreshold: 0.05,
       vadHoldoff: 500,
       echoCancellation: false,
@@ -148,6 +148,20 @@ describe('Microphone constructor validation', () => {
 
   it('throws on invalid vadHoldoff', () => {
     expect(() => new Microphone({ vadHoldoff: -100 })).toThrow('vadHoldoff');
+  });
+
+  it('rejects the legacy vad: true form', () => {
+    expect(() => new Microphone({ vad: true })).toThrow('vad: true is no longer supported');
+  });
+
+  it('rejects an unrecognized vad value (silero is Node-only)', () => {
+    expect(() => new Microphone({ vad: 'silero' })).toThrow('Invalid vad value');
+    expect(() => new Microphone({ vad: 'loud' })).toThrow('Invalid vad value');
+  });
+
+  it('accepts vad: false and vad: energy', () => {
+    expect(() => new Microphone({ vad: false })).not.toThrow();
+    expect(() => new Microphone({ vad: 'energy' })).not.toThrow();
   });
 });
 
@@ -412,7 +426,7 @@ describe('Microphone VAD', () => {
   beforeEach(resetMocks);
 
   it('emits speech when RMS crosses threshold', async () => {
-    const mic = new Microphone({ dtype: 'float32', vad: true, vadThreshold: 0.01 });
+    const mic = new Microphone({ dtype: 'float32', vad: 'energy', vadThreshold: 0.01 });
     await mic.start();
 
     const speechFn = vi.fn();
@@ -425,8 +439,32 @@ describe('Microphone VAD', () => {
     mic.stop();
   });
 
+  it('exposes vadScore as the last RMS in energy mode', async () => {
+    const mic = new Microphone({ dtype: 'float32', vad: 'energy', vadThreshold: 0.01 });
+    await mic.start();
+
+    expect(mic.vadScore).toBe(0);
+
+    const loud = new Float32Array(100).fill(0.5);
+    mockPort.onmessage({ data: loud.buffer });
+
+    expect(mic.vadScore).toBeCloseTo(0.5);
+    mic.stop();
+  });
+
+  it('keeps vadScore at 0 when vad is disabled', async () => {
+    const mic = new Microphone({ dtype: 'float32', vad: false });
+    await mic.start();
+
+    const loud = new Float32Array(100).fill(0.5);
+    mockPort.onmessage({ data: loud.buffer });
+
+    expect(mic.vadScore).toBe(0);
+    mic.stop();
+  });
+
   it('does not emit speech when below threshold', async () => {
-    const mic = new Microphone({ dtype: 'float32', vad: true, vadThreshold: 0.5 });
+    const mic = new Microphone({ dtype: 'float32', vad: 'energy', vadThreshold: 0.5 });
     await mic.start();
 
     const speechFn = vi.fn();
@@ -442,7 +480,7 @@ describe('Microphone VAD', () => {
   it('emits silence after holdoff period', async () => {
     vi.useFakeTimers();
 
-    const mic = new Microphone({ dtype: 'float32', vad: true, vadThreshold: 0.01, vadHoldoff: 300 });
+    const mic = new Microphone({ dtype: 'float32', vad: 'energy', vadThreshold: 0.01, vadHoldoff: 300 });
     await mic.start();
 
     const speechFn = vi.fn();
@@ -480,7 +518,7 @@ describe('Microphone VAD', () => {
   });
 
   it('works with int16 format', async () => {
-    const mic = new Microphone({ dtype: 'int16', vad: true, vadThreshold: 0.01 });
+    const mic = new Microphone({ dtype: 'int16', vad: 'energy', vadThreshold: 0.01 });
     await mic.start();
 
     const speechFn = vi.fn();

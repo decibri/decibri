@@ -35,9 +35,22 @@ class Microphone extends Emitter {
     this._stopRequested = false;
 
     // ── VAD state ─────────────────────────────────────────────────────────
-    this._vad = options.vad ?? false;
+    // Single vad union: false (disabled, default) or 'energy'. The browser
+    // runs energy VAD only; Silero needs ONNX Runtime, which is Node-only. The
+    // legacy vad: true form is rejected with a migration error.
+    const vad = options.vad ?? false;
+    if (vad === false) {
+      this._vad = false;
+    } else if (vad === true) {
+      throw new TypeError("vad: true is no longer supported. Specify the mode explicitly: vad: 'energy'.");
+    } else if (vad === 'energy') {
+      this._vad = true;
+    } else {
+      throw new TypeError(`Invalid vad value: ${JSON.stringify(vad)}. Expected false or 'energy'.`);
+    }
     this._vadThreshold = options.vadThreshold ?? 0.01;
     this._vadHoldoff = options.vadHoldoff ?? 300;
+    this._vadScore = 0;
     this._isSpeaking = false;
     this._silenceTimer = null;
 
@@ -141,6 +154,15 @@ class Microphone extends Emitter {
   /** Whether the microphone is currently capturing. */
   get isOpen() {
     return this._started;
+  }
+
+  /**
+   * Most recent VAD score: the normalized RMS of the last chunk in `'energy'`
+   * mode, or 0 when VAD is disabled or before the first chunk is processed.
+   * @returns {number}
+   */
+  get vadScore() {
+    return this._vadScore;
   }
 
   /**
@@ -272,6 +294,7 @@ class Microphone extends Emitter {
 
   _processVad(chunk) {
     const rms = this._computeRms(chunk);
+    this._vadScore = rms;
 
     if (rms >= this._vadThreshold) {
       if (this._silenceTimer !== null) {

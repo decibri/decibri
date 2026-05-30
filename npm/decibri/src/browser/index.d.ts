@@ -52,10 +52,16 @@ export interface MicrophoneOptions {
   dtype?: 'int16' | 'float32';
 
   /**
-   * Enable energy-based voice activity detection.
+   * Voice activity detection mode. One of:
+   * - `false`: disabled (default)
+   * - `'energy'`: RMS energy threshold
+   *
+   * The browser runs energy VAD only; Silero is Node-only. When enabled, emits
+   * `'speech'` and `'silence'` events and updates `vadScore`. The legacy
+   * `vad: true` form is rejected; specify the mode explicitly.
    * @default false
    */
-  vad?: boolean;
+  vad?: false | 'energy';
 
   /**
    * RMS energy threshold for speech detection (VAD mode only).
@@ -120,6 +126,12 @@ export declare class Microphone {
 
   /** Whether the microphone is currently capturing. */
   readonly isOpen: boolean;
+
+  /**
+   * Most recent VAD score: the normalized RMS of the last chunk in `'energy'`
+   * mode, or 0 when VAD is disabled or before the first chunk is processed.
+   */
+  readonly vadScore: number;
 
   /**
    * List available audio input devices.

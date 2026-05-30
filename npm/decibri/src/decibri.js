@@ -147,14 +147,32 @@ class Microphone extends Readable {
 
     // ── Validate VAD options ─────────────────────────────────────────────────
 
-    const vadMode = options.vadMode ?? 'energy';
-    if (vadMode !== 'energy' && vadMode !== 'silero') {
-      throw new TypeError("vadMode must be 'energy' or 'silero'");
+    // Single vad union: false (disabled, default), 'silero', or 'energy'. The
+    // legacy two-flag form (vad: true plus vadMode) is rejected with a
+    // migration error. Energy and Silero are both computed in this wrapper;
+    // the union only selects which.
+    const vad = options.vad ?? false;
+    let vadEnabled;
+    let vadMode;
+    if (vad === false) {
+      vadEnabled = false;
+      vadMode = 'energy'; // inert placeholder; ignored while disabled
+    } else if (vad === true) {
+      throw new TypeError(
+        "vad: true is no longer supported. Specify the mode explicitly: vad: 'silero' or vad: 'energy'."
+      );
+    } else if (vad === 'silero' || vad === 'energy') {
+      vadEnabled = true;
+      vadMode = vad;
+    } else {
+      throw new TypeError(
+        `Invalid vad value: ${JSON.stringify(vad)}. Expected false, 'silero', or 'energy'.`
+      );
     }
 
     let modelPath = undefined;
     let ortLibraryPath = undefined;
-    if (vadMode === 'silero' && options.vad) {
+    if (vadEnabled && vadMode === 'silero') {
       modelPath = options.modelPath || path.join(__dirname, '..', 'models', 'silero_vad.onnx');
       if (!fs.existsSync(modelPath)) {
         throw new Error(`Silero VAD model not found at ${modelPath}. Ensure the models/ directory is included in your installation.`);
@@ -169,10 +187,11 @@ class Microphone extends Readable {
     // ── Store config ───────────────────────────────────────────────────────
 
     this._dtype = dtype;
-    this._vad = options.vad || false;
+    this._vad = vadEnabled;
     this._vadMode = vadMode;
     this._vadThreshold = options.vadThreshold ?? (vadMode === 'silero' ? 0.5 : 0.01);
     this._vadHoldoff = options.vadHoldoff ?? 300;
+    this._vadScore = 0;
     this._isSpeaking = false;
     this._silenceTimer = null;
     this._started = false;
@@ -186,7 +205,7 @@ class Microphone extends Readable {
         framesPerBuffer,
         format: dtype,
         device: resolvedDevice,
-        vadMode: (options.vad && vadMode === 'silero') ? 'silero' : 'energy',
+        vadMode,
         modelPath,
         ortLibraryPath,
       });
@@ -237,6 +256,7 @@ class Microphone extends Readable {
 
   /** @internal Common speech/silence state machine */
   _processVadValue(value) {
+    this._vadScore = value;
     if (value >= this._vadThreshold) {
       clearTimeout(this._silenceTimer);
       this._silenceTimer = null;
@@ -271,6 +291,16 @@ class Microphone extends Readable {
    */
   get isOpen() {
     return this._native.isOpen;
+  }
+
+  /**
+   * Most recent VAD score for the active mode: the Silero speech probability
+   * in 'silero' mode, the normalized RMS of the last chunk in 'energy' mode.
+   * 0 when VAD is disabled or before the first chunk is processed.
+   * @returns {number}
+   */
+  get vadScore() {
+    return this._vadScore;
   }
 
   /**

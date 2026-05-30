@@ -211,30 +211,47 @@ console.log('  Group 4 done\n');
 
 console.log('--- Group 5: VAD option validation ---');
 
+// Legacy two-flag form is rejected with a migration error.
 assertThrows(
-  () => new Microphone({ vadMode: 'invalid' }),
+  () => new Microphone({ vad: true }),
   TypeError,
-  "vadMode must be 'energy' or 'silero'"
+  'vad: true is no longer supported'
 );
 
-// Missing model file
+// An unrecognized vad value is rejected.
+assertThrows(
+  () => new Microphone({ vad: 'loud' }),
+  TypeError,
+  'Invalid vad value'
+);
+
+// Missing model file (silero mode)
 try {
-  new Microphone({ vad: true, vadMode: 'silero', modelPath: '/nonexistent/model.onnx' });
+  new Microphone({ vad: 'silero', modelPath: '/nonexistent/model.onnx' });
   console.log('  FAIL: missing model should throw');
   failed++;
 } catch (e) {
   assert(e.message.includes('Silero VAD model not found'), 'missing model error message correct');
 }
 
-// Default vadMode is energy (constructor succeeds without model)
+// Energy mode constructs without a model.
 try {
-  const m = new Microphone({ sampleRate: 16000, channels: 1, vad: true });
+  const m = new Microphone({ sampleRate: 16000, channels: 1, vad: 'energy' });
   m.stop();
   passed++;
 } catch (e) {
-  console.log(`  FAIL: default vadMode should work: ${e.message}`);
+  console.log(`  FAIL: energy mode should work: ${e.message}`);
   failed++;
 }
+
+// vadScore: 0 when disabled, 0 before any audio in energy mode.
+const mDisabled = new Microphone({ sampleRate: 16000, channels: 1 });
+assert(mDisabled.vadScore === 0, 'vadScore is 0 when VAD disabled');
+mDisabled.stop();
+
+const mEnergy = new Microphone({ sampleRate: 16000, channels: 1, vad: 'energy' });
+assert(mEnergy.vadScore === 0, 'vadScore starts at 0 in energy mode');
+mEnergy.stop();
 
 console.log('  Group 5 done\n');
 
