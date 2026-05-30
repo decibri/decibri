@@ -419,10 +419,53 @@ async function asyncOpenTests() {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
-// Summary (runs after the async group resolves)
+// Group 9: async write/drain (deterministic, no hardware required)
+// ═══════════════════════════════════════════════════════════════════════════════
+//
+// Asserts what is deterministic without an output device: the no-op paths
+// resolve and the methods return Promises. A real playback round trip through
+// writeAsync/drainAsync (which opens the output stream) is in the hardware tier
+// in tests/test-async-write-drain.js.
+
+async function asyncWriteDrainTests() {
+  console.log('--- Group 9: async write/drain ---');
+
+  const s = new Speaker({ sampleRate: 16000, channels: 1 });
+
+  // The methods return Promises.
+  const wp = s.writeAsync(Buffer.alloc(0));
+  assert(typeof wp.then === 'function', 'writeAsync() returns a Promise');
+  const dp = s.drainAsync();
+  assert(typeof dp.then === 'function', 'drainAsync() returns a Promise');
+
+  // An empty write resolves without opening the stream (no device needed).
+  await wp;
+  assert(true, 'writeAsync(empty) resolves');
+
+  // drainAsync with nothing written is a no-op that resolves immediately.
+  await dp;
+  assert(true, 'drainAsync() with no stream resolves');
+
+  s.stop();
+
+  // Additive guarantee: the synchronous write/drain path is unchanged. A
+  // zero-byte sync write is still an accepted no-op, end() still drains.
+  {
+    const s2 = new Speaker({ sampleRate: 16000, channels: 1 });
+    s2.write(Buffer.alloc(0));
+    s2.stop();
+    assert(true, 'sync write/stop still works alongside the async path');
+  }
+
+  console.log('  Group 9 done\n');
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// Summary (runs after the async groups resolve)
 // ═══════════════════════════════════════════════════════════════════════════════
 
 asyncOpenTests()
+  .then(asyncWriteDrainTests)
   .then(() => {
     console.log('═══════════════════════════════════════');
     console.log(`  Passed:  ${passed}`);
@@ -433,6 +476,6 @@ asyncOpenTests()
     }
   })
   .catch((err) => {
-    console.error('  FATAL: async open() tests threw unexpectedly:', err);
+    console.error('  FATAL: async tests threw unexpectedly:', err);
     process.exit(1);
   });

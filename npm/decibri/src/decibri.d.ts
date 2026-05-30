@@ -273,6 +273,29 @@ export declare class Speaker extends Writable {
    */
   static open(options?: SpeakerOptions): Promise<Speaker>;
 
+  /**
+   * Write PCM audio without blocking the event loop. Performs the backpressure
+   * wait (when the native playback queue is full) on the native thread pool and
+   * resolves when the samples are queued.
+   *
+   * Additive: the synchronous `write()` / `pipe()` stream interface is
+   * unchanged. This is a direct, opt-in alternative that bypasses the Writable
+   * buffer; do not interleave it with `write()` / `pipe()` on the same instance.
+   * Await calls sequentially to preserve sample order. An empty buffer resolves
+   * immediately; a closed or stopped stream rejects with the matching error.
+   */
+  writeAsync(chunk: Buffer): Promise<void>;
+
+  /**
+   * Wait for all queued audio to finish playing without blocking the event
+   * loop. Runs the drain wait on the native thread pool and resolves when the
+   * buffer has drained; resolves immediately if nothing was written.
+   *
+   * Additive: the synchronous drain via `end()` is unchanged. Pair with
+   * `writeAsync()` for a fully non-blocking playback path.
+   */
+  drainAsync(): Promise<void>;
+
   /** Immediate stop. Discards remaining buffered audio. */
   stop(): void;
 

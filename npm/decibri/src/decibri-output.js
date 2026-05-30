@@ -158,6 +158,56 @@ class Speaker extends Writable {
   }
 
   /**
+   * Write PCM audio without blocking the event loop.
+   *
+   * The blocking part of a write is the backpressure wait when the native
+   * playback queue is full; the synchronous stream path (`write()` / `pipe()`)
+   * performs that wait on the event loop. This method performs it on the native
+   * thread pool and resolves when the samples are queued. The audio stream is
+   * created on the first call (a fast device open) and stays on its own thread;
+   * only the queue handoff runs off the event loop.
+   *
+   * Additive and non-blocking: the synchronous `write()` / `pipe()` stream
+   * interface is unchanged. This is a direct, opt-in alternative that bypasses
+   * the Writable buffer, so do not interleave it with `write()` / `pipe()` on
+   * the same instance; pick one path per instance. Await calls sequentially to
+   * preserve sample order. An empty buffer resolves immediately. A failed write
+   * (a closed or stopped stream) rejects with the matching error class.
+   *
+   * @param {Buffer} chunk PCM samples in the configured `dtype`.
+   * @returns {Promise<void>}
+   */
+  async writeAsync(chunk) {
+    try {
+      await this._native.writeAsync(chunk);
+    } catch (err) {
+      throw wrapNativeError(err);
+    }
+  }
+
+  /**
+   * Wait for all queued audio to finish playing without blocking the event
+   * loop.
+   *
+   * The synchronous drain (run by `end()` / `_final`) polls for completion on
+   * the event loop for the full playback tail; this method runs that wait on the
+   * native thread pool and resolves when the buffer has drained. If nothing has
+   * been written yet it resolves immediately.
+   *
+   * Additive and non-blocking: the synchronous drain via `end()` is unchanged.
+   * Pair this with `writeAsync()` for a fully non-blocking playback path.
+   *
+   * @returns {Promise<void>}
+   */
+  async drainAsync() {
+    try {
+      await this._native.drainAsync();
+    } catch (err) {
+      throw wrapNativeError(err);
+    }
+  }
+
+  /**
    * Immediate stop. Discards remaining buffered audio.
    */
   stop() {

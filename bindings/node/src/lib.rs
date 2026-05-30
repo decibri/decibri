@@ -10,7 +10,7 @@ use napi_derive::napi;
 use decibri::device::{self, DeviceSelector};
 use decibri::microphone::{Microphone, MicrophoneConfig, MicrophoneStream};
 use decibri::sample;
-use decibri::speaker::{Speaker, SpeakerConfig, SpeakerStream};
+use decibri::speaker::{Speaker, SpeakerConfig, SpeakerSink, SpeakerStream};
 use decibri::vad::{SileroVad, VadConfig};
 use decibri::CPAL_VERSION;
 
@@ -78,8 +78,8 @@ pub struct DecibriBridge {
 /// `AsyncTask` and the bridge be assembled back on the JS thread in `resolve`.
 /// Every field here is `Send`, so the whole struct can cross the libuv boundary:
 /// `Microphone` owns only config plus a `cpal::Device` (Send + Sync), and
-/// `SileroVad` already crosses threads in the capture pump. The `!Send`
-/// `cpal::Stream` is not created here; it is opened later in `start`.
+/// `SileroVad` already crosses threads in the capture pump. The `cpal::Stream`
+/// is not created here; it is opened later in `start`.
 pub struct MicrophoneParts {
     capture: Microphone,
     format: SampleFormat,
@@ -488,6 +488,11 @@ pub struct OutputDeviceInfoJs {
 pub struct DecibriOutputBridge {
     output: Option<Speaker>,
     stream: Option<SpeakerStream>,
+    /// A `Send` handle to the live stream's channel and drain state, captured
+    /// when the `stream` is created. The async write/drain tasks clone this to do
+    /// the blocking work off the JS thread without holding the `stream`, which the
+    /// bridge keeps on the JS thread. `None` until the stream is first created.
+    sink: Option<SpeakerSink>,
     format: SampleFormat,
 }
 
@@ -496,7 +501,7 @@ pub struct DecibriOutputBridge {
 /// resolution, so `Speaker.open()` exists chiefly for API parity with
 /// `Microphone.open()` (and the Python `AsyncSpeaker.open()`). `Speaker` owns
 /// only config plus a `cpal::Device` (Send + Sync), so this struct is `Send`;
-/// the `!Send` `cpal::Stream` is opened lazily on the first write, not here.
+/// the `cpal::Stream` is opened lazily on the first write, not here.
 pub struct SpeakerParts {
     output: Speaker,
     format: SampleFormat,
@@ -542,8 +547,63 @@ impl SpeakerParts {
         DecibriOutputBridge {
             output: Some(self.output),
             stream: None,
+            sink: None,
             format: self.format,
         }
+    }
+}
+
+/// Background task that performs the blocking channel `send` (write under
+/// backpressure) off the JS event loop. It holds only `Send` primitives: a clone
+/// of the stream's crossbeam `Sender` (wrapped in a `SpeakerSink`) and the
+/// already-converted samples. The `cpal::Stream` is not touched here; because the
+/// sink is lock-free, the offloaded `send` cannot block the JS thread's `stop` or
+/// `is_playing`. A closed stream rejects the Promise with `SpeakerStreamClosed`.
+/// An empty task (no sink) is a no-op for empty writes.
+pub struct WriteTask {
+    sink: Option<SpeakerSink>,
+    samples: Option<Vec<f32>>,
+}
+
+impl Task for WriteTask {
+    type Output = ();
+    type JsValue = ();
+
+    fn compute(&mut self) -> Result<Self::Output> {
+        if let (Some(sink), Some(samples)) = (self.sink.as_ref(), self.samples.take()) {
+            sink.send(samples).map_err(to_napi_error)?;
+        }
+        Ok(())
+    }
+
+    fn resolve(&mut self, _env: Env, _output: Self::Output) -> Result<Self::JsValue> {
+        Ok(())
+    }
+}
+
+/// Background task that performs the drain wait (the poll loop that blocks until
+/// the cpal callback has played everything queued) off the JS event loop. It
+/// holds only a `Send` `SpeakerSink` clone and never touches the `cpal::Stream`;
+/// because the sink is lock-free, a long drain never blocks the JS thread's
+/// `stop` or `is_playing`. With no stream yet created the sink is `None` and the
+/// drain is a no-op that resolves immediately, matching the synchronous `drain`.
+pub struct DrainTask {
+    sink: Option<SpeakerSink>,
+}
+
+impl Task for DrainTask {
+    type Output = ();
+    type JsValue = ();
+
+    fn compute(&mut self) -> Result<Self::Output> {
+        if let Some(sink) = self.sink.as_ref() {
+            sink.drain();
+        }
+        Ok(())
+    }
+
+    fn resolve(&mut self, _env: Env, _output: Self::Output) -> Result<Self::JsValue> {
+        Ok(())
     }
 }
 
@@ -583,6 +643,22 @@ impl DecibriOutputBridge {
         AsyncTask::new(OpenSpeakerTask { options })
     }
 
+    /// Open the output stream on first use, capturing the stream (kept on the JS
+    /// thread by the bridge) and a `Send` sink handle (used by the async tasks).
+    /// Idempotent: a no-op once the stream exists. Always runs on the JS thread.
+    fn ensure_stream(&mut self) -> Result<()> {
+        if self.stream.is_none() {
+            let output = self
+                .output
+                .as_ref()
+                .ok_or_else(|| Error::new(Status::GenericFailure, "Output not initialized"))?;
+            let stream = output.start().map_err(to_napi_error)?;
+            self.sink = Some(stream.sink());
+            self.stream = Some(stream);
+        }
+        Ok(())
+    }
+
     /// Write PCM data for playback. Starts the output stream on first call.
     /// Empty buffers are a no-op.
     #[napi]
@@ -592,14 +668,7 @@ impl DecibriOutputBridge {
         }
 
         // Start stream on first write
-        if self.stream.is_none() {
-            let output = self
-                .output
-                .as_ref()
-                .ok_or_else(|| Error::new(Status::GenericFailure, "Output not initialized"))?;
-            let stream = output.start().map_err(to_napi_error)?;
-            self.stream = Some(stream);
-        }
+        self.ensure_stream()?;
 
         let samples = match self.format {
             SampleFormat::Int16 => sample::i16_le_bytes_to_f32(&buffer),
@@ -613,12 +682,52 @@ impl DecibriOutputBridge {
             .map_err(to_napi_error)
     }
 
+    /// Non-blocking write: convert the samples and start the stream on the JS
+    /// thread (a fast device open, same as the synchronous first write), then
+    /// perform the blocking channel `send` (which stalls under backpressure when
+    /// the queue is full) on the libuv thread pool. The returned Promise
+    /// resolves when the samples are queued, or rejects with the matching error.
+    /// Empty buffers resolve immediately. The synchronous `write` is unchanged.
+    #[napi]
+    pub fn write_async(&mut self, buffer: Buffer) -> Result<AsyncTask<WriteTask>> {
+        if buffer.is_empty() {
+            return Ok(AsyncTask::new(WriteTask {
+                sink: None,
+                samples: None,
+            }));
+        }
+
+        // Stream creation stays on the JS thread; only the lock-free send is offloaded.
+        self.ensure_stream()?;
+
+        let samples = match self.format {
+            SampleFormat::Int16 => sample::i16_le_bytes_to_f32(&buffer),
+            SampleFormat::Float32 => sample::f32_le_bytes_to_f32(&buffer),
+        };
+
+        Ok(AsyncTask::new(WriteTask {
+            sink: self.sink.clone(),
+            samples: Some(samples),
+        }))
+    }
+
     /// Graceful drain: blocks until all queued samples have been played.
     #[napi]
     pub fn drain(&self) {
         if let Some(stream) = self.stream.as_ref() {
             stream.drain();
         }
+    }
+
+    /// Non-blocking drain: the poll loop that waits for the cpal callback to play
+    /// everything queued runs on the libuv thread pool instead of the event loop.
+    /// The returned Promise resolves when the buffer has drained. With no stream
+    /// yet created it resolves immediately. The synchronous `drain` is unchanged.
+    #[napi]
+    pub fn drain_async(&self) -> AsyncTask<DrainTask> {
+        AsyncTask::new(DrainTask {
+            sink: self.sink.clone(),
+        })
     }
 
     /// Immediate stop. Discards remaining samples.
@@ -628,6 +737,7 @@ impl DecibriOutputBridge {
             stream.stop();
         }
         self.stream = None;
+        self.sink = None;
     }
 
     /// Whether audio is currently being output.
