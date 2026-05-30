@@ -82,7 +82,7 @@ vi.stubGlobal('DOMException', class DOMException extends Error {
 });
 
 // Import after mocks
-const { Decibri } = await import('../../npm/decibri/src/browser/decibri-browser.js');
+const { Microphone } = await import('../../npm/decibri/src/browser/decibri-browser.js');
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -98,22 +98,22 @@ function resetMocks() {
 
 // ── Tests ────────────────────────────────────────────────────────────────────
 
-describe('Decibri constructor', () => {
+describe('Microphone constructor', () => {
   beforeEach(resetMocks);
 
   it('creates an instance with defaults', () => {
-    const mic = new Decibri();
-    expect(mic).toBeInstanceOf(Decibri);
+    const mic = new Microphone();
+    expect(mic).toBeInstanceOf(Microphone);
     expect(mic.isOpen).toBe(false);
   });
 
   it('accepts all options', () => {
-    const mic = new Decibri({
+    const mic = new Microphone({
       sampleRate: 44100,
       channels: 2,
       framesPerBuffer: 800,
       device: 'mic2',
-      format: 'float32',
+      dtype: 'float32',
       vad: true,
       vadThreshold: 0.05,
       vadHoldoff: 500,
@@ -125,37 +125,37 @@ describe('Decibri constructor', () => {
   });
 });
 
-describe('Decibri constructor validation', () => {
+describe('Microphone constructor validation', () => {
   it('throws on invalid sampleRate', () => {
-    expect(() => new Decibri({ sampleRate: 0 })).toThrow('sample rate');
-    expect(() => new Decibri({ sampleRate: 500000 })).toThrow('sample rate');
+    expect(() => new Microphone({ sampleRate: 0 })).toThrow('sample rate');
+    expect(() => new Microphone({ sampleRate: 500000 })).toThrow('sample rate');
   });
 
   it('throws on invalid framesPerBuffer', () => {
-    expect(() => new Decibri({ framesPerBuffer: 0 })).toThrow('frames per buffer');
-    expect(() => new Decibri({ framesPerBuffer: 100000 })).toThrow('frames per buffer');
+    expect(() => new Microphone({ framesPerBuffer: 0 })).toThrow('frames per buffer');
+    expect(() => new Microphone({ framesPerBuffer: 100000 })).toThrow('frames per buffer');
   });
 
   it('throws on invalid channels', () => {
-    expect(() => new Decibri({ channels: 0 })).toThrow('channels');
-    expect(() => new Decibri({ channels: 33 })).toThrow('channels');
+    expect(() => new Microphone({ channels: 0 })).toThrow('channels');
+    expect(() => new Microphone({ channels: 33 })).toThrow('channels');
   });
 
   it('throws on invalid vadThreshold', () => {
-    expect(() => new Decibri({ vadThreshold: -1 })).toThrow('vadThreshold');
-    expect(() => new Decibri({ vadThreshold: 2 })).toThrow('vadThreshold');
+    expect(() => new Microphone({ vadThreshold: -1 })).toThrow('vadThreshold');
+    expect(() => new Microphone({ vadThreshold: 2 })).toThrow('vadThreshold');
   });
 
   it('throws on invalid vadHoldoff', () => {
-    expect(() => new Decibri({ vadHoldoff: -100 })).toThrow('vadHoldoff');
+    expect(() => new Microphone({ vadHoldoff: -100 })).toThrow('vadHoldoff');
   });
 });
 
-describe('Decibri.start()', () => {
+describe('Microphone.start()', () => {
   beforeEach(resetMocks);
 
   it('calls getUserMedia with correct constraints', async () => {
-    const mic = new Decibri({ channels: 1, echoCancellation: true, noiseSuppression: false });
+    const mic = new Microphone({ channels: 1, echoCancellation: true, noiseSuppression: false });
     await mic.start();
 
     expect(mockGetUserMedia).toHaveBeenCalledWith({
@@ -170,7 +170,7 @@ describe('Decibri.start()', () => {
   });
 
   it('includes deviceId when specified', async () => {
-    const mic = new Decibri({ device: 'mic2' });
+    const mic = new Microphone({ device: 'mic2' });
     await mic.start();
 
     expect(mockGetUserMedia).toHaveBeenCalledWith({
@@ -183,7 +183,7 @@ describe('Decibri.start()', () => {
   });
 
   it('passes correct processor options', async () => {
-    const mic = new Decibri({ sampleRate: 16000, framesPerBuffer: 1600, format: 'int16' });
+    const mic = new Microphone({ sampleRate: 16000, framesPerBuffer: 1600, dtype: 'int16' });
     await mic.start();
 
     expect(capturedWorkletOptions.processorOptions).toEqual({
@@ -197,14 +197,14 @@ describe('Decibri.start()', () => {
   });
 
   it('sets isOpen to true after start', async () => {
-    const mic = new Decibri();
+    const mic = new Microphone();
     await mic.start();
     expect(mic.isOpen).toBe(true);
     mic.stop();
   });
 
   it('is a no-op if already started', async () => {
-    const mic = new Decibri();
+    const mic = new Microphone();
     await mic.start();
     await mic.start();
     expect(MockAudioContext).toHaveBeenCalledTimes(1);
@@ -212,7 +212,7 @@ describe('Decibri.start()', () => {
   });
 
   it('returns same promise if start is in progress', async () => {
-    const mic = new Decibri();
+    const mic = new Microphone();
     const p1 = mic.start();
     const p2 = mic.start();
     expect(p1).toBe(p2);
@@ -221,7 +221,7 @@ describe('Decibri.start()', () => {
   });
 
   it('connects source to worklet but not to destination', async () => {
-    const mic = new Decibri();
+    const mic = new Microphone();
     await mic.start();
 
     expect(mockSourceConnect).toHaveBeenCalledWith(mockWorkletNode);
@@ -231,21 +231,21 @@ describe('Decibri.start()', () => {
   });
 
   it('resumes AudioContext for Safari', async () => {
-    const mic = new Decibri();
+    const mic = new Microphone();
     await mic.start();
     expect(mockContextResume).toHaveBeenCalled();
     mic.stop();
   });
 });
 
-describe('Decibri.start() error handling', () => {
+describe('Microphone.start() error handling', () => {
   beforeEach(resetMocks);
 
   it('rejects with clear message on permission denied', async () => {
     const domError = new DOMException('User denied', 'NotAllowedError');
     mockGetUserMedia.mockRejectedValueOnce(domError);
 
-    const mic = new Decibri();
+    const mic = new Microphone();
     const errorFn = vi.fn();
     mic.on('error', errorFn);
 
@@ -258,7 +258,7 @@ describe('Decibri.start() error handling', () => {
     const domError = new DOMException('No device', 'NotFoundError');
     mockGetUserMedia.mockRejectedValueOnce(domError);
 
-    const mic = new Decibri();
+    const mic = new Microphone();
     await expect(mic.start()).rejects.toThrow('No microphone found');
   });
 
@@ -266,14 +266,14 @@ describe('Decibri.start() error handling', () => {
     const domError = new DOMException('Something else', 'NotReadableError');
     mockGetUserMedia.mockRejectedValueOnce(domError);
 
-    const mic = new Decibri();
+    const mic = new Microphone();
     await expect(mic.start()).rejects.toThrow('Microphone access failed');
   });
 
   it('cleans up AudioContext on getUserMedia failure', async () => {
     mockGetUserMedia.mockRejectedValueOnce(new DOMException('Denied', 'NotAllowedError'));
 
-    const mic = new Decibri();
+    const mic = new Microphone();
     try { await mic.start(); } catch {}
 
     expect(mockContextClose).toHaveBeenCalled();
@@ -282,7 +282,7 @@ describe('Decibri.start() error handling', () => {
   it('cleans up on worklet load failure', async () => {
     mockAddModule.mockRejectedValueOnce(new Error('CSP blocked'));
 
-    const mic = new Decibri();
+    const mic = new Microphone();
     const errorFn = vi.fn();
     mic.on('error', errorFn);
 
@@ -295,7 +295,7 @@ describe('Decibri.start() error handling', () => {
   it('allows start() after a failed start()', async () => {
     mockGetUserMedia.mockRejectedValueOnce(new DOMException('Denied', 'NotAllowedError'));
 
-    const mic = new Decibri();
+    const mic = new Microphone();
     try { await mic.start(); } catch {}
 
     mockGetUserMedia.mockResolvedValueOnce(mockStream);
@@ -305,16 +305,16 @@ describe('Decibri.start() error handling', () => {
   });
 });
 
-describe('Decibri.stop()', () => {
+describe('Microphone.stop()', () => {
   beforeEach(resetMocks);
 
   it('is a no-op before start', () => {
-    const mic = new Decibri();
+    const mic = new Microphone();
     expect(() => mic.stop()).not.toThrow();
   });
 
   it('cleans up all resources', async () => {
-    const mic = new Decibri();
+    const mic = new Microphone();
     await mic.start();
     mic.stop();
 
@@ -327,7 +327,7 @@ describe('Decibri.stop()', () => {
   });
 
   it('emits end then close', async () => {
-    const mic = new Decibri();
+    const mic = new Microphone();
     await mic.start();
 
     const events = [];
@@ -339,14 +339,14 @@ describe('Decibri.stop()', () => {
   });
 
   it('is safe to call multiple times', async () => {
-    const mic = new Decibri();
+    const mic = new Microphone();
     await mic.start();
     mic.stop();
     expect(() => mic.stop()).not.toThrow();
   });
 
   it('tears down if stop() called during in-flight start()', async () => {
-    const mic = new Decibri();
+    const mic = new Microphone();
     const startPromise = mic.start();
     mic.stop();
 
@@ -358,7 +358,7 @@ describe('Decibri.stop()', () => {
   });
 
   it('allows fresh start after stop', async () => {
-    const mic = new Decibri();
+    const mic = new Microphone();
     await mic.start();
     mic.stop();
 
@@ -369,11 +369,11 @@ describe('Decibri.stop()', () => {
   });
 });
 
-describe('Decibri data events', () => {
+describe('Microphone data events', () => {
   beforeEach(resetMocks);
 
   it('emits Int16Array for int16 format', async () => {
-    const mic = new Decibri({ format: 'int16' });
+    const mic = new Microphone({ dtype: 'int16' });
     await mic.start();
 
     const fn = vi.fn();
@@ -391,7 +391,7 @@ describe('Decibri data events', () => {
   });
 
   it('emits Float32Array for float32 format', async () => {
-    const mic = new Decibri({ format: 'float32' });
+    const mic = new Microphone({ dtype: 'float32' });
     await mic.start();
 
     const fn = vi.fn();
@@ -408,11 +408,11 @@ describe('Decibri data events', () => {
   });
 });
 
-describe('Decibri VAD', () => {
+describe('Microphone VAD', () => {
   beforeEach(resetMocks);
 
   it('emits speech when RMS crosses threshold', async () => {
-    const mic = new Decibri({ format: 'float32', vad: true, vadThreshold: 0.01 });
+    const mic = new Microphone({ dtype: 'float32', vad: true, vadThreshold: 0.01 });
     await mic.start();
 
     const speechFn = vi.fn();
@@ -426,7 +426,7 @@ describe('Decibri VAD', () => {
   });
 
   it('does not emit speech when below threshold', async () => {
-    const mic = new Decibri({ format: 'float32', vad: true, vadThreshold: 0.5 });
+    const mic = new Microphone({ dtype: 'float32', vad: true, vadThreshold: 0.5 });
     await mic.start();
 
     const speechFn = vi.fn();
@@ -442,7 +442,7 @@ describe('Decibri VAD', () => {
   it('emits silence after holdoff period', async () => {
     vi.useFakeTimers();
 
-    const mic = new Decibri({ format: 'float32', vad: true, vadThreshold: 0.01, vadHoldoff: 300 });
+    const mic = new Microphone({ dtype: 'float32', vad: true, vadThreshold: 0.01, vadHoldoff: 300 });
     await mic.start();
 
     const speechFn = vi.fn();
@@ -466,7 +466,7 @@ describe('Decibri VAD', () => {
   });
 
   it('does not emit events when vad is disabled', async () => {
-    const mic = new Decibri({ format: 'float32', vad: false });
+    const mic = new Microphone({ dtype: 'float32', vad: false });
     await mic.start();
 
     const speechFn = vi.fn();
@@ -480,7 +480,7 @@ describe('Decibri VAD', () => {
   });
 
   it('works with int16 format', async () => {
-    const mic = new Decibri({ format: 'int16', vad: true, vadThreshold: 0.01 });
+    const mic = new Microphone({ dtype: 'int16', vad: true, vadThreshold: 0.01 });
     await mic.start();
 
     const speechFn = vi.fn();
@@ -494,20 +494,20 @@ describe('Decibri VAD', () => {
   });
 });
 
-describe('Decibri.devices()', () => {
+describe('Microphone.devices()', () => {
   beforeEach(resetMocks);
 
   it('returns only audioinput devices', async () => {
-    const devices = await Decibri.devices();
+    const devices = await Microphone.devices();
     expect(devices).toHaveLength(2);
     expect(devices[0]).toEqual({ deviceId: 'mic1', label: 'Built-in Mic', groupId: 'g1' });
     expect(devices[1]).toEqual({ deviceId: 'mic2', label: 'USB Mic', groupId: 'g2' });
   });
 });
 
-describe('Decibri.version()', () => {
+describe('Microphone.version()', () => {
   it('returns version info with decibri key', () => {
-    const v = Decibri.version();
+    const v = Microphone.version();
     expect(v).toHaveProperty('decibri');
     expect(typeof v.decibri).toBe('string');
   });

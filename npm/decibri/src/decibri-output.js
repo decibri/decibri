@@ -4,11 +4,11 @@ const { Writable } = require('stream');
 const { DecibriOutputBridge } = require('../index.js');
 const { wrapNativeError } = require('./errors');
 
-// ─── DecibriOutput (Writable) ───────────────────────────────────────────────
+// ─── Speaker (Writable) ─────────────────────────────────────────────────────
 
-class DecibriOutput extends Writable {
+class Speaker extends Writable {
   /**
-   * @param {import('./decibri').DecibriOutputOptions} [options]
+   * @param {import('./decibri').SpeakerOptions} [options]
    */
   constructor(options = {}) {
     super({ highWaterMark: options.highWaterMark || 16384 });
@@ -25,9 +25,9 @@ class DecibriOutput extends Writable {
       throw new RangeError('channels must be between 1 and 32');
     }
 
-    const format = options.format ?? 'int16';
-    if (format !== 'int16' && format !== 'float32') {
-      throw new TypeError("format must be 'int16' or 'float32'");
+    const dtype = options.dtype ?? 'int16';
+    if (dtype !== 'int16' && dtype !== 'float32') {
+      throw new TypeError("dtype must be 'int16' or 'float32'");
     }
 
     // ── Resolve device ──────────────────────────────────────────────────────
@@ -51,7 +51,7 @@ class DecibriOutput extends Writable {
     } else if (typeof options.device === 'number') {
       const devices = DecibriOutputBridge.devices();
       if (options.device < 0 || options.device >= devices.length) {
-        throw new RangeError('device index out of range. Call DecibriOutput.devices() to list available devices');
+        throw new RangeError('device index out of range. Call Speaker.devices() to list available devices');
       }
       resolvedDevice = options.device;
     } else if (
@@ -69,7 +69,7 @@ class DecibriOutput extends Writable {
 
     // ── Store config ───────────────────────────────────────────────────────
 
-    this._format = format;
+    this._dtype = dtype;
     this._started = false;
 
     // ── Create native bridge ───────────────────────────────────────────────
@@ -78,7 +78,7 @@ class DecibriOutput extends Writable {
       this._native = new DecibriOutputBridge({
         sampleRate,
         channels,
-        format,
+        format: dtype,
         device: resolvedDevice,
       });
     } catch (err) {
@@ -142,4 +142,4 @@ class DecibriOutput extends Writable {
   }
 }
 
-module.exports = DecibriOutput;
+module.exports = Speaker;

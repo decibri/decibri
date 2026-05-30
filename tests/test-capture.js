@@ -1,11 +1,11 @@
 'use strict';
 
 const path = require('path');
-const Decibri = require(path.join(__dirname, '..', 'npm', 'decibri', 'src', 'decibri.js'));
+const { Microphone } = require(path.join(__dirname, '..', 'npm', 'decibri', 'src', 'decibri.js'));
 
 // ── Test 1: version() ────────────────────────────────────────────────────────
-console.log('--- Decibri.version() ---');
-const ver = Decibri.version();
+console.log('--- Microphone.version() ---');
+const ver = Microphone.version();
 console.log(ver);
 console.assert(typeof ver.decibri === 'string', 'decibri version is a string');
 console.assert(typeof ver.portaudio === 'string', 'portaudio version is a string');
@@ -13,8 +13,8 @@ console.assert(ver.portaudio.includes('cpal'), `portaudio should contain "cpal",
 console.log('PASS: version()\n');
 
 // ── Test 2: devices() ────────────────────────────────────────────────────────
-console.log('--- Decibri.devices() ---');
-const devices = Decibri.devices();
+console.log('--- Microphone.devices() ---');
+const devices = Microphone.devices();
 console.log(JSON.stringify(devices, null, 2));
 console.assert(Array.isArray(devices), 'devices() returns an array');
 if (devices.length > 0) {
@@ -29,7 +29,7 @@ console.log('PASS: devices()\n');
 
 // ── Test 3: capture 2 seconds ────────────────────────────────────────────────
 console.log('--- Capture test (2 seconds) ---');
-const mic = new Decibri({ sampleRate: 16000, channels: 1 });
+const mic = new Microphone({ sampleRate: 16000, channels: 1 });
 
 let chunkCount = 0;
 let totalBytes = 0;

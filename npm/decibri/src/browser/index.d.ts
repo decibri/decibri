@@ -1,5 +1,5 @@
 /** Information about an available audio input device (browser). */
-export interface DeviceInfo {
+export interface MicrophoneInfo {
   /** Opaque device identifier (pass to constructor as `device`). */
   deviceId: string;
   /** Human-readable device name. May be empty until permission is granted. */
@@ -14,8 +14,8 @@ export interface VersionInfo {
   decibri: string;
 }
 
-/** Constructor options for the browser `Decibri` class. */
-export interface DecibriOptions {
+/** Constructor options for the browser `Microphone` class. */
+export interface MicrophoneOptions {
   /**
    * Target sample rate in Hz. Browser captures at native rate and resamples.
    * @default 16000
@@ -38,18 +38,18 @@ export interface DecibriOptions {
   framesPerBuffer?: number;
 
   /**
-   * Audio input device. Pass a deviceId string from `Decibri.devices()`.
+   * Audio input device. Pass a deviceId string from `Microphone.devices()`.
    * Omit to use the system default input device.
    */
   device?: string;
 
   /**
-   * Sample encoding format.
+   * Sample encoding data type.
    * - `'int16'`: Int16Array of PCM samples
    * - `'float32'`: Float32Array of samples in [-1, 1]
    * @default 'int16'
    */
-  format?: 'int16' | 'float32';
+  dtype?: 'int16' | 'float32';
 
   /**
    * Enable energy-based voice activity detection.
@@ -95,9 +95,9 @@ export interface DecibriOptions {
  *
  * @example
  * ```js
- * import { Decibri } from 'decibri'; // browser entry via conditional export
+ * import { Microphone } from 'decibri'; // browser entry via conditional export
  *
- * const mic = new Decibri({ sampleRate: 16000 });
+ * const mic = new Microphone({ sampleRate: 16000 });
  * mic.on('data', (chunk) => {
  *   // chunk is an Int16Array of PCM samples
  * });
@@ -105,8 +105,8 @@ export interface DecibriOptions {
  * mic.stop();
  * ```
  */
-export declare class Decibri {
-  constructor(options?: DecibriOptions);
+export declare class Microphone {
+  constructor(options?: MicrophoneOptions);
 
   /**
    * Start microphone capture.
@@ -125,7 +125,7 @@ export declare class Decibri {
    * List available audio input devices.
    * Labels may be empty until microphone permission is granted.
    */
-  static devices(): Promise<DeviceInfo[]>;
+  static devices(): Promise<MicrophoneInfo[]>;
 
   /** Version information. */
   static version(): VersionInfo;

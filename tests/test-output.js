@@ -1,8 +1,7 @@
 'use strict';
 
 const path = require('path');
-const Decibri = require(path.join(__dirname, '..', 'npm', 'decibri', 'src', 'decibri.js'));
-const { DecibriOutput } = Decibri;
+const { Microphone, Speaker } = require(path.join(__dirname, '..', 'npm', 'decibri', 'src', 'decibri.js'));
 
 let passed = 0;
 let failed = 0;
@@ -75,34 +74,34 @@ async function testErrors() {
   console.log('--- Group 1: Error messages ---');
 
   // sampleRate
-  assertThrows(() => new DecibriOutput({ sampleRate: 0 }), RangeError, 'sample rate must be between 1000 and 384000');
-  assertThrows(() => new DecibriOutput({ sampleRate: 999 }), RangeError, 'sample rate must be between 1000 and 384000');
-  assertThrows(() => new DecibriOutput({ sampleRate: 384001 }), RangeError, 'sample rate must be between 1000 and 384000');
+  assertThrows(() => new Speaker({ sampleRate: 0 }), RangeError, 'sample rate must be between 1000 and 384000');
+  assertThrows(() => new Speaker({ sampleRate: 999 }), RangeError, 'sample rate must be between 1000 and 384000');
+  assertThrows(() => new Speaker({ sampleRate: 384001 }), RangeError, 'sample rate must be between 1000 and 384000');
 
   // channels
-  assertThrows(() => new DecibriOutput({ channels: 0 }), RangeError, 'channels must be between 1 and 32');
-  assertThrows(() => new DecibriOutput({ channels: 33 }), RangeError, 'channels must be between 1 and 32');
+  assertThrows(() => new Speaker({ channels: 0 }), RangeError, 'channels must be between 1 and 32');
+  assertThrows(() => new Speaker({ channels: 33 }), RangeError, 'channels must be between 1 and 32');
 
-  // format
-  assertThrows(() => new DecibriOutput({ format: 'wav' }), TypeError, "format must be 'int16' or 'float32'");
+  // dtype
+  assertThrows(() => new Speaker({ dtype: 'wav' }), TypeError, "dtype must be 'int16' or 'float32'");
 
   // device name not found
   assertThrows(
-    () => new DecibriOutput({ device: '__nonexistent__' }),
+    () => new Speaker({ device: '__nonexistent__' }),
     TypeError,
     'No audio output device found matching "__nonexistent__"'
   );
 
   // device index out of range
   assertThrows(
-    () => new DecibriOutput({ device: 99999 }),
+    () => new Speaker({ device: 99999 }),
     RangeError,
     'device index out of range'
   );
 
   // zero-byte write is a no-op (not a crash)
   try {
-    const speaker = new DecibriOutput({ sampleRate: 16000, channels: 1 });
+    const speaker = new Speaker({ sampleRate: 16000, channels: 1 });
     speaker.write(Buffer.alloc(0));
     speaker.stop();
     passed++;
@@ -113,14 +112,14 @@ async function testErrors() {
 
   // boundary values that SHOULD work
   try {
-    const s1 = new DecibriOutput({ sampleRate: 1000 }); s1.stop();
+    const s1 = new Speaker({ sampleRate: 1000 }); s1.stop();
     passed++;
   } catch (e) {
     console.log(`  FAIL: sampleRate 1000 should be accepted: ${e.message}`);
     failed++;
   }
   try {
-    const s2 = new DecibriOutput({ sampleRate: 384000 }); s2.stop();
+    const s2 = new Speaker({ sampleRate: 384000 }); s2.stop();
     passed++;
   } catch (e) {
     console.log(`  FAIL: sampleRate 384000 should be accepted: ${e.message}`);
@@ -137,7 +136,7 @@ async function testErrors() {
 async function testDeviceEnumeration() {
   console.log('--- Group 2: Output device enumeration ---');
 
-  const devices = DecibriOutput.devices();
+  const devices = Speaker.devices();
   console.log(`  Found ${devices.length} output device(s)`);
   assert(Array.isArray(devices), 'devices() returns an array');
   assert(devices.length > 0, 'at least one output device');
@@ -155,7 +154,7 @@ async function testDeviceEnumeration() {
   }
 
   // version() works
-  const ver = DecibriOutput.version();
+  const ver = Speaker.version();
   assert(ver.portaudio.includes('cpal'), 'version().portaudio contains cpal');
 
   console.log('  Group 2 done\n');
@@ -170,7 +169,7 @@ async function testSineWave() {
   console.log('  (You should hear a tone)');
 
   const buffer = generateSineWave(16000, 440, 2, 0.3);
-  const speaker = new DecibriOutput({ sampleRate: 16000, channels: 1 });
+  const speaker = new Speaker({ sampleRate: 16000, channels: 1 });
 
   return new Promise((resolve) => {
     speaker.write(buffer);
@@ -201,7 +200,7 @@ async function testFloat32Playback() {
   console.log('  (You should hear a higher tone)');
 
   const buffer = generateSineWaveFloat32(16000, 880, 2, 0.3);
-  const speaker = new DecibriOutput({ sampleRate: 16000, channels: 1, format: 'float32' });
+  const speaker = new Speaker({ sampleRate: 16000, channels: 1, dtype: 'float32' });
 
   return new Promise((resolve) => {
     speaker.write(buffer);
@@ -231,8 +230,8 @@ async function testEcho() {
   console.log('--- Group 5: Pipe capture → output (echo, 3 seconds) ---');
   console.log('  (You should hear your voice echoed)');
 
-  const mic = new Decibri({ sampleRate: 16000, channels: 1 });
-  const speaker = new DecibriOutput({ sampleRate: 16000, channels: 1 });
+  const mic = new Microphone({ sampleRate: 16000, channels: 1 });
+  const speaker = new Speaker({ sampleRate: 16000, channels: 1 });
 
   let errorOccurred = false;
   mic.on('error', (err) => { console.log(`  mic error: ${err.message}`); errorOccurred = true; });
@@ -259,7 +258,7 @@ async function testStopDiscards() {
 
   // Generate 10 seconds of audio but stop immediately
   const buffer = generateSineWave(16000, 440, 10, 0.3);
-  const speaker = new DecibriOutput({ sampleRate: 16000, channels: 1 });
+  const speaker = new Speaker({ sampleRate: 16000, channels: 1 });
 
   speaker.write(buffer);
   speaker.stop();
@@ -278,7 +277,7 @@ async function testMultipleInstances() {
   console.log('--- Group 7: Multiple sequential instances ---');
 
   // Instance 1
-  const s1 = new DecibriOutput({ sampleRate: 16000, channels: 1 });
+  const s1 = new Speaker({ sampleRate: 16000, channels: 1 });
   const buf1 = generateSineWave(16000, 440, 0.5, 0.2);
   s1.write(buf1);
   s1.stop();
@@ -287,7 +286,7 @@ async function testMultipleInstances() {
   await sleep(200);
 
   // Instance 2
-  const s2 = new DecibriOutput({ sampleRate: 16000, channels: 1 });
+  const s2 = new Speaker({ sampleRate: 16000, channels: 1 });
   const buf2 = generateSineWave(16000, 880, 0.5, 0.2);
   s2.write(buf2);
   s2.stop();

@@ -1,7 +1,7 @@
 'use strict';
 
 const path = require('path');
-const Decibri = require(path.join(__dirname, '..', 'npm', 'decibri', 'src', 'decibri.js'));
+const { Microphone } = require(path.join(__dirname, '..', 'npm', 'decibri', 'src', 'decibri.js'));
 
 let passed = 0;
 let failed = 0;
@@ -51,7 +51,7 @@ function sleep(ms) {
 async function testSileroCapture() {
   console.log('--- Group 1: Silero VAD capture (3 seconds) ---');
 
-  const mic = new Decibri({
+  const mic = new Microphone({
     sampleRate: 16000,
     channels: 1,
     vad: true,
@@ -85,7 +85,7 @@ async function testSileroCapture() {
 async function testEnergyRegression() {
   console.log('--- Group 2: Energy VAD regression (2 seconds) ---');
 
-  const mic = new Decibri({
+  const mic = new Microphone({
     sampleRate: 16000,
     channels: 1,
     vad: true,
@@ -115,7 +115,7 @@ async function testDefaultVadMode() {
   console.log('--- Group 3: Default vadMode is energy ---');
 
   // No vadMode specified, should default to energy
-  const mic = new Decibri({
+  const mic = new Microphone({
     sampleRate: 16000,
     channels: 1,
     vad: true,
@@ -140,7 +140,7 @@ async function testInvalidVadMode() {
   console.log('--- Group 4: Invalid vadMode ---');
 
   assertThrows(
-    () => new Decibri({ vadMode: 'invalid' }),
+    () => new Microphone({ vadMode: 'invalid' }),
     TypeError,
     "vadMode must be 'energy' or 'silero'"
   );
@@ -155,10 +155,10 @@ async function testInvalidVadMode() {
 async function testSileroFloat32() {
   console.log('--- Group 5: Silero with float32 format (2 seconds) ---');
 
-  const mic = new Decibri({
+  const mic = new Microphone({
     sampleRate: 16000,
     channels: 1,
-    format: 'float32',
+    dtype: 'float32',
     vad: true,
     vadMode: 'silero',
     vadThreshold: 0.5,
@@ -191,7 +191,7 @@ async function testMissingModel() {
   console.log('--- Group 6: Missing model file ---');
 
   try {
-    new Decibri({
+    new Microphone({
       vad: true,
       vadMode: 'silero',
       modelPath: '/nonexistent/path/model.onnx',
