@@ -78,7 +78,7 @@
     "@decibri/decibri-linux-arm64-gnu": "4.0.0"
   },
   "devDependencies": {
-    "@napi-rs/cli": "^3.0.0"
+    "@napi-rs/cli": "^3.7.0"
   },
   "scripts": {
     "build": "napi build --platform --release -p decibri-node --manifest-path ../../bindings/node/Cargo.toml --js-package-name @decibri/decibri -o .",
