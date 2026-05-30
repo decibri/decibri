@@ -11,6 +11,12 @@ For other decibri packages, see:
 
 ## [Unreleased]
 
+## [4.0.1] - 2026-05-30
+
+### Fixed
+
+- **Device-index error message.** `DeviceIndexOutOfRange` no longer references a class name that was removed in the 4.0.0 rename. The message keeps its `device index out of range` prefix and now points at the neutral `devices()` enumeration, so the guidance is direction-agnostic and names no removed type.
+
 ## [4.0.0] - 2026-05-30
 
 Renames the public API to a microphone/speaker vocabulary. This is a breaking
