@@ -1,16 +1,24 @@
 <!-- markdownlint-disable MD024 -->
 
-# Decibri Python Wheel Changelog
+# Decibri Python Changelog
 
-This file tracks changes to the decibri Python wheel published to PyPI (`pip install decibri`).
+This file tracks changes to the decibri Python package published to PyPI (`pip install decibri`).
 
-For Rust core (`crates/decibri`) and npm binding (`bindings/node`) changes, see [the root CHANGELOG.md](../../CHANGELOG.md). The Rust core and npm binding ship together at the same version under the `v*` tag pattern; the Python wheel has its own version trajectory aligned with API surface stability and ships under the `python-v*` tag pattern.
+For Rust core (`crates/decibri`) and npm binding (`bindings/node`) changes, see [the root CHANGELOG.md](../../CHANGELOG.md). The Rust core and npm binding ship together at the same version under the `v*` tag pattern; the Python package has its own version trajectory aligned with API surface stability and ships under the `python-v*` tag pattern.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.2.0] - 2026-05-30
 
 ### Python binding
+
+0.2.0 aligns the Python API to decibri's canonical microphone/speaker vocabulary. It is a breaking release; see [`MIGRATION_PYTHON.md`](MIGRATION_PYTHON.md) for the upgrade guide.
+
+#### Breaking
+
+- Device-enumeration methods renamed to the short form: `Microphone.input_devices()` is now `Microphone.devices()`, `Speaker.output_devices()` is now `Speaker.devices()`, and the `AsyncMicrophone` and `AsyncSpeaker` mirrors. The module-level free functions `decibri.input_devices()` and `decibri.output_devices()` are unchanged, so code calling those needs no change.
+- Exceptions renamed: `CaptureStreamClosed` is now `MicrophoneStreamClosed`, `OutputStreamClosed` is now `SpeakerStreamClosed`, `DeviceNotFound` is now `MicrophoneNotFound`, `OutputDeviceNotFound` is now `SpeakerNotFound`, and `NoOutputDeviceFound` is now `NoSpeakerFound`. The old names are removed, so `except` clauses and imports using them must update. The other exception names are unchanged.
+- Device-info types renamed: `DeviceInfo` is now `MicrophoneInfo` and `OutputDeviceInfo` is now `SpeakerInfo`. The objects returned by `devices()` carry the same fields; only the type names changed, so this affects code that imports these names or uses `isinstance` against them.
 
 #### Changed
 
