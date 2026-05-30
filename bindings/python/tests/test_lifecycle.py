@@ -1,4 +1,4 @@
-"""Phase 2 lifecycle and resource-management tests.
+"""Lifecycle and resource-management tests.
 
 Three sections:
 
@@ -127,13 +127,12 @@ def test_stop_without_start_is_safe() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Section 2b: close() permanent alias for stop() (Phase 7.5; permanence
-# committed in Phase 7.7 Item B6).
+# Section 2b: close() permanent alias for stop().
 #
 # Microphone.close() is provided for ergonomic parity with the
-# asyncio / aiohttp / httpx convention. Phase 7.7 commits close() to
-# remain a permanent alias for stop() across all decibri versions; the
-# prior "may diverge in future" hedge has been removed.
+# asyncio / aiohttp / httpx convention. close() is a permanent alias for
+# stop() across all decibri versions; the prior "may diverge in future"
+# hedge has been removed.
 # ---------------------------------------------------------------------------
 
 
@@ -256,22 +255,21 @@ def _supports_kwarg(_obj: Any, _name: str) -> bool:
 
 
 # ---------------------------------------------------------------------------
-# Section 5: mid-stream device-disconnect surfacing (Phase 7.6 Item B3).
+# Section 5: mid-stream device-disconnect surfacing.
 #
 # Pins the documented 0.1.0 behavior:
-#   - read() after stop() raises CaptureStreamClosed (sync + async).
-#   - The wrapper's iterator propagates CaptureStreamClosed from the bridge.
+#   - read() after stop() raises MicrophoneStreamClosed (sync + async).
+#   - The wrapper's iterator propagates MicrophoneStreamClosed from the bridge.
 #   - Calling stop() from a thread other than the one inside read() raises
 #     AlreadyBorrowed (a pyo3 RuntimeError from the bridge's RefCell borrow).
-#     This is a known 0.1.0 limitation; thread-safe shutdown ships in 0.2.0
-#     (see C:/Users/rossa/.claude/plans/0-2-0-backlog.md).
+#     This is a known limitation pinned by the test below.
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.requires_audio_input
 def test_sync_read_after_stop_raises_capture_closed() -> None:
-    """After stop(), the next read() raises CaptureStreamClosed."""
-    from decibri import CaptureStreamClosed
+    """After stop(), the next read() raises MicrophoneStreamClosed."""
+    from decibri import MicrophoneStreamClosed
 
     d = Microphone(sample_rate=16000, channels=1, frames_per_buffer=512)
     d.start()
@@ -279,13 +277,13 @@ def test_sync_read_after_stop_raises_capture_closed() -> None:
     d.read(timeout_ms=500)
     d.stop()
 
-    with pytest.raises(CaptureStreamClosed):
+    with pytest.raises(MicrophoneStreamClosed):
         d.read(timeout_ms=100)
 
 
 def test_sync_iterator_propagates_capture_closed_from_bridge() -> None:
-    """If the bridge raises CaptureStreamClosed from read(), iterator surface raises too."""
-    from decibri import CaptureStreamClosed
+    """If the bridge raises MicrophoneStreamClosed from read(), iterator surface raises too."""
+    from decibri import MicrophoneStreamClosed
 
     class _ClosedBridge(_MockBridge):
         def __init__(self) -> None:
@@ -294,23 +292,23 @@ def test_sync_iterator_propagates_capture_closed_from_bridge() -> None:
 
         def read(self, timeout_ms: int | None = None) -> bytes | None:
             self.read_calls += 1
-            raise CaptureStreamClosed("capture is not running")
+            raise MicrophoneStreamClosed("capture is not running")
 
     bridge = _ClosedBridge()
     d = _make_decibri_with_mock_bridge(bridge)
 
     iterator = iter(d)
-    with pytest.raises(CaptureStreamClosed):
+    with pytest.raises(MicrophoneStreamClosed):
         next(iterator)
     assert bridge.read_calls == 1
 
 
 @pytest.mark.requires_audio_input
 def test_async_read_after_stop_raises_capture_closed() -> None:
-    """After await stop(), the next await read() raises CaptureStreamClosed."""
+    """After await stop(), the next await read() raises MicrophoneStreamClosed."""
     import asyncio
 
-    from decibri import AsyncMicrophone, CaptureStreamClosed
+    from decibri import AsyncMicrophone, MicrophoneStreamClosed
 
     async def _run() -> None:
         d = AsyncMicrophone(sample_rate=16000, channels=1, frames_per_buffer=512)
@@ -318,7 +316,7 @@ def test_async_read_after_stop_raises_capture_closed() -> None:
         await d.read(timeout_ms=500)
         await d.stop()
 
-        with pytest.raises(CaptureStreamClosed):
+        with pytest.raises(MicrophoneStreamClosed):
             await d.read(timeout_ms=100)
 
     asyncio.run(_run())
@@ -331,11 +329,7 @@ def test_sync_stop_from_other_thread_raises_already_borrowed() -> None:
     Calling Microphone.stop() from a thread other than the one currently
     blocked inside read() raises a RuntimeError from pyo3's RefCell borrow
     machinery (the bridge holds the borrow during read()). This is a
-    KNOWN 0.1.0 limitation; a thread-safe shutdown path ships in 0.2.0
-    (see C:/Users/rossa/.claude/plans/0-2-0-backlog.md "Sync Microphone
-    thread-safe shutdown").
-
-    Until 0.2.0 lands, the documented workaround is AsyncMicrophone, which
+    KNOWN 0.1.0 limitation. The documented workaround is AsyncMicrophone, which
     serializes stop() against in-flight read() via the Rust-side tokio
     mutex and supports sibling-task cancellation cleanly. This test pins
     the current behaviour so that 0.2.0's fix is detectable as a behaviour
@@ -380,7 +374,7 @@ def test_sync_stop_from_other_thread_raises_already_borrowed() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Section 6: __del__ defensive finalizer (Phase 7.6 Item C4).
+# Section 6: __del__ defensive finalizer.
 #
 # Microphone and Speaker define __del__ as a defensive cleanup for
 # users who forget the context manager. AsyncMicrophone and AsyncSpeaker
@@ -469,7 +463,7 @@ def test_async_microphone_no_del_attr() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Section 7: Re-entry contract (Phase 7.7 Item B5).
+# Section 7: Re-entry contract.
 #
 # Microphone, Speaker, AsyncMicrophone, and AsyncSpeaker are reusable across
 # stop/start cycles. Pin the contract so future refactors can't silently
@@ -484,7 +478,7 @@ def test_async_microphone_no_del_attr() -> None:
 
 @pytest.mark.requires_audio_input
 def test_microphone_start_after_stop_reconstructs_stream() -> None:
-    """Pinning Phase 7.7 B5 outcome (i): start after stop is supported."""
+    """Pinning the re-entry contract: start after stop is supported."""
     d = Microphone()
     d.start()
     assert d.is_open is True
@@ -497,7 +491,7 @@ def test_microphone_start_after_stop_reconstructs_stream() -> None:
 
 @pytest.mark.requires_audio_input
 def test_microphone_start_after_close_reconstructs_stream() -> None:
-    """Pinning Phase 7.7 B5 outcome (i): start after close is supported."""
+    """Pinning the re-entry contract: start after close is supported."""
     d = Microphone()
     d.start()
     d.close()
@@ -509,7 +503,7 @@ def test_microphone_start_after_close_reconstructs_stream() -> None:
 
 @pytest.mark.requires_audio_input
 def test_microphone_start_after_with_block_reconstructs_stream() -> None:
-    """Pinning Phase 7.7 B5 outcome (i): start after `with` exit is supported."""
+    """Pinning the re-entry contract: start after `with` exit is supported."""
     d = Microphone()
     with d:
         pass
@@ -519,7 +513,7 @@ def test_microphone_start_after_with_block_reconstructs_stream() -> None:
 
 
 def test_microphone_vad_state_resets_on_restart() -> None:
-    """Pinning Phase 7.7 B5 outcome (i): VAD state resets on each new start()."""
+    """Pinning the re-entry contract: VAD state resets on each new start()."""
     d = Microphone(vad="energy")
     # Force the VAD state machine into a non-default state.
     d._vad._is_speaking = True  # type: ignore[attr-defined]
@@ -533,7 +527,7 @@ def test_microphone_vad_state_resets_on_restart() -> None:
 
 @pytest.mark.requires_audio_input
 def test_microphone_double_start_raises_already_running() -> None:
-    """Pinning Phase 7.7 B5 outcome (i): start() while running raises AlreadyRunning."""
+    """Pinning the re-entry contract: start() while running raises AlreadyRunning."""
     from decibri import AlreadyRunning
 
     d = Microphone()

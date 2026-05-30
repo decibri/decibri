@@ -21,7 +21,7 @@ crate-type = ["cdylib"]
 [dependencies]
 # Dual path+version dep: path wins for workspace dev (no crates.io round-trip),
 # version pins for eventual registry publish if we ever ship this standalone.
-# Matches the polars-style convention; see P3 plan §10.2.
+# Matches the polars-style convention.
 #
 # IMPORTANT: do NOT add a `features = [...]` override here without matching
 # changes in `bindings/node/Cargo.toml`. Cargo's workspace resolver unifies
@@ -49,7 +49,7 @@ decibri = { version = "4.0.0", path = "../../crates/decibri" }
 #   a Python interpreter on the build host. On native Windows MSVC,
 #   `python3-dll-a` uses `cc::windows_registry::find` to locate MSVC's
 #   `lib.exe` (the same mechanism napi-rs already relies on). On Linux CI
-#   cross-compiling to Windows (Phase 3), `python3-dll-a` falls back to
+#   cross-compiling to Windows, `python3-dll-a` falls back to
 #   `llvm-dlltool` which Ubuntu runners get via `apt-get install llvm` or
 #   via PyO3/maturin-action. Industry pattern: polars, pydantic-core,
 #   orjson, and PyO3's own abi3 examples all enable this feature.
@@ -57,8 +57,7 @@ decibri = { version = "4.0.0", path = "../../crates/decibri" }
 # Do NOT set `[env] PYO3_NO_PYTHON = "1"` in `.cargo/config.toml` to try to
 # skip pyo3's Python interpreter probe. On Windows that setting prevents
 # pyo3-build-config from emitting the `cargo:rustc-link-search` directive
-# that the PE linker needs, and the build fails with LNK1181. See the Phase
-# 1 plan file §7.6 for the full incident writeup.
+# that the PE linker needs, and the build fails with LNK1181.
 pyo3 = { version = "0.28", features = [
     "abi3-py310",
     "extension-module",
@@ -66,14 +65,14 @@ pyo3 = { version = "0.28", features = [
 ] }
 
 # rust-numpy powers the optional numpy=True ndarray return paths on
-# Decibri.read and AsyncDecibri.read (Phase 6). Pinned exactly to 0.28.0
+# Decibri.read and AsyncDecibri.read. Pinned exactly to 0.28.0
 # (released 2026-02-08) because the crate's release cadence tracks PyO3
 # minor versions; any version bump should be a deliberate cross-workflow
 # action paired with a pyo3 bump.
 numpy = "=0.28.0"
 
-# pyo3-async-runtimes powers the AsyncDecibri / AsyncDecibriOutput surfaces
-# (Phase 5). Pinned exactly to 0.28.0 because the crate is brand new (released
+# pyo3-async-runtimes powers the AsyncDecibri / AsyncDecibriOutput surfaces.
+# Pinned exactly to 0.28.0 because the crate is brand new (released
 # 2026-02-04) and version drift in the absence of a long stability track record
 # is a real risk; any minor-version bump should be a deliberate cross-workflow
 # action. The `tokio-runtime` feature selects the Tokio backend; `attributes`

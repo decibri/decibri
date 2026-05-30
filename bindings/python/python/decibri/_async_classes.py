@@ -1,6 +1,6 @@
 """Async Python wrappers for decibri: AsyncMicrophone and AsyncSpeaker.
 
-Phase 5 of the Python Integration Project. These classes mirror the sync
+These classes mirror the sync
 ``Microphone`` and ``Speaker`` surfaces method-for-method, with
 ``async def`` semantics, async context manager support
 (``__aenter__`` / ``__aexit__``), and (for capture only) async iterator
@@ -12,21 +12,21 @@ work to a Tokio worker thread via ``spawn_blocking``. The Tokio runtime
 is lazily initialized; no explicit init call is needed.
 
 Cancellation: ``asyncio.CancelledError`` propagates through
-``pyo3-async-runtimes`` to the underlying Rust future. Per the Phase 5
-locked decision (abort-immediately), cancellation is non-recoverable for
-the in-flight chunk: any cpal data captured in the spawn_blocking thread
-between the Python-side cancellation and the thread's natural completion
-is dropped. Per the Phase 5 plan Risk 2, the spawn_blocking OS thread
-itself does not cooperatively cancel; the Python coroutine sees
-``CancelledError`` immediately while the Rust thread runs to completion.
+``pyo3-async-runtimes`` to the underlying Rust future. By design
+(abort-immediately), cancellation is non-recoverable for the in-flight
+chunk: any cpal data captured in the spawn_blocking thread between the
+Python-side cancellation and the thread's natural completion is dropped.
+The spawn_blocking OS thread itself does not cooperatively cancel; the
+Python coroutine sees ``CancelledError`` immediately while the Rust thread
+runs to completion.
 
 State properties (``is_open``, ``is_speaking``, ``vad_score``,
 ``is_playing``) are synchronous Python properties backed by Python-side
 state tracking. The Rust async bridge exposes these as awaitables, but
 awaiting from a property is not idiomatic Python and would surprise
 callers who expect ``decibri.is_open`` to behave like sync ``Microphone``.
-Phase 7.5 Item 10: the sync ``is_open`` / ``is_playing`` properties
-now delegate to lock-free atomic mirrors on the Rust bridge, so they
+The sync ``is_open`` / ``is_playing`` properties
+delegate to lock-free atomic mirrors on the Rust bridge, so they
 report bridge truth (not stale Python-side cache) even when the Rust
 side closes the stream itself.
 
@@ -49,7 +49,7 @@ from typing_extensions import Self
 if TYPE_CHECKING:
     import numpy as np
 
-    # Phase 6: read can return bytes (default) or ndarray (as_ndarray=True);
+    # read can return bytes (default) or ndarray (as_ndarray=True);
     # write can accept either. Optional runtime numpy dependency.
     SampleData = Union[bytes, "np.ndarray[Any, Any]"]
 else:
@@ -57,7 +57,7 @@ else:
 
 from decibri import _decibri, exceptions
 from decibri._classes import Chunk, _VadStateMachine, _VALID_FORMATS, _VALID_MODES
-from decibri._decibri import DeviceInfo, OutputDeviceInfo, VersionInfo
+from decibri._decibri import MicrophoneInfo, SpeakerInfo, VersionInfo
 
 __all__ = ["AsyncMicrophone", "AsyncSpeaker"]
 
@@ -94,7 +94,7 @@ class AsyncMicrophone:
 
     Cleanup and disconnect:
         Mid-stream device disconnect (USB unplug, default-device switch,
-        driver error) is surfaced as a ``CaptureStreamClosed`` raised on
+        driver error) is surfaced as a ``MicrophoneStreamClosed`` raised on
         the next ``await read()``. cpal detects the disconnect and
         closes the underlying stream within roughly 20ms; the bridge
         then reports the closed state on its next read attempt.
@@ -162,8 +162,8 @@ class AsyncMicrophone:
         event loop in async contexts.
 
         For latency-sensitive event-loop hot paths use the
-        :meth:`AsyncMicrophone.open` async factory classmethod added in
-        Phase 9 (``mic = await AsyncMicrophone.open(vad='silero')``),
+        :meth:`AsyncMicrophone.open` async factory classmethod
+        (``mic = await AsyncMicrophone.open(vad='silero')``),
         which dispatches the synchronous construction to the default
         ThreadPoolExecutor and returns the constructed instance
         awaitably. The synchronous constructor remains supported for
@@ -174,7 +174,7 @@ class AsyncMicrophone:
                 f"dtype must be 'int16' or 'float32'; got {dtype!r}"
             )
 
-        # Phase 7.5: collapse the legacy two-flag pattern (vad=True,
+        # Collapse the legacy two-flag pattern (vad=True,
         # vad_mode="silero") into a single union-typed parameter. Mirrors
         # Microphone exactly; see _classes.py for the full rationale.
         vad_enabled: bool
@@ -245,8 +245,8 @@ class AsyncMicrophone:
         elif ort_library_path is not None:
             resolved_ort_path = str(Path(ort_library_path))
 
-        # Wrapper-only rename (Phase 7.6 Item C2): public surface uses
-        # `dtype`; bridge keeps `format` for cross-binding consistency.
+        # Wrapper-only rename: public surface uses `dtype`; bridge keeps
+        # `format` for cross-binding consistency.
         self._bridge = _decibri.AsyncMicrophoneBridge(
             sample_rate=sample_rate,
             channels=channels,
@@ -270,12 +270,12 @@ class AsyncMicrophone:
             sample_format=dtype,
         )
         self._format = dtype
-        # Wrapper-only rename (Phase 7.7 Item B4); bridge keeps the
-        # original `numpy` name for cross-binding consistency per LD11.
+        # Wrapper-only rename; the bridge keeps the original `numpy` name
+        # for cross-binding consistency.
         self._as_ndarray = as_ndarray
-        # Phase 7.7 Item B1: chunk counter for read_with_metadata().
+        # Chunk counter for read_with_metadata().
         self._sequence = 0
-        # Phase 9 Item A4: capture construction parameters for __repr__.
+        # Capture construction parameters for __repr__.
         self._sample_rate = sample_rate
         self._channels = channels
         self._frames_per_buffer = frames_per_buffer
@@ -360,9 +360,9 @@ class AsyncMicrophone:
         (``vad="silero"`` or ``vad="energy"``). In ndarray
         mode with VAD enabled, the chunk is converted to bytes once via
         ``arr.tobytes()`` for the VAD state machine; the original
-        ndarray is returned to the user. Phase 6 plan §3i.
+        ndarray is returned to the user.
 
-        Cancellation: per the Phase 5 abort-immediately decision, cancelling
+        Cancellation: by the abort-immediately design, cancelling
         this await raises ``CancelledError`` immediately. The spawn_blocking
         thread on the Rust side runs to completion; its result (if any) is
         dropped. The bridge state remains consistent for subsequent reads.
@@ -443,8 +443,8 @@ class AsyncMicrophone:
     def is_open(self) -> bool:
         """True if the capture stream is currently running.
 
-        Queries the Rust bridge directly via a lock-free atomic mirror
-        (Phase 7.5 Item 10). Reports honestly even when the Rust side
+        Queries the Rust bridge directly via a lock-free atomic mirror.
+        Reports honestly even when the Rust side
         closes the stream itself (e.g., device disconnect or cpal driver
         error), unlike the prior Python-side cache.
         """
@@ -494,9 +494,8 @@ class AsyncMicrophone:
     # explicitly. See the class docstring's "Resource cleanup" section.
 
     def __repr__(self) -> str:
-        # Phase 9 Item A4. Mirrors Microphone.__repr__; is_open is
-        # queried from the bridge's lock-free atomic mirror so the repr
-        # reflects current bridge truth (LD-9-8).
+        # Mirrors Microphone.__repr__; is_open is queried from the bridge's
+        # lock-free atomic mirror so the repr reflects current bridge truth.
         is_open: bool | str
         try:
             is_open = self.is_open
@@ -513,7 +512,7 @@ class AsyncMicrophone:
         )
 
     # -----------------------------------------------------------------------
-    # Async factory (Phase 9 Item A6)
+    # Async factory
     # -----------------------------------------------------------------------
 
     @classmethod
@@ -543,15 +542,14 @@ class AsyncMicrophone:
                 async for chunk in mic:
                     await process(chunk)
 
-        Phase 9 LD-9-3 (pulled forward from 0.2.0 backlog) and LD-9-7
-        (default ThreadPoolExecutor; users wanting a custom executor can
-        construct synchronously inside their own thread).
+        The default ThreadPoolExecutor is used; callers wanting a custom
+        executor can construct synchronously inside their own thread.
         """
         loop = asyncio.get_running_loop()
         return await loop.run_in_executor(None, lambda: cls(**kwargs))
 
     @staticmethod
-    async def input_devices() -> list[DeviceInfo]:
+    async def devices() -> list[MicrophoneInfo]:
         """List available audio input devices."""
         return await _decibri.AsyncMicrophoneBridge.devices()
 
@@ -590,10 +588,9 @@ class AsyncSpeaker:
     raises ``CancelledError`` immediately, but the audio continues to play
     until the cpal output buffer empties on the callback's own schedule.
     The bridge's drain state may be inconsistent if a cancelled drain is
-    immediately followed by another write/drain cycle. This is per the
-    Phase 5 plan Risk 2 (spawn_blocking does not cooperatively cancel OS
-    threads); for production use, complete drains before initiating new
-    writes.
+    immediately followed by another write/drain cycle (spawn_blocking does
+    not cooperatively cancel OS threads); for production use, complete
+    drains before initiating new writes.
 
     Resource cleanup:
         Always use ``async with AsyncSpeaker(...) as o:`` or call
@@ -632,7 +629,7 @@ class AsyncSpeaker:
         device : int | str | None, optional
             Output device selector. ``None`` (default) uses the system
             default output. Pass an integer index from
-            ``AsyncSpeaker.output_devices()`` or a substring of the device
+            ``AsyncSpeaker.devices()`` or a substring of the device
             name. ``AsyncSpeaker`` does not load ONNX Runtime, so there
             is no ``ort_library_path`` parameter (output never invokes
             VAD).
@@ -641,15 +638,15 @@ class AsyncSpeaker:
             raise exceptions.InvalidFormat(
                 f"dtype must be 'int16' or 'float32'; got {dtype!r}"
             )
-        # Wrapper-only rename (Phase 7.6 Item C2): public surface uses
-        # `dtype`; bridge keeps `format` for cross-binding consistency.
+        # Wrapper-only rename: public surface uses `dtype`; bridge keeps
+        # `format` for cross-binding consistency.
         self._bridge = _decibri.AsyncSpeakerBridge(
             sample_rate=sample_rate,
             channels=channels,
             format=dtype,
             device=device,
         )
-        # Phase 9 Item A4: capture construction parameters for __repr__.
+        # Capture construction parameters for __repr__.
         self._sample_rate = sample_rate
         self._channels = channels
         self._format = dtype
@@ -689,7 +686,7 @@ class AsyncSpeaker:
     async def write(self, samples: SampleData) -> None:
         """Write a chunk of audio samples to the output buffer.
 
-        Phase 6: accepts either ``bytes`` or a ``numpy.ndarray`` with
+        Accepts either ``bytes`` or a ``numpy.ndarray`` with
         dtype matching the configured ``dtype`` (np.int16 or np.float32).
         Multi-channel ndarrays use shape ``(N, channels)`` (interleaved).
         Output bridges duck-type the input on each call.
@@ -701,7 +698,7 @@ class AsyncSpeaker:
     async def drain(self) -> None:
         """Block until all queued samples have been played.
 
-        Cancellation note: per Phase 5 plan Risk 2, cancelling this await
+        Cancellation note: cancelling this await
         raises ``CancelledError`` immediately, but the audio continues to
         play until the cpal output buffer empties on the callback's own
         schedule. See the class docstring for details.
@@ -724,10 +721,9 @@ class AsyncSpeaker:
     def is_playing(self) -> bool:
         """True if the output stream is currently running.
 
-        Queries the Rust bridge directly via a lock-free atomic mirror
-        (Phase 7.5 Item 10 sibling fix). Reports honestly even when the
-        Rust side closes the stream itself, unlike the prior Python-side
-        cache.
+        Queries the Rust bridge directly via a lock-free atomic mirror.
+        Reports honestly even when the Rust side closes the stream itself,
+        unlike the prior Python-side cache.
         """
         return bool(self._bridge.is_playing_sync)
 
@@ -740,9 +736,8 @@ class AsyncSpeaker:
     # See the class docstring's "Resource cleanup" section.
 
     def __repr__(self) -> str:
-        # Phase 9 Item A4. Mirrors Speaker.__repr__; is_playing reflects
-        # the bridge's atomic mirror so the repr is honest about current
-        # state (LD-9-8).
+        # Mirrors Speaker.__repr__; is_playing reflects the bridge's atomic
+        # mirror so the repr is honest about current state.
         is_playing: bool | str
         try:
             is_playing = self.is_playing
@@ -766,13 +761,11 @@ class AsyncSpeaker:
         consistently use the factory pattern across both classes.
 
         Parameters mirror ``AsyncSpeaker.__init__`` exactly.
-
-        Phase 9 LD-9-3, LD-9-7.
         """
         loop = asyncio.get_running_loop()
         return await loop.run_in_executor(None, lambda: cls(**kwargs))
 
     @staticmethod
-    async def output_devices() -> list[OutputDeviceInfo]:
+    async def devices() -> list[SpeakerInfo]:
         """List available audio output devices."""
         return await _decibri.AsyncSpeakerBridge.devices()

@@ -14,21 +14,20 @@ Hierarchy:
     + 11 direct subclasses (config + runtime errors that don't involve
       device enumeration or ORT)
     + DeviceError (intermediate; no instances; catches device-related)
-        + 8 direct device subclasses (DeviceNotFound, OutputDeviceNotFound,
+        + 8 direct device subclasses (MicrophoneNotFound, SpeakerNotFound,
           MultipleDevicesMatch, DeviceIndexOutOfRange, NoMicrophoneFound,
-          NoOutputDeviceFound, NotAnInputDevice, DeviceEnumerationFailed)
+          NoSpeakerFound, NotAnInputDevice, DeviceEnumerationFailed)
     + OrtError (intermediate; no instances; catches all ORT-related)
         + 7 direct ORT subclasses (init, session, threads, inference, tensors)
         + OrtPathError (intermediate; no instances; catches path-specific)
             + OrtLoadFailed (has path field; ORT failed to load)
             + OrtPathInvalid (has path field; pre-check rejected)
 
-Design rationale: see Q1 (revised 2026-04-26) in the Phase 2 design
-decisions reference doc. Phase 7.7 Item B7 added DeviceError for symmetry
-with OrtError and OrtPathError. Intermediate parents (DeviceError,
-OrtError, OrtPathError) are catch-targets only; they have no instances
-themselves. The Rust core's DecibriError variants map directly to the 29
-instance classes via the to_py_err mapper in bindings/python/src/lib.rs.
+DeviceError exists for catch symmetry with OrtError and OrtPathError.
+Intermediate parents (DeviceError, OrtError, OrtPathError) are
+catch-targets only; they have no instances themselves. The Rust core's
+DecibriError variants map directly to the instance classes via the
+to_py_err mapper in bindings/python/src/lib.rs.
 """
 
 
@@ -60,14 +59,14 @@ class InvalidFormat(DecibriError):
     """Raised when format string is not recognized."""
 
 
-# DeviceError intermediate parent (Phase 7.7 Item B7)
+# DeviceError intermediate parent
 
 
 class DeviceError(DecibriError):
     """Base class for all device-enumeration and selection errors.
 
-    Catches: DeviceNotFound, OutputDeviceNotFound, MultipleDevicesMatch,
-    DeviceIndexOutOfRange, NoMicrophoneFound, NoOutputDeviceFound,
+    Catches: MicrophoneNotFound, SpeakerNotFound, MultipleDevicesMatch,
+    DeviceIndexOutOfRange, NoMicrophoneFound, NoSpeakerFound,
     NotAnInputDevice, DeviceEnumerationFailed. 8 instance classes total.
 
     Use this when you want to catch any device-selection failure with a
@@ -82,12 +81,12 @@ class DeviceError(DecibriError):
 # Direct DeviceError subclasses (8 instance classes)
 
 
-class DeviceNotFound(DeviceError):
-    """Raised when the named input device cannot be found on the system."""
+class MicrophoneNotFound(DeviceError):
+    """Raised when the named microphone cannot be found on the system."""
 
 
-class OutputDeviceNotFound(DeviceError):
-    """Raised when the named output device cannot be found on the system."""
+class SpeakerNotFound(DeviceError):
+    """Raised when the named speaker cannot be found on the system."""
 
 
 class MultipleDevicesMatch(DeviceError):
@@ -102,8 +101,8 @@ class NoMicrophoneFound(DeviceError):
     """Raised when no input device is available on the system."""
 
 
-class NoOutputDeviceFound(DeviceError):
-    """Raised when no output device is available on the system."""
+class NoSpeakerFound(DeviceError):
+    """Raised when no speaker is available on the system."""
 
 
 class NotAnInputDevice(DeviceError):
@@ -134,12 +133,12 @@ class PermissionDenied(DecibriError):
     """
 
 
-class CaptureStreamClosed(DecibriError):
-    """Raised when reading from a closed capture stream."""
+class MicrophoneStreamClosed(DecibriError):
+    """Raised when reading from a closed microphone stream."""
 
 
-class OutputStreamClosed(DecibriError):
-    """Raised when writing to a closed output stream."""
+class SpeakerStreamClosed(DecibriError):
+    """Raised when writing to a closed speaker stream."""
 
 
 class VadSampleRateUnsupported(DecibriError):
@@ -266,10 +265,10 @@ class OrtPathInvalid(OrtPathError):
         self.reason = reason
 
 
-# Phase 9 Item C7: fork-safety detection (Linux). Direct DecibriError
-# subclass, NOT under OrtError, because this is a usage error (user
-# initialized ORT in parent then forked) rather than an ORT-internal
-# error. See LD-9-9. Catch via `except DecibriError` continues to work.
+# Fork-safety detection (Linux). Direct DecibriError subclass, NOT under
+# OrtError, because this is a usage error (user initialized ORT in parent
+# then forked) rather than an ORT-internal error. Catch via
+# `except DecibriError` continues to work.
 
 
 class ForkAfterOrtInit(DecibriError):

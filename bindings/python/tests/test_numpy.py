@@ -1,12 +1,11 @@
-"""Phase 6 tests for numpy ndarray support.
+"""Tests for numpy ndarray support.
 
-Covers the goals from Section 2 of phase-6-numpy-zerocopy.md:
-construction with as_ndarray=True (no NotImplementedError), bytes-mode
-regression (default), ndarray return on read, dtype/shape correctness,
-ndarray-accept on write, dtype mismatch rejection, async parallel,
-and the 5-test smoke baseline still passing.
+Covers: construction with as_ndarray=True (no NotImplementedError),
+bytes-mode regression (default), ndarray return on read, dtype/shape
+correctness, ndarray-accept on write, dtype mismatch rejection, async
+parallel, and the 5-test smoke baseline still passing.
 
-Per Phase 5 conventions, every async test has explicit
+By convention, every async test has explicit
 ``@pytest.mark.asyncio``. Hardware-gated tests use the existing
 ``requires_audio_input`` / ``requires_audio_output`` markers from
 ``conftest.py`` so cloud CI runners (no audio devices) skip cleanly.
@@ -29,19 +28,17 @@ from decibri import AsyncMicrophone, AsyncSpeaker, Microphone, Speaker
 
 
 def test_construction_with_as_ndarray_true_no_longer_raises() -> None:
-    """Phase 6 removes the Phase 2 NotImplementedError guard.
+    """``Microphone(as_ndarray=True)`` constructs without raising.
 
-    Pre-Phase-6, ``Microphone(numpy=True)`` raised
-    ``NotImplementedError``. Phase 6 wires the actual ndarray path; the
-    constructor now succeeds. Phase 7.7 renamed the wrapper kwarg from
-    ``numpy`` to ``as_ndarray`` (bridge keeps ``numpy`` per LD11).
+    The wrapper kwarg is ``as_ndarray``; the bridge keeps the original
+    ``numpy`` name internally.
     """
     decibri = Microphone(as_ndarray=True, vad=False)
     assert decibri is not None
 
 
 def test_construction_default_unchanged() -> None:
-    """Default ``as_ndarray=False`` preserves the Phase 5 behavior verbatim."""
+    """Default ``as_ndarray=False`` preserves the bytes-mode behavior verbatim."""
     decibri = Microphone(vad=False)
     assert decibri is not None
 
@@ -68,7 +65,7 @@ def test_read_returns_ndarray_when_as_ndarray_true() -> None:
 
 @pytest.mark.requires_audio_input
 def test_read_returns_bytes_when_as_ndarray_false() -> None:
-    """Default sync read returns ``bytes`` (Phase 5 baseline regression)."""
+    """Default sync read returns ``bytes`` (bytes-mode regression)."""
     with Microphone(vad=False) as d:
         chunk = d.read()
         if chunk is not None:
@@ -121,7 +118,7 @@ def test_write_accepts_ndarray_int16() -> None:
 
 @pytest.mark.requires_audio_output
 def test_write_accepts_bytes_regression() -> None:
-    """Output write still accepts ``bytes`` (Phase 5 baseline regression)."""
+    """Output write still accepts ``bytes`` (bytes-mode regression)."""
     samples = b"\x00\x00" * 1600
     with Speaker(dtype="int16") as o:
         o.write(samples)
@@ -134,13 +131,13 @@ def test_write_rejects_dtype_mismatch() -> None:
 
     The dtype check fires at ``write()`` time, but the test path requires
     ``output.start()`` to succeed first (the bridge's stream-state check
-    raises ``OutputStreamClosed`` before the dtype check would run if the
+    raises ``SpeakerStreamClosed`` before the dtype check would run if the
     output is not started). On CI runners without audio output hardware,
     ``start()`` fails with ``StreamOpenFailed`` before the test can
     exercise the dtype-rejection path; hence the
     ``requires_audio_output`` marker. Restructuring the bridge to
     validate dtype before stream-state would be a real refactor; out of
-    Phase 6 scope. The dtype-rejection behavior is still verified, just
+    scope here. The dtype-rejection behavior is still verified, just
     only on hardware.
     """
     samples = np.zeros(1600, dtype=np.float32)

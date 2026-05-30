@@ -1,8 +1,8 @@
-"""Smoke tests for the decibri Python wheel.
+"""Smoke tests for the decibri Python package.
 
-Phase 1 scope: wheel import, extension module load, VersionInfo correctness.
-Phase 2 additions: public API name surface (Microphone, Speaker, exception
-hierarchy roots) and the Silero VAD model bundling check.
+They cover package import, extension module load, VersionInfo
+correctness, the public API name surface (Microphone, Speaker, exception
+hierarchy roots), and the Silero VAD model bundling check.
 
 These tests are intentionally low-coverage and high-confidence: they verify
 the wheel installs and exposes its top-level surface. Detailed coverage of
@@ -16,12 +16,12 @@ import decibri
 
 
 def test_package_imports() -> None:
-    assert decibri.__version__ == "0.1.3"
-    # Phase 7.7 Item A2: bridges are hidden behind the private _decibri
-    # module. They are NOT accessible at decibri.<X> top level (sync or
-    # async). The async pair was never accessible at the top level; the
-    # sync pair (MicrophoneBridge, SpeakerBridge) used to be importable
-    # via attribute lookup but was hidden in 7.7 for symmetry.
+    assert decibri.__version__ == "0.2.0"
+    # The bridges are hidden behind the private _decibri module. They are
+    # NOT accessible at decibri.<X> top level (sync or async). The async
+    # pair was never accessible at the top level; the sync pair
+    # (MicrophoneBridge, SpeakerBridge) used to be importable via attribute
+    # lookup but is now hidden for symmetry.
     assert not hasattr(decibri, "MicrophoneBridge")
     assert not hasattr(decibri, "SpeakerBridge")
     assert not hasattr(decibri, "AsyncMicrophoneBridge")
@@ -72,7 +72,7 @@ def test_version_info_fields() -> None:
     info = _decibri.MicrophoneBridge.version()
     assert info.decibri == "4.0.0"
     assert info.audio_backend == "cpal 0.17"
-    assert info.binding == "0.1.3"
+    assert info.binding == "0.2.0"
 
 
 def test_version_info_is_frozen() -> None:
@@ -86,7 +86,7 @@ def test_version_info_is_frozen() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Phase 2: public API name surface
+# Public API name surface
 # ---------------------------------------------------------------------------
 
 
@@ -118,23 +118,11 @@ def test_exception_intermediate_parents_importable() -> None:
 def test_public_surface_count() -> None:
     """The public ``__all__`` enumerates the top-level surface (18 names).
 
-    Phase 7.7 reshaped the public surface (17 names at lock):
-      - Item A1 removed four lowercase factory functions
-        (microphone, speaker, async_microphone, async_speaker).
-      - Item B2 renamed `devices` -> `input_devices`.
-      - Item B7 added `DeviceError` (catch-target intermediate).
-      - Item B1 added `Chunk` (audio chunk with metadata).
-
-    Phase 9 Item C7 added `ForkAfterOrtInit` (5th exception entry):
-    additive single-class growth, surfaced because users are likely to
-    catch it by name to distinguish "use spawn start method" from other
-    DecibriError causes.
-
-    Final composition: 2 sync wrappers (Microphone, Speaker) + 2 async
+    Composition: 2 sync wrappers (Microphone, Speaker) + 2 async
     wrappers (AsyncMicrophone, AsyncSpeaker) + 3 module-level
     convenience functions (input_devices, output_devices, version) +
     2 file convenience functions (record_to_file, async_record_to_file)
-    + 3 value types (DeviceInfo, OutputDeviceInfo, VersionInfo)
+    + 3 value types (MicrophoneInfo, SpeakerInfo, VersionInfo)
     + 1 audio chunk dataclass (Chunk)
     + 5 exception entries (DecibriError, DeviceError, ForkAfterOrtInit,
       OrtError, OrtPathError)
@@ -146,33 +134,33 @@ def test_public_surface_count() -> None:
 
 
 def test_lowercase_factories_removed() -> None:
-    """Phase 7.7 Item A1: the four lowercase factories are gone."""
+    """The four lowercase factories are gone."""
     for removed_name in ("microphone", "speaker", "async_microphone", "async_speaker"):
         assert not hasattr(decibri, removed_name), (
-            f"decibri.{removed_name} should have been removed in Phase 7.7"
+            f"decibri.{removed_name} should have been removed"
         )
 
 
 # ---------------------------------------------------------------------------
-# Phase 7.5: module-level convenience functions
+# Module-level convenience functions
 # ---------------------------------------------------------------------------
 
 
 def test_module_level_input_devices_aliases_microphone() -> None:
-    """decibri.input_devices() is an alias for Microphone.input_devices()."""
+    """decibri.input_devices() is an alias for Microphone.devices()."""
     result = decibri.input_devices()
     assert isinstance(result, list)
-    expected = decibri.Microphone.input_devices()
+    expected = decibri.Microphone.devices()
     assert len(result) == len(expected)
-    # DeviceInfo objects don't implement __eq__; compare by stable id field.
+    # MicrophoneInfo objects don't implement __eq__; compare by stable id field.
     assert [d.id for d in result] == [d.id for d in expected]
 
 
 def test_module_level_output_devices_aliases_speaker() -> None:
-    """decibri.output_devices() is an alias for Speaker.output_devices()."""
+    """decibri.output_devices() is an alias for Speaker.devices()."""
     result = decibri.output_devices()
     assert isinstance(result, list)
-    expected = decibri.Speaker.output_devices()
+    expected = decibri.Speaker.devices()
     assert len(result) == len(expected)
     assert [d.id for d in result] == [d.id for d in expected]
 
@@ -190,7 +178,7 @@ def test_module_level_version_aliases_microphone() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Phase 2: Silero VAD model bundling
+# Silero VAD model bundling
 # ---------------------------------------------------------------------------
 
 

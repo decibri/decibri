@@ -1,10 +1,9 @@
-"""ONNX Runtime dynamic library path resolver for the Python wheel.
+"""ONNX Runtime dynamic library path resolver for the Python package.
 
-The Phase 2 wheel build leaves ORT loading to the user (manual
-``ORT_DYLIB_PATH``, or a separate ``pip install onnxruntime``), which is
-incompatible with the premium-quality remit. Phase 3 closes that gap by
-bundling the per-platform dylib into ``decibri/_ort/`` at CI build time and
-resolving its path at first VAD use through this module.
+This module resolves the ONNX Runtime dynamic library path at first VAD
+use. The per-platform dylib is bundled into ``decibri/_ort/`` at build
+time; this resolver locates the bundled dylib (or a user override) and
+returns its path.
 
 The resolver implements a four-arm priority order so that:
 

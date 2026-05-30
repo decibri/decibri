@@ -1,6 +1,6 @@
-"""Phase 2 exception hierarchy tests.
+"""Exception hierarchy tests.
 
-Covers all 32 exception classes shipped in the public ``decibri`` namespace:
+Covers all 33 exception classes shipped in the public ``decibri`` namespace:
 1 base (DecibriError) + 11 direct subclasses + DeviceError intermediate
 + 8 direct DeviceError subclasses + OrtError intermediate + 7 direct
 OrtError subclasses + OrtPathError intermediate + 2 direct OrtPathError
@@ -15,25 +15,25 @@ Verifies:
 - Path-bearing exceptions (OrtLoadFailed, OrtPathInvalid, VadModelLoadFailed)
   expose .path (and .reason for OrtPathInvalid) as named attributes per
   CPython OSError convention.
-- Single source of truth (Commit 5 routing fix): the binding raises
+- Single source of truth: the binding raises
   instances of the pure-Python exception classes, not Rust-side duplicates.
 """
 
 import decibri
 from decibri import (
     AlreadyRunning,
-    CaptureStreamClosed,
+    MicrophoneStreamClosed,
     ChannelsOutOfRange,
     DecibriError,
     DeviceEnumerationFailed,
     DeviceError,
     DeviceIndexOutOfRange,
-    DeviceNotFound,
+    MicrophoneNotFound,
     FramesPerBufferOutOfRange,
     InvalidFormat,
     MultipleDevicesMatch,
     NoMicrophoneFound,
-    NoOutputDeviceFound,
+    NoSpeakerFound,
     NotAnInputDevice,
     OrtError,
     OrtInferenceFailed,
@@ -45,8 +45,8 @@ from decibri import (
     OrtTensorCreateFailed,
     OrtTensorExtractFailed,
     OrtThreadsConfigFailed,
-    OutputDeviceNotFound,
-    OutputStreamClosed,
+    SpeakerNotFound,
+    SpeakerStreamClosed,
     PermissionDenied,
     SampleRateOutOfRange,
     StreamOpenFailed,
@@ -67,27 +67,27 @@ ALL_DECIBRI_ERROR_CLASSES = (
     DecibriError,
     # 11 direct DecibriError subclasses (non-device, non-ORT)
     AlreadyRunning,
-    CaptureStreamClosed,
+    MicrophoneStreamClosed,
     ChannelsOutOfRange,
     FramesPerBufferOutOfRange,
     InvalidFormat,
-    OutputStreamClosed,
+    SpeakerStreamClosed,
     PermissionDenied,
     SampleRateOutOfRange,
     StreamOpenFailed,
     StreamStartFailed,
     VadSampleRateUnsupported,
     VadThresholdOutOfRange,
-    # DeviceError intermediate + 8 direct subclasses (Phase 7.7 Item B7)
+    # DeviceError intermediate + 8 direct subclasses
     DeviceError,
     DeviceEnumerationFailed,
     DeviceIndexOutOfRange,
-    DeviceNotFound,
+    MicrophoneNotFound,
     MultipleDevicesMatch,
     NoMicrophoneFound,
-    NoOutputDeviceFound,
+    NoSpeakerFound,
     NotAnInputDevice,
-    OutputDeviceNotFound,
+    SpeakerNotFound,
     # OrtError + 7 direct + OrtPathError + 2 direct
     OrtError,
     OrtInitFailed,
@@ -104,8 +104,7 @@ ALL_DECIBRI_ERROR_CLASSES = (
 
 
 def test_class_count() -> None:
-    # Phase 7.7 Item B7 added DeviceError intermediate, taking the total
-    # from 32 to 33: 1 base + 11 direct + DeviceError + 8 device + OrtError
+    # 33 total: 1 base + 11 direct + DeviceError + 8 device + OrtError
     # + 7 ORT direct + OrtPathError + 2 path. 29 instance + 4 catch-target
     # intermediates (DecibriError, DeviceError, OrtError, OrtPathError).
     assert len(ALL_DECIBRI_ERROR_CLASSES) == 33
@@ -159,13 +158,13 @@ def test_ort_path_error_catches_exactly_two_variants() -> None:
 
 
 def test_ort_init_failed_is_not_path_error() -> None:
-    """OrtInitFailed has no path; it is NOT under OrtPathError. Per Q1 revision."""
+    """OrtInitFailed has no path; it is NOT under OrtPathError."""
     assert not issubclass(OrtInitFailed, OrtPathError)
     assert issubclass(OrtInitFailed, OrtError)
 
 
 # ---------------------------------------------------------------------------
-# Phase 7.7 Item B7: DeviceError catch-target.
+# DeviceError catch-target.
 #
 # DeviceError is the parent of all 8 device-related exception classes.
 # Symmetric with OrtError; existing catches via DecibriError are preserved.
@@ -173,12 +172,12 @@ def test_ort_init_failed_is_not_path_error() -> None:
 
 
 DEVICE_ERROR_INSTANCE_CLASSES = (
-    DeviceNotFound,
-    OutputDeviceNotFound,
+    MicrophoneNotFound,
+    SpeakerNotFound,
     MultipleDevicesMatch,
     DeviceIndexOutOfRange,
     NoMicrophoneFound,
-    NoOutputDeviceFound,
+    NoSpeakerFound,
     NotAnInputDevice,
     DeviceEnumerationFailed,
 )
@@ -196,7 +195,7 @@ def test_device_error_subclasses_still_catchable_as_decibri_error() -> None:
     for cls in DEVICE_ERROR_INSTANCE_CLASSES:
         assert issubclass(cls, DecibriError), (
             f"{cls.__name__} should still be catchable as DecibriError "
-            f"after Phase 7.7 reparenting"
+            f"after reparenting"
         )
 
 
@@ -259,13 +258,13 @@ def test_each_class_raises_and_catches_itself() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Single-source-of-truth check (Commit 5 routing fix).
+# Single-source-of-truth check.
 #
-# Before Commit 5: the Rust binding created its own exception classes via
-# create_exception!, so a consumer catching decibri.exceptions.<X> would NOT
-# catch instances raised by the Rust mapper. Commit 5 routed to_py_err
+# If the Rust binding created its own exception classes via
+# create_exception!, a consumer catching decibri.exceptions.<X> would NOT
+# catch instances raised by the Rust mapper. Instead, to_py_err routes
 # through PyErr::from_type using the pure-Python classes from
-# decibri.exceptions, so the Rust binding now raises pure-Python instances.
+# decibri.exceptions, so the Rust binding raises pure-Python instances.
 #
 # Empirical proof: trigger an error from the binding (parse_sample_format
 # rejects "bogus"); assert the caught exception is an instance of the

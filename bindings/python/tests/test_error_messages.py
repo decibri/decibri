@@ -1,4 +1,4 @@
-"""Phase 2 error-message byte-identity tests (Q5 hybrid policy).
+"""Error-message byte-identity tests (hybrid policy).
 
 Hard-freeze tests: full message-text equality on InvalidArg-family messages
 NOT already covered in test_config.py. Soft-freeze tests: substring assertions
@@ -8,27 +8,26 @@ All tests construct decibri public surface end-to-end. Direct exception
 construction is not used here; the contract being frozen is the message a
 user sees through the validation path.
 
-# TODO: PermissionDenied byte-identity test deferred until Rust core wires
-# up the variant (cpal BuildStreamError mapping). When that lands, add per
-# Q5 hybrid soft-freeze policy.
+# TODO: PermissionDenied byte-identity test deferred until the Rust core
+# wires up the variant (cpal BuildStreamError mapping). When that lands,
+# add it under the hybrid soft-freeze policy.
 
 # TODO: most ORT-family error messages (OrtInitFailed, OrtSessionBuildFailed,
 # OrtThreadsConfigFailed, OrtInferenceFailed, OrtTensorCreateFailed,
 # OrtTensorExtractFailed) require the ORT runtime to be in a failure state
-# at test time. Not reachable in normal Phase 2 test flow. Deferred until
-# Phase 3 / 4 when ORT-bundling and inference tests have a richer setup
-# surface. Soft-freeze (per Q5) substring assertions for these will land
-# alongside the test infrastructure that can produce them.
+# at test time. Not reachable in the normal test flow. Soft-freeze
+# substring assertions for these can land alongside the test
+# infrastructure that can produce them.
 """
 
 import pytest
 
 from decibri import (
-    CaptureStreamClosed,
+    MicrophoneStreamClosed,
     Microphone,
     Speaker,
     InvalidFormat,
-    OutputStreamClosed,
+    SpeakerStreamClosed,
 )
 
 
@@ -74,25 +73,25 @@ def test_output_invalid_format_wrapper(dtype_value: str, expected_msg: str) -> N
 
 
 def test_capture_read_before_start_message() -> None:
-    """Microphone.read() before start() raises CaptureStreamClosed with canonical text."""
+    """Microphone.read() before start() raises MicrophoneStreamClosed with canonical text."""
     d = Microphone()
-    with pytest.raises(CaptureStreamClosed) as exc_info:
+    with pytest.raises(MicrophoneStreamClosed) as exc_info:
         d.read(timeout_ms=100)
     assert str(exc_info.value) == "capture is not running"
 
 
 def test_output_write_before_start_message() -> None:
-    """Speaker.write() before start() raises OutputStreamClosed with canonical text."""
+    """Speaker.write() before start() raises SpeakerStreamClosed with canonical text."""
     o = Speaker()
-    with pytest.raises(OutputStreamClosed) as exc_info:
+    with pytest.raises(SpeakerStreamClosed) as exc_info:
         o.write(b"\x00" * 100)
     assert str(exc_info.value) == "output is not running"
 
 
 def test_output_drain_before_start_message() -> None:
-    """Speaker.drain() before start() raises OutputStreamClosed with canonical text."""
+    """Speaker.drain() before start() raises SpeakerStreamClosed with canonical text."""
     o = Speaker()
-    with pytest.raises(OutputStreamClosed) as exc_info:
+    with pytest.raises(SpeakerStreamClosed) as exc_info:
         o.drain()
     assert str(exc_info.value) == "output is not running"
 

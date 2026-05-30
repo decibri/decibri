@@ -1,7 +1,7 @@
-"""Phase 5 Step 1 empirical smoke tests for pyo3-async-runtimes.
+"""Empirical smoke tests for pyo3-async-runtimes.
 
 Verifies two preconditions for the AsyncMicrophone / AsyncSpeaker
-surface that lands in subsequent Phase 5 relays:
+surface:
 
 1. The Tokio runtime initializes correctly in our extension-module
    context. ``pyo3-async-runtimes`` documents
@@ -11,11 +11,10 @@ surface that lands in subsequent Phase 5 relays:
 
 2. ``asyncio.CancelledError`` (and its ``TimeoutError`` subclass)
    propagate correctly from Python through ``pyo3-async-runtimes``
-   to the underlying Tokio future. This is the foundation Phase 5's
-   abort-immediately cancellation policy is built on (locked decision
-   Q3 of phase-5-async-support.md).
+   to the underlying Tokio future. This is the foundation the
+   abort-immediately cancellation policy is built on.
 
-These tests stay as persistent regression coverage (locked decision Q4):
+These tests stay as persistent regression coverage:
 if a future ``pyo3-async-runtimes`` upgrade breaks runtime init or
 cancellation propagation, these tests fail first and surface the
 regression at the build-pipeline level rather than at AsyncMicrophone
@@ -43,8 +42,7 @@ async def test_async_smoke_returns_expected_value() -> None:
     Establishes the baseline: a Rust async block (50 ms tokio sleep
     followed by ``Ok(42_i64)``) is awaitable from Python and yields the
     expected value. If this test fails with a runtime-not-initialised
-    error, the lazy-init assumption is wrong and Phase 5's plan needs
-    revision before any AsyncMicrophone code lands.
+    error, the lazy-init assumption is wrong.
     """
     result = await _async_smoke()
     assert result == 42, f"Expected 42, got {result!r}"
@@ -58,8 +56,7 @@ async def test_async_smoke_cancellation_propagates() -> None:
     Python 3.11+, so this test exercises the locked abort-immediately
     cancellation pathway. If this fails (the future runs to completion
     despite the timeout, or hangs, or raises a different exception),
-    Phase 5's cancellation design needs revision before the full async
-    surface lands.
+    the cancellation design needs revision.
 
     Note: ``asyncio.wait_for`` is used rather than ``asyncio.timeout``
     because the latter was added in Python 3.11 and the abi3 floor is
@@ -68,7 +65,7 @@ async def test_async_smoke_cancellation_propagates() -> None:
     for our purposes (cancels the awaited coroutine, surfaces the
     cancellation as TimeoutError to the caller).
 
-    Note: per Phase 5 plan Risk 2, ``tokio::task::spawn_blocking`` does
+    Note: ``tokio::task::spawn_blocking`` does
     not cooperatively cancel the underlying OS thread; the Python side
     sees ``CancelledError`` immediately while the Rust thread continues.
     This smoke test exercises only the Python-visible behaviour, which

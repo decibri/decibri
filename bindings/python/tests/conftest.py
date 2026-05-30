@@ -20,7 +20,7 @@ Auto-skip semantics:
         Skipped when the bundled _ort/ directory is missing or contains
         no platform-appropriate dylib (libonnxruntime*.so on Linux,
         libonnxruntime*.dylib on macOS, onnxruntime*.dll on Windows). This
-        is the inverse of "skip in CI": Phase 3 CI populates _ort/ before
+        is the inverse of "skip in CI": CI populates _ort/ before
         running tests, so these tests RUN in CI and SKIP on dev installs
         where maturin develop leaves _ort/ empty. The check inspects the
         installed package via importlib.resources, so editable installs

@@ -1,4 +1,4 @@
-"""Phase 2 audio capture lifecycle tests.
+"""Audio capture lifecycle tests.
 
 All tests in this module require real audio input hardware. CI auto-skips
 via the requires_audio_input marker.
@@ -16,9 +16,9 @@ import pytest
 
 from decibri import (
     AlreadyRunning,
-    CaptureStreamClosed,
+    MicrophoneStreamClosed,
     Microphone,
-    DeviceInfo,
+    MicrophoneInfo,
 )
 
 
@@ -31,11 +31,11 @@ pytestmark = pytest.mark.requires_audio_input
 
 
 def test_input_devices_returns_list_of_device_info() -> None:
-    devices = Microphone.input_devices()
+    devices = Microphone.devices()
     assert isinstance(devices, list)
     assert len(devices) > 0
     for d in devices:
-        assert isinstance(d, DeviceInfo)
+        assert isinstance(d, MicrophoneInfo)
         assert isinstance(d.name, str)
         assert isinstance(d.index, int)
         assert isinstance(d.max_input_channels, int)
@@ -110,7 +110,7 @@ def test_read_after_stop_raises_closed() -> None:
     d = Microphone()
     d.start()
     d.stop()
-    with pytest.raises(CaptureStreamClosed):
+    with pytest.raises(MicrophoneStreamClosed):
         d.read(timeout_ms=100)
 
 
@@ -131,7 +131,7 @@ def test_iterator_yields_bytes() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Phase 7.7 Item B1: read_with_metadata + iter_with_metadata + Chunk
+# read_with_metadata + iter_with_metadata + Chunk
 # ---------------------------------------------------------------------------
 
 

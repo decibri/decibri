@@ -1,9 +1,9 @@
-"""Phase 9 Item A4: __repr__ on the four wrapper classes.
+"""__repr__ on the four wrapper classes.
 
 Pins the contract that ``repr(instance)`` returns a useful string that
 shows construction parameters plus current state, mirroring the
-``VersionInfo`` precedent. Auto-display in Jupyter (the primary motivator
-per LD-9-8) shows this repr when an instance is the last expression in
+``VersionInfo`` precedent. Auto-display in Jupyter (the primary motivator)
+shows this repr when an instance is the last expression in
 a cell.
 
 Tests that call ``mic.start()`` to verify the ``is_open=True`` lifecycle

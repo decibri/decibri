@@ -4,7 +4,7 @@ build-backend = "maturin"
 
 [project]
 name = "decibri"
-version = "0.1.3"
+version = "0.2.0"
 description = "Cross-platform audio capture, output, and voice activity detection"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -42,15 +42,14 @@ dependencies = [
     "typing-extensions>=4.15",
 ]
 
-# Phase 6: numpy is the optional ndarray-support extra. Users who want
+# numpy is the optional ndarray-support extra. Users who want
 # `Decibri(numpy=True)` and `output.write(np_array)` install via
 # `pip install decibri[numpy]`. The Rust binary always includes the
 # rust-numpy code paths (compile-time gating adds CI complexity for
 # negligible binary-size savings); calling `numpy=True` without the
 # Python `numpy` package installed raises a clear ImportError at the
 # first PyArray construction. Lower bound 1.20 covers the abi3-py310
-# baseline and matches industry convention (sounddevice, polars; cited
-# in phase-6-numpy-zerocopy.md §11 Q1 research).
+# baseline and matches industry convention (sounddevice, polars).
 [project.optional-dependencies]
 numpy = ["numpy>=1.20"]
 
@@ -69,8 +68,7 @@ dev = [
     "mypy>=1.20,<2.0",
     "typing-extensions>=4.15",
     # 0.1.3: hypothesis powers the property-based constructor tests in
-    # tests/test_microphone_properties.py (Phase 9 Tier 1 testing per
-    # prerelease-decibri-additional-testing-reqs.md). Floor 6.0 covers
+    # tests/test_microphone_properties.py. Floor 6.0 covers
     # the modern strategy API surface; upper bound left open until a
     # 7.0 release lands and we can re-pin.
     "hypothesis>=6.0",

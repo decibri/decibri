@@ -99,7 +99,7 @@ with decibri.Speaker(sample_rate=24000, channels=1) as spk:
 
 ### Value types
 
-`DeviceInfo`, `OutputDeviceInfo`, `VersionInfo`, `Chunk`.
+`MicrophoneInfo`, `SpeakerInfo`, `VersionInfo`, `Chunk`.
 
 ### Exceptions
 

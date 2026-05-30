@@ -71,8 +71,8 @@ docker run --rm decibri:base
 Verified output (Docker Desktop 4.71, manylinux_2_34 wheel):
 
 ```
-decibri 0.1.3
-VersionInfo(decibri='3.4.0', audio_backend='cpal 0.17', binding='0.1.3')
+decibri 0.2.0
+VersionInfo(decibri='4.0.0', audio_backend='cpal 0.17', binding='0.2.0')
 ```
 
 Image size: ~255 MB (`python:3.12-slim` ~50 MB + libasound2 ~3 MB + decibri wheel including bundled ORT ~50 MB + Python stdlib runtime). Well under typical production image budgets.
@@ -90,8 +90,8 @@ docker run --rm decibri:headless
 Verified output (Docker Desktop 4.71, no audio passthrough):
 
 ```
-input_devices: [DeviceInfo(index=0, name='Discard all samples (playback) or generate zero samples (capture)', id='alsa:null', max_input_channels=2, default_sample_rate=44100, is_default=false)]
-output_devices: [OutputDeviceInfo(index=0, name='Discard all samples (playback) or generate zero samples (capture)', id='alsa:null', max_output_channels=2, default_sample_rate=44100, is_default=false)]
+input_devices: [MicrophoneInfo(index=0, name='Discard all samples (playback) or generate zero samples (capture)', id='alsa:null', max_input_channels=2, default_sample_rate=44100, is_default=false)]
+output_devices: [SpeakerInfo(index=0, name='Discard all samples (playback) or generate zero samples (capture)', id='alsa:null', max_output_channels=2, default_sample_rate=44100, is_default=false)]
 Microphone() constructed UNEXPECTEDLY in headless container
 ```
 
@@ -141,9 +141,9 @@ Expected output on a Linux host with at least one audio device (build verified o
 
 ```
 input_devices count: <N>
-  - DeviceInfo(index=0, name='hw:0,0', ..., is_default=true)
+  - MicrophoneInfo(index=0, name='hw:0,0', ..., is_default=true)
   - ...
-decibri version: VersionInfo(decibri='3.4.0', audio_backend='cpal 0.17', binding='0.1.3')
+decibri version: VersionInfo(decibri='4.0.0', audio_backend='cpal 0.17', binding='0.2.0')
 ```
 
 If `input_devices count: 1` and the single device id is `alsa:null`, audio passthrough is incomplete; check the three flags above.
@@ -173,7 +173,7 @@ Verified on Docker Desktop 4.71, all three images using `python:3.12-slim` runti
 | `decibri:headless`       | 255 MB | identical to base; differs only in expected behavior   |
 | `decibri:audio`          | 267 MB | base + alsa-utils + non-root user setup                |
 
-The bundled ORT dylib accounts for ~15 to 20 MB inside the wheel; the Python wheel itself ships at ~25 MB.
+The bundled ORT dylib accounts for ~15 to 20 MB inside the wheel; the built wheel itself ships at ~25 MB.
 
 ## Recommended deployment patterns
 

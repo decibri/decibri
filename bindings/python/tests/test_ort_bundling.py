@@ -1,4 +1,4 @@
-"""Phase 3 ORT bundling and resolver tests.
+"""ORT bundling and resolver tests.
 
 Three tiers:
 
@@ -16,10 +16,9 @@ Three tiers:
    `Microphone(vad='silero')` and verify the load path
    reaches Silero session creation without raising. Marked
    `requires_bundled_ort`. Inference (forward pass against synthesized
-   audio) is intentionally deferred to Phase 4+; the existing Microphone
-   class consumes from a real microphone and does not expose a
-   buffer-injection API, so a deterministic inference smoke would need
-   an additional surface that is out of Phase 3 scope.
+   audio) is out of scope here; the existing Microphone class consumes
+   from a real microphone and does not expose a buffer-injection API, so
+   a deterministic inference smoke would need an additional surface.
 """
 
 from __future__ import annotations
@@ -258,7 +257,7 @@ def test_resolver_bundled_default(
 def test_decibri_silero_construction() -> None:
     """``Microphone(vad='silero')`` constructs end-to-end.
 
-    Exercises the full Phase 3 load path in one assertion: the resolver
+    Exercises the full load path in one assertion: the resolver
     finds the bundled dylib, the Rust bridge receives the resolved path,
     ``init_ort_once`` validates and loads it via ``ort::init_from()``, and
     the Silero session is built against the bundled model. If any link

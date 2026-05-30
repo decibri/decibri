@@ -1,4 +1,4 @@
-"""Phase 2 VAD tests organized in three sections.
+"""VAD tests organized in three sections.
 
 Section A: VAD config validation (no markers). Wrapper-layer validation of
 vad / vad_threshold / vad_holdoff_ms. These overlap conceptually with
@@ -93,7 +93,7 @@ def test_vad_disabled_is_speaking_returns_false() -> None:
     assert d.is_speaking is False
 
 
-# --- Phase 7.5 collapsed vad parameter validation -------------------------
+# --- collapsed vad parameter validation -------------------------
 
 
 def test_vad_true_raises_migration_error() -> None:
