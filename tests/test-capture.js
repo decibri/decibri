@@ -2,14 +2,16 @@
 
 const path = require('path');
 const { Microphone } = require(path.join(__dirname, '..', 'npm', 'decibri', 'src', 'decibri.js'));
+const pkg = require(path.join(__dirname, '..', 'npm', 'decibri', 'package.json'));
 
 // ── Test 1: version() ────────────────────────────────────────────────────────
 console.log('--- Microphone.version() ---');
 const ver = Microphone.version();
 console.log(ver);
 console.assert(typeof ver.decibri === 'string', 'decibri version is a string');
-console.assert(typeof ver.portaudio === 'string', 'portaudio version is a string');
-console.assert(ver.portaudio.includes('cpal'), `portaudio should contain "cpal", got: ${ver.portaudio}`);
+console.assert(typeof ver.audioBackend === 'string', 'audioBackend version is a string');
+console.assert(ver.audioBackend.includes('cpal'), `audioBackend should contain "cpal", got: ${ver.audioBackend}`);
+console.assert(ver.binding === pkg.version, `binding should equal package version ${pkg.version}, got: ${ver.binding}`);
 console.log('PASS: version()\n');
 
 // ── Test 2: devices() ────────────────────────────────────────────────────────

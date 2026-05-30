@@ -275,7 +275,7 @@ impl DecibriBridge {
     pub fn version() -> VersionInfoJs {
         VersionInfoJs {
             decibri: env!("CARGO_PKG_VERSION").to_string(),
-            portaudio: format!("cpal {}", CPAL_VERSION),
+            audio_backend: format!("cpal {}", CPAL_VERSION),
         }
     }
 }
@@ -298,7 +298,7 @@ pub struct DeviceInfoJs {
 #[napi(object)]
 pub struct VersionInfoJs {
     pub decibri: String,
-    pub portaudio: String,
+    pub audio_backend: String,
 }
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
@@ -531,7 +531,7 @@ impl DecibriOutputBridge {
     pub fn version() -> VersionInfoJs {
         VersionInfoJs {
             decibri: env!("CARGO_PKG_VERSION").to_string(),
-            portaudio: format!("cpal {}", CPAL_VERSION),
+            audio_backend: format!("cpal {}", CPAL_VERSION),
         }
     }
 }

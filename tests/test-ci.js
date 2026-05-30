@@ -10,6 +10,7 @@
 
 const path = require('path');
 const { Microphone, Speaker, inputDevices, outputDevices, version, DecibriError, DeviceError } = require(path.join(__dirname, '..', 'npm', 'decibri', 'src', 'decibri.js'));
+const pkg = require(path.join(__dirname, '..', 'npm', 'decibri', 'package.json'));
 
 let passed = 0;
 let failed = 0;
@@ -116,8 +117,9 @@ console.log('--- Group 2: Microphone static methods ---');
 
 const ver = Microphone.version();
 assert(typeof ver.decibri === 'string', 'version().decibri is string');
-assert(typeof ver.portaudio === 'string', 'version().portaudio is string');
-assert(ver.portaudio.includes('cpal'), `version().portaudio contains "cpal", got: ${ver.portaudio}`);
+assert(typeof ver.audioBackend === 'string', 'version().audioBackend is string');
+assert(ver.audioBackend.includes('cpal'), `version().audioBackend contains "cpal", got: ${ver.audioBackend}`);
+assert(ver.binding === pkg.version, `version().binding equals package version ${pkg.version}, got: ${ver.binding}`);
 
 const devices = Microphone.devices();
 assert(Array.isArray(devices), 'devices() returns array');
@@ -192,7 +194,8 @@ console.log('  Group 3 done\n');
 console.log('--- Group 4: Speaker static methods ---');
 
 const outVer = Speaker.version();
-assert(outVer.portaudio.includes('cpal'), 'Speaker.version().portaudio contains cpal');
+assert(outVer.audioBackend.includes('cpal'), 'Speaker.version().audioBackend contains cpal');
+assert(outVer.binding === pkg.version, `Speaker.version().binding equals package version ${pkg.version}, got: ${outVer.binding}`);
 
 const outDevices = Speaker.devices();
 assert(Array.isArray(outDevices), 'Speaker.devices() returns array');
@@ -266,7 +269,8 @@ assert(Array.isArray(outputDevices()), 'outputDevices() returns array');
 
 const freeVer = version();
 assert(typeof freeVer.decibri === 'string', 'free version().decibri is string');
-assert(freeVer.portaudio.includes('cpal'), 'free version().portaudio contains cpal');
+assert(freeVer.audioBackend.includes('cpal'), 'free version().audioBackend contains cpal');
+assert(freeVer.binding === pkg.version, `free version().binding equals package version ${pkg.version}, got: ${freeVer.binding}`);
 
 console.log('  Group 6 done\n');
 

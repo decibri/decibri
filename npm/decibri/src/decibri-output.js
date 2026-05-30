@@ -4,6 +4,10 @@ const { Writable } = require('stream');
 const { DecibriOutputBridge } = require('../index.js');
 const { wrapNativeError } = require('./errors');
 
+// The npm package version, reported as `binding` by version(). Read from
+// package.json so it tracks the published package and cannot drift.
+const PACKAGE_VERSION = require('../package.json').version;
+
 // ─── Speaker (Writable) ─────────────────────────────────────────────────────
 
 class Speaker extends Writable {
@@ -124,11 +128,12 @@ class Speaker extends Writable {
   }
 
   /**
-   * Version information for decibri and the audio runtime.
-   * @returns {{ decibri: string, portaudio: string }}
+   * Version information for decibri, the audio backend, and this binding.
+   * @returns {{ decibri: string, audioBackend: string, binding: string }}
    */
   static version() {
-    return DecibriOutputBridge.version();
+    const v = DecibriOutputBridge.version();
+    return { decibri: v.decibri, audioBackend: v.audioBackend, binding: PACKAGE_VERSION };
   }
 }
 

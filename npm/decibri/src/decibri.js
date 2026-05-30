@@ -12,6 +12,11 @@ const {
   OrtPathError,
 } = require('./errors');
 
+// The npm package version, reported as `binding` by version(). Read from
+// package.json so it tracks the published package and cannot drift from a
+// hardcoded string.
+const PACKAGE_VERSION = require('../package.json').version;
+
 // ─── Bundled ONNX Runtime path resolution ────────────────────────────────────
 
 /**
@@ -312,11 +317,12 @@ class Microphone extends Readable {
   }
 
   /**
-   * Version information for decibri and the audio runtime.
-   * @returns {{ decibri: string, portaudio: string }}
+   * Version information for decibri, the audio backend, and this binding.
+   * @returns {{ decibri: string, audioBackend: string, binding: string }}
    */
   static version() {
-    return DecibriBridge.version();
+    const v = DecibriBridge.version();
+    return { decibri: v.decibri, audioBackend: v.audioBackend, binding: PACKAGE_VERSION };
   }
 }
 
@@ -339,8 +345,8 @@ function outputDevices() {
 }
 
 /**
- * Version information for decibri and the audio runtime.
- * @returns {{ decibri: string, portaudio: string }}
+ * Version information for decibri, the audio backend, and this binding.
+ * @returns {{ decibri: string, audioBackend: string, binding: string }}
  */
 function version() {
   return Microphone.version();

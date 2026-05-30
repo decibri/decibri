@@ -25,10 +25,12 @@ export interface MicrophoneInfo {
 
 /** Version strings returned by `Microphone.version()`. */
 export interface VersionInfo {
-  /** decibri package version (e.g. `"3.0.0"`). */
+  /** decibri core version. */
   decibri: string;
-  /** Audio runtime version string (e.g. `"cpal 0.17"`). */
-  portaudio: string;
+  /** Audio backend version string (e.g. `"cpal 0.17"`). */
+  audioBackend: string;
+  /** This binding's npm package version. */
+  binding: string;
 }
 
 /** Constructor options for `Microphone`. */

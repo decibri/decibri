@@ -2,6 +2,7 @@
 
 const path = require('path');
 const { Microphone, Speaker, DeviceError } = require(path.join(__dirname, '..', 'npm', 'decibri', 'src', 'decibri.js'));
+const pkg = require(path.join(__dirname, '..', 'npm', 'decibri', 'package.json'));
 
 let passed = 0;
 let failed = 0;
@@ -155,7 +156,8 @@ async function testDeviceEnumeration() {
 
   // version() works
   const ver = Speaker.version();
-  assert(ver.portaudio.includes('cpal'), 'version().portaudio contains cpal');
+  assert(ver.audioBackend.includes('cpal'), 'version().audioBackend contains cpal');
+  assert(ver.binding === pkg.version, `version().binding equals package version ${pkg.version}, got: ${ver.binding}`);
 
   console.log('  Group 2 done\n');
 }
