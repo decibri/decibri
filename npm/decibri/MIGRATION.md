@@ -5,6 +5,23 @@ vocabulary that matches the Rust and Python packages, and tidies several option
 and return shapes. This guide lists every breaking change with before and after
 code.
 
+## New in 4.1.0 (additive, nothing to migrate)
+
+decibri 4.1.0 is a non-breaking, additive release. Code written for 4.0.0 keeps
+working unchanged; there is nothing to migrate. The release adds an opt-in
+non-blocking API for event-loop-sensitive code:
+
+- `Microphone.open(options)` and `Speaker.open(options)`: async factories that
+  construct an instance without blocking the event loop and resolve to a ready
+  instance. The synchronous `new Microphone(...)` and `new Speaker(...)`
+  constructors are unchanged.
+- `speaker.writeAsync(chunk)` and `speaker.drainAsync()`: write and drain
+  without blocking the event loop. The synchronous `write()` / `pipe()` /
+  `end()` interface is unchanged.
+
+See the Non-blocking API section of the README for examples. The rest of this
+guide covers the 4.0.0 changes from 3.x.
+
 ## Named exports
 
 The package no longer has a single default export. Destructure what you need.

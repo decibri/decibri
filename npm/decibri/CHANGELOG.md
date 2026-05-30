@@ -11,6 +11,8 @@ For other decibri packages, see:
 
 ## [Unreleased]
 
+## [4.1.0] - 2026-05-31
+
 ### Added
 
 - Async factories `Microphone.open(options)` and `Speaker.open(options)`, each returning a `Promise` that resolves to a constructed instance. They perform the blocking open work (the Silero VAD model load for the microphone; device resolution for both) on the native thread pool instead of the event loop, so latency-sensitive callers do not stall during construction. A failed open rejects with the matching error (`RangeError` / `TypeError` for invalid options, `DeviceError` / `OrtError` / `OrtPathError` for native failures). The synchronous `new Microphone(...)` and `new Speaker(...)` constructors are unchanged; the factories are an additive, non-blocking alternative that mirrors the Python `AsyncMicrophone.open()` / `AsyncSpeaker.open()` surface.
