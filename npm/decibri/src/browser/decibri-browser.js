@@ -3,7 +3,10 @@
 const { Emitter } = require('./emitter.js');
 const { WORKLET_SOURCE } = require('./worklet-inline.js');
 
-const VERSION = '3.0.0';
+// Browser build version. Keep in sync with package.json on each release; the
+// browser bundle cannot read package.json at runtime the way the Node wrapper
+// does, so this is a maintained constant.
+const VERSION = '4.0.0';
 
 /**
  * Browser microphone capture.
@@ -14,14 +17,14 @@ const VERSION = '3.0.0';
  * Ported from decibri-web decibri.ts. Logic identical, types removed.
  *
  * @example
- * const { Decibri } = require('decibri'); // browser entry via conditional export
- * const mic = new Decibri({ sampleRate: 16000 });
+ * const { Microphone } = require('decibri'); // browser entry via conditional export
+ * const mic = new Microphone({ sampleRate: 16000 });
  * mic.on('data', (chunk) => { // chunk is Int16Array });
  * await mic.start();
  * // later...
  * mic.stop();
  */
-class Decibri extends Emitter {
+class Microphone extends Emitter {
   constructor(options = {}) {
     super();
 
@@ -35,9 +38,22 @@ class Decibri extends Emitter {
     this._stopRequested = false;
 
     // ── VAD state ─────────────────────────────────────────────────────────
-    this._vad = options.vad ?? false;
+    // Single vad union: false (disabled, default) or 'energy'. The browser
+    // runs energy VAD only; Silero needs ONNX Runtime, which is Node-only. The
+    // legacy vad: true form is rejected with a migration error.
+    const vad = options.vad ?? false;
+    if (vad === false) {
+      this._vad = false;
+    } else if (vad === true) {
+      throw new TypeError("vad: true is no longer supported. Specify the mode explicitly: vad: 'energy'.");
+    } else if (vad === 'energy') {
+      this._vad = true;
+    } else {
+      throw new TypeError(`Invalid vad value: ${JSON.stringify(vad)}. Expected false or 'energy'.`);
+    }
     this._vadThreshold = options.vadThreshold ?? 0.01;
     this._vadHoldoff = options.vadHoldoff ?? 300;
+    this._vadScore = 0;
     this._isSpeaking = false;
     this._silenceTimer = null;
 
@@ -46,7 +62,7 @@ class Decibri extends Emitter {
     this._channels = options.channels ?? 1;
     this._framesPerBuffer = options.framesPerBuffer ?? 1600;
     this._device = options.device;
-    this._format = options.format ?? 'int16';
+    this._dtype = options.dtype ?? 'int16';
     this._echoCancellation = options.echoCancellation ?? true;
     this._noiseSuppression = options.noiseSuppression ?? true;
     this._workletUrl = options.workletUrl;
@@ -61,8 +77,8 @@ class Decibri extends Emitter {
     if (this._framesPerBuffer < 64 || this._framesPerBuffer > 65536) {
       throw new TypeError(`frames per buffer must be between 64 and 65536, got ${this._framesPerBuffer}`);
     }
-    if (this._format !== 'int16' && this._format !== 'float32') {
-      throw new TypeError("format must be 'int16' or 'float32'");
+    if (this._dtype !== 'int16' && this._dtype !== 'float32') {
+      throw new TypeError("dtype must be 'int16' or 'float32'");
     }
     if (this._vadThreshold < 0 || this._vadThreshold > 1) {
       throw new TypeError(`vadThreshold must be between 0 and 1, got ${this._vadThreshold}`);
@@ -144,6 +160,15 @@ class Decibri extends Emitter {
   }
 
   /**
+   * Most recent VAD score: the normalized RMS of the last chunk in `'energy'`
+   * mode, or 0 when VAD is disabled or before the first chunk is processed.
+   * @returns {number}
+   */
+  get vadScore() {
+    return this._vadScore;
+  }
+
+  /**
    * List available audio input devices.
    * Device labels may be empty until microphone permission is granted.
    */
@@ -217,7 +242,7 @@ class Decibri extends Emitter {
     this._workletNode = new AudioWorkletNode(this._audioContext, 'decibri-processor', {
       processorOptions: {
         framesPerBuffer: this._framesPerBuffer,
-        format: this._format,
+        format: this._dtype,
         nativeSampleRate,
         targetSampleRate: this._sampleRate,
       },
@@ -226,7 +251,7 @@ class Decibri extends Emitter {
     // 5. Wire up data from worklet
     this._workletNode.port.onmessage = (event) => {
       const buffer = event.data;
-      const chunk = this._format === 'int16'
+      const chunk = this._dtype === 'int16'
         ? new Int16Array(buffer)
         : new Float32Array(buffer);
 
@@ -272,6 +297,7 @@ class Decibri extends Emitter {
 
   _processVad(chunk) {
     const rms = this._computeRms(chunk);
+    this._vadScore = rms;
 
     if (rms >= this._vadThreshold) {
       if (this._silenceTimer !== null) {
@@ -309,4 +335,4 @@ class Decibri extends Emitter {
   }
 }
 
-module.exports = { Decibri };
+module.exports = { Microphone };

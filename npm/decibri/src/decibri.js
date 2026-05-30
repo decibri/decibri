@@ -4,7 +4,18 @@ const { Readable } = require('stream');
 const path = require('path');
 const fs = require('fs');
 const { DecibriBridge } = require('../index.js');
-const { wrapNativeError } = require('./errors');
+const {
+  wrapNativeError,
+  DecibriError,
+  DeviceError,
+  OrtError,
+  OrtPathError,
+} = require('./errors');
+
+// The npm package version, reported as `binding` by version(). Read from
+// package.json so it tracks the published package and cannot drift from a
+// hardcoded string.
+const PACKAGE_VERSION = require('../package.json').version;
 
 // ─── Bundled ONNX Runtime path resolution ────────────────────────────────────
 
@@ -63,9 +74,9 @@ function resolveBundledOrtPath() {
 
 // ─── RMS helper ──────────────────────────────────────────────────────────────
 
-function computeRMS(chunk, format) {
+function computeRMS(chunk, dtype) {
   let sum = 0, n;
-  if (format === 'float32') {
+  if (dtype === 'float32') {
     const samples = new Float32Array(chunk.buffer, chunk.byteOffset, chunk.length / 4);
     n = samples.length;
     for (let i = 0; i < n; i++) sum += samples[i] * samples[i];
@@ -80,11 +91,11 @@ function computeRMS(chunk, format) {
   return n > 0 ? Math.sqrt(sum / n) : 0;
 }
 
-// ─── Decibri (Readable) ─────────────────────────────────────────────────────
+// ─── Microphone (Readable) ──────────────────────────────────────────────────
 
-class Decibri extends Readable {
+class Microphone extends Readable {
   /**
-   * @param {import('./decibri').DecibriOptions} [options]
+   * @param {import('./decibri').MicrophoneOptions} [options]
    */
   constructor(options = {}) {
     super({ highWaterMark: options.highWaterMark, objectMode: false });
@@ -106,33 +117,23 @@ class Decibri extends Readable {
       throw new RangeError('frames per buffer must be between 64 and 65536');
     }
 
-    const format = options.format ?? 'int16';
-    if (format !== 'int16' && format !== 'float32') {
-      throw new TypeError("format must be 'int16' or 'float32'");
+    const dtype = options.dtype ?? 'int16';
+    if (dtype !== 'int16' && dtype !== 'float32') {
+      throw new TypeError("dtype must be 'int16' or 'float32'");
     }
 
     // ── Resolve device ──────────────────────────────────────────────────────
 
+    // Name and multi-match resolution are delegated to the core, which owns
+    // the renamed-vocabulary errors (MicrophoneNotFound / MultipleDevicesMatch).
+    // A string name and an { id } object are passed straight through to the
+    // native addon. Only the numeric index keeps a client-side bounds check,
+    // for a clean Node-side RangeError without a round-trip.
     let resolvedDevice = options.device;
-    if (typeof options.device === 'string') {
-      const lower = options.device.toLowerCase();
-      const matches = DecibriBridge.devices().filter(d =>
-        d.name.toLowerCase().includes(lower)
-      );
-      if (matches.length === 0) {
-        throw new TypeError(`No audio input device found matching "${options.device}"`);
-      }
-      if (matches.length > 1) {
-        const names = matches.map(d => `  [${d.index}] ${d.name}`).join('\n');
-        throw new TypeError(
-          `Multiple devices match "${options.device}":\n${names}\nUse a more specific name or pass the device index directly.`
-        );
-      }
-      resolvedDevice = matches[0].index;
-    } else if (typeof options.device === 'number') {
+    if (typeof options.device === 'number') {
       const devices = DecibriBridge.devices();
       if (options.device < 0 || options.device >= devices.length) {
-        throw new RangeError('device index out of range. Call Decibri.devices() to list available devices');
+        throw new RangeError('device index out of range. Call Microphone.devices() to list available devices');
       }
       resolvedDevice = options.device;
     } else if (
@@ -151,14 +152,32 @@ class Decibri extends Readable {
 
     // ── Validate VAD options ─────────────────────────────────────────────────
 
-    const vadMode = options.vadMode ?? 'energy';
-    if (vadMode !== 'energy' && vadMode !== 'silero') {
-      throw new TypeError("vadMode must be 'energy' or 'silero'");
+    // Single vad union: false (disabled, default), 'silero', or 'energy'. The
+    // legacy two-flag form (vad: true plus vadMode) is rejected with a
+    // migration error. Energy and Silero are both computed in this wrapper;
+    // the union only selects which.
+    const vad = options.vad ?? false;
+    let vadEnabled;
+    let vadMode;
+    if (vad === false) {
+      vadEnabled = false;
+      vadMode = 'energy'; // inert placeholder; ignored while disabled
+    } else if (vad === true) {
+      throw new TypeError(
+        "vad: true is no longer supported. Specify the mode explicitly: vad: 'silero' or vad: 'energy'."
+      );
+    } else if (vad === 'silero' || vad === 'energy') {
+      vadEnabled = true;
+      vadMode = vad;
+    } else {
+      throw new TypeError(
+        `Invalid vad value: ${JSON.stringify(vad)}. Expected false, 'silero', or 'energy'.`
+      );
     }
 
     let modelPath = undefined;
     let ortLibraryPath = undefined;
-    if (vadMode === 'silero' && options.vad) {
+    if (vadEnabled && vadMode === 'silero') {
       modelPath = options.modelPath || path.join(__dirname, '..', 'models', 'silero_vad.onnx');
       if (!fs.existsSync(modelPath)) {
         throw new Error(`Silero VAD model not found at ${modelPath}. Ensure the models/ directory is included in your installation.`);
@@ -172,11 +191,12 @@ class Decibri extends Readable {
 
     // ── Store config ───────────────────────────────────────────────────────
 
-    this._format = format;
-    this._vad = options.vad || false;
+    this._dtype = dtype;
+    this._vad = vadEnabled;
     this._vadMode = vadMode;
     this._vadThreshold = options.vadThreshold ?? (vadMode === 'silero' ? 0.5 : 0.01);
     this._vadHoldoff = options.vadHoldoff ?? 300;
+    this._vadScore = 0;
     this._isSpeaking = false;
     this._silenceTimer = null;
     this._started = false;
@@ -188,9 +208,9 @@ class Decibri extends Readable {
         sampleRate,
         channels,
         framesPerBuffer,
-        format,
+        format: dtype,
         device: resolvedDevice,
-        vadMode: (options.vad && vadMode === 'silero') ? 'silero' : 'energy',
+        vadMode,
         modelPath,
         ortLibraryPath,
       });
@@ -230,7 +250,7 @@ class Decibri extends Readable {
 
   /** @internal Energy-based VAD (RMS threshold) */
   _processVadEnergy(chunk) {
-    const rms = computeRMS(chunk, this._format);
+    const rms = computeRMS(chunk, this._dtype);
     this._processVadValue(rms);
   }
 
@@ -241,6 +261,7 @@ class Decibri extends Readable {
 
   /** @internal Common speech/silence state machine */
   _processVadValue(value) {
+    this._vadScore = value;
     if (value >= this._vadThreshold) {
       clearTimeout(this._silenceTimer);
       this._silenceTimer = null;
@@ -278,6 +299,16 @@ class Decibri extends Readable {
   }
 
   /**
+   * Most recent VAD score for the active mode: the Silero speech probability
+   * in 'silero' mode, the normalized RMS of the last chunk in 'energy' mode.
+   * 0 when VAD is disabled or before the first chunk is processed.
+   * @returns {number}
+   */
+  get vadScore() {
+    return this._vadScore;
+  }
+
+  /**
    * List all available input devices on the system.
    * @returns {Array<{index: number, name: string, maxInputChannels: number, defaultSampleRate: number, isDefault: boolean}>}
    */
@@ -286,15 +317,49 @@ class Decibri extends Readable {
   }
 
   /**
-   * Version information for decibri and the audio runtime.
-   * @returns {{ decibri: string, portaudio: string }}
+   * Version information for decibri, the audio backend, and this binding.
+   * @returns {{ decibri: string, audioBackend: string, binding: string }}
    */
   static version() {
-    return DecibriBridge.version();
+    const v = DecibriBridge.version();
+    return { decibri: v.decibri, audioBackend: v.audioBackend, binding: PACKAGE_VERSION };
   }
 }
 
-const DecibriOutput = require('./decibri-output.js');
-Decibri.DecibriOutput = DecibriOutput;
+const Speaker = require('./decibri-output.js');
 
-module.exports = Decibri;
+/**
+ * List all available audio input devices.
+ * @returns {Array<{index: number, name: string, maxInputChannels: number, defaultSampleRate: number, isDefault: boolean}>}
+ */
+function inputDevices() {
+  return Microphone.devices();
+}
+
+/**
+ * List all available audio output devices.
+ * @returns {Array<{index: number, name: string, maxOutputChannels: number, defaultSampleRate: number, isDefault: boolean}>}
+ */
+function outputDevices() {
+  return Speaker.devices();
+}
+
+/**
+ * Version information for decibri, the audio backend, and this binding.
+ * @returns {{ decibri: string, audioBackend: string, binding: string }}
+ */
+function version() {
+  return Microphone.version();
+}
+
+module.exports = {
+  Microphone,
+  Speaker,
+  inputDevices,
+  outputDevices,
+  version,
+  DecibriError,
+  DeviceError,
+  OrtError,
+  OrtPathError,
+};

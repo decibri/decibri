@@ -1,7 +1,7 @@
 'use strict';
 
 const path = require('path');
-const Decibri = require(path.join(__dirname, '..', 'npm', 'decibri', 'src', 'decibri.js'));
+const { Microphone, DeviceError } = require(path.join(__dirname, '..', 'npm', 'decibri', 'src', 'decibri.js'));
 
 let passed = 0;
 let failed = 0;
@@ -64,59 +64,59 @@ async function testErrors() {
   console.log('--- Group 1: Error messages ---');
 
   // sampleRate
-  assertThrows(() => new Decibri({ sampleRate: 0 }), RangeError, 'sample rate must be between 1000 and 384000');
-  assertThrows(() => new Decibri({ sampleRate: 999 }), RangeError, 'sample rate must be between 1000 and 384000');
-  assertThrows(() => new Decibri({ sampleRate: 384001 }), RangeError, 'sample rate must be between 1000 and 384000');
+  assertThrows(() => new Microphone({ sampleRate: 0 }), RangeError, 'sample rate must be between 1000 and 384000');
+  assertThrows(() => new Microphone({ sampleRate: 999 }), RangeError, 'sample rate must be between 1000 and 384000');
+  assertThrows(() => new Microphone({ sampleRate: 384001 }), RangeError, 'sample rate must be between 1000 and 384000');
 
   // channels
-  assertThrows(() => new Decibri({ channels: 0 }), RangeError, 'channels must be between 1 and 32');
-  assertThrows(() => new Decibri({ channels: 33 }), RangeError, 'channels must be between 1 and 32');
+  assertThrows(() => new Microphone({ channels: 0 }), RangeError, 'channels must be between 1 and 32');
+  assertThrows(() => new Microphone({ channels: 33 }), RangeError, 'channels must be between 1 and 32');
 
   // framesPerBuffer
-  assertThrows(() => new Decibri({ framesPerBuffer: 63 }), RangeError, 'frames per buffer must be between 64 and 65536');
-  assertThrows(() => new Decibri({ framesPerBuffer: 65537 }), RangeError, 'frames per buffer must be between 64 and 65536');
+  assertThrows(() => new Microphone({ framesPerBuffer: 63 }), RangeError, 'frames per buffer must be between 64 and 65536');
+  assertThrows(() => new Microphone({ framesPerBuffer: 65537 }), RangeError, 'frames per buffer must be between 64 and 65536');
 
-  // format
-  assertThrows(() => new Decibri({ format: 'wav' }), TypeError, "format must be 'int16' or 'float32'");
+  // dtype
+  assertThrows(() => new Microphone({ dtype: 'wav' }), TypeError, "dtype must be 'int16' or 'float32'");
 
-  // device name not found
+  // device name not found (delegated to the core)
   assertThrows(
-    () => new Decibri({ device: '__nonexistent__' }),
-    TypeError,
-    'No audio input device found matching "__nonexistent__"'
+    () => new Microphone({ device: '__nonexistent__' }),
+    DeviceError,
+    'No microphone found matching "__nonexistent__"'
   );
 
   // device index out of range
   assertThrows(
-    () => new Decibri({ device: 99999 }),
+    () => new Microphone({ device: 99999 }),
     RangeError,
     'device index out of range'
   );
 
   // boundary values that SHOULD work (no throw)
   try {
-    const m1 = new Decibri({ sampleRate: 1000 }); m1.stop();
+    const m1 = new Microphone({ sampleRate: 1000 }); m1.stop();
     passed++;
   } catch (e) {
     console.log(`  FAIL: sampleRate 1000 should be accepted: ${e.message}`);
     failed++;
   }
   try {
-    const m2 = new Decibri({ sampleRate: 384000 }); m2.stop();
+    const m2 = new Microphone({ sampleRate: 384000 }); m2.stop();
     passed++;
   } catch (e) {
     console.log(`  FAIL: sampleRate 384000 should be accepted: ${e.message}`);
     failed++;
   }
   try {
-    const m3 = new Decibri({ framesPerBuffer: 64 }); m3.stop();
+    const m3 = new Microphone({ framesPerBuffer: 64 }); m3.stop();
     passed++;
   } catch (e) {
     console.log(`  FAIL: framesPerBuffer 64 should be accepted: ${e.message}`);
     failed++;
   }
   try {
-    const m4 = new Decibri({ framesPerBuffer: 65536 }); m4.stop();
+    const m4 = new Microphone({ framesPerBuffer: 65536 }); m4.stop();
     passed++;
   } catch (e) {
     console.log(`  FAIL: framesPerBuffer 65536 should be accepted: ${e.message}`);
@@ -127,13 +127,13 @@ async function testErrors() {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
-// Group 2: format: 'float32'
+// Group 2: dtype: 'float32'
 // ═══════════════════════════════════════════════════════════════════════════════
 
 async function testFloat32() {
   console.log('--- Group 2: float32 format (2 seconds) ---');
 
-  const mic = new Decibri({ sampleRate: 16000, channels: 1, format: 'float32' });
+  const mic = new Microphone({ sampleRate: 16000, channels: 1, dtype: 'float32' });
   const chunks = await captureFor(mic, 2000);
 
   assert(chunks.length > 0, 'received at least one float32 chunk');
@@ -161,7 +161,7 @@ async function testFloat32() {
 async function testDeviceByName() {
   console.log('--- Group 3: Device selection by name (1 second) ---');
 
-  const devices = Decibri.devices();
+  const devices = Microphone.devices();
   const defaultDev = devices.find(d => d.isDefault);
   if (!defaultDev) {
     console.log('  SKIP: no default device found');
@@ -175,12 +175,12 @@ async function testDeviceByName() {
   console.log(`  Using name substring: "${namePart}" (from "${defaultDev.name}")`);
 
   try {
-    const mic = new Decibri({ sampleRate: 16000, channels: 1, device: namePart });
+    const mic = new Microphone({ sampleRate: 16000, channels: 1, device: namePart });
     const chunks = await captureFor(mic, 1000);
     assert(chunks.length > 0, `captured ${chunks.length} chunks via device name`);
   } catch (e) {
     // Multiple matches is acceptable if the substring is too broad
-    if (e instanceof TypeError && e.message.includes('Multiple devices match')) {
+    if (e instanceof DeviceError && e.message.includes('Multiple devices match')) {
       console.log('  SKIP: name substring matched multiple devices (expected on some systems)');
       skipped++;
     } else {
@@ -199,7 +199,7 @@ async function testDeviceByName() {
 async function testDeviceByIndex() {
   console.log('--- Group 4: Device selection by index (1 second) ---');
 
-  const devices = Decibri.devices();
+  const devices = Microphone.devices();
   if (devices.length === 0) {
     console.log('  SKIP: no devices found');
     skipped++;
@@ -207,7 +207,7 @@ async function testDeviceByIndex() {
     return;
   }
 
-  const mic = new Decibri({ sampleRate: 16000, channels: 1, device: 0 });
+  const mic = new Microphone({ sampleRate: 16000, channels: 1, device: 0 });
   const chunks = await captureFor(mic, 1000);
   assert(chunks.length > 0, `captured ${chunks.length} chunks via device index 0`);
 
@@ -221,7 +221,7 @@ async function testDeviceByIndex() {
 async function testDeviceById() {
   console.log('--- Group 4B: Device selection by id (1 second) ---');
 
-  const devices = Decibri.devices();
+  const devices = Microphone.devices();
   const defaultDev = devices.find(d => d.isDefault);
   if (!defaultDev) {
     console.log('  SKIP: no default device found');
@@ -239,7 +239,7 @@ async function testDeviceById() {
   console.log(`  Using device id: "${defaultDev.id}" (from "${defaultDev.name}")`);
 
   try {
-    const mic = new Decibri({
+    const mic = new Microphone({
       sampleRate: 16000,
       channels: 1,
       device: { id: defaultDev.id },
@@ -261,7 +261,7 @@ async function testDeviceById() {
 async function testFramesPerBuffer() {
   console.log('--- Group 5: framesPerBuffer 800 (2 seconds) ---');
 
-  const mic = new Decibri({ sampleRate: 16000, channels: 1, framesPerBuffer: 800 });
+  const mic = new Microphone({ sampleRate: 16000, channels: 1, framesPerBuffer: 800 });
   const chunks = await captureFor(mic, 2000);
 
   assert(chunks.length > 0, 'received at least one chunk');
@@ -281,10 +281,10 @@ async function testFramesPerBuffer() {
 async function testVAD() {
   console.log('--- Group 6: VAD events (3 seconds) ---');
 
-  const mic = new Decibri({
+  const mic = new Microphone({
     sampleRate: 16000,
     channels: 1,
-    vad: true,
+    vad: 'energy',
     vadThreshold: 0.001, // very low, ambient noise should trigger
   });
 
@@ -301,6 +301,7 @@ async function testVAD() {
 
   assert(dataCount > 0, `received ${dataCount} data chunks`);
   assert(speechFired, 'speech event fired (threshold 0.001)');
+  assert(typeof mic.vadScore === 'number' && mic.vadScore >= 0, `vadScore is a non-negative number (got ${mic.vadScore})`);
   // silence may or may not fire depending on ambient conditions, so don't assert
   console.log(`  speech: ${speechFired}, silence: ${silenceFired}, chunks: ${dataCount}`);
   console.log('  Group 6 done\n');
@@ -314,13 +315,13 @@ async function testMultipleInstances() {
   console.log('--- Group 7: Multiple instances ---');
 
   // Instance 1
-  const mic1 = new Decibri({ sampleRate: 16000, channels: 1 });
+  const mic1 = new Microphone({ sampleRate: 16000, channels: 1 });
   const chunks1 = await captureFor(mic1, 1000);
   assert(chunks1.length > 0, `instance 1: ${chunks1.length} chunks`);
   assert(!mic1.isOpen, 'instance 1: isOpen false after stop');
 
   // Instance 2 (after instance 1 is stopped)
-  const mic2 = new Decibri({ sampleRate: 16000, channels: 1 });
+  const mic2 = new Microphone({ sampleRate: 16000, channels: 1 });
   const chunks2 = await captureFor(mic2, 1000);
   assert(chunks2.length > 0, `instance 2: ${chunks2.length} chunks`);
   assert(!mic2.isOpen, 'instance 2: isOpen false after stop');
@@ -335,7 +336,7 @@ async function testMultipleInstances() {
 async function testBackpressure() {
   console.log('--- Group 8: Backpressure (best-effort) ---');
 
-  const mic = new Decibri({ sampleRate: 16000, channels: 1, highWaterMark: 1 });
+  const mic = new Microphone({ sampleRate: 16000, channels: 1, highWaterMark: 1 });
 
   let backpressureFired = false;
   mic.on('backpressure', () => { backpressureFired = true; });

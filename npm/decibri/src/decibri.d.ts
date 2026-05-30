@@ -1,7 +1,7 @@
 import { Readable, ReadableOptions, Writable, WritableOptions } from 'stream';
 
 /** Information about an available audio input device. */
-export interface DeviceInfo {
+export interface MicrophoneInfo {
   /** Device index (pass to constructor as `device`). */
   index: number;
   /** Human-readable device name from the OS. */
@@ -23,16 +23,18 @@ export interface DeviceInfo {
   isDefault: boolean;
 }
 
-/** Version strings returned by `Decibri.version()`. */
+/** Version strings returned by `Microphone.version()`. */
 export interface VersionInfo {
-  /** decibri package version (e.g. `"3.0.0"`). */
+  /** decibri core version. */
   decibri: string;
-  /** Audio runtime version string (e.g. `"cpal 0.17"`). */
-  portaudio: string;
+  /** Audio backend version string (e.g. `"cpal 0.17"`). */
+  audioBackend: string;
+  /** This binding's npm package version. */
+  binding: string;
 }
 
-/** Constructor options for `Decibri`. */
-export interface DecibriOptions extends ReadableOptions {
+/** Constructor options for `Microphone`. */
+export interface MicrophoneOptions extends ReadableOptions {
   /**
    * Sample rate in Hz.
    * @default 16000
@@ -57,53 +59,50 @@ export interface DecibriOptions extends ReadableOptions {
 
   /**
    * Audio input device. One of:
-   * - numeric index (from `DeviceInfo.index`)
+   * - numeric index (from `MicrophoneInfo.index`)
    * - case-insensitive name substring
-   * - `{ id: string }` for stable per-host device ID from `DeviceInfo.id`
+   * - `{ id: string }` for stable per-host device ID from `MicrophoneInfo.id`
    *
    * Omit to use the system default input device.
    */
   device?: number | string | { id: string };
 
   /**
-   * Sample encoding format.
+   * Sample encoding data type.
    * - `'int16'`: 16-bit signed integer, little-endian (2 bytes per sample)
    * - `'float32'`: 32-bit IEEE 754 float, little-endian (4 bytes per sample)
    * @default 'int16'
    */
-  format?: 'int16' | 'float32';
+  dtype?: 'int16' | 'float32';
 
   /**
-   * Enable energy-based voice activity detection.
-   * When enabled, emits `'speech'` and `'silence'` events.
+   * Voice activity detection mode. One of:
+   * - `false`: disabled (default)
+   * - `'silero'`: Silero VAD v5 ML model (more accurate, ~1ms inference)
+   * - `'energy'`: RMS energy threshold (lightweight)
+   *
+   * When enabled, emits `'speech'` and `'silence'` events and updates `vadScore`.
+   * The legacy `vad: true` form is rejected; specify the mode explicitly.
    * @default false
    */
-  vad?: boolean;
+  vad?: false | 'silero' | 'energy';
 
   /**
-   * RMS energy threshold for speech detection (VAD mode only).
-   * @default 0.01
+   * Speech-detection threshold for the active VAD mode.
+   * @default 0.5 for `'silero'`, 0.01 for `'energy'`
    * @range 0–1
    */
   vadThreshold?: number;
 
   /**
-   * Milliseconds of sub-threshold audio before emitting `'silence'` (VAD mode only).
+   * Milliseconds of sub-threshold audio before emitting `'silence'`.
    * @default 300
    */
   vadHoldoff?: number;
 
   /**
-   * VAD engine to use.
-   * - `'energy'`: RMS energy threshold (default, lightweight)
-   * - `'silero'`: Silero VAD v5 ML model (more accurate, ~1ms inference)
-   * @default 'energy'
-   */
-  vadMode?: 'energy' | 'silero';
-
-  /**
    * Path to the Silero VAD ONNX model file.
-   * Only used when `vadMode` is `'silero'`.
+   * Only used when `vad` is `'silero'`.
    * Defaults to `models/silero_vad.onnx` relative to the package.
    */
   modelPath?: string;
@@ -114,16 +113,16 @@ export interface DecibriOptions extends ReadableOptions {
  *
  * @example
  * ```js
- * const Decibri = require('decibri');
- * const mic = new Decibri({ sampleRate: 16000, channels: 1 });
+ * const { Microphone } = require('decibri');
+ * const mic = new Microphone({ sampleRate: 16000, channels: 1 });
  * mic.on('data', (chunk) => {
  *   // chunk is a Buffer of Int16 LE PCM samples
  * });
  * setTimeout(() => mic.stop(), 5000);
  * ```
  */
-declare class Decibri extends Readable {
-  constructor(options?: DecibriOptions);
+export declare class Microphone extends Readable {
+  constructor(options?: MicrophoneOptions);
 
   /** Stop microphone capture and end the stream. Safe to call multiple times. */
   stop(): void;
@@ -131,8 +130,15 @@ declare class Decibri extends Readable {
   /** Whether the microphone is currently capturing audio. */
   readonly isOpen: boolean;
 
+  /**
+   * Most recent VAD score for the active mode: the Silero speech probability in
+   * `'silero'` mode, the normalized RMS of the last chunk in `'energy'` mode.
+   * 0 when VAD is disabled or before the first chunk is processed.
+   */
+  readonly vadScore: number;
+
   /** List all available audio input devices. */
-  static devices(): DeviceInfo[];
+  static devices(): MicrophoneInfo[];
 
   /** Version information for decibri and the audio runtime. */
   static version(): VersionInfo;
@@ -162,13 +168,13 @@ declare class Decibri extends Readable {
 }
 
 /** Information about an available audio output device. */
-export interface OutputDeviceInfo {
+export interface SpeakerInfo {
   /** Device index (pass to constructor as `device`). */
   index: number;
   /** Human-readable device name from the OS. */
   name: string;
   /**
-   * Stable per-host device ID. See `DeviceInfo.id` for format and fallback
+   * Stable per-host device ID. See `MicrophoneInfo.id` for format and fallback
    * semantics; identical rules for output devices.
    */
   id: string;
@@ -180,8 +186,8 @@ export interface OutputDeviceInfo {
   isDefault: boolean;
 }
 
-/** Constructor options for `DecibriOutput`. */
-export interface DecibriOutputOptions extends WritableOptions {
+/** Constructor options for `Speaker`. */
+export interface SpeakerOptions extends WritableOptions {
   /**
    * Sample rate in Hz.
    * @default 16000
@@ -197,18 +203,18 @@ export interface DecibriOutputOptions extends WritableOptions {
   channels?: number;
 
   /**
-   * Sample encoding format of incoming data.
+   * Sample encoding data type of incoming data.
    * - `'int16'`: 16-bit signed integer, little-endian (2 bytes per sample)
    * - `'float32'`: 32-bit IEEE 754 float, little-endian (4 bytes per sample)
    * @default 'int16'
    */
-  format?: 'int16' | 'float32';
+  dtype?: 'int16' | 'float32';
 
   /**
    * Audio output device. One of:
-   * - numeric index (from `OutputDeviceInfo.index`)
+   * - numeric index (from `SpeakerInfo.index`)
    * - case-insensitive name substring
-   * - `{ id: string }` for stable per-host device ID from `OutputDeviceInfo.id`
+   * - `{ id: string }` for stable per-host device ID from `SpeakerInfo.id`
    *
    * Omit to use the system default output device.
    */
@@ -220,14 +226,14 @@ export interface DecibriOutputOptions extends WritableOptions {
  *
  * @example
  * ```js
- * const { DecibriOutput } = require('decibri');
- * const speaker = new DecibriOutput({ sampleRate: 16000, channels: 1 });
+ * const { Speaker } = require('decibri');
+ * const speaker = new Speaker({ sampleRate: 16000, channels: 1 });
  * speaker.write(pcmBuffer);
  * speaker.end();
  * ```
  */
-declare class DecibriOutput extends Writable {
-  constructor(options?: DecibriOutputOptions);
+export declare class Speaker extends Writable {
+  constructor(options?: SpeakerOptions);
 
   /** Immediate stop. Discards remaining buffered audio. */
   stop(): void;
@@ -236,7 +242,7 @@ declare class DecibriOutput extends Writable {
   readonly isPlaying: boolean;
 
   /** List all available audio output devices. */
-  static devices(): OutputDeviceInfo[];
+  static devices(): SpeakerInfo[];
 
   /** Version information for decibri and the audio runtime. */
   static version(): VersionInfo;
@@ -252,8 +258,36 @@ declare class DecibriOutput extends Writable {
   on(event: string | symbol, listener: (...args: any[]) => void): this;
 }
 
-export = Decibri;
+/** List all available audio input devices. */
+export declare function inputDevices(): MicrophoneInfo[];
 
-declare namespace Decibri {
-  export { DecibriOutput };
+/** List all available audio output devices. */
+export declare function outputDevices(): SpeakerInfo[];
+
+/** Version information for decibri and the audio runtime. */
+export declare function version(): VersionInfo;
+
+/**
+ * Base class for errors raised by the decibri native bindings.
+ *
+ * Catch this to handle any decibri device or ONNX Runtime failure generically;
+ * catch a subclass for finer control. Argument validation (bad sample rate,
+ * channels, frames, dtype, vad) throws built-in `RangeError` / `TypeError`, not
+ * a `DecibriError`.
+ */
+export declare class DecibriError extends Error {
+  /** Stable string code identifying the specific failure. */
+  readonly code: string;
 }
+
+/**
+ * Device enumeration or selection failure: an unmatched device name, an
+ * ambiguous name match, or missing hardware.
+ */
+export declare class DeviceError extends DecibriError {}
+
+/** ONNX Runtime setup or inference failure (Silero VAD). */
+export declare class OrtError extends DecibriError {}
+
+/** A specific ONNX Runtime library path could not be loaded. */
+export declare class OrtPathError extends OrtError {}

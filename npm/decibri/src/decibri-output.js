@@ -4,11 +4,15 @@ const { Writable } = require('stream');
 const { DecibriOutputBridge } = require('../index.js');
 const { wrapNativeError } = require('./errors');
 
-// ─── DecibriOutput (Writable) ───────────────────────────────────────────────
+// The npm package version, reported as `binding` by version(). Read from
+// package.json so it tracks the published package and cannot drift.
+const PACKAGE_VERSION = require('../package.json').version;
 
-class DecibriOutput extends Writable {
+// ─── Speaker (Writable) ─────────────────────────────────────────────────────
+
+class Speaker extends Writable {
   /**
-   * @param {import('./decibri').DecibriOutputOptions} [options]
+   * @param {import('./decibri').SpeakerOptions} [options]
    */
   constructor(options = {}) {
     super({ highWaterMark: options.highWaterMark || 16384 });
@@ -25,33 +29,23 @@ class DecibriOutput extends Writable {
       throw new RangeError('channels must be between 1 and 32');
     }
 
-    const format = options.format ?? 'int16';
-    if (format !== 'int16' && format !== 'float32') {
-      throw new TypeError("format must be 'int16' or 'float32'");
+    const dtype = options.dtype ?? 'int16';
+    if (dtype !== 'int16' && dtype !== 'float32') {
+      throw new TypeError("dtype must be 'int16' or 'float32'");
     }
 
     // ── Resolve device ──────────────────────────────────────────────────────
 
+    // Name and multi-match resolution are delegated to the core, which owns
+    // the renamed-vocabulary errors (SpeakerNotFound / MultipleDevicesMatch).
+    // A string name and an { id } object are passed straight through to the
+    // native addon. Only the numeric index keeps a client-side bounds check,
+    // for a clean Node-side RangeError without a round-trip.
     let resolvedDevice = options.device;
-    if (typeof options.device === 'string') {
-      const lower = options.device.toLowerCase();
-      const matches = DecibriOutputBridge.devices().filter(d =>
-        d.name.toLowerCase().includes(lower)
-      );
-      if (matches.length === 0) {
-        throw new TypeError(`No audio output device found matching "${options.device}"`);
-      }
-      if (matches.length > 1) {
-        const names = matches.map(d => `  [${d.index}] ${d.name}`).join('\n');
-        throw new TypeError(
-          `Multiple devices match "${options.device}":\n${names}\nUse a more specific name or pass the device index directly.`
-        );
-      }
-      resolvedDevice = matches[0].index;
-    } else if (typeof options.device === 'number') {
+    if (typeof options.device === 'number') {
       const devices = DecibriOutputBridge.devices();
       if (options.device < 0 || options.device >= devices.length) {
-        throw new RangeError('device index out of range. Call DecibriOutput.devices() to list available devices');
+        throw new RangeError('device index out of range. Call Speaker.devices() to list available devices');
       }
       resolvedDevice = options.device;
     } else if (
@@ -69,7 +63,7 @@ class DecibriOutput extends Writable {
 
     // ── Store config ───────────────────────────────────────────────────────
 
-    this._format = format;
+    this._dtype = dtype;
     this._started = false;
 
     // ── Create native bridge ───────────────────────────────────────────────
@@ -78,7 +72,7 @@ class DecibriOutput extends Writable {
       this._native = new DecibriOutputBridge({
         sampleRate,
         channels,
-        format,
+        format: dtype,
         device: resolvedDevice,
       });
     } catch (err) {
@@ -134,12 +128,13 @@ class DecibriOutput extends Writable {
   }
 
   /**
-   * Version information for decibri and the audio runtime.
-   * @returns {{ decibri: string, portaudio: string }}
+   * Version information for decibri, the audio backend, and this binding.
+   * @returns {{ decibri: string, audioBackend: string, binding: string }}
    */
   static version() {
-    return DecibriOutputBridge.version();
+    const v = DecibriOutputBridge.version();
+    return { decibri: v.decibri, audioBackend: v.audioBackend, binding: PACKAGE_VERSION };
   }
 }
 
-module.exports = DecibriOutput;
+module.exports = Speaker;

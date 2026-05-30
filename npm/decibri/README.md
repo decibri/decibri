@@ -1,6 +1,6 @@
 # decibri
 
-Cross-platform audio capture, output, and voice activity detection for Node.js and browsers.
+Cross-platform audio capture, playback, and voice activity detection for Node.js and browsers.
 
 ## Installation
 
@@ -8,18 +8,24 @@ Cross-platform audio capture, output, and voice activity detection for Node.js a
 npm install decibri
 ```
 
-One package for Node.js and browsers. Node.js gets a native addon (Rust via napi-rs). Browsers get a JavaScript AudioWorklet implementation. Platform-specific binaries are installed automatically.
+One package for Node.js and browsers. Node.js gets a prebuilt native addon. Browsers get a JavaScript AudioWorklet implementation. Platform-specific binaries are installed automatically.
 
 Requires Node.js >= 18. TypeScript definitions are bundled.
+
+The package uses named exports:
+
+```javascript
+const { Microphone, Speaker, inputDevices, outputDevices, version } = require('decibri');
+```
 
 ## Quick Start
 
 ### Capture audio
 
 ```javascript
-const Decibri = require('decibri');
+const { Microphone } = require('decibri');
 
-const mic = new Decibri({ sampleRate: 16000, channels: 1 });
+const mic = new Microphone({ sampleRate: 16000, channels: 1 });
 mic.on('data', (chunk) => { /* Buffer of Int16 PCM samples */ });
 setTimeout(() => mic.stop(), 5000);
 ```
@@ -27,9 +33,9 @@ setTimeout(() => mic.stop(), 5000);
 ### Play audio
 
 ```javascript
-const { DecibriOutput } = require('decibri');
+const { Speaker } = require('decibri');
 
-const speaker = new DecibriOutput({ sampleRate: 16000, channels: 1 });
+const speaker = new Speaker({ sampleRate: 16000, channels: 1 });
 speaker.write(pcmBuffer);
 speaker.end();
 ```
@@ -37,9 +43,9 @@ speaker.end();
 ### Browser capture
 
 ```javascript
-import { Decibri } from 'decibri'; // browser entry via conditional export
+import { Microphone } from 'decibri'; // browser entry via conditional export
 
-const mic = new Decibri({ sampleRate: 16000 });
+const mic = new Microphone({ sampleRate: 16000 });
 mic.on('data', (chunk) => { /* Int16Array of PCM samples */ });
 await mic.start(); // requires user gesture in Safari
 ```
@@ -47,14 +53,16 @@ await mic.start(); // requires user gesture in Safari
 ### Pipe capture to playback (echo)
 
 ```javascript
-const mic = new Decibri({ sampleRate: 16000, channels: 1 });
-const speaker = new DecibriOutput({ sampleRate: 16000, channels: 1 });
+const { Microphone, Speaker } = require('decibri');
+
+const mic = new Microphone({ sampleRate: 16000, channels: 1 });
+const speaker = new Speaker({ sampleRate: 16000, channels: 1 });
 mic.pipe(speaker);
 ```
 
-## API: Decibri (Capture)
+## API: Microphone (Capture)
 
-### `new Decibri(options?)`
+### `new Microphone(options?)`
 
 Creates a Readable stream that captures from the microphone.
 
@@ -64,27 +72,32 @@ Creates a Readable stream that captures from the microphone.
 | `channels` | number | 1 | Input channels (1 to 32) |
 | `framesPerBuffer` | number | 1600 | Frames per chunk (64 to 65536). At 16kHz mono, 1600 = 100ms = 3200 bytes |
 | `device` | number, string, or `{ id: string }` | system default | Device index, case-insensitive name substring, or stable per-host ID |
-| `format` | `'int16'` \| `'float32'` | `'int16'` | Sample encoding |
-| `vad` | boolean | false | Enable voice activity detection |
-| `vadMode` | `'energy'` \| `'silero'` | `'energy'` | VAD engine: RMS threshold or Silero ML model |
-| `vadThreshold` | number | 0.01 / 0.5 | Speech threshold. Default depends on `vadMode` |
+| `dtype` | `'int16'` \| `'float32'` | `'int16'` | Sample encoding |
+| `vad` | `false` \| `'silero'` \| `'energy'` | `false` | Voice activity detection: disabled, the Silero ML model, or an RMS energy threshold |
+| `vadThreshold` | number | 0.5 / 0.01 | Speech threshold. Default is 0.5 for `'silero'`, 0.01 for `'energy'` |
 | `vadHoldoff` | number | 300 | Silence holdoff in ms |
+| `modelPath` | string | bundled model | Path to the Silero model. Only used when `vad` is `'silero'` |
 
 Standard `ReadableOptions` (e.g. `highWaterMark`) are also accepted.
+
+`vad: true` is not accepted; pass the mode explicitly as `vad: 'silero'` or `vad: 'energy'`.
 
 ### Methods
 
 | Method | Description |
 | --- | --- |
 | `mic.stop()` | Stop capture and end stream. Safe to call multiple times |
-| `Decibri.devices()` | List available input devices |
-| `Decibri.version()` | Version info |
+| `Microphone.devices()` | List available input devices |
+| `Microphone.version()` | Version info: `{ decibri, audioBackend, binding }` |
+
+The module-level `inputDevices()` and `version()` free functions are equivalent to the static methods.
 
 ### Properties
 
 | Property | Type | Description |
 | --- | --- | --- |
 | `mic.isOpen` | boolean | `true` while capturing |
+| `mic.vadScore` | number | Latest VAD score for the active mode (Silero probability or normalized RMS); 0 when disabled |
 
 ### Events
 
@@ -97,9 +110,9 @@ Standard `ReadableOptions` (e.g. `highWaterMark`) are also accepted.
 | `'end'` | - | Stream ended |
 | `'error'` | Error | An error occurred |
 
-## API: DecibriOutput (Playback)
+## API: Speaker (Playback)
 
-### `new DecibriOutput(options?)`
+### `new Speaker(options?)`
 
 Creates a Writable stream for speaker playback.
 
@@ -107,7 +120,7 @@ Creates a Writable stream for speaker playback.
 | --- | --- | --- | --- |
 | `sampleRate` | number | 16000 | Playback sample rate (1000 to 384000) |
 | `channels` | number | 1 | Output channels (1 to 32) |
-| `format` | `'int16'` \| `'float32'` | `'int16'` | Sample encoding of incoming data |
+| `dtype` | `'int16'` \| `'float32'` | `'int16'` | Sample encoding of incoming data |
 | `device` | number, string, or `{ id: string }` | system default | Output device index, case-insensitive name substring, or stable per-host ID |
 
 Standard `WritableOptions` (e.g. `highWaterMark`) are also accepted.
@@ -118,23 +131,45 @@ Standard `WritableOptions` (e.g. `highWaterMark`) are also accepted.
 | `speaker.end()` | Signal end. Drains remaining audio, then emits `'finish'` |
 | `speaker.stop()` | Immediate stop. Discards remaining audio |
 | `speaker.isPlaying` | `true` while audio is being output |
-| `DecibriOutput.devices()` | List available output devices |
-| `DecibriOutput.version()` | Same as `Decibri.version()` |
+| `Speaker.devices()` | List available output devices |
+| `Speaker.version()` | Same as `Microphone.version()` |
+
+The module-level `outputDevices()` free function is equivalent to `Speaker.devices()`.
+
+## Errors
+
+Construction errors come as typed classes you can catch:
+
+```javascript
+const { Microphone, DecibriError, DeviceError } = require('decibri');
+
+try {
+  new Microphone({ device: 'no such device' });
+} catch (err) {
+  if (err instanceof DeviceError) {
+    console.log(err.code); // e.g. 'MICROPHONE_NOT_FOUND'
+  }
+}
+```
+
+`DeviceError`, `OrtError`, and `OrtPathError` extend `DecibriError`, which extends `Error`. Each carries a stable `code` string. Argument validation (bad `sampleRate`, `channels`, `dtype`, or `vad`) throws a built-in `RangeError` or `TypeError`.
 
 ## API: Browser
 
 The browser API uses `getUserMedia` and `AudioWorklet`. It differs from the Node.js API because browser audio is fundamentally async.
 
-### `new Decibri(options?)` (browser)
+### `new Microphone(options?)` (browser)
 
 Same options as Node.js, plus:
 
 | Option | Type | Default | Description |
 | --- | --- | --- | --- |
-| `device` | string | system default | Device ID from `Decibri.devices()` (not index) |
+| `device` | string | system default | Device ID from `Microphone.devices()` (not index) |
 | `echoCancellation` | boolean | true | Browser echo cancellation |
 | `noiseSuppression` | boolean | true | Browser noise suppression |
 | `workletUrl` | string | inline blob | Custom worklet URL for strict CSP |
+
+The browser runs energy-mode VAD only, so its `vad` option accepts `false` or `'energy'`. The browser `version()` returns `{ decibri }` only.
 
 ### Key differences from Node.js
 
@@ -144,49 +179,52 @@ Same options as Node.js, plus:
 | Base class | Readable stream | Custom Emitter |
 | Data type | Buffer | Int16Array / Float32Array |
 | `devices()` | Sync, returns array | Async, returns Promise |
-| Sample rate | Direct via cpal | Resampled from native rate |
+| Sample rate | Native device rate | Resampled from native rate |
+| VAD | `'silero'` or `'energy'` | `'energy'` only |
 
 ## Voice Activity Detection
 
-### Energy mode (default)
+### Energy mode
 
 Lightweight RMS energy threshold. No model required.
 
 ```javascript
-const mic = new Decibri({ vad: true, vadThreshold: 0.01 });
+const mic = new Microphone({ vad: 'energy', vadThreshold: 0.01 });
 mic.on('speech', () => console.log('speaking'));
 mic.on('silence', () => console.log('silent'));
 ```
 
 ### Silero mode
 
-ML-based detection using the Silero VAD v5 ONNX model. More accurate than energy mode, especially in noisy environments.
+ML-based detection using the Silero VAD v5 model. More accurate than energy mode, especially in noisy environments.
 
 ```javascript
-const mic = new Decibri({ vad: true, vadMode: 'silero', vadThreshold: 0.5 });
+const mic = new Microphone({ vad: 'silero', vadThreshold: 0.5 });
 mic.on('speech', () => console.log('speaking'));
 mic.on('silence', () => console.log('silent'));
 ```
 
-The Silero model (~2MB) ships inside the npm package. No downloads or API keys required.
+The Silero model (~2MB) ships inside the npm package. No downloads or API keys required. Silero mode is Node.js only.
 
 ## Device Selection
 
 ```javascript
+const { Microphone } = require('decibri');
+
 // System default
-const mic = new Decibri();
+const mic = new Microphone();
 
 // By name (case-insensitive substring match)
-const mic = new Decibri({ device: 'USB' });
+const mic = new Microphone({ device: 'USB' });
 
 // By index
-const devices = Decibri.devices();
-const mic = new Decibri({ device: devices[1].index });
+const devices = Microphone.devices();
+const mic = new Microphone({ device: devices[1].index });
 
 // By stable per-host ID (survives across enumerations)
-const mic = new Decibri({ device: { id: devices[1].id } });
+const mic = new Microphone({ device: { id: devices[1].id } });
 
-Decibri.devices();
+Microphone.devices();
 // [
 //   { index: 0, name: 'Microphone', id: '{0.0.1.00000000}.{...}', maxInputChannels: 2, defaultSampleRate: 48000, isDefault: true },
 //   { index: 1, name: 'USB Headset', id: '{0.0.1.00000000}.{...}', maxInputChannels: 1, defaultSampleRate: 44100, isDefault: false }
@@ -206,6 +244,10 @@ node node_modules/decibri/examples/websocket-server.js   # terminal 1
 node node_modules/decibri/examples/websocket-stream.js   # terminal 2
 ```
 
+## Migrating from 3.x
+
+decibri 4.0.0 renames the API to a microphone and speaker vocabulary and switches to named exports. See [MIGRATION.md](./MIGRATION.md) for a complete before-and-after guide.
+
 ## Platform Support
 
 | Platform | Architecture | Audio Backend |
@@ -218,9 +260,9 @@ node node_modules/decibri/examples/websocket-stream.js   # terminal 2
 
 ## How It Works
 
-decibri is a Rust library using cpal for cross-platform audio I/O. The Rust core compiles to a Node.js native addon via napi-rs and ships pre-built binaries for each platform. Browser support uses a JavaScript AudioWorklet implementation with the same event-driven API.
+decibri compiles a Rust audio core to a Node.js native addon and ships prebuilt binaries for each platform, so there is no build step on install. Browser support uses a JavaScript AudioWorklet implementation with the same event-driven API.
 
-Audio flows from the OS audio device through cpal's callback, into a crossbeam channel, through frame-exact buffering (guarantees consistent chunk sizes), and into Node.js via a threadsafe function. The JavaScript layer wraps this in a standard Readable stream.
+On Node.js, audio flows from the OS audio device through frame-exact buffering (which guarantees consistent chunk sizes) and into a standard Readable stream. In the browser, audio is captured and resampled in an AudioWorklet and delivered through the same `'data'` event interface.
 
 ## Documentation
 

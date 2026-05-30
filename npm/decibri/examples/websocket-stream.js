@@ -5,11 +5,11 @@
 // Usage (from repo clone):            node npm/decibri/examples/websocket-stream.js [ws://localhost:8080]
 
 const { WebSocket } = require('ws');
-const Decibri       = require('decibri');
+const { Microphone } = require('decibri');
 
 const url = process.argv[2] || 'ws://localhost:8080';
 const ws  = new WebSocket(url);
-const mic = new Decibri({ sampleRate: 16000, channels: 1 });
+const mic = new Microphone({ sampleRate: 16000, channels: 1 });
 
 ws.on('open', () => {
   console.log(`Connected to ${url}, streaming audio. Ctrl+C to stop.`);
