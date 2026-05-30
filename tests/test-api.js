@@ -1,7 +1,7 @@
 'use strict';
 
 const path = require('path');
-const { Microphone } = require(path.join(__dirname, '..', 'npm', 'decibri', 'src', 'decibri.js'));
+const { Microphone, DeviceError } = require(path.join(__dirname, '..', 'npm', 'decibri', 'src', 'decibri.js'));
 
 let passed = 0;
 let failed = 0;
@@ -79,11 +79,11 @@ async function testErrors() {
   // dtype
   assertThrows(() => new Microphone({ dtype: 'wav' }), TypeError, "dtype must be 'int16' or 'float32'");
 
-  // device name not found
+  // device name not found (delegated to the core)
   assertThrows(
     () => new Microphone({ device: '__nonexistent__' }),
-    TypeError,
-    'No audio input device found matching "__nonexistent__"'
+    DeviceError,
+    'No microphone found matching "__nonexistent__"'
   );
 
   // device index out of range
@@ -180,7 +180,7 @@ async function testDeviceByName() {
     assert(chunks.length > 0, `captured ${chunks.length} chunks via device name`);
   } catch (e) {
     // Multiple matches is acceptable if the substring is too broad
-    if (e instanceof TypeError && e.message.includes('Multiple devices match')) {
+    if (e instanceof DeviceError && e.message.includes('Multiple devices match')) {
       console.log('  SKIP: name substring matched multiple devices (expected on some systems)');
       skipped++;
     } else {

@@ -1,7 +1,7 @@
 'use strict';
 
 const path = require('path');
-const { Microphone, Speaker } = require(path.join(__dirname, '..', 'npm', 'decibri', 'src', 'decibri.js'));
+const { Microphone, Speaker, DeviceError } = require(path.join(__dirname, '..', 'npm', 'decibri', 'src', 'decibri.js'));
 
 let passed = 0;
 let failed = 0;
@@ -85,11 +85,11 @@ async function testErrors() {
   // dtype
   assertThrows(() => new Speaker({ dtype: 'wav' }), TypeError, "dtype must be 'int16' or 'float32'");
 
-  // device name not found
+  // device name not found (delegated to the core)
   assertThrows(
     () => new Speaker({ device: '__nonexistent__' }),
-    TypeError,
-    'No audio output device found matching "__nonexistent__"'
+    DeviceError,
+    'No speaker found matching "__nonexistent__"'
   );
 
   // device index out of range

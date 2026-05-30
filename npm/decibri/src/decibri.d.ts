@@ -260,3 +260,28 @@ export declare function outputDevices(): SpeakerInfo[];
 
 /** Version information for decibri and the audio runtime. */
 export declare function version(): VersionInfo;
+
+/**
+ * Base class for errors raised by the decibri native bindings.
+ *
+ * Catch this to handle any decibri device or ONNX Runtime failure generically;
+ * catch a subclass for finer control. Argument validation (bad sample rate,
+ * channels, frames, dtype, vad) throws built-in `RangeError` / `TypeError`, not
+ * a `DecibriError`.
+ */
+export declare class DecibriError extends Error {
+  /** Stable string code identifying the specific failure. */
+  readonly code: string;
+}
+
+/**
+ * Device enumeration or selection failure: an unmatched device name, an
+ * ambiguous name match, or missing hardware.
+ */
+export declare class DeviceError extends DecibriError {}
+
+/** ONNX Runtime setup or inference failure (Silero VAD). */
+export declare class OrtError extends DecibriError {}
+
+/** A specific ONNX Runtime library path could not be loaded. */
+export declare class OrtPathError extends OrtError {}

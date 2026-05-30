@@ -4,7 +4,13 @@ const { Readable } = require('stream');
 const path = require('path');
 const fs = require('fs');
 const { DecibriBridge } = require('../index.js');
-const { wrapNativeError } = require('./errors');
+const {
+  wrapNativeError,
+  DecibriError,
+  DeviceError,
+  OrtError,
+  OrtPathError,
+} = require('./errors');
 
 // ─── Bundled ONNX Runtime path resolution ────────────────────────────────────
 
@@ -113,23 +119,13 @@ class Microphone extends Readable {
 
     // ── Resolve device ──────────────────────────────────────────────────────
 
+    // Name and multi-match resolution are delegated to the core, which owns
+    // the renamed-vocabulary errors (MicrophoneNotFound / MultipleDevicesMatch).
+    // A string name and an { id } object are passed straight through to the
+    // native addon. Only the numeric index keeps a client-side bounds check,
+    // for a clean Node-side RangeError without a round-trip.
     let resolvedDevice = options.device;
-    if (typeof options.device === 'string') {
-      const lower = options.device.toLowerCase();
-      const matches = DecibriBridge.devices().filter(d =>
-        d.name.toLowerCase().includes(lower)
-      );
-      if (matches.length === 0) {
-        throw new TypeError(`No audio input device found matching "${options.device}"`);
-      }
-      if (matches.length > 1) {
-        const names = matches.map(d => `  [${d.index}] ${d.name}`).join('\n');
-        throw new TypeError(
-          `Multiple devices match "${options.device}":\n${names}\nUse a more specific name or pass the device index directly.`
-        );
-      }
-      resolvedDevice = matches[0].index;
-    } else if (typeof options.device === 'number') {
+    if (typeof options.device === 'number') {
       const devices = DecibriBridge.devices();
       if (options.device < 0 || options.device >= devices.length) {
         throw new RangeError('device index out of range. Call Microphone.devices() to list available devices');
@@ -320,4 +316,14 @@ function version() {
   return Microphone.version();
 }
 
-module.exports = { Microphone, Speaker, inputDevices, outputDevices, version };
+module.exports = {
+  Microphone,
+  Speaker,
+  inputDevices,
+  outputDevices,
+  version,
+  DecibriError,
+  DeviceError,
+  OrtError,
+  OrtPathError,
+};

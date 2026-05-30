@@ -9,7 +9,7 @@
  */
 
 const path = require('path');
-const { Microphone, Speaker, inputDevices, outputDevices, version } = require(path.join(__dirname, '..', 'npm', 'decibri', 'src', 'decibri.js'));
+const { Microphone, Speaker, inputDevices, outputDevices, version, DecibriError, DeviceError } = require(path.join(__dirname, '..', 'npm', 'decibri', 'src', 'decibri.js'));
 
 let passed = 0;
 let failed = 0;
@@ -65,11 +65,11 @@ assertThrows(() => new Microphone({ framesPerBuffer: 65537 }), RangeError, 'fram
 // dtype
 assertThrows(() => new Microphone({ dtype: 'wav' }), TypeError, "dtype must be 'int16' or 'float32'");
 
-// device name not found
+// device name not found (delegated to the core)
 assertThrows(
   () => new Microphone({ device: '__nonexistent__' }),
-  TypeError,
-  'No audio input device found matching "__nonexistent__"'
+  DeviceError,
+  'No microphone found matching "__nonexistent__"'
 );
 
 // device index out of range
@@ -82,7 +82,7 @@ assertThrows(
 // device by id, not found
 assertThrows(
   () => new Microphone({ device: { id: '__nonexistent_id__' } }),
-  TypeError,
+  DeviceError,
   'No microphone found matching "__nonexistent_id__"'
 );
 
@@ -149,8 +149,8 @@ assertThrows(() => new Speaker({ channels: 33 }), RangeError, 'channels must be 
 assertThrows(() => new Speaker({ dtype: 'wav' }), TypeError, "dtype must be 'int16' or 'float32'");
 assertThrows(
   () => new Speaker({ device: '__nonexistent__' }),
-  TypeError,
-  'No audio output device found matching "__nonexistent__"'
+  DeviceError,
+  'No speaker found matching "__nonexistent__"'
 );
 assertThrows(
   () => new Speaker({ device: 99999 }),
@@ -161,7 +161,7 @@ assertThrows(
 // device by id, not found
 assertThrows(
   () => new Speaker({ device: { id: '__nonexistent_id__' } }),
-  TypeError,
+  DeviceError,
   'No speaker found matching "__nonexistent_id__"'
 );
 
@@ -252,6 +252,47 @@ assert(typeof freeVer.decibri === 'string', 'free version().decibri is string');
 assert(freeVer.portaudio.includes('cpal'), 'free version().portaudio contains cpal');
 
 console.log('  Group 6 done\n');
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// Group 7: Error class parity (instanceof + code)
+// ═══════════════════════════════════════════════════════════════════════════════
+
+console.log('--- Group 7: error class parity ---');
+
+// A delegated device-name miss is a DeviceError, catchable as DecibriError,
+// and carries a stable code. Works on CI with zero devices (nothing matches).
+try {
+  new Microphone({ device: '__nonexistent__' });
+  console.log('  FAIL: expected a device error');
+  failed++;
+} catch (e) {
+  assert(e instanceof DeviceError, 'name miss is a DeviceError');
+  assert(e instanceof DecibriError, 'DeviceError is a DecibriError');
+  assert(e instanceof Error, 'DecibriError is an Error');
+  assert(e.code === 'MICROPHONE_NOT_FOUND', `code is MICROPHONE_NOT_FOUND (got ${e.code})`);
+  assert(e.name === 'DeviceError', `name is DeviceError (got ${e.name})`);
+}
+
+try {
+  new Speaker({ device: '__nonexistent__' });
+  console.log('  FAIL: expected a device error');
+  failed++;
+} catch (e) {
+  assert(e instanceof DeviceError, 'speaker name miss is a DeviceError');
+  assert(e.code === 'SPEAKER_NOT_FOUND', `code is SPEAKER_NOT_FOUND (got ${e.code})`);
+}
+
+// Argument validation stays a built-in and is NOT a DecibriError.
+try {
+  new Microphone({ sampleRate: 0 });
+  console.log('  FAIL: expected a RangeError');
+  failed++;
+} catch (e) {
+  assert(e instanceof RangeError, 'bad sampleRate is a RangeError');
+  assert(!(e instanceof DecibriError), 'validation error is NOT a DecibriError');
+}
+
+console.log('  Group 7 done\n');
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // Summary

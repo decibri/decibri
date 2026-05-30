@@ -32,23 +32,13 @@ class Speaker extends Writable {
 
     // ── Resolve device ──────────────────────────────────────────────────────
 
+    // Name and multi-match resolution are delegated to the core, which owns
+    // the renamed-vocabulary errors (SpeakerNotFound / MultipleDevicesMatch).
+    // A string name and an { id } object are passed straight through to the
+    // native addon. Only the numeric index keeps a client-side bounds check,
+    // for a clean Node-side RangeError without a round-trip.
     let resolvedDevice = options.device;
-    if (typeof options.device === 'string') {
-      const lower = options.device.toLowerCase();
-      const matches = DecibriOutputBridge.devices().filter(d =>
-        d.name.toLowerCase().includes(lower)
-      );
-      if (matches.length === 0) {
-        throw new TypeError(`No audio output device found matching "${options.device}"`);
-      }
-      if (matches.length > 1) {
-        const names = matches.map(d => `  [${d.index}] ${d.name}`).join('\n');
-        throw new TypeError(
-          `Multiple devices match "${options.device}":\n${names}\nUse a more specific name or pass the device index directly.`
-        );
-      }
-      resolvedDevice = matches[0].index;
-    } else if (typeof options.device === 'number') {
+    if (typeof options.device === 'number') {
       const devices = DecibriOutputBridge.devices();
       if (options.device < 0 || options.device >= devices.length) {
         throw new RangeError('device index out of range. Call Speaker.devices() to list available devices');
