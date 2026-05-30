@@ -8,6 +8,12 @@ For Rust core (`crates/decibri`) and npm binding (`bindings/node`) changes, see 
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.1] - 2026-05-30
+
+### Fixed
+
+- Device-index error message. Passing an out-of-range device index no longer produces a message that names a class removed in the rename. The fix is picked up from the decibri Rust core 4.0.1; the message now points at the neutral `devices()` enumeration.
+
 ## [0.2.0] - 2026-05-30
 
 ### Python binding
