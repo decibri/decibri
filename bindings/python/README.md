@@ -1,6 +1,6 @@
 # Decibri
 
-Cross-platform audio capture, output, and processing for Python.
+Cross-platform audio capture, playback, and processing for Python.
 
 [![PyPI version](https://img.shields.io/pypi/v/decibri.svg)](https://pypi.org/project/decibri/)
 [![Python versions](https://img.shields.io/pypi/pyversions/decibri.svg)](https://pypi.org/project/decibri/)
