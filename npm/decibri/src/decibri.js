@@ -96,10 +96,56 @@ function computeRMS(chunk, dtype) {
 class Microphone extends Readable {
   /**
    * @param {import('./decibri').MicrophoneOptions} [options]
+   * @param {{ prepared: object, native: object }} [_internal] Internal: a
+   *   pre-resolved options bundle and an already-constructed native bridge,
+   *   passed by the async `Microphone.open()` factory so the heavy open work
+   *   (the Silero model load) is not repeated on the event loop. Not part of
+   *   the public API.
    */
-  constructor(options = {}) {
+  constructor(options = {}, _internal = undefined) {
     super({ highWaterMark: options.highWaterMark, objectMode: false });
 
+    // Validate and resolve options once. The async factory passes its already
+    // resolved bundle through `_internal` to avoid recomputing it.
+    const prepared = _internal ? _internal.prepared : Microphone._prepareOptions(options);
+
+    // ── Store config ───────────────────────────────────────────────────────
+
+    this._dtype = prepared.dtype;
+    this._vad = prepared.vadEnabled;
+    this._vadMode = prepared.vadMode;
+    this._vadThreshold = prepared.vadThreshold;
+    this._vadHoldoff = prepared.vadHoldoff;
+    this._vadScore = 0;
+    this._isSpeaking = false;
+    this._silenceTimer = null;
+    this._started = false;
+
+    // ── Create or adopt native bridge ───────────────────────────────────────
+
+    if (_internal) {
+      // Built off the event loop by Microphone.open(); already wrapped.
+      this._native = _internal.native;
+    } else {
+      try {
+        this._native = new DecibriBridge(prepared.nativeOptions);
+      } catch (err) {
+        throw wrapNativeError(err);
+      }
+    }
+  }
+
+  /**
+   * Validate the constructor options and resolve them into the native options
+   * object plus the wrapper-side state. Throws the same `RangeError` /
+   * `TypeError` / `Error` as the constructor on invalid input. Shared by the
+   * synchronous constructor and the async `open()` factory so both validate
+   * identically. Does no native open work beyond the numeric-device bounds
+   * check (a fast device enumeration).
+   * @internal
+   * @param {import('./decibri').MicrophoneOptions} options
+   */
+  static _prepareOptions(options) {
     // ── Validate options ───────────────────────────────────────────────────
 
     const sampleRate = options.sampleRate ?? 16000;
@@ -189,22 +235,13 @@ class Microphone extends Readable {
       ortLibraryPath = resolveBundledOrtPath();
     }
 
-    // ── Store config ───────────────────────────────────────────────────────
-
-    this._dtype = dtype;
-    this._vad = vadEnabled;
-    this._vadMode = vadMode;
-    this._vadThreshold = options.vadThreshold ?? (vadMode === 'silero' ? 0.5 : 0.01);
-    this._vadHoldoff = options.vadHoldoff ?? 300;
-    this._vadScore = 0;
-    this._isSpeaking = false;
-    this._silenceTimer = null;
-    this._started = false;
-
-    // ── Create native bridge ───────────────────────────────────────────────
-
-    try {
-      this._native = new DecibriBridge({
+    return {
+      dtype,
+      vadEnabled,
+      vadMode,
+      vadThreshold: options.vadThreshold ?? (vadMode === 'silero' ? 0.5 : 0.01),
+      vadHoldoff: options.vadHoldoff ?? 300,
+      nativeOptions: {
         sampleRate,
         channels,
         framesPerBuffer,
@@ -213,10 +250,39 @@ class Microphone extends Readable {
         vadMode,
         modelPath,
         ortLibraryPath,
-      });
+      },
+    };
+  }
+
+  /**
+   * Construct a Microphone without blocking the event loop on the open work.
+   *
+   * The synchronous `new Microphone(...)` constructor loads the Silero VAD
+   * model inline when `vad: 'silero'` is set, which blocks the event loop for
+   * roughly 100 to 500 ms on a cold cache. This static factory runs that load
+   * (and device resolution) on the native thread pool and resolves to a ready
+   * instance, so latency-sensitive callers (voice pipelines, websocket
+   * handlers) do not stall. The synchronous constructor remains available and
+   * unchanged.
+   *
+   * Mirrors the Python `AsyncMicrophone.open()` factory. Options are identical
+   * to the constructor. A failed open (bad model path, unknown device, ORT
+   * load failure) rejects the returned Promise with the matching error class
+   * (`RangeError` / `TypeError` for invalid options, `DeviceError` / `OrtError`
+   * / `OrtPathError` for native failures), rather than throwing synchronously.
+   *
+   * @param {import('./decibri').MicrophoneOptions} [options]
+   * @returns {Promise<Microphone>}
+   */
+  static async open(options = {}) {
+    const prepared = Microphone._prepareOptions(options);
+    let native;
+    try {
+      native = await DecibriBridge.openAsync(prepared.nativeOptions);
     } catch (err) {
       throw wrapNativeError(err);
     }
+    return new Microphone(options, { prepared, native });
   }
 
   /** @internal */

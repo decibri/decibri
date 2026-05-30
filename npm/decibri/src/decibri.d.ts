@@ -124,6 +124,27 @@ export interface MicrophoneOptions extends ReadableOptions {
 export declare class Microphone extends Readable {
   constructor(options?: MicrophoneOptions);
 
+  /**
+   * Construct a Microphone without blocking the event loop on the open work.
+   *
+   * The synchronous constructor loads the Silero VAD model inline when
+   * `vad: 'silero'` is set, blocking the event loop for roughly 100 to 500 ms
+   * on a cold cache. This factory runs that load (and device resolution) on the
+   * native thread pool and resolves to a ready instance. The synchronous
+   * constructor remains available and unchanged.
+   *
+   * Options are identical to the constructor. A failed open rejects the Promise
+   * with the matching error: `RangeError` / `TypeError` for invalid options, or
+   * a `DeviceError` / `OrtError` / `OrtPathError` for native failures.
+   *
+   * @example
+   * ```js
+   * const mic = await Microphone.open({ vad: 'silero' });
+   * mic.on('data', (chunk) => { ... });
+   * ```
+   */
+  static open(options?: MicrophoneOptions): Promise<Microphone>;
+
   /** Stop microphone capture and end the stream. Safe to call multiple times. */
   stop(): void;
 
@@ -234,6 +255,23 @@ export interface SpeakerOptions extends WritableOptions {
  */
 export declare class Speaker extends Writable {
   constructor(options?: SpeakerOptions);
+
+  /**
+   * Construct a Speaker without blocking the event loop. Symmetric with
+   * `Microphone.open()`. The speaker loads no model, so the only open work is
+   * device resolution; this factory is provided so async callers can use one
+   * consistent construction pattern across both classes. The synchronous
+   * constructor remains available and unchanged.
+   *
+   * A failed open (unknown device) rejects the Promise with the matching error.
+   *
+   * @example
+   * ```js
+   * const speaker = await Speaker.open({ sampleRate: 24000 });
+   * speaker.write(pcmBuffer);
+   * ```
+   */
+  static open(options?: SpeakerOptions): Promise<Speaker>;
 
   /** Immediate stop. Discards remaining buffered audio. */
   stop(): void;

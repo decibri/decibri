@@ -13,10 +13,45 @@ const PACKAGE_VERSION = require('../package.json').version;
 class Speaker extends Writable {
   /**
    * @param {import('./decibri').SpeakerOptions} [options]
+   * @param {{ prepared: object, native: object }} [_internal] Internal: a
+   *   pre-resolved options bundle and an already-constructed native bridge,
+   *   passed by the async `Speaker.open()` factory. Not part of the public API.
    */
-  constructor(options = {}) {
+  constructor(options = {}, _internal = undefined) {
     super({ highWaterMark: options.highWaterMark || 16384 });
 
+    // Validate and resolve options once. The async factory passes its already
+    // resolved bundle through `_internal` to avoid recomputing it.
+    const prepared = _internal ? _internal.prepared : Speaker._prepareOptions(options);
+
+    // ── Store config ───────────────────────────────────────────────────────
+
+    this._dtype = prepared.dtype;
+    this._started = false;
+
+    // ── Create or adopt native bridge ───────────────────────────────────────
+
+    if (_internal) {
+      // Built off the event loop by Speaker.open(); already wrapped.
+      this._native = _internal.native;
+    } else {
+      try {
+        this._native = new DecibriOutputBridge(prepared.nativeOptions);
+      } catch (err) {
+        throw wrapNativeError(err);
+      }
+    }
+  }
+
+  /**
+   * Validate the constructor options and resolve them into the native options
+   * object plus the wrapper-side state. Throws the same `RangeError` /
+   * `TypeError` as the constructor on invalid input. Shared by the synchronous
+   * constructor and the async `open()` factory.
+   * @internal
+   * @param {import('./decibri').SpeakerOptions} options
+   */
+  static _prepareOptions(options) {
     // ── Validate options ───────────────────────────────────────────────────
 
     const sampleRate = options.sampleRate ?? 16000;
@@ -61,23 +96,41 @@ class Speaker extends Writable {
       resolvedDevice = options.device;
     }
 
-    // ── Store config ───────────────────────────────────────────────────────
-
-    this._dtype = dtype;
-    this._started = false;
-
-    // ── Create native bridge ───────────────────────────────────────────────
-
-    try {
-      this._native = new DecibriOutputBridge({
+    return {
+      dtype,
+      nativeOptions: {
         sampleRate,
         channels,
         format: dtype,
         device: resolvedDevice,
-      });
+      },
+    };
+  }
+
+  /**
+   * Construct a Speaker without blocking the event loop.
+   *
+   * Symmetric with `Microphone.open()` and the Python `AsyncSpeaker.open()`.
+   * The speaker loads no model, so the only open work is device resolution and
+   * the practical blocking risk is small; this factory exists chiefly so async
+   * callers can use one consistent construction pattern across both classes.
+   * The synchronous constructor remains available and unchanged.
+   *
+   * A failed open (unknown device) rejects the returned Promise with the
+   * matching error class rather than throwing synchronously.
+   *
+   * @param {import('./decibri').SpeakerOptions} [options]
+   * @returns {Promise<Speaker>}
+   */
+  static async open(options = {}) {
+    const prepared = Speaker._prepareOptions(options);
+    let native;
+    try {
+      native = await DecibriOutputBridge.openAsync(prepared.nativeOptions);
     } catch (err) {
       throw wrapNativeError(err);
     }
+    return new Speaker(options, { prepared, native });
   }
 
   /** @internal */

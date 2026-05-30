@@ -4,6 +4,7 @@ use std::thread;
 
 use napi::bindgen_prelude::*;
 use napi::threadsafe_function::ThreadsafeFunctionCallMode;
+use napi::{Env, Task};
 use napi_derive::napi;
 
 use decibri::device::{self, DeviceSelector};
@@ -71,76 +72,148 @@ pub struct DecibriBridge {
     vad_probability: Arc<AtomicU32>,
 }
 
+/// The `Send` pieces of a microphone bridge produced by the open work: the
+/// resolved device wrapped in a `Microphone` and the (optionally) loaded Silero
+/// model. Holding these lets the blocking open work run off the JS thread in an
+/// `AsyncTask` and the bridge be assembled back on the JS thread in `resolve`.
+/// Every field here is `Send`, so the whole struct can cross the libuv boundary:
+/// `Microphone` owns only config plus a `cpal::Device` (Send + Sync), and
+/// `SileroVad` already crosses threads in the capture pump. The `!Send`
+/// `cpal::Stream` is not created here; it is opened later in `start`.
+pub struct MicrophoneParts {
+    capture: Microphone,
+    format: SampleFormat,
+    frames_per_buffer: u32,
+    channels: u16,
+    vad: Option<SileroVad>,
+}
+
+/// Resolve the device and load the Silero model. This is the blocking open work
+/// shared by the synchronous constructor and the async `openAsync` task. It is
+/// safe to run off the JS thread: it touches no napi/JS state and produces only
+/// `Send` values. The Silero model load is the slow part (roughly 100 to 500 ms
+/// on a cold cache); device resolution is fast.
+fn build_microphone_parts(options: Option<DecibriOptions>) -> Result<MicrophoneParts> {
+    let opts = options.unwrap_or_default();
+
+    let sample_rate = opts.sample_rate.unwrap_or(16000);
+    let channels = opts.channels.unwrap_or(1) as u16;
+    let frames_per_buffer = opts.frames_per_buffer.unwrap_or(1600);
+
+    let format_str = opts.format.as_deref().unwrap_or("int16");
+    let format = match format_str {
+        "int16" => SampleFormat::Int16,
+        "float32" => SampleFormat::Float32,
+        _ => {
+            return Err(Error::new(
+                Status::InvalidArg,
+                "format must be 'int16' or 'float32'",
+            ))
+        }
+    };
+
+    let device = resolve_device_option(&opts.device)?;
+
+    let config = MicrophoneConfig {
+        sample_rate,
+        channels,
+        frames_per_buffer,
+        device,
+    };
+
+    let capture = Microphone::new(config).map_err(to_napi_error)?;
+
+    // Silero VAD: load model if vadMode is 'silero'
+    let vad_mode = opts.vad_mode.as_deref().unwrap_or("energy");
+    let vad = if vad_mode == "silero" {
+        let model_path = opts.model_path.ok_or_else(|| {
+            Error::new(
+                Status::InvalidArg,
+                "modelPath is required when vadMode is 'silero'",
+            )
+        })?;
+        let vad_config = VadConfig {
+            model_path: std::path::PathBuf::from(model_path),
+            sample_rate,
+            threshold: 0.5, // JS wrapper controls the actual threshold
+            // Populated by the JS wrapper from require.resolve on the
+            // resolved platform package. When `None`, Rust falls through
+            // to `ort::init()` which honours the `ORT_DYLIB_PATH` env var.
+            ort_library_path: opts
+                .ort_library_path
+                .as_deref()
+                .map(std::path::PathBuf::from),
+        };
+        Some(SileroVad::new(vad_config).map_err(to_napi_error)?)
+    } else {
+        None
+    };
+
+    Ok(MicrophoneParts {
+        capture,
+        format,
+        frames_per_buffer,
+        channels,
+        vad,
+    })
+}
+
+impl MicrophoneParts {
+    /// Assemble the bridge from the loaded parts. No blocking work: just struct
+    /// assembly with fresh runtime state. Runs on the JS thread (either inside
+    /// the synchronous constructor or in the async task's `resolve`).
+    fn into_bridge(self) -> DecibriBridge {
+        DecibriBridge {
+            capture: Some(self.capture),
+            stream: None,
+            format: self.format,
+            frames_per_buffer: self.frames_per_buffer,
+            channels: self.channels,
+            running: Arc::new(AtomicBool::new(false)),
+            pump_handle: None,
+            vad: self.vad,
+            vad_probability: Arc::new(AtomicU32::new(0)),
+        }
+    }
+}
+
+/// Background task that performs the blocking microphone open work (device
+/// resolution and the Silero model load) on the libuv thread pool, off the JS
+/// event loop, then resolves to a constructed bridge on the JS thread. A failed
+/// open propagates through the default `reject`, rejecting the Promise with the
+/// matching error.
+pub struct OpenMicrophoneTask {
+    options: Option<DecibriOptions>,
+}
+
+impl Task for OpenMicrophoneTask {
+    type Output = MicrophoneParts;
+    type JsValue = DecibriBridge;
+
+    fn compute(&mut self) -> Result<Self::Output> {
+        build_microphone_parts(self.options.take())
+    }
+
+    fn resolve(&mut self, _env: Env, output: Self::Output) -> Result<Self::JsValue> {
+        Ok(output.into_bridge())
+    }
+}
+
 #[napi]
 impl DecibriBridge {
     #[napi(constructor)]
     pub fn new(options: Option<DecibriOptions>) -> Result<Self> {
-        let opts = options.unwrap_or_default();
+        Ok(build_microphone_parts(options)?.into_bridge())
+    }
 
-        let sample_rate = opts.sample_rate.unwrap_or(16000);
-        let channels = opts.channels.unwrap_or(1) as u16;
-        let frames_per_buffer = opts.frames_per_buffer.unwrap_or(1600);
-
-        let format_str = opts.format.as_deref().unwrap_or("int16");
-        let format = match format_str {
-            "int16" => SampleFormat::Int16,
-            "float32" => SampleFormat::Float32,
-            _ => {
-                return Err(Error::new(
-                    Status::InvalidArg,
-                    "format must be 'int16' or 'float32'",
-                ))
-            }
-        };
-
-        let device = resolve_device_option(&opts.device)?;
-
-        let config = MicrophoneConfig {
-            sample_rate,
-            channels,
-            frames_per_buffer,
-            device,
-        };
-
-        let capture = Microphone::new(config).map_err(to_napi_error)?;
-
-        // Silero VAD: load model if vadMode is 'silero'
-        let vad_mode = opts.vad_mode.as_deref().unwrap_or("energy");
-        let vad = if vad_mode == "silero" {
-            let model_path = opts.model_path.ok_or_else(|| {
-                Error::new(
-                    Status::InvalidArg,
-                    "modelPath is required when vadMode is 'silero'",
-                )
-            })?;
-            let vad_config = VadConfig {
-                model_path: std::path::PathBuf::from(model_path),
-                sample_rate,
-                threshold: 0.5, // JS wrapper controls the actual threshold
-                // Populated by the JS wrapper from require.resolve on the
-                // resolved platform package. When `None`, Rust falls through
-                // to `ort::init()` which honours the `ORT_DYLIB_PATH` env var.
-                ort_library_path: opts
-                    .ort_library_path
-                    .as_deref()
-                    .map(std::path::PathBuf::from),
-            };
-            Some(SileroVad::new(vad_config).map_err(to_napi_error)?)
-        } else {
-            None
-        };
-
-        Ok(Self {
-            capture: Some(capture),
-            stream: None,
-            format,
-            frames_per_buffer,
-            channels,
-            running: Arc::new(AtomicBool::new(false)),
-            pump_handle: None,
-            vad,
-            vad_probability: Arc::new(AtomicU32::new(0)),
-        })
+    /// Construct a microphone bridge without blocking the JS event loop. The
+    /// device resolution and Silero model load run on the libuv thread pool;
+    /// the returned Promise resolves to a fully constructed bridge, or rejects
+    /// with the matching error. The synchronous `new` remains available and
+    /// unchanged.
+    #[napi]
+    pub fn open_async(options: Option<DecibriOptions>) -> AsyncTask<OpenMicrophoneTask> {
+        AsyncTask::new(OpenMicrophoneTask { options })
     }
 
     /// Start capturing audio. The callback receives `(err, chunk)` for each buffer.
@@ -418,42 +491,96 @@ pub struct DecibriOutputBridge {
     format: SampleFormat,
 }
 
+/// The `Send` pieces of a speaker bridge produced by the open work. Unlike the
+/// microphone, there is no model to load: the only open work is device
+/// resolution, so `Speaker.open()` exists chiefly for API parity with
+/// `Microphone.open()` (and the Python `AsyncSpeaker.open()`). `Speaker` owns
+/// only config plus a `cpal::Device` (Send + Sync), so this struct is `Send`;
+/// the `!Send` `cpal::Stream` is opened lazily on the first write, not here.
+pub struct SpeakerParts {
+    output: Speaker,
+    format: SampleFormat,
+}
+
+/// Resolve the output device. Shared by the synchronous constructor and the
+/// async `openAsync` task; safe to run off the JS thread and produces only
+/// `Send` values.
+fn build_speaker_parts(options: Option<DecibriOutputOptions>) -> Result<SpeakerParts> {
+    let opts = options.unwrap_or_default();
+
+    let sample_rate = opts.sample_rate.unwrap_or(16000);
+    let channels = opts.channels.unwrap_or(1) as u16;
+
+    let format_str = opts.format.as_deref().unwrap_or("int16");
+    let format = match format_str {
+        "int16" => SampleFormat::Int16,
+        "float32" => SampleFormat::Float32,
+        _ => {
+            return Err(Error::new(
+                Status::InvalidArg,
+                "format must be 'int16' or 'float32'",
+            ))
+        }
+    };
+
+    let device = resolve_device_option(&opts.device)?;
+
+    let config = SpeakerConfig {
+        sample_rate,
+        channels,
+        device,
+    };
+
+    let output = Speaker::new(config).map_err(to_napi_error)?;
+
+    Ok(SpeakerParts { output, format })
+}
+
+impl SpeakerParts {
+    /// Assemble the bridge from the resolved parts. Runs on the JS thread.
+    fn into_bridge(self) -> DecibriOutputBridge {
+        DecibriOutputBridge {
+            output: Some(self.output),
+            stream: None,
+            format: self.format,
+        }
+    }
+}
+
+/// Background task that performs the speaker open work (device resolution) on
+/// the libuv thread pool, then resolves to a constructed bridge on the JS
+/// thread. A failed open rejects the Promise with the matching error.
+pub struct OpenSpeakerTask {
+    options: Option<DecibriOutputOptions>,
+}
+
+impl Task for OpenSpeakerTask {
+    type Output = SpeakerParts;
+    type JsValue = DecibriOutputBridge;
+
+    fn compute(&mut self) -> Result<Self::Output> {
+        build_speaker_parts(self.options.take())
+    }
+
+    fn resolve(&mut self, _env: Env, output: Self::Output) -> Result<Self::JsValue> {
+        Ok(output.into_bridge())
+    }
+}
+
 #[napi]
 impl DecibriOutputBridge {
     #[napi(constructor)]
     pub fn new(options: Option<DecibriOutputOptions>) -> Result<Self> {
-        let opts = options.unwrap_or_default();
+        Ok(build_speaker_parts(options)?.into_bridge())
+    }
 
-        let sample_rate = opts.sample_rate.unwrap_or(16000);
-        let channels = opts.channels.unwrap_or(1) as u16;
-
-        let format_str = opts.format.as_deref().unwrap_or("int16");
-        let format = match format_str {
-            "int16" => SampleFormat::Int16,
-            "float32" => SampleFormat::Float32,
-            _ => {
-                return Err(Error::new(
-                    Status::InvalidArg,
-                    "format must be 'int16' or 'float32'",
-                ))
-            }
-        };
-
-        let device = resolve_device_option(&opts.device)?;
-
-        let config = SpeakerConfig {
-            sample_rate,
-            channels,
-            device,
-        };
-
-        let output = Speaker::new(config).map_err(to_napi_error)?;
-
-        Ok(Self {
-            output: Some(output),
-            stream: None,
-            format,
-        })
+    /// Construct a speaker bridge without blocking the JS event loop. The device
+    /// resolution runs on the libuv thread pool; the returned Promise resolves
+    /// to a constructed bridge, or rejects with the matching error. The
+    /// synchronous `new` remains available and unchanged.
+    #[napi]
+    pub fn open_async(options: Option<DecibriOutputOptions>) -> AsyncTask<OpenSpeakerTask> {
+        AsyncTask::new(OpenSpeakerTask { options })
     }
 
     /// Write PCM data for playback. Starts the output stream on first call.

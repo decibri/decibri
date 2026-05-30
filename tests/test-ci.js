@@ -44,6 +44,26 @@ function assert(condition, label) {
   }
 }
 
+async function assertRejects(fn, errorType, messagePart) {
+  try {
+    await fn();
+    console.log(`  FAIL: expected ${errorType.name} rejection but the promise resolved`);
+    failed++;
+  } catch (e) {
+    if (!(e instanceof errorType)) {
+      console.log(`  FAIL: expected ${errorType.name} rejection, got ${e.constructor.name}: ${e.message}`);
+      failed++;
+    } else if (!e.message.includes(messagePart)) {
+      console.log(`  FAIL: rejection message mismatch`);
+      console.log(`    expected to contain: ${messagePart}`);
+      console.log(`    actual: ${e.message}`);
+      failed++;
+    } else {
+      passed++;
+    }
+  }
+}
+
 // ═══════════════════════════════════════════════════════════════════════════════
 // Group 1: Microphone constructor error messages
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -316,14 +336,103 @@ try {
 console.log('  Group 7 done\n');
 
 // ═══════════════════════════════════════════════════════════════════════════════
-// Summary
+// Group 8: async open() factories (deterministic, no hardware required)
+// ═══════════════════════════════════════════════════════════════════════════════
+//
+// Asserts what is deterministic: the factory resolves to a working instance and
+// rejects with the right error class on bad input. The non-blocking property
+// (that open() does not stall the event loop) is validated by design and by the
+// hardware tier in tests/test-async-open.js; it is not asserted here.
+
+async function asyncOpenTests() {
+  console.log('--- Group 8: async open() factories ---');
+
+  // Microphone.open() resolves to a working instance (default device, no model).
+  // Mirrors the synchronous construction already exercised in Group 5; if the CI
+  // runner can construct a Microphone synchronously, the async factory resolves
+  // the same way.
+  {
+    const m = await Microphone.open({ sampleRate: 16000, channels: 1 });
+    assert(m instanceof Microphone, 'Microphone.open() resolves to a Microphone');
+    assert(m.isOpen === false, 'opened Microphone is not yet capturing');
+    assert(m.vadScore === 0, 'opened Microphone vadScore starts at 0');
+    m.stop();
+  }
+
+  // Speaker.open() resolves to a working instance.
+  {
+    const s = await Speaker.open({ sampleRate: 16000, channels: 1 });
+    assert(s instanceof Speaker, 'Speaker.open() resolves to a Speaker');
+    assert(s.isPlaying === false, 'opened Speaker is not yet playing');
+    s.stop();
+  }
+
+  // Invalid options reject (not throw synchronously) with a built-in error.
+  await assertRejects(
+    () => Microphone.open({ sampleRate: 0 }),
+    RangeError,
+    'sample rate must be between 1000 and 384000'
+  );
+  await assertRejects(
+    () => Microphone.open({ dtype: 'wav' }),
+    TypeError,
+    "dtype must be 'int16' or 'float32'"
+  );
+  await assertRejects(
+    () => Speaker.open({ channels: 33 }),
+    RangeError,
+    'channels must be between 1 and 32'
+  );
+
+  // A missing Silero model rejects before any native work (wrapper-side check).
+  await assertRejects(
+    () => Microphone.open({ vad: 'silero', modelPath: '/nonexistent/model.onnx' }),
+    Error,
+    'Silero VAD model not found'
+  );
+
+  // A native open failure (unknown device name) rejects with a DeviceError that
+  // carries the frozen message and code. Exercises the native compute -> reject
+  // -> wrapNativeError path. Deterministic on CI: nothing matches the name.
+  await assertRejects(
+    () => Microphone.open({ device: '__nonexistent__' }),
+    DeviceError,
+    'No microphone found matching "__nonexistent__"'
+  );
+  await assertRejects(
+    () => Speaker.open({ device: '__nonexistent__' }),
+    DeviceError,
+    'No speaker found matching "__nonexistent__"'
+  );
+
+  // Additive guarantee: the synchronous constructor still works unchanged.
+  {
+    const m = new Microphone({ sampleRate: 16000, channels: 1 });
+    assert(m instanceof Microphone, 'sync new Microphone() still works alongside open()');
+    m.stop();
+    const s = new Speaker({ sampleRate: 16000, channels: 1 });
+    assert(s instanceof Speaker, 'sync new Speaker() still works alongside open()');
+    s.stop();
+  }
+
+  console.log('  Group 8 done\n');
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// Summary (runs after the async group resolves)
 // ═══════════════════════════════════════════════════════════════════════════════
 
-console.log('═══════════════════════════════════════');
-console.log(`  Passed:  ${passed}`);
-console.log(`  Failed:  ${failed}`);
-console.log('═══════════════════════════════════════');
-
-if (failed > 0) {
-  process.exit(1);
-}
+asyncOpenTests()
+  .then(() => {
+    console.log('═══════════════════════════════════════');
+    console.log(`  Passed:  ${passed}`);
+    console.log(`  Failed:  ${failed}`);
+    console.log('═══════════════════════════════════════');
+    if (failed > 0) {
+      process.exit(1);
+    }
+  })
+  .catch((err) => {
+    console.error('  FATAL: async open() tests threw unexpectedly:', err);
+    process.exit(1);
+  });
