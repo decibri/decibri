@@ -1,6 +1,6 @@
-"""Phase 4 bridge sendability tests.
+"""Bridge sendability tests.
 
-Verifies the Phase 4 invariant from the Python side: both `Microphone` and
+Verifies the cross-thread invariant from the Python side: both `Microphone` and
 `Speaker` instances can cross thread boundaries without raising
 PyRuntimeError("can't access object from another thread"). The Rust
 binding asserts the same property at compile time via the
@@ -11,10 +11,9 @@ implicitly depends on, or a future PyO3 release that tightens runtime
 checks beyond what Send + 'static guarantees).
 
 The strongest signal is `test_decibri_can_be_passed_through_threadpool_for_callable`,
-which simulates the capture pattern Phase 5's
-`pyo3_async_runtimes::tokio::future_into_py` will use. If that test
-passes, the bridge will compile and run inside an async closure when
-Phase 5 wires it up.
+which simulates the capture pattern
+`pyo3_async_runtimes::tokio::future_into_py` uses. If that test
+passes, the bridge will compile and run inside an async closure.
 
 These tests do not exercise audio capture or playback; they only exercise
 the bridge's identity and a pure read-only method (`is_open`). No audio
@@ -32,9 +31,9 @@ from decibri import Microphone, Speaker
 def test_decibri_construct_no_unsendable_error() -> None:
     """Constructed Microphone instance survives a thread-pool submission.
 
-    Pre-Phase-4 (#[pyclass(unsendable)]), this raised PyRuntimeError on
-    the worker's first attribute access. Post-Phase-4, the bridge is
-    `Send + 'static` and PyO3 admits the cross-thread access.
+    With #[pyclass(unsendable)] this would raise PyRuntimeError on the
+    worker's first attribute access. The bridge is `Send + 'static`, so
+    PyO3 admits the cross-thread access.
     """
     decibri = Microphone(vad=False)
     with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
@@ -68,7 +67,7 @@ def test_decibri_method_call_from_worker_thread() -> None:
 
 
 def test_decibri_can_be_passed_through_threadpool_for_callable() -> None:
-    """Closure-capture pattern that mirrors Phase 5's future_into_py.
+    """Closure-capture pattern that mirrors future_into_py.
 
     `pyo3_async_runtimes::tokio::future_into_py` captures the bridge
     into an async closure and submits the closure to a Tokio worker.
@@ -76,7 +75,7 @@ def test_decibri_can_be_passed_through_threadpool_for_callable() -> None:
     on the captured value is the same: it must survive being moved
     out of the calling thread.
 
-    If this test passes, the Phase 5 async wiring will compile when the
+    If this test passes, the async wiring will compile when the
     bridge is captured into a tokio::spawn_blocking-shaped closure.
     """
     decibri = Microphone(vad=False)
@@ -91,10 +90,9 @@ def test_decibri_can_be_passed_through_threadpool_for_callable() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Phase 7.5 Item 12 (expanded): bridge-level close() symmetry
+# Bridge-level close() symmetry
 #
-# SpeakerBridge has had close() since Phase 2; Phase 7.5 adds the missing
-# MicrophoneBridge::close() and AsyncMicrophoneBridge::close() as literal
+# MicrophoneBridge::close() and AsyncMicrophoneBridge::close() are literal
 # aliases for stop(), so all four bridges have the same lifecycle surface.
 # ---------------------------------------------------------------------------
 

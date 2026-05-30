@@ -1,4 +1,4 @@
-"""Phase 9 Item C7: ForkAfterOrtInit detection on Linux.
+"""ForkAfterOrtInit detection on Linux.
 
 These tests pin the contract that decibri raises ``ForkAfterOrtInit`` in
 a child process when ONNX Runtime was initialized in the parent before
@@ -102,7 +102,7 @@ def _child_init_silero_in_child(queue: "mp.Queue[tuple[str, str]]") -> None:
 def test_fork_after_silero_init_raises_in_child() -> None:
     """Parent inits Silero, then forks; child raises ForkAfterOrtInit on use.
 
-    This is the headline behavior of Phase 9 C7: silent ORT corruption
+    This is the headline behavior: silent ORT corruption
     on fork is now a clean exception with a remediation message.
     """
     # Parent: trigger Silero ORT init.

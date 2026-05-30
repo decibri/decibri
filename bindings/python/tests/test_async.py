@@ -1,13 +1,12 @@
-"""Phase 5 tests for AsyncMicrophone and AsyncSpeaker.
+"""Tests for AsyncMicrophone and AsyncSpeaker.
 
-Covers the goals from Section 2 of phase-5-async-support.md:
-construction lifecycle, async context manager, async iterator,
+Covers construction lifecycle, async context manager, async iterator,
 cancellation propagation, output write/drain, and the concurrent-tasks
-property test that validates Phase 4's Send + 'static under realistic
+property test that validates the bridge's Send + 'static under realistic
 async load.
 
-Per locked decision Q3, every test has explicit ``@pytest.mark.asyncio``.
-Per the Step 1 fix relay, all cancellation tests use
+By convention, every test has explicit ``@pytest.mark.asyncio``.
+All cancellation tests use
 ``asyncio.wait_for(coro, timeout=X)`` rather than ``asyncio.timeout(X)``
 because the latter is Python 3.11+ only and the abi3 floor is 3.10.
 
@@ -241,11 +240,11 @@ async def test_async_output_write_drain() -> None:
 async def test_async_decibri_concurrent_tasks_share_instance() -> None:
     """Two concurrent tasks calling on the same instance work without panic.
 
-    Validates Phase 4's ``Send + 'static`` guarantee under realistic
+    Validates the bridge's ``Send + 'static`` guarantee under realistic
     async load (not just the ThreadPoolExecutor pattern from
     tests/test_bridge_sendability.py). The Rust-side
-    ``tokio::sync::Mutex`` serializes concurrent calls per Phase 5 plan
-    Risk 3; the test confirms no panic, no deadlock.
+    ``tokio::sync::Mutex`` serializes concurrent calls; the test confirms
+    no panic, no deadlock.
 
     Test design: ``stop`` is idempotent at the bridge level (sets stream
     and capture options to None; calling twice is a no-op). Running two
@@ -254,7 +253,7 @@ async def test_async_decibri_concurrent_tasks_share_instance() -> None:
     that the non-idempotent operations (start, read) would raise.
     Concurrent ``start`` is intentionally avoided because the bridge
     raises ``AlreadyRunning`` on the second call by design (correct
-    behaviour, not a Phase 5 concern).
+    behaviour, not a concurrency concern).
 
     Requires audio input hardware: the test starts a real cpal stream
     before issuing the concurrent stops. CI runners without audio skip.
@@ -277,15 +276,15 @@ async def test_async_decibri_concurrent_tasks_share_instance() -> None:
 
 @pytest.mark.asyncio
 async def test_async_input_devices_returns_list() -> None:
-    """``AsyncMicrophone.input_devices()`` is async and returns a list."""
-    devices: list[Any] = await AsyncMicrophone.input_devices()
+    """``AsyncMicrophone.devices()`` is async and returns a list."""
+    devices: list[Any] = await AsyncMicrophone.devices()
     assert isinstance(devices, list)
 
 
 @pytest.mark.asyncio
 async def test_async_output_devices_returns_list() -> None:
-    """``AsyncSpeaker.output_devices()`` is async and returns a list."""
-    devices: list[Any] = await AsyncSpeaker.output_devices()
+    """``AsyncSpeaker.devices()`` is async and returns a list."""
+    devices: list[Any] = await AsyncSpeaker.devices()
     assert isinstance(devices, list)
 
 
@@ -298,7 +297,7 @@ async def test_async_version_returns_version_info() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Phase 7.5: close() alias for stop() on AsyncMicrophone
+# close() alias for stop() on AsyncMicrophone
 # ---------------------------------------------------------------------------
 
 
@@ -334,7 +333,7 @@ async def test_async_microphone_close_idempotent() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Phase 7.5 Item 10: is_open / is_playing now query bridge truth
+# is_open / is_playing query bridge truth
 # ---------------------------------------------------------------------------
 
 
@@ -343,9 +342,9 @@ async def test_async_microphone_close_idempotent() -> None:
 async def test_async_microphone_is_open_reflects_bridge_truth() -> None:
     """AsyncMicrophone.is_open queries the Rust bridge atomic mirror.
 
-    Phase 7.5 Item 10: previously this was a Python-side cache that
-    could lie when the Rust side closed the stream itself. Now it
-    delegates to the lock-free atomic mirror on AsyncMicrophoneBridge.
+    Previously this was a Python-side cache that could lie when the Rust
+    side closed the stream itself. Now it delegates to the lock-free
+    atomic mirror on AsyncMicrophoneBridge.
     """
     mic = AsyncMicrophone(vad=False)
     assert mic.is_open is False, "Pre-start: bridge atomic should be False"
@@ -362,7 +361,7 @@ async def test_async_microphone_is_open_reflects_bridge_truth() -> None:
 async def test_async_speaker_is_playing_reflects_bridge_truth() -> None:
     """AsyncSpeaker.is_playing queries the Rust bridge atomic mirror.
 
-    Phase 7.5 Item 10 sibling fix: same shape as AsyncMicrophone.is_open.
+    Same shape as AsyncMicrophone.is_open.
     """
     spk = AsyncSpeaker()
     assert spk.is_playing is False
@@ -394,7 +393,7 @@ async def test_async_speaker_is_playing_pre_start_no_hardware() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Phase 7.7 Item B1: async read_with_metadata + aiter_with_metadata + Chunk
+# async read_with_metadata + aiter_with_metadata + Chunk
 # ---------------------------------------------------------------------------
 
 
@@ -440,7 +439,7 @@ async def test_async_aiter_with_metadata_yields_chunks() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Phase 9 Item A6: AsyncMicrophone.open() / AsyncSpeaker.open() async
+# AsyncMicrophone.open() / AsyncSpeaker.open() async
 # factory classmethods that offload synchronous construction to the
 # default ThreadPoolExecutor via loop.run_in_executor.
 # ---------------------------------------------------------------------------
@@ -506,7 +505,7 @@ async def test_async_microphone_open_dispatches_to_executor() -> None:
     assert len(calls) == 1, f"expected one run_in_executor call, got {len(calls)}"
     executor_arg, func = calls[0]
     assert executor_arg is None, (
-        "open() should pass executor=None to use the default ThreadPoolExecutor (LD-9-7)"
+        "open() should pass executor=None to use the default ThreadPoolExecutor"
     )
     assert callable(func), "the dispatched callable should be the construction lambda"
 

@@ -1,7 +1,7 @@
-"""Phase 2 configuration validation tests (hard-freeze byte-identity).
+"""Configuration validation tests (hard-freeze byte-identity).
 
 Tests Microphone constructor + start() argument validation with full message-text
-equality per Q5 hybrid policy (hard-freeze on InvalidArg-family). All tests
+equality per the hybrid policy (hard-freeze on InvalidArg-family). All tests
 exercise the path a user actually hits, not direct exception instantiation.
 
 Two validation layers:

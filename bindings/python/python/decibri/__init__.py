@@ -57,19 +57,19 @@ __version__ = "0.1.3"
 def input_devices() -> list[MicrophoneInfo]:
     """List available audio input devices.
 
-    Module-level convenience for ``Microphone.input_devices()``. Returns
+    Module-level convenience for ``Microphone.devices()``. Returns
     input devices only; for output devices use
     ``decibri.output_devices()``. To list both, concatenate the two.
     """
-    return Microphone.input_devices()
+    return Microphone.devices()
 
 
 def output_devices() -> list[SpeakerInfo]:
     """List available audio output devices.
 
-    Module-level convenience for ``Speaker.output_devices()``.
+    Module-level convenience for ``Speaker.devices()``.
     """
-    return Speaker.output_devices()
+    return Speaker.devices()
 
 
 def version() -> VersionInfo:

@@ -1,7 +1,7 @@
-"""Phase 6 Step 1 empirical smoke tests for rust-numpy 0.28.0.
+"""Empirical smoke tests for rust-numpy 0.28.0.
 
 Verifies three preconditions for the AsyncMicrophone / Speaker numpy
-surfaces that land in subsequent Phase 6 relays:
+surfaces:
 
 1. rust-numpy 0.28.0 builds and runs cleanly in our extension-module
    context with PyO3 0.28.x.
@@ -13,8 +13,8 @@ surfaces that land in subsequent Phase 6 relays:
    constructed from the cpal-derived ``Vec<i16>`` or ``Vec<f32>``).
 
 3. The returned ndarray's ``flags.owndata == False`` documents the
-   actual rust-numpy 0.28.0 behavior. The Phase 6 Step 1 empirical
-   experiment surfaced this as outcome (ii): rust-numpy's
+   actual rust-numpy 0.28.0 behavior. An empirical experiment
+   surfaced this: rust-numpy's
    ``IntoPyArray::into_pyarray`` consumes the Rust ``Vec`` (correct
    ownership semantics; no double-free) but allocates a fresh NumPy
    buffer and copies the data into it. The original Vec's heap
@@ -25,8 +25,8 @@ surfaces that land in subsequent Phase 6 relays:
    exists to surface a CHANGE in this behavior across rust-numpy
    upgrades, which would warrant investigation.
 
-These tests stay as persistent regression coverage (locked decision Q4
-of phase-6-numpy-zerocopy.md): if a future rust-numpy upgrade breaks
+These tests stay as persistent regression coverage: if a future
+rust-numpy upgrade breaks
 the ``into_pyarray`` semantics or pyo3 0.28 compat, these tests fail
 first and surface the regression at the build-pipeline level rather
 than at AsyncMicrophone integration time.
@@ -53,7 +53,7 @@ def test_numpy_smoke_returns_ndarray() -> None:
 def test_numpy_smoke_dtype_is_int16() -> None:
     """The smoke ndarray has dtype ``np.int16`` matching the ``Vec<i16>`` input.
 
-    Validates the dtype mapping that Phase 6's read path will rely on:
+    Validates the dtype mapping that the read path relies on:
     Rust ``i16`` -> NumPy ``np.int16`` for ``dtype='int16'`` mode.
     """
     arr = _numpy_smoke()
@@ -64,7 +64,7 @@ def test_numpy_smoke_shape_is_1d() -> None:
     """The smoke ndarray has shape ``(5,)`` matching the Rust Vec's length.
 
     Validates the 1-D shape convention for mono audio. Multi-channel
-    audio (Phase 6 §3e) uses 2-D ``(N, channels)``; this smoke covers
+    audio uses 2-D ``(N, channels)``; this smoke covers
     the mono case.
     """
     arr = _numpy_smoke()
@@ -85,8 +85,8 @@ def test_numpy_smoke_values_match() -> None:
 def test_numpy_smoke_owndata_documents_copy_semantics() -> None:
     """The smoke ndarray's ``owndata`` flag is False on rust-numpy 0.28.0.
 
-    Documents the empirical finding from Phase 6 Step 1's smoke
-    experiment (outcome ii): rust-numpy's ``IntoPyArray::into_pyarray``
+    Documents the empirical finding from a smoke experiment:
+    rust-numpy's ``IntoPyArray::into_pyarray``
     is a copy-at-the-boundary operation, not strict ownership transfer.
     The Rust ``Vec`` is consumed (so there's no double-free or
     use-after-free risk; ownership semantics are correct), but the data
@@ -112,11 +112,10 @@ def test_numpy_smoke_owndata_documents_copy_semantics() -> None:
     - For audio chunks (typical sizes ~1-3 KB at 100 ms 16 kHz mono
       int16), the memcpy cost is nanoseconds. Negligible against the
       cpal callback frequency and the Python GIL acquire/release
-      overhead. Phase 6 accepts this cost as part of the contract.
+      overhead. This cost is accepted as part of the contract.
 
-    - The Phase 6 plan's original "NumPy zero-copy support" framing
-      was technically inaccurate; the rebrand to "NumPy ndarray
-      support" lands as a separate plan-storage edit. The
+    - The "NumPy zero-copy" label would be technically inaccurate
+      here; the accurate description is "NumPy ndarray support". The
       functionality this enables is unchanged: callers get
       ``numpy.ndarray`` returns from ``Microphone(as_ndarray=True).read()``
       with the expected dtype and shape; only the marketing word
@@ -137,5 +136,5 @@ def test_numpy_smoke_owndata_documents_copy_semantics() -> None:
         f"copies the Vec's contents), got {arr.flags.owndata!r}. If "
         f"this happened after a rust-numpy upgrade, the upgrade may "
         f"have introduced true zero-copy buffer sharing; investigate "
-        f"and update the Phase 6 documentation accordingly."
+        f"and update the documentation accordingly."
     )

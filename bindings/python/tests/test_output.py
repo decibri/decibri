@@ -1,4 +1,4 @@
-"""Phase 2 audio output lifecycle tests.
+"""Audio output lifecycle tests.
 
 All tests in this module require real audio output hardware. CI auto-skips
 via the requires_audio_output marker.
@@ -32,7 +32,7 @@ pytestmark = pytest.mark.requires_audio_output
 
 
 def test_output_devices_returns_list_of_output_device_info() -> None:
-    devices = Speaker.output_devices()
+    devices = Speaker.devices()
     assert isinstance(devices, list)
     assert len(devices) > 0
     for d in devices:

@@ -1,4 +1,4 @@
-"""Phase 7.6 Item C5: ``record_to_file`` convenience helper tests.
+"""``record_to_file`` convenience helper tests.
 
 Five assertions:
   1. The recorded file's frame count is within tolerance of requested

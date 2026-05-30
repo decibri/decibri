@@ -58,8 +58,8 @@ class VersionInfo:
     """Version information for the decibri core and its audio runtime.
 
     The ``decibri`` field is the Rust core version (``CARGO_PKG_VERSION``
-    at build time), not the Python wheel version. The ``binding`` field
-    is the Python wheel version. The ``audio_backend`` field is the cpal
+    at build time), not the Python package version. The ``binding`` field
+    is the Python package version. The ``audio_backend`` field is the cpal
     crate version, prefixed with ``"cpal "`` to identify the backend.
     """
 

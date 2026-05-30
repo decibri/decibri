@@ -1,4 +1,4 @@
-"""Phase 2 error-message byte-identity tests (Q5 hybrid policy).
+"""Error-message byte-identity tests (hybrid policy).
 
 Hard-freeze tests: full message-text equality on InvalidArg-family messages
 NOT already covered in test_config.py. Soft-freeze tests: substring assertions
@@ -8,17 +8,16 @@ All tests construct decibri public surface end-to-end. Direct exception
 construction is not used here; the contract being frozen is the message a
 user sees through the validation path.
 
-# TODO: PermissionDenied byte-identity test deferred until Rust core wires
-# up the variant (cpal BuildStreamError mapping). When that lands, add per
-# Q5 hybrid soft-freeze policy.
+# TODO: PermissionDenied byte-identity test deferred until the Rust core
+# wires up the variant (cpal BuildStreamError mapping). When that lands,
+# add it under the hybrid soft-freeze policy.
 
 # TODO: most ORT-family error messages (OrtInitFailed, OrtSessionBuildFailed,
 # OrtThreadsConfigFailed, OrtInferenceFailed, OrtTensorCreateFailed,
 # OrtTensorExtractFailed) require the ORT runtime to be in a failure state
-# at test time. Not reachable in normal Phase 2 test flow. Deferred until
-# Phase 3 / 4 when ORT-bundling and inference tests have a richer setup
-# surface. Soft-freeze (per Q5) substring assertions for these will land
-# alongside the test infrastructure that can produce them.
+# at test time. Not reachable in the normal test flow. Soft-freeze
+# substring assertions for these can land alongside the test
+# infrastructure that can produce them.
 """
 
 import pytest

@@ -1,4 +1,4 @@
-"""Phase 7 wheel-install smoke tests.
+"""Wheel-install smoke tests.
 
 These tests run against the production install surface (the wheel
 installed in a clean venv), NOT against maturin develop builds.
@@ -6,7 +6,7 @@ They validate that the bundled artifacts (Silero VAD model, ORT
 dylib) are present and discoverable, and that the public surface
 constructs cleanly without audio hardware.
 
-The tests are persistent (not Phase 7-specific) and serve as the
+The tests are persistent and serve as the
 canonical "production install" gate going forward. They run as part
 of the install-test step in python-ci.yml and on every push.
 
@@ -57,8 +57,8 @@ def test_resolver_finds_bundled() -> None:
     Verifies: the resolver's glob pattern (libonnxruntime*.so/.dylib,
     onnxruntime*.dll) finds the bundled dylib regardless of any hash
     suffix added by auditwheel's wheel repair, and regardless of whether
-    delocate's -L flag preserved the _ort/ layout (Phase 7 Step 1 finding:
-    we pass -L _ort to delocate-wheel so dylibs stay in _ort/).
+    delocate's -L flag preserved the _ort/ layout (we pass -L _ort to
+    delocate-wheel so dylibs stay in _ort/).
     """
     from decibri._ort_resolver import resolve_ort_dylib_path
 

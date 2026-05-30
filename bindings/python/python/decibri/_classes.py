@@ -711,7 +711,7 @@ class Microphone:
     # -----------------------------------------------------------------------
 
     @staticmethod
-    def input_devices() -> list[MicrophoneInfo]:
+    def devices() -> list[MicrophoneInfo]:
         """List available audio input devices."""
         return _decibri.MicrophoneBridge.devices()
 
@@ -803,7 +803,7 @@ class Speaker:
         device : int | str | None, optional
             Output device selector. ``None`` (default) uses the system
             default output. Pass an integer index from
-            ``Speaker.output_devices()`` or a substring of the device name.
+            ``Speaker.devices()`` or a substring of the device name.
             ``Speaker`` does not load ONNX Runtime, so there is no
             ``ort_library_path`` parameter (output never invokes VAD).
         """
@@ -889,7 +889,7 @@ class Speaker:
         return self._bridge.is_playing
 
     @staticmethod
-    def output_devices() -> list[SpeakerInfo]:
+    def devices() -> list[SpeakerInfo]:
         """List available audio output devices."""
         return _decibri.SpeakerBridge.devices()
 

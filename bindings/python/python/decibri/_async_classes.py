@@ -549,7 +549,7 @@ class AsyncMicrophone:
         return await loop.run_in_executor(None, lambda: cls(**kwargs))
 
     @staticmethod
-    async def input_devices() -> list[MicrophoneInfo]:
+    async def devices() -> list[MicrophoneInfo]:
         """List available audio input devices."""
         return await _decibri.AsyncMicrophoneBridge.devices()
 
@@ -629,7 +629,7 @@ class AsyncSpeaker:
         device : int | str | None, optional
             Output device selector. ``None`` (default) uses the system
             default output. Pass an integer index from
-            ``AsyncSpeaker.output_devices()`` or a substring of the device
+            ``AsyncSpeaker.devices()`` or a substring of the device
             name. ``AsyncSpeaker`` does not load ONNX Runtime, so there
             is no ``ort_library_path`` parameter (output never invokes
             VAD).
@@ -766,6 +766,6 @@ class AsyncSpeaker:
         return await loop.run_in_executor(None, lambda: cls(**kwargs))
 
     @staticmethod
-    async def output_devices() -> list[SpeakerInfo]:
+    async def devices() -> list[SpeakerInfo]:
         """List available audio output devices."""
         return await _decibri.AsyncSpeakerBridge.devices()
