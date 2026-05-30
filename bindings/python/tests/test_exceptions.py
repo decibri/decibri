@@ -1,6 +1,6 @@
 """Exception hierarchy tests.
 
-Covers all 32 exception classes shipped in the public ``decibri`` namespace:
+Covers all 33 exception classes shipped in the public ``decibri`` namespace:
 1 base (DecibriError) + 11 direct subclasses + DeviceError intermediate
 + 8 direct DeviceError subclasses + OrtError intermediate + 7 direct
 OrtError subclasses + OrtPathError intermediate + 2 direct OrtPathError

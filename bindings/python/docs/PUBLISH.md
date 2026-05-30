@@ -1,12 +1,12 @@
 # Publishing decibri to PyPI
 
-This document describes how decibri Python wheels are published to PyPI and TestPyPI via the [`publish-pypi.yml`](../../../.github/workflows/publish-pypi.yml) GitHub Actions workflow. The workflow uses Trusted Publisher OIDC (no API tokens) and produces PEP 740 attestations via Sigstore.
+This document describes how the decibri Python package is published to PyPI and TestPyPI via the [`publish-pypi.yml`](../../../.github/workflows/publish-pypi.yml) GitHub Actions workflow. The workflow uses Trusted Publisher OIDC (no API tokens) and produces PEP 740 attestations via Sigstore.
 
 This workflow shipped on 2026-05-02 alongside the 0.1.0a1 publish to TestPyPI.
 
 ## Tag patterns
 
-decibri's repository is polyglot: the Rust core, npm package, and Python wheel each have their own version cadences. Tag namespacing keeps each registry's publish workflow scoped to its own tags.
+decibri's repository spans multiple languages: the Rust core, npm package, and Python package each have their own version cadences. Tag namespacing keeps each registry's publish workflow scoped to its own tags.
 
 | Tag pattern        | Workflow                                                              | Registry                     |
 | ------------------ | --------------------------------------------------------------------- | ---------------------------- |

@@ -173,7 +173,7 @@ Verified on Docker Desktop 4.71, all three images using `python:3.12-slim` runti
 | `decibri:headless`       | 255 MB | identical to base; differs only in expected behavior   |
 | `decibri:audio`          | 267 MB | base + alsa-utils + non-root user setup                |
 
-The bundled ORT dylib accounts for ~15 to 20 MB inside the wheel; the Python wheel itself ships at ~25 MB.
+The bundled ORT dylib accounts for ~15 to 20 MB inside the wheel; the built wheel itself ships at ~25 MB.
 
 ## Recommended deployment patterns
 
