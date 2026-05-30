@@ -16,9 +16,9 @@ import pytest
 
 from decibri import (
     AlreadyRunning,
-    CaptureStreamClosed,
+    MicrophoneStreamClosed,
     Microphone,
-    DeviceInfo,
+    MicrophoneInfo,
 )
 
 
@@ -35,7 +35,7 @@ def test_input_devices_returns_list_of_device_info() -> None:
     assert isinstance(devices, list)
     assert len(devices) > 0
     for d in devices:
-        assert isinstance(d, DeviceInfo)
+        assert isinstance(d, MicrophoneInfo)
         assert isinstance(d.name, str)
         assert isinstance(d.index, int)
         assert isinstance(d.max_input_channels, int)
@@ -110,7 +110,7 @@ def test_read_after_stop_raises_closed() -> None:
     d = Microphone()
     d.start()
     d.stop()
-    with pytest.raises(CaptureStreamClosed):
+    with pytest.raises(MicrophoneStreamClosed):
         d.read(timeout_ms=100)
 
 

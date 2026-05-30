@@ -184,7 +184,7 @@ async def test_async_decibri_cancellation_raises() -> None:
     """``asyncio.wait_for`` around a read raises an exception promptly.
 
     On a not-started bridge, the bridge's own error handling fires
-    immediately (CaptureStreamClosed); on a started bridge with no audio
+    immediately (MicrophoneStreamClosed); on a started bridge with no audio
     hardware, ``wait_for`` may time out. Either path proves the
     cancellation pathway works on AsyncMicrophone's read coroutine. The
     foundational cancellation propagation is already proven by
@@ -199,7 +199,7 @@ async def test_async_decibri_cancellation_raises() -> None:
 async def test_async_output_cancellation_during_drain() -> None:
     """``asyncio.wait_for`` around a drain raises an exception promptly.
 
-    Either the bridge's own error handling fires (OutputStreamClosed on
+    Either the bridge's own error handling fires (SpeakerStreamClosed on
     a not-started output) or the wait_for times out; either path proves
     cancellation works on AsyncSpeaker.drain.
     """

@@ -134,7 +134,7 @@ def test_public_surface_count() -> None:
     wrappers (AsyncMicrophone, AsyncSpeaker) + 3 module-level
     convenience functions (input_devices, output_devices, version) +
     2 file convenience functions (record_to_file, async_record_to_file)
-    + 3 value types (DeviceInfo, OutputDeviceInfo, VersionInfo)
+    + 3 value types (MicrophoneInfo, SpeakerInfo, VersionInfo)
     + 1 audio chunk dataclass (Chunk)
     + 5 exception entries (DecibriError, DeviceError, ForkAfterOrtInit,
       OrtError, OrtPathError)
@@ -164,7 +164,7 @@ def test_module_level_input_devices_aliases_microphone() -> None:
     assert isinstance(result, list)
     expected = decibri.Microphone.input_devices()
     assert len(result) == len(expected)
-    # DeviceInfo objects don't implement __eq__; compare by stable id field.
+    # MicrophoneInfo objects don't implement __eq__; compare by stable id field.
     assert [d.id for d in result] == [d.id for d in expected]
 
 

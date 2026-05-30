@@ -259,19 +259,18 @@ def _supports_kwarg(_obj: Any, _name: str) -> bool:
 # Section 5: mid-stream device-disconnect surfacing (Phase 7.6 Item B3).
 #
 # Pins the documented 0.1.0 behavior:
-#   - read() after stop() raises CaptureStreamClosed (sync + async).
-#   - The wrapper's iterator propagates CaptureStreamClosed from the bridge.
+#   - read() after stop() raises MicrophoneStreamClosed (sync + async).
+#   - The wrapper's iterator propagates MicrophoneStreamClosed from the bridge.
 #   - Calling stop() from a thread other than the one inside read() raises
 #     AlreadyBorrowed (a pyo3 RuntimeError from the bridge's RefCell borrow).
-#     This is a known 0.1.0 limitation; thread-safe shutdown ships in 0.2.0
-#     (see C:/Users/rossa/.claude/plans/0-2-0-backlog.md).
+#     This is a known limitation pinned by the test below.
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.requires_audio_input
 def test_sync_read_after_stop_raises_capture_closed() -> None:
-    """After stop(), the next read() raises CaptureStreamClosed."""
-    from decibri import CaptureStreamClosed
+    """After stop(), the next read() raises MicrophoneStreamClosed."""
+    from decibri import MicrophoneStreamClosed
 
     d = Microphone(sample_rate=16000, channels=1, frames_per_buffer=512)
     d.start()
@@ -279,13 +278,13 @@ def test_sync_read_after_stop_raises_capture_closed() -> None:
     d.read(timeout_ms=500)
     d.stop()
 
-    with pytest.raises(CaptureStreamClosed):
+    with pytest.raises(MicrophoneStreamClosed):
         d.read(timeout_ms=100)
 
 
 def test_sync_iterator_propagates_capture_closed_from_bridge() -> None:
-    """If the bridge raises CaptureStreamClosed from read(), iterator surface raises too."""
-    from decibri import CaptureStreamClosed
+    """If the bridge raises MicrophoneStreamClosed from read(), iterator surface raises too."""
+    from decibri import MicrophoneStreamClosed
 
     class _ClosedBridge(_MockBridge):
         def __init__(self) -> None:
@@ -294,23 +293,23 @@ def test_sync_iterator_propagates_capture_closed_from_bridge() -> None:
 
         def read(self, timeout_ms: int | None = None) -> bytes | None:
             self.read_calls += 1
-            raise CaptureStreamClosed("capture is not running")
+            raise MicrophoneStreamClosed("capture is not running")
 
     bridge = _ClosedBridge()
     d = _make_decibri_with_mock_bridge(bridge)
 
     iterator = iter(d)
-    with pytest.raises(CaptureStreamClosed):
+    with pytest.raises(MicrophoneStreamClosed):
         next(iterator)
     assert bridge.read_calls == 1
 
 
 @pytest.mark.requires_audio_input
 def test_async_read_after_stop_raises_capture_closed() -> None:
-    """After await stop(), the next await read() raises CaptureStreamClosed."""
+    """After await stop(), the next await read() raises MicrophoneStreamClosed."""
     import asyncio
 
-    from decibri import AsyncMicrophone, CaptureStreamClosed
+    from decibri import AsyncMicrophone, MicrophoneStreamClosed
 
     async def _run() -> None:
         d = AsyncMicrophone(sample_rate=16000, channels=1, frames_per_buffer=512)
@@ -318,7 +317,7 @@ def test_async_read_after_stop_raises_capture_closed() -> None:
         await d.read(timeout_ms=500)
         await d.stop()
 
-        with pytest.raises(CaptureStreamClosed):
+        with pytest.raises(MicrophoneStreamClosed):
             await d.read(timeout_ms=100)
 
     asyncio.run(_run())

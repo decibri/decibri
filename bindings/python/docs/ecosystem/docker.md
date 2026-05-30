@@ -90,8 +90,8 @@ docker run --rm decibri:headless
 Verified output (Docker Desktop 4.71, no audio passthrough):
 
 ```
-input_devices: [DeviceInfo(index=0, name='Discard all samples (playback) or generate zero samples (capture)', id='alsa:null', max_input_channels=2, default_sample_rate=44100, is_default=false)]
-output_devices: [OutputDeviceInfo(index=0, name='Discard all samples (playback) or generate zero samples (capture)', id='alsa:null', max_output_channels=2, default_sample_rate=44100, is_default=false)]
+input_devices: [MicrophoneInfo(index=0, name='Discard all samples (playback) or generate zero samples (capture)', id='alsa:null', max_input_channels=2, default_sample_rate=44100, is_default=false)]
+output_devices: [SpeakerInfo(index=0, name='Discard all samples (playback) or generate zero samples (capture)', id='alsa:null', max_output_channels=2, default_sample_rate=44100, is_default=false)]
 Microphone() constructed UNEXPECTEDLY in headless container
 ```
 
@@ -141,7 +141,7 @@ Expected output on a Linux host with at least one audio device (build verified o
 
 ```
 input_devices count: <N>
-  - DeviceInfo(index=0, name='hw:0,0', ..., is_default=true)
+  - MicrophoneInfo(index=0, name='hw:0,0', ..., is_default=true)
   - ...
 decibri version: VersionInfo(decibri='3.4.0', audio_backend='cpal 0.17', binding='0.1.3')
 ```

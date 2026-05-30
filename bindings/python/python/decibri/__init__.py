@@ -10,25 +10,25 @@ constructors (``decibri.Microphone(...)`` / ``decibri.Speaker(...)``).
 from decibri._async_classes import AsyncMicrophone, AsyncSpeaker
 from decibri._classes import Chunk, Microphone, Speaker
 from decibri._decibri import (
-    DeviceInfo,
-    OutputDeviceInfo,
+    MicrophoneInfo,
+    SpeakerInfo,
     VersionInfo,
 )
 from decibri.exceptions import (
     AlreadyRunning,
-    CaptureStreamClosed,
     ChannelsOutOfRange,
     DecibriError,
     DeviceEnumerationFailed,
     DeviceError,
     DeviceIndexOutOfRange,
-    DeviceNotFound,
     ForkAfterOrtInit,
     FramesPerBufferOutOfRange,
     InvalidFormat,
+    MicrophoneNotFound,
+    MicrophoneStreamClosed,
     MultipleDevicesMatch,
     NoMicrophoneFound,
-    NoOutputDeviceFound,
+    NoSpeakerFound,
     NotAnInputDevice,
     OrtError,
     OrtInferenceFailed,
@@ -40,10 +40,10 @@ from decibri.exceptions import (
     OrtTensorCreateFailed,
     OrtTensorExtractFailed,
     OrtThreadsConfigFailed,
-    OutputDeviceNotFound,
-    OutputStreamClosed,
     PermissionDenied,
     SampleRateOutOfRange,
+    SpeakerNotFound,
+    SpeakerStreamClosed,
     StreamOpenFailed,
     StreamStartFailed,
     VadModelLoadFailed,
@@ -54,7 +54,7 @@ from decibri.exceptions import (
 __version__ = "0.1.3"
 
 
-def input_devices() -> list[DeviceInfo]:
+def input_devices() -> list[MicrophoneInfo]:
     """List available audio input devices.
 
     Module-level convenience for ``Microphone.input_devices()``. Returns
@@ -64,7 +64,7 @@ def input_devices() -> list[DeviceInfo]:
     return Microphone.input_devices()
 
 
-def output_devices() -> list[OutputDeviceInfo]:
+def output_devices() -> list[SpeakerInfo]:
     """List available audio output devices.
 
     Module-level convenience for ``Speaker.output_devices()``.
@@ -197,25 +197,23 @@ __all__ = [
     # Public Python wrapper classes (sync)
     "Microphone",
     "Speaker",
-    # Public Python wrapper classes (async; Phase 5)
+    # Public Python wrapper classes (async)
     "AsyncMicrophone",
     "AsyncSpeaker",
     # Module-level convenience functions
     "input_devices",
     "output_devices",
     "version",
-    # File convenience functions (Phase 7.6 Item C5)
+    # File convenience functions
     "record_to_file",
     "async_record_to_file",
     # Value types
-    "DeviceInfo",
-    "OutputDeviceInfo",
+    "MicrophoneInfo",
+    "SpeakerInfo",
     "VersionInfo",
-    # Audio chunk with metadata (Phase 7.7 Item B1)
+    # Audio chunk with metadata
     "Chunk",
-    # Exception hierarchy entry points (Phase 7.6 Item C3, Shape C2;
-    # Phase 7.7 Item B7 added DeviceError; Phase 9 Item C7 added
-    # ForkAfterOrtInit):
+    # Exception hierarchy entry points:
     # only the catch-target roots plus ForkAfterOrtInit are surfaced in
     # __all__ to keep `from decibri import *` legible. The full
     # 32+-class hierarchy remains importable via top-level attribute

@@ -134,7 +134,7 @@ def test_write_rejects_dtype_mismatch() -> None:
 
     The dtype check fires at ``write()`` time, but the test path requires
     ``output.start()`` to succeed first (the bridge's stream-state check
-    raises ``OutputStreamClosed`` before the dtype check would run if the
+    raises ``SpeakerStreamClosed`` before the dtype check would run if the
     output is not started). On CI runners without audio output hardware,
     ``start()`` fails with ``StreamOpenFailed`` before the test can
     exercise the dtype-rejection path; hence the

@@ -4,7 +4,7 @@ Matches the Rust surface in ``bindings/python/src/lib.rs``. Kept alongside
 the compiled ``.pyd`` / ``.so`` so mypy and IDEs see types without loading
 the extension. Update this file when the Rust surface changes.
 
-Internal module. Phase 7.7 Item A2: the four bridge classes
+Internal module. The four bridge classes
 (``MicrophoneBridge``, ``SpeakerBridge``, ``AsyncMicrophoneBridge``,
 ``AsyncSpeakerBridge``) are accessible only via ``decibri._decibri.<X>``;
 they are NOT re-exported on the top-level ``decibri`` module and are NOT
@@ -19,9 +19,9 @@ at ``decibri.exceptions``; ``to_py_err`` in the Rust binding raises instances
 of those pure-Python classes via ``PyErr::from_type``. Consumers should
 import exceptions from ``decibri`` or directly from ``decibri.exceptions``.
 
-Wrapper-only naming translations (Phase 7.6 + Phase 7.7):
+Wrapper-only naming translations:
     The public Python wrappers translate three kwargs at the boundary
-    while the bridge keeps the cross-binding-historical names per LD11:
+    while the bridge keeps the cross-binding-historical names:
         wrapper ``dtype=``       -> bridge ``format=``
         wrapper ``vad_holdoff_ms=`` -> bridge ``vad_holdoff=``
         wrapper ``as_ndarray=``  -> bridge ``numpy=``
@@ -37,7 +37,7 @@ from typing import Awaitable, Coroutine, Any, TYPE_CHECKING, Union
 if TYPE_CHECKING:
     import numpy as np
 
-    # Phase 6: read returns bytes (default) or ndarray (numpy=True);
+    # read returns bytes (default) or ndarray (numpy=True);
     # write accepts either. The runtime numpy dependency is optional.
     SampleData = Union[bytes, "np.ndarray[Any, Any]"]
 else:
@@ -48,8 +48,8 @@ __all__ = [
     "AsyncSpeakerBridge",
     "MicrophoneBridge",
     "SpeakerBridge",
-    "DeviceInfo",
-    "OutputDeviceInfo",
+    "MicrophoneInfo",
+    "SpeakerInfo",
     "VersionInfo",
 ]
 
@@ -72,7 +72,7 @@ class VersionInfo:
     def __repr__(self) -> str: ...
 
 
-class DeviceInfo:
+class MicrophoneInfo:
     """Audio input device metadata. Returned by ``MicrophoneBridge.devices()``."""
 
     @property
@@ -90,7 +90,7 @@ class DeviceInfo:
     def __repr__(self) -> str: ...
 
 
-class OutputDeviceInfo:
+class SpeakerInfo:
     """Audio output device metadata. Returned by ``SpeakerBridge.devices()``."""
 
     @property
@@ -154,7 +154,7 @@ class MicrophoneBridge:
     @property
     def vad_holdoff_ms(self) -> int: ...
     @staticmethod
-    def devices() -> list[DeviceInfo]: ...
+    def devices() -> list[MicrophoneInfo]: ...
     @staticmethod
     def version() -> VersionInfo: ...
 
@@ -187,11 +187,11 @@ class SpeakerBridge:
     @property
     def is_playing(self) -> bool: ...
     @staticmethod
-    def devices() -> list[OutputDeviceInfo]: ...
+    def devices() -> list[SpeakerInfo]: ...
 
 
 class AsyncMicrophoneBridge:
-    """Async wrapper around ``MicrophoneBridge`` (Phase 5).
+    """Async wrapper around ``MicrophoneBridge``.
 
     Internal pyclass. Public ``AsyncMicrophone`` wrapper lives in
     ``decibri._async_classes``; consumers should construct
@@ -241,13 +241,13 @@ class AsyncMicrophoneBridge:
     @property
     def vad_holdoff_ms(self) -> Awaitable[int]: ...
     @staticmethod
-    def devices() -> Coroutine[Any, Any, list[DeviceInfo]]: ...
+    def devices() -> Coroutine[Any, Any, list[MicrophoneInfo]]: ...
     @staticmethod
     def version() -> Coroutine[Any, Any, VersionInfo]: ...
 
 
 class AsyncSpeakerBridge:
-    """Async wrapper around ``SpeakerBridge`` (Phase 5).
+    """Async wrapper around ``SpeakerBridge``.
 
     Internal pyclass. Public ``AsyncSpeaker`` wrapper lives in
     ``decibri._async_classes``; consumers should construct
@@ -271,4 +271,4 @@ class AsyncSpeakerBridge:
     @property
     def is_playing_sync(self) -> bool: ...
     @staticmethod
-    def devices() -> Coroutine[Any, Any, list[OutputDeviceInfo]]: ...
+    def devices() -> Coroutine[Any, Any, list[SpeakerInfo]]: ...

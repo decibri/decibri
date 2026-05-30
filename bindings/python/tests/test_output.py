@@ -7,7 +7,7 @@ Coverage:
 - start / stop / close lifecycle
 - write / drain semantics
 - is_playing property reflects start/stop state
-- write before start raises OutputStreamClosed
+- write before start raises SpeakerStreamClosed
 - Idempotent stop / close
 - Static devices() returns a non-empty list
 - Context-manager round-trip with write + drain
@@ -18,8 +18,8 @@ import pytest
 from decibri import (
     AlreadyRunning,
     Speaker,
-    OutputDeviceInfo,
-    OutputStreamClosed,
+    SpeakerInfo,
+    SpeakerStreamClosed,
 )
 
 
@@ -36,7 +36,7 @@ def test_output_devices_returns_list_of_output_device_info() -> None:
     assert isinstance(devices, list)
     assert len(devices) > 0
     for d in devices:
-        assert isinstance(d, OutputDeviceInfo)
+        assert isinstance(d, SpeakerInfo)
         assert isinstance(d.name, str)
         assert isinstance(d.index, int)
         assert isinstance(d.max_output_channels, int)
@@ -93,13 +93,13 @@ def test_context_manager_lifecycle() -> None:
 
 def test_write_before_start_raises_closed() -> None:
     o = Speaker()
-    with pytest.raises(OutputStreamClosed):
+    with pytest.raises(SpeakerStreamClosed):
         o.write(b"\x00" * 1024)
 
 
 def test_drain_before_start_raises_closed() -> None:
     o = Speaker()
-    with pytest.raises(OutputStreamClosed):
+    with pytest.raises(SpeakerStreamClosed):
         o.drain()
 
 

@@ -115,20 +115,20 @@ static EXCEPTION_CLASSES: PyOnceLock<HashMap<&'static str, Py<PyType>>> = PyOnce
 const EXCEPTION_NAMES: &[&str] = &[
     "DecibriError",
     "AlreadyRunning",
-    "CaptureStreamClosed",
+    "MicrophoneStreamClosed",
     "ChannelsOutOfRange",
     "DeviceEnumerationFailed",
     "DeviceIndexOutOfRange",
-    "DeviceNotFound",
+    "MicrophoneNotFound",
     "ForkAfterOrtInit",
     "FramesPerBufferOutOfRange",
     "InvalidFormat",
     "MultipleDevicesMatch",
     "NoMicrophoneFound",
-    "NoOutputDeviceFound",
+    "NoSpeakerFound",
     "NotAnInputDevice",
-    "OutputDeviceNotFound",
-    "OutputStreamClosed",
+    "SpeakerNotFound",
+    "SpeakerStreamClosed",
     "PermissionDenied",
     "SampleRateOutOfRange",
     "StreamOpenFailed",
@@ -227,7 +227,7 @@ fn to_py_err(py: Python<'_>, err: CoreDecibriError) -> PyErr {
             Box::new(move |cls| PyErr::from_type(cls, (msg,))),
         ),
         CoreDecibriError::NoSpeakerFound => (
-            "NoOutputDeviceFound",
+            "NoSpeakerFound",
             Box::new(move |cls| PyErr::from_type(cls, (msg,))),
         ),
         CoreDecibriError::NotAnInputDevice => (
@@ -243,21 +243,21 @@ fn to_py_err(py: Python<'_>, err: CoreDecibriError) -> PyErr {
             Box::new(move |cls| PyErr::from_type(cls, (msg,))),
         ),
         CoreDecibriError::MicrophoneStreamClosed => (
-            "CaptureStreamClosed",
+            "MicrophoneStreamClosed",
             Box::new(move |cls| PyErr::from_type(cls, (msg,))),
         ),
         CoreDecibriError::SpeakerStreamClosed => (
-            "OutputStreamClosed",
+            "SpeakerStreamClosed",
             Box::new(move |cls| PyErr::from_type(cls, (msg,))),
         ),
 
         // Tuple variants with String (5).
         CoreDecibriError::MicrophoneNotFound(_) => (
-            "DeviceNotFound",
+            "MicrophoneNotFound",
             Box::new(move |cls| PyErr::from_type(cls, (msg,))),
         ),
         CoreDecibriError::SpeakerNotFound(_) => (
-            "OutputDeviceNotFound",
+            "SpeakerNotFound",
             Box::new(move |cls| PyErr::from_type(cls, (msg,))),
         ),
         CoreDecibriError::DeviceEnumerationFailed(_) => (
@@ -428,12 +428,14 @@ fn build_version_info() -> VersionInfo {
 }
 
 // ---------------------------------------------------------------------------
-// DeviceInfo / OutputDeviceInfo: read-only Python wrappers around the core
-// device structs. Both are #[non_exhaustive] in the Rust core, so the
+// MicrophoneInfo / SpeakerInfo: read-only Python wrappers around the core
+// device structs. The Rust structs are named DeviceInfo / OutputDeviceInfo
+// but are exposed to Python under the microphone/speaker names via the
+// pyclass `name` attribute. Both core structs are #[non_exhaustive], so the
 // binding's pyclasses are the stable Python-facing surface.
 // ---------------------------------------------------------------------------
 
-#[pyclass(module = "decibri._decibri", frozen)]
+#[pyclass(name = "MicrophoneInfo", module = "decibri._decibri", frozen)]
 struct DeviceInfo {
     #[pyo3(get)]
     index: usize,
@@ -453,7 +455,7 @@ struct DeviceInfo {
 impl DeviceInfo {
     fn __repr__(&self) -> String {
         format!(
-            "DeviceInfo(index={}, name='{}', id='{}', max_input_channels={}, default_sample_rate={}, is_default={})",
+            "MicrophoneInfo(index={}, name='{}', id='{}', max_input_channels={}, default_sample_rate={}, is_default={})",
             self.index, self.name, self.id, self.max_input_channels, self.default_sample_rate, self.is_default
         )
     }
@@ -472,7 +474,7 @@ impl From<CoreDeviceInfo> for DeviceInfo {
     }
 }
 
-#[pyclass(module = "decibri._decibri", frozen)]
+#[pyclass(name = "SpeakerInfo", module = "decibri._decibri", frozen)]
 struct OutputDeviceInfo {
     #[pyo3(get)]
     index: usize,
@@ -492,7 +494,7 @@ struct OutputDeviceInfo {
 impl OutputDeviceInfo {
     fn __repr__(&self) -> String {
         format!(
-            "OutputDeviceInfo(index={}, name='{}', id='{}', max_output_channels={}, default_sample_rate={}, is_default={})",
+            "SpeakerInfo(index={}, name='{}', id='{}', max_output_channels={}, default_sample_rate={}, is_default={})",
             self.index, self.name, self.id, self.max_output_channels, self.default_sample_rate, self.is_default
         )
     }
@@ -726,7 +728,7 @@ impl MicrophoneBridge {
         let stream = self
             .stream
             .as_mut()
-            .ok_or_else(|| raise_named(py, "CaptureStreamClosed", "capture is not running"))?;
+            .ok_or_else(|| raise_named(py, "MicrophoneStreamClosed", "capture is not running"))?;
 
         // Release GIL for the blocking next_chunk call. Run VAD inference
         // inside the same allow_threads region to avoid GIL ping-pong.
@@ -1017,7 +1019,7 @@ impl SpeakerBridge {
         let stream = self
             .stream
             .as_mut()
-            .ok_or_else(|| raise_named(py, "OutputStreamClosed", "output is not running"))?;
+            .ok_or_else(|| raise_named(py, "SpeakerStreamClosed", "output is not running"))?;
         let owned_samples: Vec<u8> = samples.to_vec();
         let samples_f32 = match self.format {
             BindingSampleFormat::Int16 => py.detach(|| i16_le_bytes_to_f32(&owned_samples)),
@@ -1032,7 +1034,7 @@ impl SpeakerBridge {
         let stream = self
             .stream
             .as_mut()
-            .ok_or_else(|| raise_named(py, "OutputStreamClosed", "output is not running"))?;
+            .ok_or_else(|| raise_named(py, "SpeakerStreamClosed", "output is not running"))?;
         // Per-sample i16 -> f32 conversion mirrors i16_le_bytes_to_f32:
         // divide by 32768.0 to map [i16::MIN, i16::MAX] into approximately
         // [-1.0, 1.0). Avoids the bytes round-trip for the numpy path.
@@ -1048,7 +1050,7 @@ impl SpeakerBridge {
         let stream = self
             .stream
             .as_mut()
-            .ok_or_else(|| raise_named(py, "OutputStreamClosed", "output is not running"))?;
+            .ok_or_else(|| raise_named(py, "SpeakerStreamClosed", "output is not running"))?;
         let samples_f32: Vec<f32> = samples.to_vec();
         py.detach(|| stream.send(samples_f32))
             .map_err(|e| to_py_err(py, e))?;
@@ -1163,7 +1165,7 @@ impl SpeakerBridge {
         let stream = self
             .stream
             .as_mut()
-            .ok_or_else(|| raise_named(py, "OutputStreamClosed", "output is not running"))?;
+            .ok_or_else(|| raise_named(py, "SpeakerStreamClosed", "output is not running"))?;
         py.detach(|| stream.drain());
         Ok(())
     }

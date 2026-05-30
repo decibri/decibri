@@ -24,11 +24,11 @@ user sees through the validation path.
 import pytest
 
 from decibri import (
-    CaptureStreamClosed,
+    MicrophoneStreamClosed,
     Microphone,
     Speaker,
     InvalidFormat,
-    OutputStreamClosed,
+    SpeakerStreamClosed,
 )
 
 
@@ -74,25 +74,25 @@ def test_output_invalid_format_wrapper(dtype_value: str, expected_msg: str) -> N
 
 
 def test_capture_read_before_start_message() -> None:
-    """Microphone.read() before start() raises CaptureStreamClosed with canonical text."""
+    """Microphone.read() before start() raises MicrophoneStreamClosed with canonical text."""
     d = Microphone()
-    with pytest.raises(CaptureStreamClosed) as exc_info:
+    with pytest.raises(MicrophoneStreamClosed) as exc_info:
         d.read(timeout_ms=100)
     assert str(exc_info.value) == "capture is not running"
 
 
 def test_output_write_before_start_message() -> None:
-    """Speaker.write() before start() raises OutputStreamClosed with canonical text."""
+    """Speaker.write() before start() raises SpeakerStreamClosed with canonical text."""
     o = Speaker()
-    with pytest.raises(OutputStreamClosed) as exc_info:
+    with pytest.raises(SpeakerStreamClosed) as exc_info:
         o.write(b"\x00" * 100)
     assert str(exc_info.value) == "output is not running"
 
 
 def test_output_drain_before_start_message() -> None:
-    """Speaker.drain() before start() raises OutputStreamClosed with canonical text."""
+    """Speaker.drain() before start() raises SpeakerStreamClosed with canonical text."""
     o = Speaker()
-    with pytest.raises(OutputStreamClosed) as exc_info:
+    with pytest.raises(SpeakerStreamClosed) as exc_info:
         o.drain()
     assert str(exc_info.value) == "output is not running"
 

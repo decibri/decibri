@@ -1,8 +1,8 @@
 """High-level Python wrapper for decibri audio capture with VAD policy.
 
 This module ships the consumer-facing `Microphone` class. The class wraps the
-native `_decibri.MicrophoneBridge` pyclass (Rust binding shipped in Commit 2)
-and adds wrapper-layer VAD policy: threshold application, holdoff state
+native `_decibri.MicrophoneBridge` pyclass and adds wrapper-layer VAD policy:
+threshold application, holdoff state
 machine, and mode dispatch (Silero passthrough vs energy RMS computation).
 
 Architectural notes:
@@ -26,8 +26,8 @@ Architectural notes:
   the raw `vad_probability` name for cross-binding consistency; the
   wrapper exposes the mode-agnostic `vad_score` view.
 
-- The Phase 2 surface is sync only. Async iteration and event callbacks
-  ship in Phase 3 alongside `pyo3-async-runtimes` integration (Q7).
+- This module's classes are synchronous. The async equivalents live in
+  `decibri._async_classes` (`AsyncMicrophone`, `AsyncSpeaker`).
 """
 
 from __future__ import annotations
@@ -46,7 +46,7 @@ from typing_extensions import Self
 if TYPE_CHECKING:
     import numpy as np
 
-    # Phase 6: read can return bytes (default) or ndarray (as_ndarray=True);
+    # read can return bytes (default) or ndarray (as_ndarray=True);
     # write can accept either. The runtime numpy dependency is optional
     # (pip install decibri[numpy]); using TYPE_CHECKING keeps the import
     # cost out of the default-install path while preserving mypy
@@ -56,13 +56,13 @@ else:
     SampleData = bytes
 
 from decibri import _decibri, exceptions
-from decibri._decibri import DeviceInfo, OutputDeviceInfo, VersionInfo
+from decibri._decibri import MicrophoneInfo, SpeakerInfo, VersionInfo
 
-__all__ = ["Chunk", "Microphone", "Speaker", "DeviceInfo", "OutputDeviceInfo", "VersionInfo"]
+__all__ = ["Chunk", "Microphone", "Speaker", "MicrophoneInfo", "SpeakerInfo", "VersionInfo"]
 
 
 # ---------------------------------------------------------------------------
-# Chunk: typed audio chunk with metadata (Phase 7.7 Item B1).
+# Chunk: typed audio chunk with metadata.
 #
 # Frozen dataclass returned from read_with_metadata() / iter_with_metadata().
 # read() keeps the naked-data return shape for backwards compatibility;
@@ -205,7 +205,7 @@ class _VadStateMachine:
 #
 # Mirrors Node's _processVadEnergy: int16 samples normalized to [-1, 1] before
 # squaring; float32 used as-is. Computed in pure Python via struct.unpack;
-# Phase 3 can profile and optimize with NumPy if hot path warrants it.
+# could be optimized with NumPy if the hot path warrants it.
 # ---------------------------------------------------------------------------
 
 
@@ -257,7 +257,7 @@ class Microphone:
 
     Construction does NOT start capture. Use the context manager or call
     `start()` explicitly. Iteration without an active capture raises
-    `_decibri.CaptureStreamClosed`.
+    `MicrophoneStreamClosed`.
 
     The VAD parameters (`vad`, `vad_threshold`, `vad_holdoff_ms`,
     `model_path`, `ort_library_path`) configure both the bridge and the
@@ -265,12 +265,11 @@ class Microphone:
     ``"silero"``, or ``"energy"``. With ``vad=False``, ``vad_score``
     returns 0.0 and ``is_speaking`` returns False unconditionally.
 
-    The wrapper is sync only in Phase 2. Async iteration and speech-event
-    callbacks ship in Phase 3.
+    This class is synchronous. For async iteration, use ``AsyncMicrophone``.
 
     Cleanup and disconnect:
         Mid-stream device disconnect (USB unplug, default-device switch,
-        driver error) is surfaced as a ``CaptureStreamClosed`` raised on
+        driver error) is surfaced as a ``MicrophoneStreamClosed`` raised on
         the next ``read()``. cpal detects the disconnect and closes the
         underlying stream within roughly 20ms; the wrapper then sees the
         closed state on its next read attempt and raises.
@@ -364,7 +363,7 @@ class Microphone:
                 f"dtype must be 'int16' or 'float32'; got {dtype!r}"
             )
 
-        # Phase 7.5: collapse the legacy two-flag pattern (vad=True,
+        # Collapse the legacy two-flag pattern (vad=True,
         # vad_mode="silero") into a single union-typed parameter. ``vad``
         # accepts False (disabled; default), "silero", or "energy".
         # vad=True is rejected explicitly so existing callers get a
@@ -451,10 +450,10 @@ class Microphone:
             # bridge state see the user's intent.
             resolved_ort_path = str(Path(ort_library_path))
 
-        # Wrapper-only rename (Phase 7.6 Item C2): the public Python
-        # surface uses `dtype` (NumPy convention) but the internal Rust
-        # bridge keeps `format` for cross-binding consistency with the
-        # Node binding. Translate at the boundary; bridge stubs unchanged.
+        # Wrapper-only rename: the public Python surface uses `dtype`
+        # (NumPy convention) but the internal Rust bridge keeps `format`
+        # for cross-binding consistency with the Node binding. Translate
+        # at the boundary; bridge stubs unchanged.
         self._bridge = _decibri.MicrophoneBridge(
             sample_rate=sample_rate,
             channels=channels,
@@ -478,17 +477,16 @@ class Microphone:
             sample_format=dtype,
         )
         self._format = dtype
-        # Phase 6: store the as_ndarray flag (bridge-level: numpy=) so
-        # read() can branch its return type (bytes vs ndarray) without
-        # re-querying the bridge each call. Wrapper-only rename
-        # (Phase 7.7 Item B4); bridge keeps the original `numpy` name
-        # for cross-binding consistency per LD11.
+        # Store the as_ndarray flag (bridge-level: numpy=) so read() can
+        # branch its return type (bytes vs ndarray) without re-querying the
+        # bridge each call. Wrapper-only rename; the bridge keeps the
+        # original `numpy` name for cross-binding consistency.
         self._as_ndarray = as_ndarray
-        # Phase 7.7 Item B1: chunk counter for read_with_metadata().
+        # Chunk counter for read_with_metadata().
         # Increments on every non-None chunk emission; resets to 0 on
         # each stop() so a subsequent start() begins a fresh sequence.
         self._sequence = 0
-        # Phase 9 Item A4: capture construction parameters for __repr__.
+        # Capture construction parameters for __repr__.
         # The bridge does not expose these as readable attributes, so the
         # wrapper holds its own copies. ``vad`` stores the original public
         # union value (``False``, ``"silero"``, or ``"energy"``) rather
@@ -562,8 +560,7 @@ class Microphone:
         """Read one chunk. Returns the chunk, or None if the stream closed.
 
         Return type:
-        - When ``as_ndarray=False`` (default), returns ``bytes`` (Phase 2
-          wire format).
+        - When ``as_ndarray=False`` (default), returns ``bytes``.
         - When ``as_ndarray=True``, returns a ``numpy.ndarray`` with
           dtype matching the configured ``dtype`` (np.int16 or
           np.float32) and shape matching the channel count (1-D for
@@ -604,8 +601,8 @@ class Microphone:
             # ndarray; convert to bytes once for the VAD pass via
             # arr.tobytes(). Cheap (~microseconds) for typical chunk
             # sizes; cleaner than rewriting _compute_rms to handle both
-            # input types. Phase 6 plan §3i. The cast to bytes is for
-            # mypy; at runtime the branch matches the actual type.
+            # input types. The cast to bytes is for mypy; at runtime the
+            # branch matches the actual type.
             if self._as_ndarray:
                 vad_input: bytes = chunk.tobytes()  # type: ignore[union-attr]
             else:
@@ -714,7 +711,7 @@ class Microphone:
     # -----------------------------------------------------------------------
 
     @staticmethod
-    def input_devices() -> list[DeviceInfo]:
+    def input_devices() -> list[MicrophoneInfo]:
         """List available audio input devices."""
         return _decibri.MicrophoneBridge.devices()
 
@@ -742,10 +739,10 @@ class Microphone:
             pass
 
     def __repr__(self) -> str:
-        # Phase 9 Item A4. Show construction parameters plus current
-        # is_open state. Pattern matches VersionInfo's repr precedent;
-        # is_open is queried live from the bridge so the repr reflects
-        # actual state, not just construction-time state (LD-9-8).
+        # Show construction parameters plus current is_open state.
+        # Pattern matches VersionInfo's repr precedent; is_open is queried
+        # live from the bridge so the repr reflects actual state, not just
+        # construction-time state.
         is_open: bool | str
         try:
             is_open = self.is_open
@@ -814,15 +811,15 @@ class Speaker:
             raise exceptions.InvalidFormat(
                 f"dtype must be 'int16' or 'float32'; got {dtype!r}"
             )
-        # Wrapper-only rename (Phase 7.6 Item C2): public surface uses
-        # `dtype`; bridge keeps `format` for cross-binding consistency.
+        # Wrapper-only rename: public surface uses `dtype`; bridge keeps
+        # `format` for cross-binding consistency.
         self._bridge = _decibri.SpeakerBridge(
             sample_rate=sample_rate,
             channels=channels,
             format=dtype,
             device=device,
         )
-        # Phase 9 Item A4: capture construction parameters for __repr__.
+        # Capture construction parameters for __repr__.
         self._sample_rate = sample_rate
         self._channels = channels
         self._format = dtype
@@ -860,7 +857,7 @@ class Speaker:
     def write(self, samples: SampleData) -> None:
         """Write a chunk to the output stream.
 
-        Phase 6: accepts either ``bytes`` (Phase 2 wire format) or a
+        Accepts either ``bytes`` or a
         ``numpy.ndarray`` with dtype matching the configured ``dtype``
         (np.int16 for ``dtype='int16'``, np.float32 for
         ``dtype='float32'``). Multi-channel ndarrays use shape
@@ -892,7 +889,7 @@ class Speaker:
         return self._bridge.is_playing
 
     @staticmethod
-    def output_devices() -> list[OutputDeviceInfo]:
+    def output_devices() -> list[SpeakerInfo]:
         """List available audio output devices."""
         return _decibri.SpeakerBridge.devices()
 
@@ -908,9 +905,8 @@ class Speaker:
             pass
 
     def __repr__(self) -> str:
-        # Phase 9 Item A4. Same shape as Microphone.__repr__; Speaker has
-        # no VAD so the repr omits that field. is_playing is the analogue
-        # of is_open here (LD-9-8).
+        # Same shape as Microphone.__repr__; Speaker has no VAD so the repr
+        # omits that field. is_playing is the analogue of is_open here.
         is_playing: bool | str
         try:
             is_playing = self.is_playing
