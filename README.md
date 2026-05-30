@@ -84,9 +84,9 @@ Full Python guide: [here](bindings/python/README.md).
 ### Node.js
 
 ```javascript
-const Decibri = require('decibri');
+const { Microphone } = require('decibri');
 
-const mic = new Decibri({ sampleRate: 16000 });
+const mic = new Microphone({ sampleRate: 16000 });
 mic.on('data', (chunk) => console.log(`Got ${chunk.length} bytes`));
 setTimeout(() => mic.stop(), 5000);
 ```
@@ -98,11 +98,11 @@ Full Node.js and browser guide: [here](npm/decibri/README.md).
 ### Rust
 
 ```rust
-use decibri::capture::{AudioCapture, CaptureConfig};
+use decibri::{Microphone, MicrophoneConfig};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let capture = AudioCapture::new(CaptureConfig::default())?;
-    let stream = capture.start()?;
+    let microphone = Microphone::new(MicrophoneConfig::default())?;
+    let stream = microphone.start()?;
     while let Ok(Some(chunk)) = stream.next_chunk(None) {
         println!("Got {} bytes", chunk.data.len());
     }
