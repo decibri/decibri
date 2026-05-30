@@ -220,7 +220,7 @@ pub mod gain;
 pub use microphone::{AudioChunk, Microphone, MicrophoneConfig, MicrophoneStream};
 
 #[cfg(feature = "playback")]
-pub use speaker::{Speaker, SpeakerConfig, SpeakerStream};
+pub use speaker::{Speaker, SpeakerConfig, SpeakerSink, SpeakerStream};
 
 #[cfg(any(feature = "capture", feature = "playback"))]
 pub use device::{input_devices, output_devices, DeviceSelector, MicrophoneInfo, SpeakerInfo};

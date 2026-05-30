@@ -87,6 +87,7 @@ Standard `ReadableOptions` (e.g. `highWaterMark`) are also accepted.
 | Method | Description |
 | --- | --- |
 | `mic.stop()` | Stop capture and end stream. Safe to call multiple times |
+| `Microphone.open(options?)` | Construct without blocking the event loop. Returns a `Promise<Microphone>`. See [Non-blocking API](#non-blocking-api) |
 | `Microphone.devices()` | List available input devices |
 | `Microphone.version()` | Version info: `{ decibri, audioBackend, binding }` |
 
@@ -128,13 +129,46 @@ Standard `WritableOptions` (e.g. `highWaterMark`) are also accepted.
 | Method / Property | Description |
 | --- | --- |
 | `speaker.write(chunk)` | Write PCM data for playback |
+| `speaker.writeAsync(chunk)` | Write without blocking the event loop. Returns a `Promise`. See [Non-blocking API](#non-blocking-api) |
 | `speaker.end()` | Signal end. Drains remaining audio, then emits `'finish'` |
+| `speaker.drainAsync()` | Wait for queued audio to finish without blocking the event loop. Returns a `Promise` |
 | `speaker.stop()` | Immediate stop. Discards remaining audio |
 | `speaker.isPlaying` | `true` while audio is being output |
+| `Speaker.open(options?)` | Construct without blocking the event loop. Returns a `Promise<Speaker>` |
 | `Speaker.devices()` | List available output devices |
 | `Speaker.version()` | Same as `Microphone.version()` |
 
 The module-level `outputDevices()` free function is equivalent to `Speaker.devices()`.
+
+## Non-blocking API
+
+The synchronous constructors and `write` / `drain` do their work on the event loop, which is fine for most apps. For event-loop-sensitive code (servers, real-time voice pipelines), 4.1.0 adds async variants that perform the blocking work without stalling the event loop. They are additive: the synchronous API is unchanged, and you opt in only where you need it.
+
+### Non-blocking construction
+
+`Microphone.open(options?)` and `Speaker.open(options?)` are async factories that return a Promise of a ready instance. They take the same options as the constructors. For a microphone with Silero VAD, the model load that the constructor does inline runs without blocking the event loop.
+
+```javascript
+const { Microphone, Speaker } = require('decibri');
+
+const mic = await Microphone.open({ sampleRate: 16000, vad: 'silero' });
+const speaker = await Speaker.open({ sampleRate: 16000, channels: 1 });
+```
+
+The synchronous `new Microphone(...)` and `new Speaker(...)` still work unchanged. A failed open rejects the Promise with the same typed error a failed constructor throws.
+
+### Non-blocking playback
+
+`speaker.writeAsync(chunk)` resolves once the audio is queued, performing the backpressure wait (when the playback buffer is full) without blocking the event loop. `speaker.drainAsync()` resolves when all queued audio has finished playing, again without blocking.
+
+```javascript
+const speaker = await Speaker.open({ sampleRate: 16000, channels: 1 });
+
+await speaker.writeAsync(pcmBuffer);
+await speaker.drainAsync(); // resolves when playback finishes
+```
+
+These are a direct alternative to the synchronous `write()` / `pipe()` / `end()` stream interface, which is unchanged. Use one path per instance (the stream methods or the async methods, not both at once), and await calls in sequence to keep samples in order.
 
 ## Errors
 

@@ -13,10 +13,45 @@ const PACKAGE_VERSION = require('../package.json').version;
 class Speaker extends Writable {
   /**
    * @param {import('./decibri').SpeakerOptions} [options]
+   * @param {{ prepared: object, native: object }} [_internal] Internal: a
+   *   pre-resolved options bundle and an already-constructed native bridge,
+   *   passed by the async `Speaker.open()` factory. Not part of the public API.
    */
-  constructor(options = {}) {
+  constructor(options = {}, _internal = undefined) {
     super({ highWaterMark: options.highWaterMark || 16384 });
 
+    // Validate and resolve options once. The async factory passes its already
+    // resolved bundle through `_internal` to avoid recomputing it.
+    const prepared = _internal ? _internal.prepared : Speaker._prepareOptions(options);
+
+    // ── Store config ───────────────────────────────────────────────────────
+
+    this._dtype = prepared.dtype;
+    this._started = false;
+
+    // ── Create or adopt native bridge ───────────────────────────────────────
+
+    if (_internal) {
+      // Built off the event loop by Speaker.open(); already wrapped.
+      this._native = _internal.native;
+    } else {
+      try {
+        this._native = new DecibriOutputBridge(prepared.nativeOptions);
+      } catch (err) {
+        throw wrapNativeError(err);
+      }
+    }
+  }
+
+  /**
+   * Validate the constructor options and resolve them into the native options
+   * object plus the wrapper-side state. Throws the same `RangeError` /
+   * `TypeError` as the constructor on invalid input. Shared by the synchronous
+   * constructor and the async `open()` factory.
+   * @internal
+   * @param {import('./decibri').SpeakerOptions} options
+   */
+  static _prepareOptions(options) {
     // ── Validate options ───────────────────────────────────────────────────
 
     const sampleRate = options.sampleRate ?? 16000;
@@ -61,23 +96,41 @@ class Speaker extends Writable {
       resolvedDevice = options.device;
     }
 
-    // ── Store config ───────────────────────────────────────────────────────
-
-    this._dtype = dtype;
-    this._started = false;
-
-    // ── Create native bridge ───────────────────────────────────────────────
-
-    try {
-      this._native = new DecibriOutputBridge({
+    return {
+      dtype,
+      nativeOptions: {
         sampleRate,
         channels,
         format: dtype,
         device: resolvedDevice,
-      });
+      },
+    };
+  }
+
+  /**
+   * Construct a Speaker without blocking the event loop.
+   *
+   * Symmetric with `Microphone.open()` and the Python `AsyncSpeaker.open()`.
+   * The speaker loads no model, so the only open work is device resolution and
+   * the practical blocking risk is small; this factory exists chiefly so async
+   * callers can use one consistent construction pattern across both classes.
+   * The synchronous constructor remains available and unchanged.
+   *
+   * A failed open (unknown device) rejects the returned Promise with the
+   * matching error class rather than throwing synchronously.
+   *
+   * @param {import('./decibri').SpeakerOptions} [options]
+   * @returns {Promise<Speaker>}
+   */
+  static async open(options = {}) {
+    const prepared = Speaker._prepareOptions(options);
+    let native;
+    try {
+      native = await DecibriOutputBridge.openAsync(prepared.nativeOptions);
     } catch (err) {
       throw wrapNativeError(err);
     }
+    return new Speaker(options, { prepared, native });
   }
 
   /** @internal */
@@ -101,6 +154,56 @@ class Speaker extends Writable {
       callback();
     } catch (err) {
       callback(err);
+    }
+  }
+
+  /**
+   * Write PCM audio without blocking the event loop.
+   *
+   * The blocking part of a write is the backpressure wait when the native
+   * playback queue is full; the synchronous stream path (`write()` / `pipe()`)
+   * performs that wait on the event loop. This method performs it on the native
+   * thread pool and resolves when the samples are queued. The audio stream is
+   * created on the first call (a fast device open) and stays on its own thread;
+   * only the queue handoff runs off the event loop.
+   *
+   * Additive and non-blocking: the synchronous `write()` / `pipe()` stream
+   * interface is unchanged. This is a direct, opt-in alternative that bypasses
+   * the Writable buffer, so do not interleave it with `write()` / `pipe()` on
+   * the same instance; pick one path per instance. Await calls sequentially to
+   * preserve sample order. An empty buffer resolves immediately. A failed write
+   * (a closed or stopped stream) rejects with the matching error class.
+   *
+   * @param {Buffer} chunk PCM samples in the configured `dtype`.
+   * @returns {Promise<void>}
+   */
+  async writeAsync(chunk) {
+    try {
+      await this._native.writeAsync(chunk);
+    } catch (err) {
+      throw wrapNativeError(err);
+    }
+  }
+
+  /**
+   * Wait for all queued audio to finish playing without blocking the event
+   * loop.
+   *
+   * The synchronous drain (run by `end()` / `_final`) polls for completion on
+   * the event loop for the full playback tail; this method runs that wait on the
+   * native thread pool and resolves when the buffer has drained. If nothing has
+   * been written yet it resolves immediately.
+   *
+   * Additive and non-blocking: the synchronous drain via `end()` is unchanged.
+   * Pair this with `writeAsync()` for a fully non-blocking playback path.
+   *
+   * @returns {Promise<void>}
+   */
+  async drainAsync() {
+    try {
+      await this._native.drainAsync();
+    } catch (err) {
+      throw wrapNativeError(err);
     }
   }
 

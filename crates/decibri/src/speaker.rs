@@ -131,6 +131,72 @@ impl SpeakerStream {
         // Drop all pending samples by draining the channel
         while self.sender.try_send(Vec::new()).is_ok() {}
     }
+
+    /// A cloneable, `Send` handle to this stream's sample channel and drain
+    /// state. Use it to push samples or wait for drain from another thread (for
+    /// example a worker pool) without holding the `SpeakerStream` itself. Because
+    /// the handle clones only the lock-free channel sender and atomic flags, its
+    /// off-thread `send` and `drain` never block a holder of the stream that
+    /// needs `stop` or `is_playing`.
+    ///
+    /// The handle shares the same crossbeam channel and atomic drain flags as
+    /// the stream, so [`SpeakerSink::send`] and [`SpeakerSink::drain`] behave
+    /// exactly like their [`SpeakerStream`] counterparts. The stream must stay
+    /// alive while a sink is in use: dropping the `SpeakerStream` releases the
+    /// device, after which a `send` on a surviving sink returns
+    /// [`DecibriError::SpeakerStreamClosed`] rather than playing.
+    pub fn sink(&self) -> SpeakerSink {
+        SpeakerSink {
+            sender: self.sender.clone(),
+            running: self.running.clone(),
+            drain_complete: self.drain_complete.clone(),
+        }
+    }
+}
+
+/// A cloneable, `Send` handle to a running [`SpeakerStream`]'s sample channel
+/// and drain state.
+///
+/// Obtained from [`SpeakerStream::sink`]. The `SpeakerStream` itself is `Send`,
+/// so it can be held wherever its owner likes; a `SpeakerSink` is a cheaper,
+/// lock-free companion that clones only the thread-safe pieces (the crossbeam
+/// channel sender and the atomic flags) and is `Send + Sync + Clone`. Several
+/// threads can push samples or wait for drain through sinks at once, and because
+/// a sink never touches the audio stream handle, its `send` and `drain` cannot
+/// block whoever holds the `SpeakerStream` and needs `stop` or `is_playing`.
+#[cfg(feature = "playback")]
+#[derive(Clone)]
+pub struct SpeakerSink {
+    sender: Sender<Vec<f32>>,
+    running: Arc<AtomicBool>,
+    drain_complete: Arc<AtomicBool>,
+}
+
+#[cfg(feature = "playback")]
+impl SpeakerSink {
+    /// Send `f32` samples for playback. Identical semantics to
+    /// [`SpeakerStream::send`]: blocks when the internal buffer is full
+    /// (backpressure), treats an empty vector as a no-op, and returns
+    /// [`DecibriError::SpeakerStreamClosed`] once the stream has stopped.
+    pub fn send(&self, samples: Vec<f32>) -> Result<(), DecibriError> {
+        if samples.is_empty() {
+            return Ok(());
+        }
+        self.sender
+            .send(samples)
+            .map_err(|_| DecibriError::SpeakerStreamClosed)
+    }
+
+    /// Block until all queued samples have played. Identical semantics to
+    /// [`SpeakerStream::drain`]: sends a sentinel, polls the shared drain flag,
+    /// then marks the stream no longer playing.
+    pub fn drain(&self) {
+        let _ = self.sender.send(Vec::new());
+        while !self.drain_complete.load(Ordering::Relaxed) {
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        self.running.store(false, Ordering::Relaxed);
+    }
 }
 
 /// An output device you play audio to.

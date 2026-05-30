@@ -124,6 +124,27 @@ export interface MicrophoneOptions extends ReadableOptions {
 export declare class Microphone extends Readable {
   constructor(options?: MicrophoneOptions);
 
+  /**
+   * Construct a Microphone without blocking the event loop on the open work.
+   *
+   * The synchronous constructor loads the Silero VAD model inline when
+   * `vad: 'silero'` is set, blocking the event loop for roughly 100 to 500 ms
+   * on a cold cache. This factory runs that load (and device resolution) on the
+   * native thread pool and resolves to a ready instance. The synchronous
+   * constructor remains available and unchanged.
+   *
+   * Options are identical to the constructor. A failed open rejects the Promise
+   * with the matching error: `RangeError` / `TypeError` for invalid options, or
+   * a `DeviceError` / `OrtError` / `OrtPathError` for native failures.
+   *
+   * @example
+   * ```js
+   * const mic = await Microphone.open({ vad: 'silero' });
+   * mic.on('data', (chunk) => { ... });
+   * ```
+   */
+  static open(options?: MicrophoneOptions): Promise<Microphone>;
+
   /** Stop microphone capture and end the stream. Safe to call multiple times. */
   stop(): void;
 
@@ -234,6 +255,46 @@ export interface SpeakerOptions extends WritableOptions {
  */
 export declare class Speaker extends Writable {
   constructor(options?: SpeakerOptions);
+
+  /**
+   * Construct a Speaker without blocking the event loop. Symmetric with
+   * `Microphone.open()`. The speaker loads no model, so the only open work is
+   * device resolution; this factory is provided so async callers can use one
+   * consistent construction pattern across both classes. The synchronous
+   * constructor remains available and unchanged.
+   *
+   * A failed open (unknown device) rejects the Promise with the matching error.
+   *
+   * @example
+   * ```js
+   * const speaker = await Speaker.open({ sampleRate: 24000 });
+   * speaker.write(pcmBuffer);
+   * ```
+   */
+  static open(options?: SpeakerOptions): Promise<Speaker>;
+
+  /**
+   * Write PCM audio without blocking the event loop. Performs the backpressure
+   * wait (when the native playback queue is full) on the native thread pool and
+   * resolves when the samples are queued.
+   *
+   * Additive: the synchronous `write()` / `pipe()` stream interface is
+   * unchanged. This is a direct, opt-in alternative that bypasses the Writable
+   * buffer; do not interleave it with `write()` / `pipe()` on the same instance.
+   * Await calls sequentially to preserve sample order. An empty buffer resolves
+   * immediately; a closed or stopped stream rejects with the matching error.
+   */
+  writeAsync(chunk: Buffer): Promise<void>;
+
+  /**
+   * Wait for all queued audio to finish playing without blocking the event
+   * loop. Runs the drain wait on the native thread pool and resolves when the
+   * buffer has drained; resolves immediately if nothing was written.
+   *
+   * Additive: the synchronous drain via `end()` is unchanged. Pair with
+   * `writeAsync()` for a fully non-blocking playback path.
+   */
+  drainAsync(): Promise<void>;
 
   /** Immediate stop. Discards remaining buffered audio. */
   stop(): void;
