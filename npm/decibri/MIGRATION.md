@@ -5,6 +5,20 @@ vocabulary that matches the Rust and Python packages, and tidies several option
 and return shapes. This guide lists every breaking change with before and after
 code.
 
+## New in 4.2.0 (additive, nothing to migrate)
+
+decibri 4.2.0 is a browser-only, additive release. Code written for 4.1.0 keeps
+working unchanged; there is nothing to migrate. The release adds audio playback
+to the browser build:
+
+- A browser `Speaker` that plays audio through the Web Audio API: `start()`,
+  async `write(chunk)`, async `drain()`, `stop()`, and `isPlaying`, with int16
+  and float32 input and resampling from the source rate to the output rate. It
+  is started from a user gesture, as browsers require. The browser `Microphone`
+  (capture) and the entire Node.js API are unchanged.
+
+See the browser Speaker section of the README for examples.
+
 ## New in 4.1.0 (additive, nothing to migrate)
 
 decibri 4.1.0 is a non-breaking, additive release. Code written for 4.0.0 keeps

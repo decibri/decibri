@@ -1,0 +1,159 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>decibri browser audio playback test</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body { font-family: system-ui, sans-serif; max-width: 680px; margin: 40px auto; padding: 0 20px; color: #222; }
+    h1 { font-size: 1.4rem; margin-bottom: 8px; }
+    p.intro { font-size: 0.9rem; color: #555; margin-bottom: 16px; line-height: 1.5; }
+    .format-toggle { margin-bottom: 16px; font-size: 0.9rem; }
+    .format-toggle label { margin-right: 12px; cursor: pointer; }
+    .controls { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 16px; }
+    button { padding: 10px 16px; font-size: 0.9rem; border: 1px solid #ccc; border-radius: 4px; cursor: pointer; background: #f8f8f8; }
+    button:hover { background: #e8e8e8; }
+    button.stop { border-color: #f44336; color: #c62828; }
+    .hint { display: block; font-size: 0.75rem; color: #888; margin-top: 2px; }
+    .stats { font-size: 0.85rem; color: #666; margin-bottom: 12px; }
+    #log { background: #1a1a1a; color: #0f0; font-family: monospace; font-size: 0.8rem; padding: 12px; border-radius: 4px; height: 320px; overflow-y: auto; white-space: pre-wrap; word-break: break-all; }
+  </style>
+</head>
+<body>
+  <h1>decibri browser audio playback test</h1>
+  <p class="intro">
+    Tap a button to play audio through the browser Speaker, then listen and watch the log.
+    Playback must start from a tap (the browser only allows audio after a user gesture), so
+    nothing plays until you tap. Serve this page over <strong>localhost</strong> or
+    <strong>https</strong>; opening it as a <code>file://</code> URL will not work. See
+    <code>examples/README.md</code> for serve and mobile instructions.
+  </p>
+
+  <div class="format-toggle">
+    <strong>Format:</strong>
+    <label><input type="radio" name="dtype" value="int16" checked> int16</label>
+    <label><input type="radio" name="dtype" value="float32"> float32</label>
+  </div>
+
+  <div class="controls">
+    <div>
+      <button id="btn-tone">Play 440 Hz tone</button>
+      <span class="hint">about 1.5 s. Should be a clean, steady tone.</span>
+    </div>
+    <div>
+      <button id="btn-continuous">Play 3 s continuous</button>
+      <span class="hint">Listen for any gaps, clicks, or dropouts.</span>
+    </div>
+    <div>
+      <button id="btn-resampled">Play 440 Hz from 16 kHz</button>
+      <span class="hint">Forces resampling. Should match the first button's pitch.</span>
+    </div>
+    <div>
+      <button id="btn-stop" class="stop">Stop</button>
+      <span class="hint">Should halt immediately.</span>
+    </div>
+  </div>
+
+  <div class="stats" id="stats">Idle.</div>
+  <div id="log"></div>
+
+  <!--
+    This page loads the real browser Speaker from examples/decibri.browser.js, a
+    generated bundle of the package's browser entry (src/browser/index.js). It is
+    the actual shipped code, not a copy. See examples/README.md to regenerate it.
+  -->
+  <script src="./decibri.browser.js"></script>
+  <script>
+    const { Speaker } = decibri;
+
+    const logEl = document.getElementById('log');
+    const statsEl = document.getElementById('stats');
+
+    let current = null;
+
+    function log(msg) {
+      const ts = new Date().toISOString().slice(11, 23);
+      logEl.textContent += `[${ts}] ${msg}\n`;
+      logEl.scrollTop = logEl.scrollHeight;
+    }
+
+    function setStats(text) {
+      const playing = current ? current.isPlaying : false;
+      statsEl.textContent = `${text}  |  isPlaying: ${playing}`;
+    }
+
+    function getDtype() {
+      return document.querySelector('input[name="dtype"]:checked').value;
+    }
+
+    // Generate a sine tone at `rate` Hz with short fades to avoid edge clicks.
+    function genTone(freq, seconds, rate, dtype) {
+      const n = Math.floor(rate * seconds);
+      const amp = 0.25;
+      const fade = Math.min(Math.floor(rate * 0.005), Math.floor(n / 2));
+      const f32 = new Float32Array(n);
+      for (let i = 0; i < n; i++) {
+        let env = 1;
+        if (i < fade) env = i / fade;
+        else if (i >= n - fade) env = (n - 1 - i) / fade;
+        f32[i] = Math.sin(2 * Math.PI * freq * i / rate) * amp * env;
+      }
+      if (dtype === 'float32') return f32;
+      const i16 = new Int16Array(n);
+      for (let i = 0; i < n; i++) {
+        i16[i] = Math.max(-32768, Math.min(32767, Math.round(f32[i] * 32767)));
+      }
+      return i16;
+    }
+
+    function stopCurrent() {
+      if (current) {
+        current.stop();
+        log('stop()');
+        current = null;
+        setStats('Stopped.');
+      }
+    }
+
+    async function play(label, freq, seconds, srcRate) {
+      stopCurrent();
+      const dtype = getDtype();
+      log(`${label}: ${seconds}s of ${freq} Hz, source ${srcRate} Hz, dtype=${dtype}`);
+      setStats('Starting...');
+      const speaker = new Speaker({ sampleRate: srcRate, dtype });
+      current = speaker;
+      try {
+        const tone = genTone(freq, seconds, srcRate, dtype);
+        await speaker.write(tone);
+        log(`queued ${tone.length} samples, waiting for playback to finish...`);
+        setStats('Playing...');
+        await speaker.drain();
+        log('drained (playback finished)');
+        setStats('Finished.');
+        // Only tear down if a newer play has not replaced this one.
+        if (current === speaker) {
+          speaker.stop();
+          current = null;
+        }
+      } catch (err) {
+        log('ERROR: ' + (err && err.message ? err.message : String(err)));
+        setStats('Error (see log).');
+      }
+    }
+
+    document.getElementById('btn-tone').addEventListener('click', () => {
+      play('440 Hz tone', 440, 1.5, 44100);
+    });
+    document.getElementById('btn-continuous').addEventListener('click', () => {
+      play('continuous', 440, 3, 44100);
+    });
+    document.getElementById('btn-resampled').addEventListener('click', () => {
+      play('resampled from 16 kHz', 440, 1.5, 16000);
+    });
+    document.getElementById('btn-stop').addEventListener('click', stopCurrent);
+
+    log('Ready. Tap a button to play.');
+  </script>
+</body>
+</html>
