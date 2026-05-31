@@ -11,6 +11,8 @@ For other decibri packages, see:
 
 ## [Unreleased]
 
+## [4.1.0] - 2026-05-31
+
 ### Added
 
 - `SpeakerSink`: a cloneable, `Send + Sync` handle to a running `SpeakerStream`'s sample channel and drain state, obtained from `SpeakerStream::sink()`. It exposes `send()` and `drain()` with the same semantics as the stream's. `SpeakerStream` is `Send`; a `SpeakerSink` is a cheaper, lock-free companion that clones only the thread-safe primitives (the channel sender and the atomic flags), so callers can push samples or wait for drain from another thread (for example a worker pool) without holding the stream, and the off-thread work never blocks a holder of the stream that needs `stop()` or `is_playing()`. The stream must stay alive while a sink is in use; a `send` on a surviving sink after the stream is dropped returns `SpeakerStreamClosed`. Additive: `SpeakerStream` and its methods are unchanged.
