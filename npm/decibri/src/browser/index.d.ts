@@ -166,3 +166,88 @@ export declare class Microphone {
   emit(event: string, ...args: any[]): boolean;
   removeAllListeners(event?: string): this;
 }
+
+/** Constructor options for the browser `Speaker` class. */
+export interface SpeakerOptions {
+  /**
+   * Sample rate of the audio you write, in Hz. Samples are resampled to the
+   * audio context's native rate before playback.
+   * @default 16000
+   * @range 1000–384000
+   */
+  sampleRate?: number;
+
+  /**
+   * Number of output channels. A mono stream is played on every channel.
+   * @default 1
+   * @range 1–32
+   */
+  channels?: number;
+
+  /**
+   * Sample encoding data type of the audio you write.
+   * - `'int16'`: Int16Array of PCM samples
+   * - `'float32'`: Float32Array of samples in [-1, 1]
+   * @default 'int16'
+   */
+  dtype?: 'int16' | 'float32';
+
+  /**
+   * Custom URL for the output AudioWorklet processor script.
+   * Use this for strict CSP environments that block blob URLs.
+   * Omit to use the default inline blob URL.
+   */
+  workletUrl?: string;
+}
+
+/**
+ * Browser audio playback via the Web Audio API + AudioWorklet.
+ *
+ * Plays PCM audio. Samples are converted to float32 and resampled to the
+ * context rate on the main thread, then fed to an output worklet that drains
+ * them to the speakers. Playback is async throughout, as the browser requires:
+ * `write()` resolves when the samples are queued and `drain()` resolves when
+ * the queued audio has finished playing. The first `write()` (or `start()`)
+ * must run in a user gesture so the browser allows audio.
+ *
+ * @example
+ * ```js
+ * import { Speaker } from 'decibri'; // browser entry via conditional export
+ *
+ * const speaker = new Speaker({ sampleRate: 16000 });
+ * button.onclick = async () => {
+ *   await speaker.write(int16Chunk); // Int16Array of PCM samples
+ *   await speaker.drain();
+ *   speaker.stop();
+ * };
+ * ```
+ */
+export declare class Speaker {
+  constructor(options?: SpeakerOptions);
+
+  /**
+   * Create and resume the AudioContext and load the output worklet.
+   * Must be called from a user gesture context so the browser allows audio.
+   * Optional: `write()` starts playback on its own if `start()` was not called.
+   */
+  start(): Promise<void>;
+
+  /**
+   * Play PCM audio. Resolves when the samples are queued, applying backpressure
+   * (the promise waits) when the playback queue is full. Await calls
+   * sequentially to preserve sample order.
+   */
+  write(chunk: Int16Array | Float32Array | ArrayBuffer): Promise<void>;
+
+  /**
+   * Wait for all queued audio to finish playing. Resolves immediately if
+   * nothing is queued.
+   */
+  drain(): Promise<void>;
+
+  /** Immediate stop. Discards queued audio and releases all resources. */
+  stop(): void;
+
+  /** Whether audio is currently queued and playing. */
+  readonly isPlaying: boolean;
+}
