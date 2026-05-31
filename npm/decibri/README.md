@@ -50,6 +50,19 @@ mic.on('data', (chunk) => { /* Int16Array of PCM samples */ });
 await mic.start(); // requires user gesture in Safari
 ```
 
+### Browser playback
+
+```javascript
+import { Speaker } from 'decibri'; // browser entry via conditional export
+
+const speaker = new Speaker({ sampleRate: 16000 });
+playButton.onclick = async () => {
+  await speaker.write(int16Chunk); // Int16Array of PCM samples
+  await speaker.drain();           // resolves when playback finishes
+  speaker.stop();
+};
+```
+
 ### Pipe capture to playback (echo)
 
 ```javascript
@@ -216,6 +229,37 @@ The browser runs energy-mode VAD only, so its `vad` option accepts `false` or `'
 | Sample rate | Native device rate | Resampled from native rate |
 | VAD | `'silero'` or `'energy'` | `'energy'` only |
 
+### `new Speaker(options?)` (browser)
+
+Browser audio playback through the Web Audio API. Playback is async (Promise based) and must be started from a user gesture so the browser allows audio.
+
+```javascript
+import { Speaker } from 'decibri'; // browser entry via conditional export
+
+const speaker = new Speaker({ sampleRate: 16000 });
+
+playButton.onclick = async () => {
+  await speaker.write(int16Chunk); // Int16Array of PCM samples
+  await speaker.drain();           // resolves when playback finishes
+  speaker.stop();
+};
+```
+
+| Option | Type | Default | Description |
+| --- | --- | --- | --- |
+| `sampleRate` | number | 16000 | Sample rate of the audio you write (resampled to the output rate) |
+| `channels` | number | 1 | Output channels (a mono stream plays on every channel) |
+| `dtype` | `'int16'` \| `'float32'` | `'int16'` | Encoding of the samples you write |
+| `workletUrl` | string | inline blob | Custom worklet URL for strict CSP |
+
+- `start()` creates and resumes the audio output. Optional: `write()` starts it on the first call. Either must run in a user gesture (a click or tap); a context blocked by the autoplay policy surfaces a clear error.
+- `write(chunk)` resolves when the samples are queued. It waits when the buffer is full, so awaiting it paces playback. Await calls sequentially to preserve order.
+- `drain()` resolves when the queued audio has finished playing, immediately if nothing is queued.
+- `stop()` halts immediately and discards anything queued.
+- `isPlaying` reports whether audio is currently queued and playing.
+
+To verify playback in real browsers, open `examples/browser-speaker-test.html` (see `examples/README.md`).
+
 ## Voice Activity Detection
 
 ### Energy mode
@@ -277,6 +321,8 @@ node node_modules/decibri/examples/wav-capture.js
 node node_modules/decibri/examples/websocket-server.js   # terminal 1
 node node_modules/decibri/examples/websocket-stream.js   # terminal 2
 ```
+
+For the browser, `examples/browser-speaker-test.html` is a page for manually verifying audio playback in each browser. See `examples/README.md` for how to serve it on desktop and mobile.
 
 ## Migrating from 3.x
 
