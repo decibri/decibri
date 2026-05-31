@@ -4,7 +4,7 @@ var decibri = (function() {
 	//#region \0rolldown/runtime.js
 	var __commonJSMin = (cb, mod) => () => (mod || cb((mod = { exports: {} }).exports, mod), mod.exports);
 	//#endregion
-	//#region ../development/decibri/rust/decibri/repository/decibri/npm/decibri/src/browser/emitter.js
+	//#region npm/decibri/src/browser/emitter.js
 	var require_emitter = /* @__PURE__ */ __commonJSMin(((exports, module) => {
 		/**
 		* Minimal event emitter for browsers.
@@ -61,16 +61,16 @@ var decibri = (function() {
 		module.exports = { Emitter };
 	}));
 	//#endregion
-	//#region ../development/decibri/rust/decibri/repository/decibri/npm/decibri/src/browser/worklet-inline.js
+	//#region npm/decibri/src/browser/worklet-inline.js
 	var require_worklet_inline = /* @__PURE__ */ __commonJSMin(((exports, module) => {
 		module.exports = { WORKLET_SOURCE: "var u=class extends AudioWorkletProcessor{constructor(r){super();let e=r.processorOptions;this.framesPerBuffer=e.framesPerBuffer,this.format=e.format,this.ratio=e.nativeSampleRate/e.targetSampleRate,this.needsResample=e.nativeSampleRate!==e.targetSampleRate,this.position=0,this.buffer=new Float32Array(this.framesPerBuffer),this.bufferIndex=0}process(r,e,s){let t=r[0]?.[0];if(!t||t.length===0)return!0;let f;this.needsResample?f=this.resample(t):f=t;let a=0;for(;a<f.length;){let i=this.framesPerBuffer-this.bufferIndex,o=f.length-a,n=Math.min(i,o);this.buffer.set(f.subarray(a,a+n),this.bufferIndex),this.bufferIndex+=n,a+=n,this.bufferIndex>=this.framesPerBuffer&&this.flush()}return!0}resample(r){let e=r.length,s=0,t=this.position;for(;t<e-1;)s++,t+=this.ratio;let f=new Float32Array(s);t=this.position;for(let a=0;a<s;a++){let i=Math.floor(t),o=t-i;f[a]=r[i]*(1-o)+r[i+1]*o,t+=this.ratio}return this.position=Math.max(0,t-e),f}flush(){let r;if(this.format===\"int16\"){let e=new Int16Array(this.framesPerBuffer);for(let s=0;s<this.framesPerBuffer;s++)e[s]=Math.max(-32768,Math.min(32767,Math.round(this.buffer[s]*32768)));r=e.buffer}else r=this.buffer.slice(0,this.framesPerBuffer).buffer;this.port.postMessage(r,[r]),this.buffer=new Float32Array(this.framesPerBuffer),this.bufferIndex=0}};registerProcessor(\"decibri-processor\",u);\n" };
 	}));
 	//#endregion
-	//#region ../development/decibri/rust/decibri/repository/decibri/npm/decibri/src/browser/decibri-browser.js
+	//#region npm/decibri/src/browser/decibri-browser.js
 	var require_decibri_browser = /* @__PURE__ */ __commonJSMin(((exports, module) => {
 		const { Emitter } = require_emitter();
 		const { WORKLET_SOURCE } = require_worklet_inline();
-		const VERSION = "4.0.0";
+		const VERSION = "4.2.0";
 		/**
 		* Browser microphone capture.
 		*
@@ -293,12 +293,12 @@ var decibri = (function() {
 		module.exports = { Microphone };
 	}));
 	//#endregion
-	//#region ../development/decibri/rust/decibri/repository/decibri/npm/decibri/src/browser/output-worklet-inline.js
+	//#region npm/decibri/src/browser/output-worklet-inline.js
 	var require_output_worklet_inline = /* @__PURE__ */ __commonJSMin(((exports, module) => {
 		module.exports = { OUTPUT_WORKLET_SOURCE: "class R{constructor(t){this.capacity=t,this.buffer=new Float32Array(t),this.writeIndex=0,this.readIndex=0,this.size=0}get availableRead(){return this.size}get availableWrite(){return this.capacity-this.size}get isEmpty(){return this.size===0}get isFull(){return this.size===this.capacity}write(t){let e=Math.min(t.length,this.availableWrite);for(let s=0;s<e;s++)this.buffer[this.writeIndex]=t[s],this.writeIndex=this.writeIndex+1===this.capacity?0:this.writeIndex+1;return this.size+=e,e}readInto(t,e,s){let i=Math.min(s,this.size);for(let f=0;f<i;f++)t[e+f]=this.buffer[this.readIndex],this.readIndex=this.readIndex+1===this.capacity?0:this.readIndex+1;return this.size-=i,i}clear(){this.writeIndex=0,this.readIndex=0,this.size=0}}class P extends AudioWorkletProcessor{constructor(t){super();let e=t&&t.processorOptions||{},s=e.ringCapacity??96000;this.ring=new R(s),this.hadData=!1,this.port.onmessage=i=>this._onmessage(i)}_onmessage(t){let e=t.data;if(e&&e.type===\"flush\"){this.ring.clear(),this.hadData=!1;return}if(e instanceof ArrayBuffer){let s=new Float32Array(e),i=this.ring.write(s);i>0&&(this.hadData=!0),this.port.postMessage({type:\"level\",queued:this.ring.availableRead,capacity:this.ring.capacity,accepted:i,requested:s.length})}}process(t,e,s){let i=e[0];if(!i||i.length===0)return!0;let f=i[0].length,a=this.ring.readInto(i[0],0,f);for(let o=a;o<f;o++)i[0][o]=0;for(let o=1;o<i.length;o++)i[o].set(i[0]);return this.hadData&&this.ring.isEmpty&&(this.hadData=!1,this.port.postMessage({type:\"drained\"})),!0}}P.RingBuffer=R;registerProcessor(\"decibri-output-processor\",P);\n" };
 	}));
 	//#endregion
-	//#region ../development/decibri/rust/decibri/repository/decibri/npm/decibri/src/browser/decibri-output-browser.js
+	//#region npm/decibri/src/browser/decibri-output-browser.js
 	var require_decibri_output_browser = /* @__PURE__ */ __commonJSMin(((exports, module) => {
 		const { OUTPUT_WORKLET_SOURCE } = require_output_worklet_inline();
 		const BUFFER_SECONDS = 2;

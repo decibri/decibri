@@ -11,6 +11,12 @@ For other decibri packages, see:
 
 ## [Unreleased]
 
+## [4.2.0] - 2026-05-31
+
+### Added
+
+- Browser `Speaker` for audio playback through the Web Audio API: `start()`, async `write(chunk)`, async `drain()`, `stop()`, and an `isPlaying` getter, with `int16` and `float32` input and resampling from the source rate to the output rate. Playback is started from a user gesture, as browsers require. This adds playback to the browser build alongside the existing browser `Microphone` capture. The release is browser-only and additive: the Node.js API and behavior are unchanged.
+
 ## [4.1.0] - 2026-05-31
 
 ### Added
