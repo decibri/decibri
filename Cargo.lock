@@ -221,7 +221,7 @@ checksum = "0c87e182de0887fd5361989c677c4e8f5000cd9491d6d563161a8f3a5519fc7f"
 
 [[package]]
 name = "decibri"
-version = "4.1.0"
+version = "4.2.0"
 dependencies = [
  "cpal",
  "crossbeam-channel",
@@ -233,7 +233,7 @@ dependencies = [
 
 [[package]]
 name = "decibri-node"
-version = "4.1.0"
+version = "4.2.0"
 dependencies = [
  "decibri",
  "napi",
@@ -245,7 +245,7 @@ dependencies = [
 
 [[package]]
 name = "decibri-python"
-version = "4.1.0"
+version = "4.2.0"
 dependencies = [
  "decibri",
  "numpy",
