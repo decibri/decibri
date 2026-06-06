@@ -489,13 +489,16 @@ mod tests {
     // crossed 0.5. The values now reflect the corrected `context ++ window`
     // invocation, where `infer_window` prepends the previous window's last 64
     // samples. The companion `vad_golden_output_regression_tts_speech` anchors
-    // the same fix against an actual human-voice recording.
+    // the same fix against generated (Kokoro TTS) speech.
     //
-    // Comparison is bit-exact on the f32 bit patterns: same machine, same ORT
-    // build, single inference thread (`with_intra_threads(1)` in the session
-    // builder) is deterministic across reruns, and the embedded literals use
-    // Rust's shortest round-tripping float formatting, so parsing them back
-    // yields the identical bits.
+    // Comparison uses an absolute tolerance of 1e-4, not bit-exact equality.
+    // ORT's CPU kernels are not bit-identical across platforms, so values
+    // generated on one OS drift slightly on another: these were generated on
+    // Windows, and Linux CI showed ~6e-8 at window 6. The tolerance is sized to
+    // absorb that drift as it accumulates through the recurrent run (the LSTM
+    // state plus the carried audio context) while staying orders of magnitude
+    // below any real behavior change, where probabilities move by 0.01 or more.
+    // The embedded literals use Rust's shortest round-tripping float formatting.
     //
     // To regenerate after a genuine, reviewed change to the model file, the ORT
     // version, the invocation, or the fixture, set the environment variable so
@@ -506,8 +509,8 @@ mod tests {
     //
     // Copy the printed EXPECTED_GOLDEN over the constant below, then rerun
     // without the variable to confirm green. Never edit the numbers by hand to
-    // make a failing change pass: a mismatch means the inference path changed
-    // behavior.
+    // make a failing change pass: a mismatch beyond the tolerance means the
+    // inference path changed behavior.
 
     /// Number of 512-sample windows (at 16 kHz) in the golden fixture.
     const GOLDEN_WINDOWS: usize = 80;
@@ -752,13 +755,14 @@ mod tests {
             EXPECTED_GOLDEN.len(),
             "golden window count changed: regenerate EXPECTED_GOLDEN (see module comment)"
         );
+        // Absolute tolerance (not bit-exact): ORT CPU kernels drift slightly
+        // across platforms. See the module comment for why 1e-4 is the bound.
         for (i, (got, want)) in actual.iter().zip(EXPECTED_GOLDEN.iter()).enumerate() {
-            assert_eq!(
-                got.to_bits(),
-                want.to_bits(),
+            assert!(
+                (got - want).abs() <= 1e-4,
                 "golden mismatch at window {i}: got {got:?}, expected {want:?}. \
-                 A mismatch means the inference path changed behavior; fix the \
-                 code, not this number."
+                 A mismatch beyond tolerance means the inference path changed \
+                 behavior; fix the code, not this number."
             );
         }
 
@@ -806,10 +810,14 @@ mod tests {
     // crossed 0.5, so this test could not have been satisfied at all: that is
     // exactly why it now guards the fix.
     //
-    // Comparison is bit-exact on the f32 bit patterns, with the same determinism
-    // guarantees as the synthetic test. To regenerate after a reviewed change to
-    // the model, the ORT version, the invocation, or the fixture, set the
-    // environment variable so the test prints a paste-ready array and panics:
+    // Comparison uses an absolute tolerance of 1e-4, not bit-exact equality,
+    // for the same reason as the synthetic test: ORT CPU kernels drift slightly
+    // across platforms (these values were generated on Windows; Linux CI showed
+    // ~6e-8 at window 6), and the tolerance absorbs that drift accumulating
+    // through the recurrent run while staying far below any real behavior change.
+    // To regenerate after a reviewed change to the model, the ORT version, the
+    // invocation, or the fixture, set the environment variable so the test
+    // prints a paste-ready array and panics:
     //
     //   DECIBRI_REGEN_VAD_GOLDEN_TTS=1 cargo test-decibri \
     //       vad_golden_output_regression_tts_speech -- --nocapture
@@ -1116,13 +1124,14 @@ mod tests {
             EXPECTED_GOLDEN_TTS.len(),
             "TTS-speech window count changed: regenerate EXPECTED_GOLDEN_TTS (see comment)"
         );
+        // Absolute tolerance (not bit-exact): ORT CPU kernels drift slightly
+        // across platforms. See the comment above for why 1e-4 is the bound.
         for (i, (got, want)) in actual.iter().zip(EXPECTED_GOLDEN_TTS.iter()).enumerate() {
-            assert_eq!(
-                got.to_bits(),
-                want.to_bits(),
+            assert!(
+                (got - want).abs() <= 1e-4,
                 "TTS-speech golden mismatch at window {i}: got {got:?}, expected {want:?}. \
-                 A mismatch means the inference path changed behavior; fix the code, not this \
-                 number."
+                 A mismatch beyond tolerance means the inference path changed behavior; fix \
+                 the code, not this number."
             );
         }
 
