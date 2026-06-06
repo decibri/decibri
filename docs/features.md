@@ -7,7 +7,7 @@ Reference guide to the Cargo features exposed by the `decibri` crate. Aimed at R
 | Flag | Default | Purpose |
 |------|---------|---------|
 | `capture` | on | Microphone input stream support (pulls in `cpal`, `crossbeam-channel`) |
-| `output` | on | Speaker output stream support (pulls in `cpal`, `crossbeam-channel`) |
+| `playback` | on | Speaker output stream support (pulls in `cpal`, `crossbeam-channel`) |
 | `vad` | on | Silero VAD ONNX inference (pulls in `ort`) |
 | `denoise` | on | On by default; no runtime cost when off |
 | `gain` | on | On by default; no runtime cost when off |
@@ -18,7 +18,7 @@ Reference guide to the Cargo features exposed by the `decibri` crate. Aimed at R
 | `directml` | off | ORT DirectML execution provider passthrough (Windows) |
 | `rocm` | off | ORT ROCm execution provider passthrough (Linux AMD) |
 
-The default feature set is `["capture", "output", "vad", "denoise", "gain", "ort-load-dynamic"]`, giving the full decibri experience with runtime ORT loading. This is the set decibri's own Node.js and Python bindings build against.
+The default feature set is `["capture", "playback", "vad", "denoise", "gain", "ort-load-dynamic"]`, giving the full decibri experience with runtime ORT loading. This is the set decibri's own Node.js and Python bindings build against.
 
 ## Choosing an ORT distribution mode
 
@@ -73,7 +73,7 @@ To switch modes in a consumer crate, disable default features and enable the one
 [dependencies]
 decibri = { version = "3.3", default-features = false, features = [
     "capture",
-    "output",
+    "playback",
     "vad",
     "denoise",
     "gain",
@@ -92,12 +92,14 @@ The four execution provider features (`coreml`, `cuda`, `directml`, `rocm`) are 
 
 decibri's own bindings do not enable any execution provider by default. Silero VAD is light enough to run in real time on CPU across all supported platforms.
 
+Internally, the ONNX session builder selects an execution provider per session, defaulting to CPU with automatic CPU fallback. These Cargo features gate which providers that internal selection can register: requesting a provider whose feature is not compiled in returns a clear error. The selection is internal only. There is no public API to choose a provider, and CPU is the only provider decibri uses by default.
+
 ## Feature constraints
 
-- `capture` and `output` both depend on `cpal`. Disabling both removes all cpal code. Without either you have only VAD and sample conversion, which is rarely useful on its own.
+- `capture` and `playback` both depend on `cpal`. Disabling both removes all cpal code. Without either you have only VAD and sample conversion, which is rarely useful on its own.
 - `vad` pulls in `ort` as an optional dependency (`dep:ort`). Without `vad`, the `ort-load-dynamic` / `ort-download-binaries` features are no-ops since the `ort` crate is not in the dependency graph.
-- **Known constraint**: `crates/decibri/src/error.rs` references `ort::Error` in several variant definitions without feature gating, so building with `--no-default-features --features capture,output` (attempting to skip `vad`) currently fails to compile. Production consumers always enable `vad`.
-- `docs.rs` builds the published documentation with `["capture", "output", "vad", "denoise", "gain", "ort-download-binaries"]` so docs.rs builders do not need a runtime ORT dylib. See `[package.metadata.docs.rs]` in `crates/decibri/Cargo.toml`.
+- Builds without `vad` compile cleanly: the `ort::Error`-carrying `DecibriError` variants are all `#[cfg(feature = "vad")]`-gated, so a build such as `--no-default-features --features capture,playback,denoise,gain` has no `ort` in its dependency graph. The CI "Feature Combinations" job checks this and the other supported combinations on every push.
+- `docs.rs` builds the published documentation with `["capture", "playback", "vad", "denoise", "gain", "ort-download-binaries"]` so docs.rs builders do not need a runtime ORT dylib. See `[package.metadata.docs.rs]` in `crates/decibri/Cargo.toml`.
 
 ## Related documentation
 

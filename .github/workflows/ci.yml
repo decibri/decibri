@@ -54,6 +54,47 @@ jobs:
       - run: sudo apt-get update && sudo apt-get install -y libasound2-dev
       - run: cargo test-decibri
 
+  feature-combinations:
+    name: Feature Combinations
+    runs-on: ubuntu-latest
+    needs: lint
+    strategy:
+      fail-fast: false
+      # `cargo check` each meaningful feature selection so a future change that
+      # breaks a feature gate (a module, a re-export, or a DecibriError variant
+      # that fails to compile under some combination) is caught. `check` is used
+      # rather than `build` because the goal is gate breakage, not artifacts, and
+      # it neither links nor downloads ONNX Runtime.
+      #
+      # Exclusions, by design:
+      #   - The execution-provider features (coreml, cuda, directml, rocm) are
+      #     passthroughs to ORT provider backends that require platform SDKs
+      #     (e.g. the CUDA toolkit) not installed on the runner, so they are not
+      #     built here.
+      #   - The two ORT distribution modes (ort-load-dynamic and
+      #     ort-download-binaries) are mutually exclusive (compile_error! in
+      #     lib.rs), so there is no single "all features" build. The `default`
+      #     entry below is the maximal CI-compilable set (it pins
+      #     ort-load-dynamic); ort-download-binaries is already exercised by the
+      #     Rust Tests job via the cargo test-decibri alias.
+      matrix:
+        include:
+          - { name: default, flags: "" }
+          - { name: capture, flags: "--no-default-features --features capture" }
+          - { name: playback, flags: "--no-default-features --features playback" }
+          - { name: capture+playback, flags: "--no-default-features --features capture,playback" }
+          - { name: vad, flags: "--no-default-features --features vad" }
+          - { name: no-vad-full, flags: "--no-default-features --features capture,playback,denoise,gain" }
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: "rust"
+      - run: sudo apt-get update && sudo apt-get install -y libasound2-dev
+      - name: cargo check (${{ matrix.name }})
+        run: cargo check -p decibri ${{ matrix.flags }}
+
   test-node:
     name: Node.js Tests
     runs-on: ubuntu-latest
