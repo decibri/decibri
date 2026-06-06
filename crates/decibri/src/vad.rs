@@ -16,9 +16,7 @@
 //!   - `stateN`: f32[2, batch, 128]       (updated LSTM state)
 
 #[cfg(feature = "vad")]
-use std::path::{Path, PathBuf};
-#[cfg(feature = "vad")]
-use std::sync::OnceLock;
+use std::path::PathBuf;
 
 use crate::error::DecibriError;
 #[cfg(feature = "vad")]
@@ -125,174 +123,6 @@ pub struct SileroVad {
 /// State size: 2 (hidden + cell layers) × batch(1) × hidden_dim(128).
 const STATE_SIZE: usize = 256;
 
-/// Process-global ORT init tracker. Stores the library path used on first
-/// successful init (None if init used `ort::init()` with env-var fallback).
-/// Subsequent `init_ort_once` calls see this as populated and return immediately.
-#[cfg(feature = "vad")]
-static ORT_INIT: OnceLock<Option<PathBuf>> = OnceLock::new();
-
-/// Process id captured alongside [`ORT_INIT`] on first successful init.
-/// Compared against the current pid at every Silero inference call by
-/// [`check_pid_for_ort`]; a mismatch indicates the process forked after
-/// init and ONNX Runtime's internal state is no longer safe to use.
-///
-/// Recorded inside the `OnceLock::get_or_init` callback in
-/// [`init_ort_once`] so the pid stamp is paired with the successful ORT
-/// init, not set speculatively before init returned.
-#[cfg(feature = "vad")]
-static ORT_INIT_PID: OnceLock<u32> = OnceLock::new();
-
-/// Wrap an ORT init failure with a decibri-specific actionable message.
-///
-/// Kept as a standalone function (rather than an inline closure in
-/// `init_ort_once`) so it can be unit-tested without triggering a real ORT
-/// init failure. Tests construct a synthetic `ort::Error` via
-/// [`ort::Error::new`].
-///
-/// Returns one of two typed variants depending on whether a path was provided:
-/// [`DecibriError::OrtLoadFailed`] when `path.is_some()`, or
-/// [`DecibriError::OrtInitFailed`] otherwise. The inner `ort::Error` is
-/// carried via `#[source]` so consumers can walk the error chain.
-#[cfg(feature = "vad")]
-fn wrap_init_error(path: Option<&Path>, err: ort::Error) -> DecibriError {
-    match path {
-        Some(p) => DecibriError::OrtLoadFailed {
-            path: p.to_path_buf(),
-            source: err,
-        },
-        None => DecibriError::OrtInitFailed { source: err },
-    }
-}
-
-/// Perform the actual ORT init call. Split out by distribution-mode feature
-/// so `init_ort_once` stays single-path.
-///
-/// Under `ort-load-dynamic`: `ort::init_from(path)` is available and is
-/// fallible (validates the dylib up-front).
-///
-/// Under `ort-download-binaries`: `ort::init_from` does NOT exist. ORT is
-/// statically linked into the binary and any path argument is meaningless.
-/// The path is ignored; we call `ort::init()` to commit an
-/// `EnvironmentBuilder` so our OnceLock bookkeeping fires.
-#[cfg(all(feature = "vad", feature = "ort-load-dynamic"))]
-fn do_ort_init(path: Option<&Path>) -> Result<bool, ort::Error> {
-    match path {
-        Some(p) => ort::init_from(p).map(|b| b.with_name("decibri").commit()),
-        None => Ok(ort::init().with_name("decibri").commit()),
-    }
-}
-
-#[cfg(all(feature = "vad", not(feature = "ort-load-dynamic")))]
-fn do_ort_init(_path: Option<&Path>) -> Result<bool, ort::Error> {
-    Ok(ort::init().with_name("decibri").commit())
-}
-
-/// Initialize ORT exactly once per process.
-///
-/// - If ORT is already initialized (by this or any prior caller), returns
-///   immediately. The `path` argument is silently ignored. ORT's global
-///   state cannot be re-initialized. See `VadConfig::ort_library_path` docs.
-/// - Otherwise delegates to the feature-gated `do_ort_init` helper.
-/// - On failure, the `OnceLock` is NOT set, so a subsequent caller can retry.
-///
-/// Note: `e` in the error-wrapping path below is always an `ort::Error` (ORT's
-/// own error type), never a `DecibriError`. This function is the single place
-/// where ORT errors enter decibri's error hierarchy. Do NOT apply the same
-/// wrapping pattern elsewhere or the `decibri:` prefix and guidance string
-/// will be duplicated in the message users see.
-#[cfg(feature = "vad")]
-pub(crate) fn init_ort_once(path: Option<&Path>) -> Result<(), DecibriError> {
-    // Fast path: ORT already initialized.
-    if ORT_INIT.get().is_some() {
-        return Ok(());
-    }
-
-    // Defensive pre-check (load-dynamic only): verify the path points at a
-    // regular file before handing it to `ort::init_from`. A nonexistent path
-    // or a path that points at a directory causes `ort::init_from` on Windows
-    // to hang indefinitely (reproduced 2026-04-22 against pyke/ort
-    // 2.0.0-rc.12 + onnxruntime 1.24.4). Failing fast here turns that hang
-    // into a clean typed error that Node, Python, and mobile consumers can
-    // surface to users.
-    //
-    // The check is intentionally scoped to `load-dynamic`: under
-    // `download-binaries`, ORT is statically linked and the path argument
-    // is ignored, so there is nothing to pre-validate.
-    #[cfg(feature = "ort-load-dynamic")]
-    if let Some(p) = path {
-        if !p.is_file() {
-            // Use `OrtPathInvalid`, not `OrtLoadFailed`, precisely because
-            // constructing an `ort::Error` here would call `ortsys![
-            // CreateStatus]`, which triggers the ORT dylib load that this
-            // pre-check is designed to prevent. `OrtPathInvalid` is
-            // string-only and never touches ORT symbols.
-            return Err(DecibriError::OrtPathInvalid {
-                path: p.to_path_buf(),
-                reason: "path does not exist or is not a regular file",
-            });
-        }
-    }
-
-    match do_ort_init(path) {
-        Ok(_committed) => {
-            // First-caller-wins. If another thread set it first, discard ours;
-            // ORT's own global init is idempotent (first takes effect).
-            let _ = ORT_INIT.set(path.map(|p| p.to_path_buf()));
-            // Pair the ORT init with the pid that
-            // performed it. Subsequent `check_pid_for_ort` calls compare
-            // the current pid against this stamp and raise
-            // `ForkAfterOrtInit` on mismatch. `_ = .set(...)` because
-            // another thread may have set the pid first; under that race
-            // the existing value wins and our value is silently dropped,
-            // matching the behavior of ORT_INIT itself.
-            let _ = ORT_INIT_PID.set(std::process::id());
-            Ok(())
-        }
-        Err(e) => Err(wrap_init_error(path, e)),
-    }
-}
-
-/// Verify that the current pid matches the pid that initialized ORT.
-/// Called at the start of every Silero inference call to detect Linux
-/// `fork()`-after-init silent ORT corruption.
-///
-/// On Linux, when a parent process initializes ORT (e.g. by constructing
-/// `Microphone(vad="silero")`) and then forks a child via Python's
-/// default `fork` start method, the child inherits the OnceLock's set
-/// state but the underlying ORT runtime data structures are not safe to
-/// share. Calling inference in the child without re-initializing
-/// produces silent wrong probabilities, segfaults, or hangs depending
-/// on the specific ORT configuration.
-///
-/// This function compares `std::process::id()` against the recorded
-/// `ORT_INIT_PID`. On mismatch it returns
-/// [`DecibriError::ForkAfterOrtInit`] with both pids attached so the
-/// caller can diagnose. On match (the common case: same process that
-/// did init is now doing inference) it returns `Ok(())`.
-///
-/// Returns `Ok(())` cheaply if `ORT_INIT_PID` is unset (ORT was never
-/// initialized in this process), so non-VAD code paths pay nothing.
-///
-/// Pre-fork detection: not in scope here; `init_ort_once` is the single
-/// place that sets the pid and runs only when ORT is actually used.
-/// Code paths that never construct a Silero VAD never trip this check.
-///
-/// # Errors
-/// - [`DecibriError::ForkAfterOrtInit`] if `current_pid != init_pid`.
-#[cfg(feature = "vad")]
-pub(crate) fn check_pid_for_ort() -> Result<(), DecibriError> {
-    if let Some(&init_pid) = ORT_INIT_PID.get() {
-        let current_pid = std::process::id();
-        if current_pid != init_pid {
-            return Err(DecibriError::ForkAfterOrtInit {
-                init_pid,
-                current_pid,
-            });
-        }
-    }
-    Ok(())
-}
-
 #[cfg(feature = "vad")]
 impl SileroVad {
     /// Create a new Silero VAD instance by loading the ONNX model.
@@ -304,7 +134,9 @@ impl SileroVad {
 
         // Initialize ORT exactly once per process. Subsequent SileroVad
         // instances pass through immediately regardless of their ort_library_path.
-        init_ort_once(config.ort_library_path.as_deref())?;
+        // ORT init lives in the capability-neutral `onnx` module so no single
+        // model owns the process-global runtime state.
+        crate::onnx::init_ort_once(config.ort_library_path.as_deref())?;
 
         // Session construction goes through the internal `OnnxSession` trait.
         // The ORT-backed implementation is the only backend. See
@@ -337,7 +169,8 @@ impl SileroVad {
         // entry point covers every inference call; the inner
         // `infer_window` loop runs many sessions per `process` and does
         // not need its own check (any pid mismatch already failed here).
-        check_pid_for_ort()?;
+        // The fork guard lives in the `onnx` module alongside ORT init.
+        crate::onnx::check_pid_for_ort()?;
 
         self.accumulator.extend_from_slice(samples);
 
@@ -473,99 +306,12 @@ mod tests {
     }
 
     #[test]
-    fn test_wrap_init_error_with_path() {
-        use std::env;
-
-        // Platform-agnostic invalid path (guaranteed to not exist on any OS).
-        let bogus_path = env::temp_dir().join("does-not-exist-onnxruntime-xyz-test");
-        let err = wrap_init_error(
-            Some(bogus_path.as_path()),
-            ort::Error::new("simulated ort loader failure"),
-        );
-        let msg = err.to_string();
-
-        assert!(
-            msg.contains(&bogus_path.display().to_string()),
-            "error message should contain the attempted path, got: {msg}"
-        );
-        assert!(
-            msg.contains("If ORT_DYLIB_PATH is set"),
-            "error message should contain actionable guidance phrase, got: {msg}"
-        );
-        assert!(
-            msg.contains("simulated ort loader failure"),
-            "error message should include the underlying ort error, got: {msg}"
-        );
-    }
-
-    #[test]
-    fn test_wrap_init_error_without_path() {
-        let err = wrap_init_error(None, ort::Error::new("simulated ort init failure"));
-        let msg = err.to_string();
-
-        assert!(
-            msg.contains("ort_library_path"),
-            "None-path error should mention the VadConfig field, got: {msg}"
-        );
-        assert!(
-            msg.contains("ORT_DYLIB_PATH"),
-            "None-path error should mention the env var, got: {msg}"
-        );
-        assert!(
-            msg.contains("ort-download-binaries"),
-            "None-path error should mention the opt-out feature, got: {msg}"
-        );
-        assert!(
-            msg.contains("simulated ort init failure"),
-            "error message should include the underlying ort error, got: {msg}"
-        );
-    }
-
-    #[test]
     fn test_vad_config_validation() {
         let bad_rate = VadConfig {
             sample_rate: 44100,
             ..default_config()
         };
         assert!(SileroVad::new(bad_rate).is_err());
-    }
-
-    /// Core guarantee of the commit 3.8 structured-error refactor:
-    /// `err.source()` walks to the underlying `ort::Error` for the wrapped
-    /// variants, and deliberately returns `None` for `OrtPathInvalid` (which
-    /// has no underlying ORT error because constructing one would trigger
-    /// the hang the pre-check prevents).
-    #[test]
-    fn test_ort_error_source_chain_preserved() {
-        use std::error::Error;
-
-        // OrtInitFailed (no path) carries an ort::Error source.
-        let inner = ort::Error::new("simulated underlying ort error");
-        let err = wrap_init_error(None, inner);
-        assert!(
-            err.source().is_some(),
-            "OrtInitFailed should carry an ort::Error source"
-        );
-
-        // OrtLoadFailed (with path) carries an ort::Error source.
-        let inner_with_path = ort::Error::new("another simulated error");
-        let path_err = wrap_init_error(Some(Path::new("/tmp/bogus")), inner_with_path);
-        assert!(
-            path_err.source().is_some(),
-            "OrtLoadFailed should carry an ort::Error source"
-        );
-
-        // OrtPathInvalid intentionally does NOT carry a source (documented
-        // asymmetry; see OrtPathInvalid's rustdoc in error.rs).
-        let path_invalid = DecibriError::OrtPathInvalid {
-            path: PathBuf::from("/tmp/nope"),
-            reason: "test",
-        };
-        assert!(
-            path_invalid.source().is_none(),
-            "OrtPathInvalid intentionally has no source (constructing ort::Error \
-             would trigger the hang the pre-check prevents)"
-        );
     }
 
     /// `DecibriError::is_ort_path_error` groups the two path-level ORT
@@ -687,5 +433,327 @@ mod tests {
 
         assert!(vad.state.iter().all(|&v| v == 0.0), "State should be zeros");
         assert!(vad.accumulator.is_empty(), "Accumulator should be empty");
+    }
+
+    // ── Golden-output regression ───────────────────────────────────────
+    //
+    // `vad_golden_output_regression` anchors Silero VAD's exact per-window
+    // speech probabilities for a fixed deterministic input. Its purpose is to
+    // prove that a refactor of the inference path (for example relocating ORT
+    // init or adding execution-provider selection) is behavior-identical: the
+    // probabilities must not move. It is not a check of Silero's modeling
+    // accuracy.
+    //
+    // On the fixture and what "spans low and high" means here. The fixture
+    // (see `golden_fixture`) alternates silent windows with windows of formant-
+    // synthesized voiced audio. The silent windows sit at Silero's
+    // non-speech floor (~0.0005); the synthesized windows lift the probability
+    // several times above that floor (peaks around 0.003), so the trajectory
+    // spans a clear low band and a clear elevated band rather than a single
+    // flat value, and the two bursts exercise the LSTM across silence-to-onset
+    // transitions. The elevated band does not cross the 0.5 speech-decision
+    // threshold: Silero v5 is robust against synthetic audio and, as verified
+    // empirically while building this test across four distinct synthesis
+    // methods (pure tones, additive formants, impulse-excited formants, and
+    // the diphthong-with-breath-noise method used here), reserves high
+    // confidence for natural speech. There is no committed natural-speech
+    // sample in the repo to draw on. To anchor genuine above-threshold speech
+    // frames, drop a small 16 kHz mono speech clip into `golden_fixture` and
+    // regenerate; the bit-exact mechanism below is unchanged either way.
+    //
+    // The EXPECTED_GOLDEN values were generated from the pre-seam
+    // implementation on this machine via the regeneration path below.
+    // Comparison is bit-exact on the f32 bit patterns: same machine, same
+    // ORT build, single inference thread (`with_intra_threads(1)` in the
+    // session builder) is deterministic across reruns. The embedded literals
+    // use Rust's shortest round-tripping float formatting, so parsing them
+    // back yields the identical bits.
+    //
+    // To regenerate after a genuine, reviewed change to the model file, the
+    // ORT version, or the fixture, set the environment variable so the test
+    // prints a paste-ready array and then panics:
+    //
+    //   DECIBRI_REGEN_VAD_GOLDEN=1 cargo test-decibri \
+    //       vad_golden_output_regression -- --nocapture
+    //
+    // Copy the printed EXPECTED_GOLDEN over the constant below, then rerun
+    // without the variable to confirm green. Never edit the numbers by hand to
+    // make a failing refactor pass: a mismatch means the inference path
+    // changed behavior.
+
+    /// Number of 512-sample windows (at 16 kHz) in the golden fixture.
+    const GOLDEN_WINDOWS: usize = 80;
+    /// Silero VAD window size at 16 kHz.
+    const GOLDEN_WINDOW_SIZE: usize = 512;
+
+    /// Per-window speech probabilities produced by the current inference path
+    /// over [`golden_fixture`]. Regenerate via the documented env-var path; do
+    /// not hand-edit. See the module comment above.
+    const EXPECTED_GOLDEN: &[f32] = &[
+        0.00059220195,
+        0.0005399883,
+        0.00053575635,
+        0.0005354285,
+        0.0005353987,
+        0.0005353391,
+        0.0005353689,
+        0.0005353689,
+        0.0005353987,
+        0.0005353987,
+        0.0005353987,
+        0.0005353987,
+        0.0005353987,
+        0.0005353987,
+        0.0005353987,
+        0.0005353987,
+        0.00051757693,
+        0.00051772594,
+        0.003079176,
+        0.0005182624,
+        0.00051757693,
+        0.00051757693,
+        0.00051766634,
+        0.00051757693,
+        0.00080385804,
+        0.00053048134,
+        0.0008057654,
+        0.002694577,
+        0.002518475,
+        0.00051757693,
+        0.0020724237,
+        0.00051757693,
+        0.00051763654,
+        0.00051757693,
+        0.00051757693,
+        0.00051760674,
+        0.0021745563,
+        0.00051790476,
+        0.00051757693,
+        0.00051757693,
+        0.0030798316,
+        0.00051757693,
+        0.00051757693,
+        0.00051757693,
+        0.00051757693,
+        0.00051757693,
+        0.00051757693,
+        0.00051757693,
+        0.0005351901,
+        0.0005353391,
+        0.0005353987,
+        0.0005353987,
+        0.0005353987,
+        0.0005353987,
+        0.0005353987,
+        0.0005353987,
+        0.0005353987,
+        0.0005353987,
+        0.0005353987,
+        0.0005353987,
+        0.0005353987,
+        0.0005353987,
+        0.0005353987,
+        0.0005353987,
+        0.0005181432,
+        0.0014440119,
+        0.003076166,
+        0.0028525293,
+        0.00058060884,
+        0.0006099045,
+        0.0030797422,
+        0.0030797422,
+        0.0030797422,
+        0.0008032918,
+        0.0008033514,
+        0.0030797422,
+        0.0030797422,
+        0.00051757693,
+        0.00051757693,
+        0.0005183816,
+    ];
+
+    /// Build the deterministic golden fixture: a 16 kHz, mono f32 waveform of
+    /// `GOLDEN_WINDOWS * GOLDEN_WINDOW_SIZE` samples that alternates between
+    /// digital silence and formant-synthesized voiced bursts (a glottal impulse
+    /// train plus breath noise exciting three resonators that sweep along a
+    /// diphthong trajectory, with a pitch glide and syllabic amplitude
+    /// modulation). The silent windows sit at Silero's non-speech floor and the
+    /// synthesized windows lift the probability several-fold above it, so the
+    /// golden sequence spans a low band and a clearly elevated band rather than
+    /// a single flat value (see the module comment for why the elevated band
+    /// stays below the 0.5 speech threshold). Two separate bursts also exercise
+    /// the LSTM state across silence-to-onset transitions. Pure function of the
+    /// sample index: no I/O, and the only randomness is a fixed-seed LCG reset
+    /// per burst, so it is identical on every rerun on this machine.
+    fn golden_fixture() -> Vec<f32> {
+        use std::f64::consts::PI;
+
+        let sr = 16_000.0_f64;
+        let total = GOLDEN_WINDOWS * GOLDEN_WINDOW_SIZE;
+
+        // Diphthong-like formant trajectory: each burst sweeps from an
+        // /a/-vowel toward an /i/-vowel and back. Moving formants (especially
+        // the F2 transition) plus breath noise are strong speech cues. Targets
+        // are (center Hz, bandwidth Hz, linear gain) per formant.
+        const VOWEL_A: [(f64, f64, f64); 3] = [
+            (730.0, 90.0, 1.0),
+            (1090.0, 110.0, 0.5),
+            (2440.0, 170.0, 0.25),
+        ];
+        const VOWEL_I: [(f64, f64, f64); 3] = [
+            (270.0, 80.0, 1.0),
+            (2290.0, 110.0, 0.6),
+            (3010.0, 180.0, 0.3),
+        ];
+
+        // Two voiced bursts (half-open window ranges); silent elsewhere. Each
+        // burst is synthesized independently with fresh filter and glottal
+        // state, exercising the LSTM across two silence-to-speech onsets.
+        const BURSTS: [(usize, usize); 2] = [(16, 48), (64, 80)];
+
+        let mut out = vec![0.0_f32; total];
+        for (w0, w1) in BURSTS {
+            let start = w0 * GOLDEN_WINDOW_SIZE;
+            let end = w1 * GOLDEN_WINDOW_SIZE;
+            let len = end - start;
+
+            // Formant synthesis: a glottal impulse train (pitch gliding
+            // 115 -> 150 Hz) plus breath noise, exciting three parallel
+            // 2nd-order resonators whose centers sweep along the diphthong
+            // trajectory. The periodic-pulse-plus-moving-formant structure is
+            // what real voiced speech looks like, which Silero scores far
+            // higher than steady additive tones. Synthesize into f64, then
+            // peak-normalize so the level is strong and independent of
+            // resonator gain.
+            let mut raw = vec![0.0_f64; len];
+            let mut z1 = [0.0_f64; 3];
+            let mut z2 = [0.0_f64; 3];
+            let mut phase = 0.0_f64;
+            // Deterministic LCG for breath noise (fixed seed, reset per burst).
+            let mut seed: u64 = 0x243F_6A88_85A3_08D3;
+            for (i, slot) in raw.iter_mut().enumerate() {
+                let t = i as f64 / sr;
+                let frac = i as f64 / len as f64;
+                // Triangle 0 -> 1 -> 0 across the burst drives the diphthong.
+                let sweep = 1.0 - (2.0 * frac - 1.0).abs();
+
+                let f0 = 115.0 + 35.0 * t; // pitch glide, Hz
+                phase += f0 / sr;
+                let pulse = if phase >= 1.0 {
+                    phase -= 1.0;
+                    1.0
+                } else {
+                    0.0
+                };
+                seed = seed
+                    .wrapping_mul(6_364_136_223_846_793_005)
+                    .wrapping_add(1_442_695_040_888_963_407);
+                let noise = ((seed >> 40) as f64 / (1u64 << 24) as f64) * 2.0 - 1.0;
+                let exc = pulse + 0.4 * noise;
+
+                let mut s = 0.0_f64;
+                for fi in 0..3 {
+                    let (fa, ba, ga) = VOWEL_A[fi];
+                    let (fii, bii, gii) = VOWEL_I[fi];
+                    let fc = fa + (fii - fa) * sweep;
+                    let bw = ba + (bii - ba) * sweep;
+                    let g = ga + (gii - ga) * sweep;
+                    let r = (-PI * bw / sr).exp();
+                    let a1 = 2.0 * r * (2.0 * PI * fc / sr).cos();
+                    let a2 = -(r * r);
+                    let y = exc + a1 * z1[fi] + a2 * z2[fi];
+                    z2[fi] = z1[fi];
+                    z1[fi] = y;
+                    s += g * y;
+                }
+                // Syllabic amplitude modulation at ~4 Hz; never fully silent.
+                let env = 0.55 + 0.45 * (2.0 * PI * 4.0 * t).sin().max(0.0);
+                *slot = env * s;
+            }
+
+            let peak = raw.iter().fold(0.0_f64, |m, &v| m.max(v.abs())).max(1e-9);
+            let scale = 0.8 / peak;
+            for (i, &v) in raw.iter().enumerate() {
+                out[start + i] = (v * scale).clamp(-1.0, 1.0) as f32;
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn vad_golden_output_regression() {
+        let fixture = golden_fixture();
+        assert_eq!(
+            fixture.len(),
+            GOLDEN_WINDOWS * GOLDEN_WINDOW_SIZE,
+            "fixture length must be an exact multiple of the window size"
+        );
+
+        let mut vad = SileroVad::new(default_config()).unwrap();
+
+        // Feed one 512-sample window per `process` call so each call yields
+        // exactly that window's probability (the accumulator starts empty and
+        // is fully drained each call). This is the public API path a user
+        // takes; it pins the entire per-window probability trajectory,
+        // including LSTM state evolution across the two bursts.
+        let mut actual: Vec<f32> = Vec::with_capacity(GOLDEN_WINDOWS);
+        for window in fixture.chunks_exact(GOLDEN_WINDOW_SIZE) {
+            let result = vad.process(window).unwrap();
+            actual.push(result.probability);
+        }
+        assert_eq!(actual.len(), GOLDEN_WINDOWS);
+
+        // Regeneration path: print a paste-ready array, then panic so it can
+        // never silently pass without asserting. See the module comment above.
+        if std::env::var("DECIBRI_REGEN_VAD_GOLDEN").is_ok() {
+            let mut body = String::new();
+            for (i, p) in actual.iter().enumerate() {
+                if i % 14 == 0 {
+                    body.push_str("\n        ");
+                }
+                body.push_str(&format!("{p:?}, "));
+            }
+            println!("    const EXPECTED_GOLDEN: &[f32] = &[{body}\n    ];");
+            panic!(
+                "DECIBRI_REGEN_VAD_GOLDEN is set: copy the printed EXPECTED_GOLDEN \
+                 above into vad.rs, then rerun without the variable to confirm green."
+            );
+        }
+
+        assert_eq!(
+            actual.len(),
+            EXPECTED_GOLDEN.len(),
+            "golden window count changed: regenerate EXPECTED_GOLDEN (see module comment)"
+        );
+        for (i, (got, want)) in actual.iter().zip(EXPECTED_GOLDEN.iter()).enumerate() {
+            assert_eq!(
+                got.to_bits(),
+                want.to_bits(),
+                "golden mismatch at window {i}: got {got:?}, expected {want:?}. \
+                 A mismatch means the inference path changed behavior; fix the \
+                 code, not this number."
+            );
+        }
+
+        // Guard the fixture itself: it must keep spanning a low silence band
+        // and a clearly elevated synthesized-voiced band, so a future fixture
+        // edit cannot quietly flatten the anchor into a single value. The
+        // thresholds bracket the observed separation (floor ~0.0005, voiced
+        // peaks ~0.003) with margin; see the module comment for why the
+        // elevated band does not reach the 0.5 speech threshold.
+        let lo = actual.iter().copied().fold(f32::INFINITY, f32::min);
+        let hi = actual.iter().copied().fold(f32::NEG_INFINITY, f32::max);
+        assert!(
+            lo < 0.001,
+            "golden fixture should include low-probability silence windows, min was {lo}"
+        );
+        assert!(
+            hi > 0.002,
+            "golden fixture should include clearly elevated voiced windows, max was {hi}"
+        );
+        assert!(
+            hi > lo * 4.0,
+            "golden fixture should span a meaningful probability range, got [{lo}, {hi}]"
+        );
     }
 }
