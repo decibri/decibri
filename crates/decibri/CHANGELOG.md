@@ -11,6 +11,12 @@ For other decibri packages, see:
 
 ## [Unreleased]
 
+## [4.2.0] - Unreleased
+
+### Fixed
+
+- The Silero VAD never detected speech due to a missing 64-sample audio context required by Silero v5. VAD probabilities now reflect real speech activity. If you consume VAD output, expect meaningful probabilities where previously everything sat near zero.
+
 ## [4.1.0] - 2026-05-31
 
 ### Added
