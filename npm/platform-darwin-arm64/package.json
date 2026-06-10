@@ -1,6 +1,6 @@
 {
   "name": "@decibri/decibri-darwin-arm64",
-  "version": "4.3.0",
+  "version": "4.4.0",
   "os": ["darwin"],
   "cpu": ["arm64"],
   "main": "decibri.darwin-arm64.node",

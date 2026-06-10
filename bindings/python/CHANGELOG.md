@@ -8,6 +8,12 @@ For Rust core (`crates/decibri`) and npm binding (`bindings/node`) changes, see 
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.0] - 2026-06-10
+
+### Changed
+
+- Picks up the decibri Rust core speaker stop/drain fix and device-release-on-stop. `Speaker.drain()` and `AsyncSpeaker.drain()` are now repeatable, non-terminal flushes: a later `drain()` waits for its own audio instead of returning immediately. `stop()` discards queued audio and releases the audio device. The Python `stop()` already dropped the stream, so its observable behavior is unchanged; the `drain()` repeatability is the user-visible improvement.
+
 ## [0.3.0] - Unreleased
 
 ### Fixed
