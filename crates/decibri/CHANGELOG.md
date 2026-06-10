@@ -11,6 +11,10 @@ For other decibri packages, see:
 
 ## [Unreleased]
 
+### Changed
+
+- `MicrophoneStream::stop()` and `SpeakerStream::stop()` now release the audio device immediately: each drops the held `cpal::Stream`, so the OS frees the device (and the microphone-in-use indicator clears) on `stop()` rather than only when the handle is dropped. For direct Rust consumers, `stop()` now blocks briefly while the audio thread tears down instead of being an instant flag flip; post-stop behavior is otherwise unchanged (the existing `MicrophoneStreamClosed` / `SpeakerStreamClosed` semantics still apply). The Node and Python bindings already released the device on stop and are unaffected.
+
 ## [4.2.0] - Unreleased
 
 ### Fixed

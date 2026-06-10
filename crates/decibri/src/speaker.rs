@@ -10,7 +10,7 @@
 #[cfg(feature = "playback")]
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 #[cfg(feature = "playback")]
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 #[cfg(feature = "playback")]
 use cpal::traits::{DeviceTrait, StreamTrait};
@@ -177,14 +177,22 @@ fn drain_impl(
 /// Obtained from [`Speaker::start`]. Queue samples with [`send`](Self::send),
 /// which applies backpressure when the internal buffer is full. Call
 /// [`drain`](Self::drain) to block until everything queued has played, or
-/// [`stop`](Self::stop) to end immediately and discard what remains. Dropping
-/// the stream releases the device. The type is `!Sync`: keep it on one thread
-/// or wrap it in a mutex.
+/// [`stop`](Self::stop) to end immediately, discard what remains, and release
+/// the device. Dropping the stream also releases the device. The type is
+/// `Send + Sync`.
 #[cfg(feature = "playback")]
 pub struct SpeakerStream {
-    // `Option` so unit tests can construct a synthetic stream with no cpal
-    // device (`None`); always `Some` in production. Mirrors `MicrophoneStream`.
-    _stream: Option<cpal::Stream>,
+    // `Mutex<Option<...>>` (not `Cell`/`RefCell`) so `stop(&self)` can `take()`
+    // and drop the stream under `&self`, releasing the device, while keeping
+    // this type `Send + Sync`. The Python binding requires `Sync`: its
+    // `#[pyclass]` (`assert_pyclass_send_sync`) and `py.detach` both need the
+    // stream type to be `Sync`, and `cpal::Stream` is itself `Send + Sync` on
+    // every backend. `Cell`/`RefCell` are `!Sync` and would break
+    // `decibri-python`. The lock is uncontended: only `stop()` and `drop` ever
+    // touch this field; the cpal callback owns the channel receiver, not this.
+    // The `Option` also lets the test seam build a stream with no real device
+    // (`Mutex::new(None)`); production stores `Mutex::new(Some(stream))`.
+    _stream: Mutex<Option<cpal::Stream>>,
     sender: Sender<Vec<f32>>,
     running: Arc<AtomicBool>,
     // Drain handshake. `drain()` reserves the next `sentinel_seq` ticket and
@@ -245,15 +253,22 @@ impl SpeakerStream {
         self.running.load(Ordering::Relaxed)
     }
 
-    /// Immediate stop. The output goes silent within one callback cycle and all
-    /// queued audio is discarded; [`is_playing`](Self::is_playing) is false at
-    /// once and later non-empty [`send`](Self::send) calls return
-    /// [`DecibriError::SpeakerStreamClosed`]. The device is not released here;
-    /// drop the stream for that.
+    /// Immediate stop, releasing the device. The output goes silent at once and
+    /// all queued audio is discarded; [`is_playing`](Self::is_playing) is false
+    /// immediately and later non-empty [`send`](Self::send) calls (including via
+    /// a surviving [`SpeakerSink`]) return [`DecibriError::SpeakerStreamClosed`].
+    /// The held `cpal::Stream` is dropped here, so the OS releases the output
+    /// device on stop rather than only when the handle is dropped; this blocks
+    /// briefly while the audio thread tears down.
     pub fn stop(&self) {
-        // The output callback observes this flag, discards anything queued, and
-        // emits silence on its next cycle; it never plays stale audio again.
+        // Flag first: a surviving sink's send/drain key off this and short-circuit.
         self.running.store(false, Ordering::Relaxed);
+        // Then drop the cpal stream to release the OS device now, not only on
+        // drop. Poison-tolerant: if a teardown elsewhere panicked while holding
+        // the lock, still clear the slot rather than panicking in stop().
+        if let Ok(mut guard) = self._stream.lock() {
+            *guard = None;
+        }
     }
 
     /// A cloneable, `Send` handle to this stream's sample channel and drain
@@ -409,7 +424,7 @@ impl Speaker {
             .map_err(|e| DecibriError::StreamStartFailed(e.to_string()))?;
 
         Ok(SpeakerStream {
-            _stream: Some(stream),
+            _stream: Mutex::new(Some(stream)),
             sender,
             running,
             sentinel_seq,
@@ -431,7 +446,7 @@ mod tests {
         let (sender, receiver) = crossbeam_channel::bounded::<Vec<f32>>(32);
         let sentinels_played = Arc::new(AtomicUsize::new(0));
         let stream = SpeakerStream {
-            _stream: None,
+            _stream: Mutex::new(None),
             sender,
             running: Arc::new(AtomicBool::new(true)),
             sentinel_seq: Arc::new(AtomicUsize::new(0)),
@@ -665,5 +680,33 @@ mod tests {
             2,
             "each drain through the sink waits for its own audio"
         );
+    }
+
+    /// Compile-time guard that `SpeakerStream` is `Send + Sync`. The `_stream`
+    /// field is a `Mutex` to keep this bound; a future change to `Cell`/`RefCell`
+    /// would make the type `!Sync` and fail this test in the core crate, rather
+    /// than only surfacing as a `decibri-python` build break (pyo3's
+    /// `#[pyclass]` and `py.detach` both require `Sync`).
+    #[test]
+    fn test_speaker_stream_is_send_and_sync() {
+        fn assert_send_sync<T: Send + Sync>() {}
+        assert_send_sync::<SpeakerStream>();
+    }
+
+    /// `stop()` takes the held stream out from under the mutex (releasing the
+    /// device in production) and is idempotent. The test seam holds no real
+    /// device, so this asserts the slot is empty after stop and that a second
+    /// stop does not panic; the real `Some -> None` drop is exercised by the
+    /// binding suites and integration playback.
+    #[test]
+    fn test_stop_empties_stream_and_is_idempotent() {
+        let (stream, _receiver, _played) = test_stream();
+        stream.stop();
+        assert!(!stream.is_playing(), "stop() clears the running flag");
+        assert!(
+            stream._stream.lock().unwrap().is_none(),
+            "stop() leaves the stream slot empty (device released)"
+        );
+        stream.stop(); // idempotent: an already-empty slot must not panic
     }
 }

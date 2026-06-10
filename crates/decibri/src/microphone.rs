@@ -9,7 +9,7 @@
 #[cfg(feature = "capture")]
 use std::sync::atomic::{AtomicBool, Ordering};
 #[cfg(feature = "capture")]
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 #[cfg(feature = "capture")]
 use std::time::{Duration, Instant};
 
@@ -78,16 +78,24 @@ pub struct AudioChunk {
 /// Obtained from [`Microphone::start`]. Read audio with
 /// [`next_chunk`](Self::next_chunk) (blocking, with a timeout) or
 /// [`try_next_chunk`](Self::try_next_chunk) (non-blocking). Call
-/// [`stop`](Self::stop) to end capture, or drop the stream to release the
-/// device. The type is `!Sync`: keep it on one thread or wrap it in a mutex.
+/// [`stop`](Self::stop) to end capture and release the device; dropping the
+/// handle also releases it. The type is `Send + Sync`.
 #[cfg(feature = "capture")]
 pub struct MicrophoneStream {
-    /// Holds the cpal stream alive for the lifetime of this handle. Wrapped
-    /// in `Option` purely so the test-only `tests::test_stream()` helper can
-    /// construct a `MicrophoneStream` without a real audio device. Production
-    /// code always stores `Some(stream)`; drop semantics are identical (the
-    /// `Option`'s drop runs the inner `cpal::Stream`'s drop).
-    _stream: Option<cpal::Stream>,
+    /// Holds the cpal stream alive for the lifetime of this handle.
+    ///
+    /// `Mutex<Option<...>>` (not `Cell`/`RefCell`) so [`stop`](Self::stop) can
+    /// `take()` and drop the stream under `&self`, releasing the device, while
+    /// keeping this type `Send + Sync`. The Python binding requires `Sync`: its
+    /// `#[pyclass]` (`assert_pyclass_send_sync`) and `py.detach` both need the
+    /// stream type to be `Sync`, and `cpal::Stream` is itself `Send + Sync` on
+    /// every backend. `Cell`/`RefCell` are `!Sync` and would break
+    /// `decibri-python`. The lock is uncontended: only `stop()` and `drop` ever
+    /// touch this field; the cpal callback owns the channel sender, not this.
+    /// The `Option` also lets the test-only `tests::test_stream()` helper build
+    /// a handle with no real device (`Mutex::new(None)`); production stores
+    /// `Mutex::new(Some(stream))`.
+    _stream: Mutex<Option<cpal::Stream>>,
     receiver: Receiver<AudioChunk>,
     running: Arc<AtomicBool>,
     #[allow(dead_code)]
@@ -175,11 +183,12 @@ impl MicrophoneStream {
     /// threads can call [`stop`](Self::stop) concurrently to unblock this
     /// call within approximately 20 ms.
     ///
-    /// Implementation note: `stop()` does not disconnect the underlying
-    /// channel (the cpal `Stream` still holds the sender until the
-    /// `MicrophoneStream` is dropped), so this method internally polls both
-    /// the channel and [`is_open`](Self::is_open) at a short interval
-    /// rather than relying on channel disconnection alone to wake up.
+    /// Implementation note: this method polls both the channel and
+    /// [`is_open`](Self::is_open) at a short interval. An explicit
+    /// [`stop`](Self::stop) disconnects the channel (it drops the cpal `Stream`,
+    /// and with it the sender), which wakes a blocked wait promptly; the poll
+    /// additionally covers a driver-error stop, which flips
+    /// [`is_open`](Self::is_open) without dropping the stream.
     ///
     /// # Stability
     /// Part of decibri's stable FFI-consumer API surface.
@@ -234,17 +243,28 @@ impl MicrophoneStream {
         self.running.load(Ordering::Relaxed)
     }
 
-    /// Stop capturing audio.
+    /// Stop capturing audio and release the device.
     ///
-    /// Signals the capture callback to stop producing chunks. Already-buffered
-    /// chunks remain readable via [`try_next_chunk`](Self::try_next_chunk) or
-    /// [`next_chunk`](Self::next_chunk) until the buffer is drained, at which
-    /// point those methods return `Err(MicrophoneStreamClosed)`.
+    /// Flips the running flag, then drops the held `cpal::Stream`, so the OS
+    /// releases the input device (and the mic-in-use indicator clears) at once
+    /// rather than only when this handle is dropped. Dropping the stream also
+    /// disconnects the capture channel; chunks already buffered remain readable
+    /// via [`try_next_chunk`](Self::try_next_chunk) or
+    /// [`next_chunk`](Self::next_chunk) until the buffer is drained, after which
+    /// those methods return `Err(MicrophoneStreamClosed)`.
     ///
     /// May be called from any thread; wakes a concurrent
-    /// [`next_chunk`](Self::next_chunk) waiter within approximately 20 ms.
+    /// [`next_chunk`](Self::next_chunk) waiter promptly (the channel disconnect
+    /// unblocks it). Releasing the device blocks briefly while the audio thread
+    /// tears down.
     pub fn stop(&self) {
         self.running.store(false, Ordering::Relaxed);
+        // Drop the cpal stream to release the OS device now, not only on drop.
+        // Poison-tolerant: if a teardown elsewhere panicked while holding the
+        // lock, still clear the slot rather than panicking in stop().
+        if let Ok(mut guard) = self._stream.lock() {
+            *guard = None;
+        }
     }
 }
 
@@ -332,7 +352,7 @@ impl Microphone {
             .map_err(|e| DecibriError::StreamStartFailed(e.to_string()))?;
 
         Ok(MicrophoneStream {
-            _stream: Some(stream),
+            _stream: Mutex::new(Some(stream)),
             receiver,
             running,
             sample_rate,
@@ -353,7 +373,7 @@ mod tests {
         let (sender, receiver) = crossbeam_channel::unbounded::<AudioChunk>();
         let running = Arc::new(AtomicBool::new(true));
         let stream = MicrophoneStream {
-            _stream: None,
+            _stream: Mutex::new(None),
             receiver,
             running: running.clone(),
             sample_rate: 16000,
@@ -540,5 +560,33 @@ mod tests {
             [1.0, 2.0],
             "both chunks must be consumed exactly once with no duplicates or losses"
         );
+    }
+
+    /// Compile-time guard that `MicrophoneStream` is `Send + Sync`. The
+    /// `_stream` field is a `Mutex` to keep this bound; a future change to
+    /// `Cell`/`RefCell` would make the type `!Sync` and fail this test in the
+    /// core crate, rather than only surfacing as a `decibri-python` build break
+    /// (pyo3's `#[pyclass]` and `py.detach` both require `Sync`).
+    #[test]
+    fn test_microphone_stream_is_send_and_sync() {
+        fn assert_send_sync<T: Send + Sync>() {}
+        assert_send_sync::<MicrophoneStream>();
+    }
+
+    /// `stop()` takes the held stream out from under the mutex (releasing the
+    /// device in production) and is idempotent. The test seam holds no real
+    /// device, so this asserts the slot is empty after stop and that a second
+    /// stop does not panic; the real `Some -> None` drop is exercised by the
+    /// binding suites and integration capture.
+    #[test]
+    fn test_stop_empties_stream_and_is_idempotent() {
+        let (stream, _sender, _running) = test_stream();
+        stream.stop();
+        assert!(!stream.is_open(), "stop() clears the running flag");
+        assert!(
+            stream._stream.lock().unwrap().is_none(),
+            "stop() leaves the stream slot empty (device released)"
+        );
+        stream.stop(); // idempotent: an already-empty slot must not panic
     }
 }
