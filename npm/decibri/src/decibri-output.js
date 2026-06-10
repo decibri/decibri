@@ -150,7 +150,13 @@ class Speaker extends Writable {
   /** @internal Called by end() after all buffered writes complete. */
   _final(callback) {
     try {
+      // end() is terminal: flush all queued audio, then stop. drain() blocks
+      // until everything queued has played (it is a non-terminal flush in the
+      // core), and stop() then ends the stream so isPlaying is false once the
+      // audio has finished. The flush-then-stop order plays the tail to
+      // completion before stopping; reversing it would truncate the audio.
       this._native.drain();
+      this._native.stop();
       callback();
     } catch (err) {
       callback(err);
