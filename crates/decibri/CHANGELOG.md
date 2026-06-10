@@ -11,6 +11,17 @@ For other decibri packages, see:
 
 ## [Unreleased]
 
+## [4.3.0] - 2026-06-10
+
+### Fixed
+
+- `SpeakerStream::stop()` now discards queued audio and goes silent immediately. Previously it appended empty sentinels behind the queued audio (and was a no-op when the channel was full), so audio played to completion after `stop()`.
+
+### Changed
+
+- **Behavioral:** `SpeakerStream::drain()` is now a repeatable, non-terminal flush. It blocks until everything queued at call time has played, then leaves the stream usable, so a later `drain()` waits for its own audio and `send()` keeps working. Previously `drain()` incidentally ended the stream (it set `running = false`); code that relied on `drain()` as a stop must now call `stop()` explicitly. Applies to `SpeakerSink::drain()`. (In the Node binding, `end()` now flushes then stops, so the stream is still terminal after `end()`.)
+- `MicrophoneStream::stop()` and `SpeakerStream::stop()` now release the audio device immediately: each drops the held `cpal::Stream`, so the OS frees the device (and the microphone-in-use indicator clears) on `stop()` rather than only when the handle is dropped. For direct Rust consumers, `stop()` now blocks briefly while the audio thread tears down; post-stop error semantics are unchanged.
+
 ## [4.2.0] - Unreleased
 
 ### Fixed
