@@ -310,6 +310,25 @@ impl SpeakerStream {
     }
 }
 
+#[cfg(feature = "playback")]
+impl Drop for SpeakerStream {
+    /// Release any drain parked on this stream, or on a [`SpeakerSink`] that
+    /// shares its `running` flag, when the stream is dropped without `stop()`.
+    ///
+    /// `drain()` waits in a poll loop ([`drain_impl`]) that exits only on its
+    /// sentinel count or `running == false`. Dropping the stream tears down the
+    /// cpal callback that advances the sentinel count, so without this a
+    /// `drain()` already mid-wait at drop time would block forever (and, in the
+    /// Node binding, leak the libuv worker running it). Clearing `running` lets
+    /// that loop return on its next poll. The store runs before the `_stream`
+    /// field is dropped (a custom `drop` body runs before field drops), so the
+    /// flag is already false when the callback is torn down. `stop()` performs
+    /// the same flip on the explicit path; this covers drop-without-stop.
+    fn drop(&mut self) {
+        self.running.store(false, Ordering::Relaxed);
+    }
+}
+
 /// A cloneable, `Send` handle to a running [`SpeakerStream`]'s sample channel
 /// and drain state.
 ///
@@ -525,6 +544,44 @@ mod tests {
             );
             thread::sleep(Duration::from_millis(1));
         }
+    }
+
+    #[test]
+    fn drain_returns_when_stream_dropped_without_stop() {
+        // Regression for the drop-while-draining hang: a drain() parked in its
+        // wait loop must return when the SpeakerStream is dropped without an
+        // explicit stop(). The synthetic stream has no output callback to
+        // advance `sentinels_played`, so the only way the drain can finish is
+        // the `running` flag going false. Pre-fix (no `impl Drop`) nothing
+        // cleared it on drop, so the drain polled forever (and a Node
+        // `drainAsync` leaked the libuv worker running it). The `impl Drop`
+        // clears `running`; this test fails (via the watchdog) without it.
+        let (stream, receiver, _played) = test_stream();
+        let sink = stream.sink();
+        let (done_tx, done_rx) = crossbeam_channel::bounded::<()>(1);
+        let drain_thread = thread::spawn(move || {
+            // Sends a sentinel (the channel is open: `receiver` is held below),
+            // then polls `sentinels_played`, which nothing advances here.
+            sink.drain();
+            let _ = done_tx.send(());
+        });
+
+        // Let the drain thread send its sentinel and enter the wait loop.
+        thread::sleep(Duration::from_millis(50));
+
+        // Drop the stream WITHOUT stop(). `impl Drop` must clear `running` so
+        // the parked drain returns on its next poll.
+        drop(stream);
+
+        // Watchdog: a regression fails the test here instead of hanging the
+        // whole suite.
+        assert!(
+            done_rx.recv_timeout(Duration::from_secs(2)).is_ok(),
+            "drain() did not return after the stream was dropped without stop() \
+             (regression: would hang forever without impl Drop for SpeakerStream)"
+        );
+        drain_thread.join().unwrap();
+        drop(receiver);
     }
 
     #[test]
