@@ -489,7 +489,7 @@ fn to_napi_error(e: decibri::error::DecibriError) -> Error {
         | PermissionDenied
         | MicrophoneStreamClosed
         | SpeakerStreamClosed
-        | DeviceFailed(_)
+        | DeviceFailed { .. }
         | OrtInitFailed { .. }
         | OrtLoadFailed { .. }
         | OrtPathInvalid { .. }

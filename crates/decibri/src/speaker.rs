@@ -453,7 +453,9 @@ impl Speaker {
                 move |err| {
                     // Record a typed cause so a consumer that sees the stream
                     // close can distinguish a driver failure from stop().
-                    let typed = DecibriError::DeviceFailed(err.to_string());
+                    let typed = DecibriError::DeviceFailed {
+                        source: Box::new(err),
+                    };
                     eprintln!("{typed}");
                     if let Ok(mut slot) = err_last_error.lock() {
                         *slot = Some(typed);
