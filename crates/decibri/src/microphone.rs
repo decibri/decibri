@@ -7,7 +7,7 @@
 //! playback counterpart is [`crate::speaker`].
 
 #[cfg(feature = "capture")]
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 #[cfg(feature = "capture")]
 use std::sync::{Arc, Mutex};
 #[cfg(feature = "capture")]
@@ -16,7 +16,7 @@ use std::time::{Duration, Instant};
 #[cfg(feature = "capture")]
 use cpal::traits::{DeviceTrait, StreamTrait};
 #[cfg(feature = "capture")]
-use crossbeam_channel::{Receiver, RecvTimeoutError, Sender, TryRecvError};
+use crossbeam_channel::{Receiver, RecvTimeoutError, Sender, TryRecvError, TrySendError};
 
 use crate::device::DeviceSelector;
 use crate::error::DecibriError;
@@ -73,6 +73,15 @@ pub struct AudioChunk {
     pub channels: u16,
 }
 
+/// Bound on the capture channel. A stalled consumer cannot grow memory without
+/// limit: once this many `AudioChunk`s are queued, the realtime callback drops
+/// new chunks (counting them, see [`MicrophoneStream::overrun_count`]) rather
+/// than blocking the audio thread or allocating without bound. Sized generously
+/// (each chunk is one cpal buffer, roughly 100 ms at the 16 kHz / 1600-frame
+/// default) so normal consumer jitter never drops, only a genuine stall does.
+#[cfg(feature = "capture")]
+const CAPTURE_CHANNEL_CAPACITY: usize = 64;
+
 /// An open capture stream you pull [`AudioChunk`]s from.
 ///
 /// Obtained from [`Microphone::start`]. Read audio with
@@ -106,6 +115,11 @@ pub struct MicrophoneStream {
     // from an explicit `stop()`. The cpal callback writes it; consumers drain
     // it. Uncontended in practice (written at most once, on failure).
     last_error: Arc<Mutex<Option<DecibriError>>>,
+    // Count of capture buffers dropped because the channel was full (a stalled
+    // consumer). Incremented by the realtime callback, read via
+    // [`overrun_count`](Self::overrun_count). Bounds memory by dropping rather
+    // than queuing without limit.
+    overruns: Arc<AtomicU64>,
 }
 
 #[cfg(feature = "capture")]
@@ -268,6 +282,13 @@ impl MicrophoneStream {
         self.last_error.lock().ok().and_then(|mut slot| slot.take())
     }
 
+    /// Total number of capture buffers dropped because the channel was full
+    /// (a consumer that could not keep up). Stays 0 while the consumer keeps
+    /// pace; a rising count means audio is being dropped to bound memory.
+    pub fn overrun_count(&self) -> u64 {
+        self.overruns.load(Ordering::Relaxed)
+    }
+
     /// Stop capturing audio and release the device.
     ///
     /// Flips the running flag, then drops the held `cpal::Stream`, so the OS
@@ -331,7 +352,7 @@ impl Microphone {
     /// Start capturing audio. Returns a stream handle with a receiver for audio chunks.
     pub fn start(&self) -> Result<MicrophoneStream, DecibriError> {
         let (sender, receiver): (Sender<AudioChunk>, Receiver<AudioChunk>) =
-            crossbeam_channel::unbounded();
+            crossbeam_channel::bounded(CAPTURE_CHANNEL_CAPACITY);
 
         let running = Arc::new(AtomicBool::new(true));
         let running_clone = running.clone();
@@ -349,6 +370,8 @@ impl Microphone {
         let err_running = running.clone();
         let last_error = Arc::new(Mutex::new(None));
         let err_last_error = last_error.clone();
+        let overruns = Arc::new(AtomicU64::new(0));
+        let overruns_cb = overruns.clone();
 
         let stream = self
             .device
@@ -363,8 +386,18 @@ impl Microphone {
                         sample_rate,
                         channels,
                     };
-                    // If the receiver is dropped, just discard.
-                    let _ = sender.send(chunk);
+                    // Non-blocking send: the cpal callback must never block the
+                    // realtime audio thread. On a full channel (a stalled
+                    // consumer) drop this chunk and count it rather than growing
+                    // memory without bound; a disconnected receiver also just
+                    // discards.
+                    match sender.try_send(chunk) {
+                        Ok(()) => {}
+                        Err(TrySendError::Full(_)) => {
+                            overruns_cb.fetch_add(1, Ordering::Relaxed);
+                        }
+                        Err(TrySendError::Disconnected(_)) => {}
+                    }
                 },
                 move |err| {
                     // Record a typed cause so a consumer that sees the stream
@@ -391,6 +424,7 @@ impl Microphone {
             sample_rate,
             channels,
             last_error,
+            overruns,
         })
     }
 }
@@ -413,6 +447,7 @@ mod tests {
             sample_rate: 16000,
             channels: 1,
             last_error: Arc::new(Mutex::new(None)),
+            overruns: Arc::new(AtomicU64::new(0)),
         };
         (stream, sender, running)
     }

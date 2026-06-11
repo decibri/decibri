@@ -42,17 +42,36 @@ jobs:
       - run: cargo audit
 
   test-rust:
-    name: Rust Tests
-    runs-on: ubuntu-latest
+    name: Rust Tests (${{ matrix.os }})
     needs: lint
+    strategy:
+      fail-fast: false
+      # The golden VAD anchors are pinned to values generated on Windows and
+      # carry a 1e-4 tolerance sized for cross-platform ORT CPU-kernel drift, so
+      # run them on every platform rather than ubuntu only. macOS in particular
+      # had no coverage of the pinned trajectories before.
+      matrix:
+        os: [ubuntu-latest, macos-14, windows-latest]
+    runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
         with:
           shared-key: "rust"
-      - run: sudo apt-get update && sudo apt-get install -y libasound2-dev
-      - run: cargo test-decibri
+      - name: Install ALSA (Linux only)
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y libasound2-dev
+      - name: Tests (download-binaries; runs the golden VAD anchors)
+        run: cargo test-decibri
+      # Exercise the ort-load-dynamic load-failure path (compiled out by the
+      # test-decibri alias, which uses download-binaries). The failure-path
+      # tests pass a bad ort_library_path and assert the OrtPathInvalid
+      # pre-check fires, so they need no real ORT dylib. Runs on every OS,
+      # which matters most on Windows where the original init_from hang
+      # reproduced.
+      - name: ORT load-dynamic failure-path tests
+        run: cargo test -p decibri --no-default-features --features capture,playback,vad,denoise,gain,ort-load-dynamic --test vad_ort_load_failure
 
   feature-combinations:
     name: Feature Combinations

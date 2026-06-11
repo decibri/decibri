@@ -278,7 +278,12 @@ impl SileroVad {
                 source: "Silero output `output` missing from session run".into(),
             })?;
         let probability = match &prob.data {
-            OnnxTensorOwned::F32(v) => v[0],
+            OnnxTensorOwned::F32(v) => {
+                *v.first().ok_or_else(|| DecibriError::OnnxBackendFailed {
+                    backend: "ort",
+                    source: "Silero output `output` tensor is empty".into(),
+                })?
+            }
             OnnxTensorOwned::I64(_) => {
                 return Err(DecibriError::OnnxBackendFailed {
                     backend: "ort",
@@ -294,7 +299,20 @@ impl SileroVad {
                 source: "Silero output `stateN` missing from session run".into(),
             })?;
         match &state_n.data {
-            OnnxTensorOwned::F32(v) => self.state.copy_from_slice(v),
+            OnnxTensorOwned::F32(v) => {
+                if v.len() != self.state.len() {
+                    return Err(DecibriError::OnnxBackendFailed {
+                        backend: "ort",
+                        source: format!(
+                            "Silero output `stateN` has {} elements, expected {}",
+                            v.len(),
+                            self.state.len()
+                        )
+                        .into(),
+                    });
+                }
+                self.state.copy_from_slice(v);
+            }
             OnnxTensorOwned::I64(_) => {
                 return Err(DecibriError::OnnxBackendFailed {
                     backend: "ort",

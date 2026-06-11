@@ -150,6 +150,13 @@ fn do_ort_init(_path: Option<&Path>) -> Result<bool, ort::Error> {
 pub(crate) fn init_ort_once(path: Option<&Path>) -> Result<(), DecibriError> {
     // Fast path: ORT already initialized.
     if ORT_INIT.get().is_some() {
+        // Guard fork-after-init at construction time, not only at inference: in
+        // a forked child the inherited OnceLock makes this the fast path, and
+        // building a session against inherited ORT state is the exact unsafe
+        // operation `check_pid_for_ort` exists to prevent. Without this the
+        // typed `ForkAfterOrtInit` would not fire until the first inference,
+        // after the unsafe session build had already run.
+        check_pid_for_ort()?;
         return Ok(());
     }
 
