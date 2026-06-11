@@ -201,6 +201,11 @@ pub struct SpeakerStream {
     // its ticket, so sequential drains each wait for their own audio.
     sentinel_seq: Arc<AtomicUsize>,
     sentinels_played: Arc<AtomicUsize>,
+    // Last device/driver error reported by the cpal output error callback
+    // while streaming, retrievable via [`take_last_error`](Self::take_last_error).
+    // Lets a consumer that sees a closed stream distinguish a driver failure
+    // from an explicit `stop()`. Written at most once, on failure.
+    last_error: Arc<Mutex<Option<DecibriError>>>,
 }
 
 #[cfg(feature = "playback")]
@@ -251,6 +256,17 @@ impl SpeakerStream {
     /// Check whether the stream is still actively playing.
     pub fn is_playing(&self) -> bool {
         self.running.load(Ordering::Relaxed)
+    }
+
+    /// Take the last device/driver error reported while streaming, if any.
+    ///
+    /// When the cpal output error callback fires (device unplug, driver
+    /// failure) it records a typed [`DecibriError::DeviceFailed`] and stops
+    /// playback. Reading it here drains it (returns `None` afterwards), letting
+    /// a consumer that observes a closed stream tell a driver failure apart
+    /// from an explicit [`stop`](Self::stop).
+    pub fn take_last_error(&self) -> Option<DecibriError> {
+        self.last_error.lock().ok().and_then(|mut slot| slot.take())
     }
 
     /// Immediate stop, releasing the device. The output goes silent at once and
@@ -384,6 +400,8 @@ impl Speaker {
         let running_cb = running.clone();
         let sentinels_played_cb = sentinels_played.clone();
         let running_clone = running.clone();
+        let last_error = Arc::new(Mutex::new(None));
+        let err_last_error = last_error.clone();
 
         let sample_rate = self.config.sample_rate;
         let channels = self.config.channels;
@@ -412,7 +430,13 @@ impl Speaker {
                     );
                 },
                 move |err| {
-                    eprintln!("decibri: audio output error: {err}");
+                    // Record a typed cause so a consumer that sees the stream
+                    // close can distinguish a driver failure from stop().
+                    let typed = DecibriError::DeviceFailed(err.to_string());
+                    eprintln!("{typed}");
+                    if let Ok(mut slot) = err_last_error.lock() {
+                        *slot = Some(typed);
+                    }
                     running_clone.store(false, Ordering::Relaxed);
                 },
                 None,
@@ -429,6 +453,7 @@ impl Speaker {
             running,
             sentinel_seq,
             sentinels_played,
+            last_error,
         })
     }
 }
@@ -451,6 +476,7 @@ mod tests {
             running: Arc::new(AtomicBool::new(true)),
             sentinel_seq: Arc::new(AtomicUsize::new(0)),
             sentinels_played: sentinels_played.clone(),
+            last_error: Arc::new(Mutex::new(None)),
         };
         (stream, receiver, sentinels_played)
     }

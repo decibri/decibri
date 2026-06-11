@@ -98,6 +98,20 @@ pub enum DecibriError {
     #[error("Speaker stream is closed")]
     SpeakerStreamClosed,
 
+    /// An active audio stream failed at the device or driver level while
+    /// running (device unplugged, driver reset, exclusive-mode preemption).
+    ///
+    /// Distinct from [`Self::StreamOpenFailed`] / [`Self::StreamStartFailed`],
+    /// which fire at open/start time: this is reported by the cpal error
+    /// callback during streaming. The payload carries the underlying cpal
+    /// error text as a `String` (matching the open/start variants, so no cpal
+    /// type leaks into the public enum). After it fires the stream is treated
+    /// as closed; a consumer that sees `MicrophoneStreamClosed` /
+    /// `SpeakerStreamClosed` can call `take_last_error()` on the stream to
+    /// retrieve this cause. Additive variant permitted by `#[non_exhaustive]`.
+    #[error("decibri: audio device error: {0}")]
+    DeviceFailed(String),
+
     // ── VAD config validation ──────────────────────────────────────────
     /// Payload carries the offending sample rate; not formatted into the
     /// Display string to keep the message text stable.

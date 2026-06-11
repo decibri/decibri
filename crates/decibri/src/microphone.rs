@@ -100,6 +100,12 @@ pub struct MicrophoneStream {
     running: Arc<AtomicBool>,
     sample_rate: u32,
     channels: u16,
+    // Last device/driver error reported by the cpal error callback while
+    // streaming, retrievable via [`take_last_error`](Self::take_last_error).
+    // Lets a consumer that sees a closed stream distinguish a driver failure
+    // from an explicit `stop()`. The cpal callback writes it; consumers drain
+    // it. Uncontended in practice (written at most once, on failure).
+    last_error: Arc<Mutex<Option<DecibriError>>>,
 }
 
 #[cfg(feature = "capture")]
@@ -251,6 +257,17 @@ impl MicrophoneStream {
         self.channels
     }
 
+    /// Take the last device/driver error reported while streaming, if any.
+    ///
+    /// When the cpal error callback fires (device unplug, driver failure) it
+    /// records a typed [`DecibriError::DeviceFailed`] and closes the stream.
+    /// Reading it here drains it (returns `None` afterwards), letting a
+    /// consumer that observes a closed stream tell a driver failure apart from
+    /// an explicit [`stop`](Self::stop).
+    pub fn take_last_error(&self) -> Option<DecibriError> {
+        self.last_error.lock().ok().and_then(|mut slot| slot.take())
+    }
+
     /// Stop capturing audio and release the device.
     ///
     /// Flips the running flag, then drops the held `cpal::Stream`, so the OS
@@ -330,6 +347,8 @@ impl Microphone {
         };
 
         let err_running = running.clone();
+        let last_error = Arc::new(Mutex::new(None));
+        let err_last_error = last_error.clone();
 
         let stream = self
             .device
@@ -348,7 +367,13 @@ impl Microphone {
                     let _ = sender.send(chunk);
                 },
                 move |err| {
-                    eprintln!("decibri: audio stream error: {err}");
+                    // Record a typed cause so a consumer that sees the stream
+                    // close can distinguish a driver failure from stop().
+                    let typed = DecibriError::DeviceFailed(err.to_string());
+                    eprintln!("{typed}");
+                    if let Ok(mut slot) = err_last_error.lock() {
+                        *slot = Some(typed);
+                    }
                     err_running.store(false, Ordering::Relaxed);
                 },
                 None, // No timeout
@@ -365,6 +390,7 @@ impl Microphone {
             running,
             sample_rate,
             channels,
+            last_error,
         })
     }
 }
@@ -386,6 +412,7 @@ mod tests {
             running: running.clone(),
             sample_rate: 16000,
             channels: 1,
+            last_error: Arc::new(Mutex::new(None)),
         };
         (stream, sender, running)
     }
