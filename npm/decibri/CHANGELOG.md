@@ -11,13 +11,21 @@ For other decibri packages, see:
 
 ## [Unreleased]
 
+## [4.4.1] - 2026-06-11
+
+### Fixed
+
+- Restarting a `DecibriBridge` (stop then start) no longer silently loses Silero VAD: the VAD is reclaimed across the cycle and `vadProbability` is reset on stop.
+- A device or driver error during capture now raises the `'error'` event instead of freezing silently with `isOpen` still true. The capture pump uses a timed receive, and `isOpen` reflects the real device state.
+- Picks up the Rust core `drain()` drop fix, so a pending `drainAsync()` whose speaker is dropped without `stop()` no longer leaks a libuv worker thread or leaves the promise unsettled.
+
 ## [4.4.0] - 2026-06-10
 
 ### Changed
 
 - `end()` on the Node `Speaker` now flushes then stops: it plays out the queued audio (drain) and then stops the stream, so `isPlaying` is false after `finish`. This keeps `end()` terminal now that the Rust core makes `drain()` a non-terminal, repeatable flush. As a result, `drainAsync()` is repeatable too (a later `drainAsync()` waits for its own audio instead of returning immediately). `stop()` releases the audio device via the updated core (the binding already dropped the native stream on stop, so no behavior change there). The rest of the API is unchanged.
 
-## [4.3.0] - Unreleased
+## [4.3.0] - 2026-06-07
 
 ### Fixed
 

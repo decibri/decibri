@@ -7,7 +7,7 @@ members = [
 ]
 
 [workspace.package]
-version = "4.3.0"
+version = "4.3.1"
 edition = "2021"
 # MSRV empirically verified 2026-04-22: rustc 1.88 is the minimum version
 # that compiles the workspace. Floors: ort 2.0.0-rc.12 declares
@@ -21,9 +21,7 @@ repository = "https://github.com/decibri/decibri"
 
 [workspace.dependencies]
 cpal = "0.17"
-dasp_sample = "0.11"
 thiserror = "2"
-parking_lot = "0.12"
 crossbeam-channel = "0.5"
 # ort 2.0.0-rc.12 targets ONNX Runtime C API version 24 (ORT_API_VERSION = 24).
 # We bundle ONNX Runtime 1.24.4 tarballs into each npm platform package.

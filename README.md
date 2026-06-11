@@ -104,7 +104,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let microphone = Microphone::new(MicrophoneConfig::default())?;
     let stream = microphone.start()?;
     while let Ok(Some(chunk)) = stream.next_chunk(None) {
-        println!("Got {} bytes", chunk.data.len());
+        println!("Got {} samples", chunk.data.len());
     }
     Ok(())
 }

@@ -11,6 +11,24 @@ For other decibri packages, see:
 
 ## [Unreleased]
 
+## [4.3.1] - 2026-06-11
+
+### Fixed
+
+- `SpeakerStream::drain()` no longer hangs when the stream is dropped without `stop()`. A new `Drop` clears the running flag, so a drain parked in its wait loop (on the stream or on a `SpeakerSink` sharing it) returns instead of polling forever.
+- Malformed VAD models (correct tensor names but wrong shapes) now return a typed `OnnxBackendFailed` error instead of panicking the process.
+- The fork-after-ORT-init guard now also fires when a Silero VAD is constructed in a forked child, not only at the first inference, so `ForkAfterOrtInit` is raised before any ORT session is built on inherited state.
+
+### Added
+
+- `DecibriError::DeviceFailed`, a typed error carrying the underlying cpal stream error as a structured source for a device or driver failure during streaming. `MicrophoneStream` and `SpeakerStream` gained `take_last_error()` so a consumer that sees a closed stream can tell a driver failure from an explicit `stop()`.
+- `MicrophoneStream::sample_rate()`, `channels()`, and `overrun_count()` accessors.
+
+### Changed
+
+- The microphone capture channel is now bounded: a stalled consumer drops the newest buffers (counted via `overrun_count()`) rather than growing memory without bound, and the realtime callback never blocks.
+- Removed the unused `parking_lot` and `dasp_sample` dependencies.
+
 ## [4.3.0] - 2026-06-10
 
 ### Fixed
@@ -22,7 +40,7 @@ For other decibri packages, see:
 - **Behavioral:** `SpeakerStream::drain()` is now a repeatable, non-terminal flush. It blocks until everything queued at call time has played, then leaves the stream usable, so a later `drain()` waits for its own audio and `send()` keeps working. Previously `drain()` incidentally ended the stream (it set `running = false`); code that relied on `drain()` as a stop must now call `stop()` explicitly. Applies to `SpeakerSink::drain()`. (In the Node binding, `end()` now flushes then stops, so the stream is still terminal after `end()`.)
 - `MicrophoneStream::stop()` and `SpeakerStream::stop()` now release the audio device immediately: each drops the held `cpal::Stream`, so the OS frees the device (and the microphone-in-use indicator clears) on `stop()` rather than only when the handle is dropped. For direct Rust consumers, `stop()` now blocks briefly while the audio thread tears down; post-stop error semantics are unchanged.
 
-## [4.2.0] - Unreleased
+## [4.2.0] - 2026-06-07
 
 ### Fixed
 

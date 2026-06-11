@@ -152,7 +152,7 @@ The common types are re-exported at the crate root, so `use decibri::Microphone;
 
 ## Thread safety
 
-All public types are `Send` and suitable for cross-thread handoff. `MicrophoneStream` and `SpeakerStream` are `!Sync` because they hold a live platform audio stream internally; wrap them in a mutex or move them into a dedicated thread for shared access.
+All public types are `Send` and suitable for cross-thread handoff. `MicrophoneStream` and `SpeakerStream` are also `Sync` (they hold their live platform audio stream behind an internal mutex), so they can be shared across threads, for example via an `Arc`, without external synchronization.
 
 ## Platform support
 

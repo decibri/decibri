@@ -279,7 +279,8 @@ class Microphone:
         raise ``AlreadyBorrowed`` (a pyo3 ``RuntimeError`` from the
         bridge's ``RefCell`` borrow). This is a known 0.1.0 limitation
         pinned by ``test_sync_stop_from_other_thread_raises_already_borrowed``;
-        a thread-safe shutdown path is scheduled for 0.2.0. Workarounds:
+        a thread-safe shutdown path is planned for a future release.
+        Workarounds:
         use ``AsyncMicrophone`` (sibling-task cancellation works
         correctly), or call ``stop()`` from the same thread that owns
         the iteration loop.

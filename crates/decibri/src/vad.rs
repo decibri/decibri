@@ -278,7 +278,12 @@ impl SileroVad {
                 source: "Silero output `output` missing from session run".into(),
             })?;
         let probability = match &prob.data {
-            OnnxTensorOwned::F32(v) => v[0],
+            OnnxTensorOwned::F32(v) => {
+                *v.first().ok_or_else(|| DecibriError::OnnxBackendFailed {
+                    backend: "ort",
+                    source: "Silero output `output` tensor is empty".into(),
+                })?
+            }
             OnnxTensorOwned::I64(_) => {
                 return Err(DecibriError::OnnxBackendFailed {
                     backend: "ort",
@@ -294,7 +299,20 @@ impl SileroVad {
                 source: "Silero output `stateN` missing from session run".into(),
             })?;
         match &state_n.data {
-            OnnxTensorOwned::F32(v) => self.state.copy_from_slice(v),
+            OnnxTensorOwned::F32(v) => {
+                if v.len() != self.state.len() {
+                    return Err(DecibriError::OnnxBackendFailed {
+                        backend: "ort",
+                        source: format!(
+                            "Silero output `stateN` has {} elements, expected {}",
+                            v.len(),
+                            self.state.len()
+                        )
+                        .into(),
+                    });
+                }
+                self.state.copy_from_slice(v);
+            }
             OnnxTensorOwned::I64(_) => {
                 return Err(DecibriError::OnnxBackendFailed {
                     backend: "ort",
@@ -315,7 +333,88 @@ impl SileroVad {
 #[cfg(all(test, feature = "vad"))]
 mod tests {
     use super::*;
+    use crate::onnx::{OnnxOutputTensor, OnnxOutputs};
     use std::path::Path;
+
+    // ---- F7: malformed model output must surface a typed error, not panic ----
+
+    /// A mock session returning caller-specified `output`/`stateN` tensors, to
+    /// exercise `infer_window`'s malformed-output paths without ORT.
+    struct MalformedSession {
+        output: Vec<f32>,
+        state_n: Vec<f32>,
+    }
+
+    impl OnnxSession for MalformedSession {
+        fn run(&mut self, _inputs: OnnxInputs<'_>) -> Result<OnnxOutputs, DecibriError> {
+            Ok(OnnxOutputs {
+                tensors: vec![
+                    (
+                        "output".to_string(),
+                        OnnxOutputTensor {
+                            shape: vec![1, 1],
+                            data: OnnxTensorOwned::F32(self.output.clone()),
+                        },
+                    ),
+                    (
+                        "stateN".to_string(),
+                        OnnxOutputTensor {
+                            shape: vec![2, 1, 128],
+                            data: OnnxTensorOwned::F32(self.state_n.clone()),
+                        },
+                    ),
+                ],
+            })
+        }
+    }
+
+    /// Build a 16 kHz `SileroVad` around an arbitrary session, bypassing ORT.
+    /// This child module may construct `SileroVad`'s private fields directly, so
+    /// no production-side test seam is needed.
+    fn vad_with_session(session: Box<dyn OnnxSession>) -> SileroVad {
+        let window_size = 512;
+        let context_size = window_size / 8;
+        SileroVad {
+            session,
+            state: vec![0.0f32; STATE_SIZE],
+            sample_rate: 16000,
+            threshold: 0.5,
+            accumulator: Vec::new(),
+            window_size,
+            context: vec![0.0f32; context_size],
+            context_size,
+        }
+    }
+
+    #[test]
+    fn malformed_probability_output_returns_typed_error() {
+        // An empty `output` tensor must surface OnnxBackendFailed rather than
+        // panic at the probability read (the `v.first()` site).
+        let mut vad = vad_with_session(Box::new(MalformedSession {
+            output: vec![],
+            state_n: vec![0.0f32; STATE_SIZE],
+        }));
+        let err = vad.process(&[0.0f32; 512]).unwrap_err();
+        assert!(
+            matches!(err, DecibriError::OnnxBackendFailed { .. }),
+            "expected OnnxBackendFailed, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn malformed_state_output_returns_typed_error() {
+        // A wrong-length `stateN` tensor must surface OnnxBackendFailed rather
+        // than panic in `copy_from_slice` (the state length-check site).
+        let mut vad = vad_with_session(Box::new(MalformedSession {
+            output: vec![0.5f32],
+            state_n: vec![0.0f32; STATE_SIZE - 1],
+        }));
+        let err = vad.process(&[0.0f32; 512]).unwrap_err();
+        assert!(
+            matches!(err, DecibriError::OnnxBackendFailed { .. }),
+            "expected OnnxBackendFailed, got {err:?}"
+        );
+    }
 
     fn model_path() -> PathBuf {
         // Resolve relative to the workspace root
@@ -368,9 +467,8 @@ mod tests {
         };
         assert!(!init_failed.is_ort_path_error());
 
-        // `SampleRateOutOfRange` is a unit variant (applies to capture/output
-        // configs, not VAD); Ross's draft had `(999999)` which wouldn't
-        // compile. Using the correct unit form.
+        // `SampleRateOutOfRange` is a unit variant (it applies to capture and
+        // output configs, not VAD), so it is constructed without a payload.
         let sample_rate = DecibriError::SampleRateOutOfRange;
         assert!(!sample_rate.is_ort_path_error());
 

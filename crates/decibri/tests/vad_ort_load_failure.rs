@@ -7,8 +7,8 @@
 //! each run is the first ORT init in its process and thus actually exercises
 //! the load-failure branch.
 //!
-//! The tests rely on the defensive pre-check added in
-//! `crates/decibri/src/vad.rs::init_ort_once`, which validates that the
+//! The tests rely on the defensive pre-check in
+//! `crates/decibri/src/onnx.rs::init_ort_once`, which validates that the
 //! provided `ort_library_path` points at a regular file before handing it
 //! to `ort::init_from`. Without that pre-check, Windows hangs indefinitely
 //! inside `ort::init_from` on a nonexistent path (reproduced 2026-04-22
@@ -29,7 +29,7 @@
 //! ```text
 //! cargo test -p decibri \
 //!   --no-default-features \
-//!   --features capture,output,vad,denoise,gain,ort-load-dynamic \
+//!   --features capture,playback,vad,denoise,gain,ort-load-dynamic \
 //!   --test vad_ort_load_failure
 //! ```
 

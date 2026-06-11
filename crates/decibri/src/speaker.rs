@@ -201,6 +201,11 @@ pub struct SpeakerStream {
     // its ticket, so sequential drains each wait for their own audio.
     sentinel_seq: Arc<AtomicUsize>,
     sentinels_played: Arc<AtomicUsize>,
+    // Last device/driver error reported by the cpal output error callback
+    // while streaming, retrievable via [`take_last_error`](Self::take_last_error).
+    // Lets a consumer that sees a closed stream distinguish a driver failure
+    // from an explicit `stop()`. Written at most once, on failure.
+    last_error: Arc<Mutex<Option<DecibriError>>>,
 }
 
 #[cfg(feature = "playback")]
@@ -253,6 +258,17 @@ impl SpeakerStream {
         self.running.load(Ordering::Relaxed)
     }
 
+    /// Take the last device/driver error reported while streaming, if any.
+    ///
+    /// When the cpal output error callback fires (device unplug, driver
+    /// failure) it records a typed [`DecibriError::DeviceFailed`] and stops
+    /// playback. Reading it here drains it (returns `None` afterwards), letting
+    /// a consumer that observes a closed stream tell a driver failure apart
+    /// from an explicit [`stop`](Self::stop).
+    pub fn take_last_error(&self) -> Option<DecibriError> {
+        self.last_error.lock().ok().and_then(|mut slot| slot.take())
+    }
+
     /// Immediate stop, releasing the device. The output goes silent at once and
     /// all queued audio is discarded; [`is_playing`](Self::is_playing) is false
     /// immediately and later non-empty [`send`](Self::send) calls (including via
@@ -291,6 +307,27 @@ impl SpeakerStream {
             sentinel_seq: self.sentinel_seq.clone(),
             sentinels_played: self.sentinels_played.clone(),
         }
+    }
+}
+
+#[cfg(feature = "playback")]
+impl Drop for SpeakerStream {
+    /// Release any drain parked on this stream, or on a [`SpeakerSink`] that
+    /// shares its `running` flag, when the stream is dropped without `stop()`.
+    ///
+    /// `drain()` waits in a poll loop ([`drain_impl`]) that exits only on its
+    /// sentinel count or `running == false`. Dropping the stream tears down the
+    /// cpal callback that advances the sentinel count, so without this a
+    /// `drain()` already mid-wait at drop time would block forever (and, in the
+    /// Node binding, leak the libuv worker running it). Clearing `running` lets
+    /// that loop return on its next poll. The fix does not depend on drop
+    /// ordering: a parked drain escapes via `running` regardless of when the
+    /// cpal callback is torn down (the `drop` body runs before the `_stream`
+    /// field drops, which is simply the natural place to clear the flag).
+    /// `stop()` performs the same flip on the explicit path; this covers
+    /// drop-without-stop.
+    fn drop(&mut self) {
+        self.running.store(false, Ordering::Relaxed);
     }
 }
 
@@ -384,6 +421,8 @@ impl Speaker {
         let running_cb = running.clone();
         let sentinels_played_cb = sentinels_played.clone();
         let running_clone = running.clone();
+        let last_error = Arc::new(Mutex::new(None));
+        let err_last_error = last_error.clone();
 
         let sample_rate = self.config.sample_rate;
         let channels = self.config.channels;
@@ -412,7 +451,15 @@ impl Speaker {
                     );
                 },
                 move |err| {
-                    eprintln!("decibri: audio output error: {err}");
+                    // Record a typed cause so a consumer that sees the stream
+                    // close can distinguish a driver failure from stop().
+                    let typed = DecibriError::DeviceFailed {
+                        source: Box::new(err),
+                    };
+                    eprintln!("{typed}");
+                    if let Ok(mut slot) = err_last_error.lock() {
+                        *slot = Some(typed);
+                    }
                     running_clone.store(false, Ordering::Relaxed);
                 },
                 None,
@@ -429,6 +476,7 @@ impl Speaker {
             running,
             sentinel_seq,
             sentinels_played,
+            last_error,
         })
     }
 }
@@ -451,6 +499,7 @@ mod tests {
             running: Arc::new(AtomicBool::new(true)),
             sentinel_seq: Arc::new(AtomicUsize::new(0)),
             sentinels_played: sentinels_played.clone(),
+            last_error: Arc::new(Mutex::new(None)),
         };
         (stream, receiver, sentinels_played)
     }
@@ -499,6 +548,44 @@ mod tests {
             );
             thread::sleep(Duration::from_millis(1));
         }
+    }
+
+    #[test]
+    fn drain_returns_when_stream_dropped_without_stop() {
+        // Regression for the drop-while-draining hang: a drain() parked in its
+        // wait loop must return when the SpeakerStream is dropped without an
+        // explicit stop(). The synthetic stream has no output callback to
+        // advance `sentinels_played`, so the only way the drain can finish is
+        // the `running` flag going false. Pre-fix (no `impl Drop`) nothing
+        // cleared it on drop, so the drain polled forever (and a Node
+        // `drainAsync` leaked the libuv worker running it). The `impl Drop`
+        // clears `running`; this test fails (via the watchdog) without it.
+        let (stream, receiver, _played) = test_stream();
+        let sink = stream.sink();
+        let (done_tx, done_rx) = crossbeam_channel::bounded::<()>(1);
+        let drain_thread = thread::spawn(move || {
+            // Sends a sentinel (the channel is open: `receiver` is held below),
+            // then polls `sentinels_played`, which nothing advances here.
+            sink.drain();
+            let _ = done_tx.send(());
+        });
+
+        // Let the drain thread send its sentinel and enter the wait loop.
+        thread::sleep(Duration::from_millis(50));
+
+        // Drop the stream WITHOUT stop(). `impl Drop` must clear `running` so
+        // the parked drain returns on its next poll.
+        drop(stream);
+
+        // Watchdog: a regression fails the test here instead of hanging the
+        // whole suite.
+        assert!(
+            done_rx.recv_timeout(Duration::from_secs(2)).is_ok(),
+            "drain() did not return after the stream was dropped without stop() \
+             (regression: would hang forever without impl Drop for SpeakerStream)"
+        );
+        drain_thread.join().unwrap();
+        drop(receiver);
     }
 
     #[test]

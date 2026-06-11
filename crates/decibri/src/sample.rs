@@ -38,7 +38,15 @@ pub fn i16_to_f32(samples: &[i16]) -> Vec<f32> {
 ///
 /// Each pair of bytes is interpreted as an i16 LE value, then divided by 32768.0.
 /// Used by the output path: JS sends i16 LE bytes, Rust needs f32 for cpal.
+///
+/// A trailing odd byte (when `bytes.len()` is odd) is ignored. The public
+/// bindings only ever pass even-length PCM buffers, so this is a defensive
+/// note rather than a reachable case.
 pub fn i16_le_bytes_to_f32(bytes: &[u8]) -> Vec<f32> {
+    debug_assert!(
+        bytes.len().is_multiple_of(2),
+        "i16_le_bytes_to_f32 expects an even-length buffer; a trailing odd byte is dropped"
+    );
     bytes
         .chunks_exact(2)
         .map(|c| {

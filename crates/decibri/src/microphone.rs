@@ -7,7 +7,7 @@
 //! playback counterpart is [`crate::speaker`].
 
 #[cfg(feature = "capture")]
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 #[cfg(feature = "capture")]
 use std::sync::{Arc, Mutex};
 #[cfg(feature = "capture")]
@@ -16,7 +16,7 @@ use std::time::{Duration, Instant};
 #[cfg(feature = "capture")]
 use cpal::traits::{DeviceTrait, StreamTrait};
 #[cfg(feature = "capture")]
-use crossbeam_channel::{Receiver, RecvTimeoutError, Sender, TryRecvError};
+use crossbeam_channel::{Receiver, RecvTimeoutError, Sender, TryRecvError, TrySendError};
 
 use crate::device::DeviceSelector;
 use crate::error::DecibriError;
@@ -73,6 +73,20 @@ pub struct AudioChunk {
     pub channels: u16,
 }
 
+/// Bound on the capture channel. A stalled consumer cannot grow memory without
+/// limit: once this many `AudioChunk`s are queued, the realtime callback drops
+/// new chunks (counting them, see [`MicrophoneStream::overrun_count`]) rather
+/// than blocking the audio thread or allocating without bound.
+///
+/// This is a memory bound, not a fixed-duration guarantee. One queued item is
+/// one cpal callback buffer, whose duration is backend-dependent: on WASAPI cpal
+/// ignores `BufferSize::Fixed` and delivers the driver period (often ~10 ms, not
+/// `frames_per_buffer`), so 64 items can be anywhere from well under a second to
+/// several seconds of audio. It is sized so a consumer that keeps pace never
+/// drops; only a genuine stall does.
+#[cfg(feature = "capture")]
+const CAPTURE_CHANNEL_CAPACITY: usize = 64;
+
 /// An open capture stream you pull [`AudioChunk`]s from.
 ///
 /// Obtained from [`Microphone::start`]. Read audio with
@@ -98,10 +112,19 @@ pub struct MicrophoneStream {
     _stream: Mutex<Option<cpal::Stream>>,
     receiver: Receiver<AudioChunk>,
     running: Arc<AtomicBool>,
-    #[allow(dead_code)]
     sample_rate: u32,
-    #[allow(dead_code)]
     channels: u16,
+    // Last device/driver error reported by the cpal error callback while
+    // streaming, retrievable via [`take_last_error`](Self::take_last_error).
+    // Lets a consumer that sees a closed stream distinguish a driver failure
+    // from an explicit `stop()`. The cpal callback writes it; consumers drain
+    // it. Uncontended in practice (written at most once, on failure).
+    last_error: Arc<Mutex<Option<DecibriError>>>,
+    // Count of capture buffers dropped because the channel was full (a stalled
+    // consumer). Incremented by the realtime callback, read via
+    // [`overrun_count`](Self::overrun_count). Bounds memory by dropping rather
+    // than queuing without limit.
+    overruns: Arc<AtomicU64>,
 }
 
 #[cfg(feature = "capture")]
@@ -243,6 +266,34 @@ impl MicrophoneStream {
         self.running.load(Ordering::Relaxed)
     }
 
+    /// The sample rate (Hz) this stream was opened with.
+    pub fn sample_rate(&self) -> u32 {
+        self.sample_rate
+    }
+
+    /// The channel count this stream was opened with.
+    pub fn channels(&self) -> u16 {
+        self.channels
+    }
+
+    /// Take the last device/driver error reported while streaming, if any.
+    ///
+    /// When the cpal error callback fires (device unplug, driver failure) it
+    /// records a typed [`DecibriError::DeviceFailed`] and closes the stream.
+    /// Reading it here drains it (returns `None` afterwards), letting a
+    /// consumer that observes a closed stream tell a driver failure apart from
+    /// an explicit [`stop`](Self::stop).
+    pub fn take_last_error(&self) -> Option<DecibriError> {
+        self.last_error.lock().ok().and_then(|mut slot| slot.take())
+    }
+
+    /// Total number of capture buffers dropped because the channel was full
+    /// (a consumer that could not keep up). Stays 0 while the consumer keeps
+    /// pace; a rising count means audio is being dropped to bound memory.
+    pub fn overrun_count(&self) -> u64 {
+        self.overruns.load(Ordering::Relaxed)
+    }
+
     /// Stop capturing audio and release the device.
     ///
     /// Flips the running flag, then drops the held `cpal::Stream`, so the OS
@@ -306,7 +357,7 @@ impl Microphone {
     /// Start capturing audio. Returns a stream handle with a receiver for audio chunks.
     pub fn start(&self) -> Result<MicrophoneStream, DecibriError> {
         let (sender, receiver): (Sender<AudioChunk>, Receiver<AudioChunk>) =
-            crossbeam_channel::unbounded();
+            crossbeam_channel::bounded(CAPTURE_CHANNEL_CAPACITY);
 
         let running = Arc::new(AtomicBool::new(true));
         let running_clone = running.clone();
@@ -322,6 +373,10 @@ impl Microphone {
         };
 
         let err_running = running.clone();
+        let last_error = Arc::new(Mutex::new(None));
+        let err_last_error = last_error.clone();
+        let overruns = Arc::new(AtomicU64::new(0));
+        let overruns_cb = overruns.clone();
 
         let stream = self
             .device
@@ -336,11 +391,29 @@ impl Microphone {
                         sample_rate,
                         channels,
                     };
-                    // If the receiver is dropped, just discard.
-                    let _ = sender.send(chunk);
+                    // Non-blocking send: the cpal callback must never block the
+                    // realtime audio thread. On a full channel (a stalled
+                    // consumer) drop this chunk and count it rather than growing
+                    // memory without bound; a disconnected receiver also just
+                    // discards.
+                    match sender.try_send(chunk) {
+                        Ok(()) => {}
+                        Err(TrySendError::Full(_)) => {
+                            overruns_cb.fetch_add(1, Ordering::Relaxed);
+                        }
+                        Err(TrySendError::Disconnected(_)) => {}
+                    }
                 },
                 move |err| {
-                    eprintln!("decibri: audio stream error: {err}");
+                    // Record a typed cause so a consumer that sees the stream
+                    // close can distinguish a driver failure from stop().
+                    let typed = DecibriError::DeviceFailed {
+                        source: Box::new(err),
+                    };
+                    eprintln!("{typed}");
+                    if let Ok(mut slot) = err_last_error.lock() {
+                        *slot = Some(typed);
+                    }
                     err_running.store(false, Ordering::Relaxed);
                 },
                 None, // No timeout
@@ -357,6 +430,8 @@ impl Microphone {
             running,
             sample_rate,
             channels,
+            last_error,
+            overruns,
         })
     }
 }
@@ -378,6 +453,8 @@ mod tests {
             running: running.clone(),
             sample_rate: 16000,
             channels: 1,
+            last_error: Arc::new(Mutex::new(None)),
+            overruns: Arc::new(AtomicU64::new(0)),
         };
         (stream, sender, running)
     }

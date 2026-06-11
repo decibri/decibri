@@ -98,6 +98,26 @@ pub enum DecibriError {
     #[error("Speaker stream is closed")]
     SpeakerStreamClosed,
 
+    /// An active audio stream failed at the device or driver level while
+    /// running (device unplugged, driver reset, exclusive-mode preemption).
+    ///
+    /// Distinct from [`Self::StreamOpenFailed`] / [`Self::StreamStartFailed`],
+    /// which fire at open/start time: this is reported by the cpal error
+    /// callback during streaming. The underlying `cpal::StreamError` is carried
+    /// boxed as a `#[source]` (the same pattern as [`Self::OnnxBackendFailed`]),
+    /// so a consumer can walk `error.source()` (and downcast to
+    /// `cpal::StreamError`) to distinguish a cause such as device-not-available
+    /// from a backend-specific driver error, with no cpal type appearing in this
+    /// enum's public signature. After it fires the stream is treated as closed;
+    /// a consumer that sees `MicrophoneStreamClosed` / `SpeakerStreamClosed` can
+    /// call `take_last_error()` on the stream to retrieve this cause. Additive
+    /// variant permitted by `#[non_exhaustive]`.
+    #[error("decibri: audio device error: {source}")]
+    DeviceFailed {
+        #[source]
+        source: Box<dyn std::error::Error + Send + Sync>,
+    },
+
     // ── VAD config validation ──────────────────────────────────────────
     /// Payload carries the offending sample rate; not formatted into the
     /// Display string to keep the message text stable.
@@ -278,5 +298,23 @@ impl DecibriError {
         {
             false
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::error::Error as _;
+
+    #[test]
+    fn device_failed_carries_structured_source() {
+        let inner = std::io::Error::other("device gone");
+        let err = DecibriError::DeviceFailed {
+            source: Box::new(inner),
+        };
+        // Display renders the source's message in the frozen style.
+        assert_eq!(err.to_string(), "decibri: audio device error: device gone");
+        // The cause is structured and walkable, not merely stringified.
+        assert!(err.source().is_some());
     }
 }
