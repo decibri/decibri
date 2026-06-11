@@ -85,9 +85,9 @@ static ORT_INIT: OnceLock<Option<PathBuf>> = OnceLock::new();
 /// [`check_pid_for_ort`]; a mismatch indicates the process forked after
 /// init and ONNX Runtime's internal state is no longer safe to use.
 ///
-/// Recorded inside the `OnceLock::get_or_init` callback in
-/// [`init_ort_once`] so the pid stamp is paired with the successful ORT
-/// init, not set speculatively before init returned.
+/// Recorded via [`OnceLock::set`] in the `Ok` arm of [`init_ort_once`] (after
+/// `do_ort_init` returns successfully) so the pid stamp is paired with the
+/// successful ORT init, not set speculatively before init returned.
 static ORT_INIT_PID: OnceLock<u32> = OnceLock::new();
 
 /// Wrap an ORT init failure with a decibri-specific actionable message.
@@ -624,7 +624,6 @@ mod tests {
     /// load-bearing bound (`SileroVad` can live on a capture thread; the
     /// bindings already assert `Send + 'static`). If a future trait change
     /// drops one of these bounds, this assertion fails at compile time.
-    #[allow(dead_code)]
     fn assert_send_sync<T: Send + Sync>() {}
 
     #[test]

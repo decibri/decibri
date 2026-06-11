@@ -34,8 +34,8 @@ All commits, tags, and registry publishes are performed manually. If a task appe
 
 ## CI
 
-- `tests/test-ci.js` is the CI-safe test subset (~38 assertions, no hardware required). Run it with `node tests/test-ci.js`.
-- Hardware tests (`test-capture.js`, `test-api.js`, `test-output.js`, `test-vad-silero.js`) require a microphone/speaker and are local-only. They do NOT run in CI.
+- `tests/test-ci.js` is the CI-safe test subset (around 80 assertions across `assert`, `assertThrows`, and `assertRejects`, no hardware required). Run it with `node tests/test-ci.js`.
+- Hardware tests (`test-capture.js`, `test-api.js`, `test-output.js`, `test-vad-silero.js`, `test-async-open.js`, `test-async-write-drain.js`) require a microphone/speaker and are local-only. They do NOT run in CI.
 - Browser tests (`npx vitest run`) mock browser globals and run in Node.js. Safe for CI.
 - CI runs on every push to main and on PRs. See `.github/workflows/ci.yml`.
 - Pre-tag validation: run `publish-crates.yml`, `publish-npm.yml`, or `publish-pypi.yml` manually via `workflow_dispatch` from the Actions tab with the `publish` input unticked. Each workflow runs its build and validation steps without publishing.

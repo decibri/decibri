@@ -97,7 +97,11 @@ fn build_microphone_parts(options: Option<DecibriOptions>) -> Result<MicrophoneP
     let opts = options.unwrap_or_default();
 
     let sample_rate = opts.sample_rate.unwrap_or(16000);
-    let channels = opts.channels.unwrap_or(1) as u16;
+    let channels: u16 = opts
+        .channels
+        .unwrap_or(1)
+        .try_into()
+        .map_err(|_| Error::new(Status::InvalidArg, "invalid channel count".to_string()))?;
     let frames_per_buffer = opts.frames_per_buffer.unwrap_or(1600);
 
     let format_str = opts.format.as_deref().unwrap_or("int16");
@@ -514,7 +518,11 @@ fn build_speaker_parts(options: Option<DecibriOutputOptions>) -> Result<SpeakerP
     let opts = options.unwrap_or_default();
 
     let sample_rate = opts.sample_rate.unwrap_or(16000);
-    let channels = opts.channels.unwrap_or(1) as u16;
+    let channels: u16 = opts
+        .channels
+        .unwrap_or(1)
+        .try_into()
+        .map_err(|_| Error::new(Status::InvalidArg, "invalid channel count".to_string()))?;
 
     let format_str = opts.format.as_deref().unwrap_or("int16");
     let format = match format_str {

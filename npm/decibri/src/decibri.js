@@ -376,7 +376,7 @@ class Microphone extends Readable {
 
   /**
    * List all available input devices on the system.
-   * @returns {Array<{index: number, name: string, maxInputChannels: number, defaultSampleRate: number, isDefault: boolean}>}
+   * @returns {Array<{index: number, name: string, id: string, maxInputChannels: number, defaultSampleRate: number, isDefault: boolean}>}
    */
   static devices() {
     return DecibriBridge.devices();

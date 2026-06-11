@@ -98,9 +98,7 @@ pub struct MicrophoneStream {
     _stream: Mutex<Option<cpal::Stream>>,
     receiver: Receiver<AudioChunk>,
     running: Arc<AtomicBool>,
-    #[allow(dead_code)]
     sample_rate: u32,
-    #[allow(dead_code)]
     channels: u16,
 }
 
@@ -241,6 +239,16 @@ impl MicrophoneStream {
     /// Check whether the stream is still actively capturing.
     pub fn is_open(&self) -> bool {
         self.running.load(Ordering::Relaxed)
+    }
+
+    /// The sample rate (Hz) this stream was opened with.
+    pub fn sample_rate(&self) -> u32 {
+        self.sample_rate
+    }
+
+    /// The channel count this stream was opened with.
+    pub fn channels(&self) -> u16 {
+        self.channels
     }
 
     /// Stop capturing audio and release the device.

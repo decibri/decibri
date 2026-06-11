@@ -36,7 +36,7 @@ Decibri ships prebuilt native binaries for four platforms (Windows x64, macOS AR
 
 - npm publishing uses [Trusted Publishing via OIDC](https://docs.npmjs.com/trusted-publishers/). No long-lived npm tokens are stored in the repository or CI system. Each publish uses a short-lived, workflow-specific credential issued by npm.
 - All npm packages (`decibri`, `@decibri/decibri-win32-x64-msvc`, `@decibri/decibri-darwin-arm64`, `@decibri/decibri-linux-x64-gnu`, `@decibri/decibri-linux-arm64-gnu`) are configured to require 2FA and disallow legacy token publishing.
-- The Rust crate on crates.io is published from the same CI pipeline with a scoped, crate-specific token stored as a GitHub Actions secret.
+- The Rust crate on crates.io is published from the same CI pipeline using keyless [Trusted Publishing via OIDC](https://crates.io/docs/trusted-publishing): a short-lived, crate-specific publish token is issued per run by exchanging a GitHub OIDC token (via `rust-lang/crates-io-auth-action`). No long-lived crates.io token is stored in the repository or CI system.
 
 ### Provenance and attestation
 
@@ -57,10 +57,10 @@ This security policy applies to the following versions:
 
 | Version | Supported                |
 |:-------:|:------------------------:|
-| 3.x     | :white_check_mark: Yes   |
-| < 3.0   | :x: No longer supported  |
+| 4.x     | :white_check_mark: Yes   |
+| < 4.0   | :x: No longer supported  |
 
-Security fixes are applied to the latest 3.x release only. Version 1.x (C++/PortAudio implementation) is no longer maintained. Version 2.x was never published.
+Security fixes are applied to the latest 4.x release only. Version 1.x (C++/PortAudio implementation) is no longer maintained. Version 2.x was never published. Version 3.x is superseded by 4.x.
 
 ## CVE Policy
 

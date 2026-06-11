@@ -368,9 +368,8 @@ mod tests {
         };
         assert!(!init_failed.is_ort_path_error());
 
-        // `SampleRateOutOfRange` is a unit variant (applies to capture/output
-        // configs, not VAD); Ross's draft had `(999999)` which wouldn't
-        // compile. Using the correct unit form.
+        // `SampleRateOutOfRange` is a unit variant (it applies to capture and
+        // output configs, not VAD), so it is constructed without a payload.
         let sample_rate = DecibriError::SampleRateOutOfRange;
         assert!(!sample_rate.is_ort_path_error());
 

@@ -53,8 +53,6 @@ rocm = ["ort?/rocm"]
 
 [dependencies]
 cpal = { workspace = true, optional = true }
-dasp_sample = { workspace = true }
 thiserror = { workspace = true }
-parking_lot = { workspace = true }
 crossbeam-channel = { workspace = true, optional = true }
 ort = { workspace = true, optional = true }
