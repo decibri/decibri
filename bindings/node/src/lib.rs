@@ -1,6 +1,7 @@
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::Arc;
 use std::thread;
+use std::time::Duration;
 
 use napi::bindgen_prelude::*;
 use napi::threadsafe_function::ThreadsafeFunctionCallMode;
@@ -62,12 +63,12 @@ pub struct DecibriOptions {
 #[napi]
 pub struct DecibriBridge {
     capture: Option<Microphone>,
-    stream: Option<MicrophoneStream>,
+    stream: Option<Arc<MicrophoneStream>>,
     format: SampleFormat,
     frames_per_buffer: u32,
     channels: u16,
     running: Arc<AtomicBool>,
-    pump_handle: Option<thread::JoinHandle<()>>,
+    pump_handle: Option<thread::JoinHandle<Option<SileroVad>>>,
     vad: Option<SileroVad>,
     vad_probability: Arc<AtomicU32>,
 }
@@ -235,8 +236,22 @@ impl DecibriBridge {
             .as_ref()
             .ok_or_else(|| Error::new(Status::GenericFailure, "Capture not initialized"))?;
 
-        let stream = capture.start().map_err(to_napi_error)?;
+        // Reclaim the VAD from a previous pump that finished without stop()
+        // (for example after a device error ended capture), so this start runs
+        // with VAD again. After a clean stop() this take() yields None.
+        if let Some(handle) = self.pump_handle.take() {
+            self.vad = handle.join().ok().flatten();
+        }
+        // Start each session from a clean VAD probability rather than a value
+        // left over from a previous session.
+        self.vad_probability
+            .store(0.0f32.to_bits(), Ordering::Relaxed);
+
+        // Keep the core stream behind an `Arc` so the pump thread can poll its
+        // `is_open` / `take_last_error` while the bridge still owns it.
+        let stream = Arc::new(capture.start().map_err(to_napi_error)?);
         let receiver = stream.receiver().clone();
+        let pump_stream = stream.clone();
 
         self.running.store(true, Ordering::Relaxed);
         let running = self.running.clone();
@@ -244,7 +259,8 @@ impl DecibriBridge {
         let target_samples = self.frames_per_buffer as usize * self.channels as usize;
         let vad_probability = self.vad_probability.clone();
 
-        // Move VAD into the pump thread (SileroVad is Send)
+        // Move VAD into the pump thread (SileroVad is Send); it is handed back
+        // when the pump exits so a later start() can reuse it.
         let mut vad = self.vad.take();
 
         // Create a threadsafe function to call back into JS from the pump thread.
@@ -260,8 +276,13 @@ impl DecibriBridge {
             // so this ensures the API contract (exact chunk size) is honoured.
             let mut accum: Vec<f32> = Vec::with_capacity(target_samples);
 
+            // Timed receive so a device error (which closes the core stream
+            // without disconnecting our channel) is noticed within one interval
+            // instead of blocking forever. Matches the core's ~20 ms wakeup.
+            const POLL: Duration = Duration::from_millis(20);
+
             while running.load(Ordering::Relaxed) {
-                match receiver.recv() {
+                match receiver.recv_timeout(POLL) {
                     Ok(chunk) => {
                         accum.extend_from_slice(&chunk.data);
 
@@ -287,13 +308,31 @@ impl DecibriBridge {
                             );
                         }
                     }
-                    Err(_) => {
-                        // Channel closed. Capture stopped.
-                        // Discard partial buffer (matches C++ PortAudio behaviour).
-                        break;
+                    Err(e) => {
+                        // A plain timeout while the device is healthy: keep
+                        // waiting. But if the channel disconnected, or the core
+                        // stream closed (a driver error flips its `is_open` and
+                        // records a typed cause without our `stop()` running),
+                        // surface it instead of freezing with isOpen still true.
+                        if e.is_disconnected() || !pump_stream.is_open() {
+                            if let Some(err) = pump_stream.take_last_error() {
+                                // Device/driver failure: deliver the typed error
+                                // to the JS callback so it raises 'error' rather
+                                // than silently stalling.
+                                tsfn.call(
+                                    Err(to_napi_error(err)),
+                                    ThreadsafeFunctionCallMode::NonBlocking,
+                                );
+                            }
+                            running.store(false, Ordering::Relaxed);
+                            break;
+                        }
                     }
                 }
             }
+
+            // Hand the VAD back to the bridge (it was moved in via take()).
+            vad
         });
 
         self.stream = Some(stream);
@@ -313,14 +352,24 @@ impl DecibriBridge {
         self.stream = None;
 
         if let Some(handle) = self.pump_handle.take() {
-            let _ = handle.join();
+            // Reclaim the VAD the pump hands back so a later start() keeps VAD
+            // (start() moved it into the pump via take()).
+            self.vad = handle.join().ok().flatten();
         }
+
+        // Clear the probability so a restarted bridge does not read a stale
+        // pre-stop score before its first new inference.
+        self.vad_probability
+            .store(0.0f32.to_bits(), Ordering::Relaxed);
     }
 
     /// Whether the microphone is currently capturing.
     #[napi(getter)]
     pub fn is_open(&self) -> bool {
-        self.running.load(Ordering::Relaxed)
+        // Reflect the core stream's real state: a device/driver error closes
+        // the core stream, so `isOpen` reports `false` rather than the bridge's
+        // own flag staying `true` until the pump notices.
+        self.stream.as_ref().is_some_and(|s| s.is_open())
     }
 
     /// Latest VAD speech probability (0.0 to 1.0). Updated by pump thread.
@@ -440,6 +489,7 @@ fn to_napi_error(e: decibri::error::DecibriError) -> Error {
         | PermissionDenied
         | MicrophoneStreamClosed
         | SpeakerStreamClosed
+        | DeviceFailed(_)
         | OrtInitFailed { .. }
         | OrtLoadFailed { .. }
         | OrtPathInvalid { .. }
