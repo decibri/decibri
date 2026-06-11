@@ -8,6 +8,16 @@ For Rust core (`crates/decibri`) and npm binding (`bindings/node`) changes, see 
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.1] - 2026-06-11
+
+### Fixed
+
+- Picks up the Rust core hardening: `Speaker.drain()` / `AsyncSpeaker.drain()` no longer hang if the stream is dropped without `stop()`; malformed VAD models raise a typed error instead of crashing the process; and the fork-after-init guard now fires when a Silero VAD is constructed in a forked child, not only at inference.
+
+### Changed
+
+- The microphone capture channel is now bounded in the core, so a stalled reader drops audio to keep memory bounded rather than growing without limit.
+
 ## [0.4.0] - 2026-06-10
 
 ### Changed

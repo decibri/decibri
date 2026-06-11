@@ -11,6 +11,24 @@ For other decibri packages, see:
 
 ## [Unreleased]
 
+## [4.3.1] - 2026-06-11
+
+### Fixed
+
+- `SpeakerStream::drain()` no longer hangs when the stream is dropped without `stop()`. A new `Drop` clears the running flag, so a drain parked in its wait loop (on the stream or on a `SpeakerSink` sharing it) returns instead of polling forever.
+- Malformed VAD models (correct tensor names but wrong shapes) now return a typed `OnnxBackendFailed` error instead of panicking the process.
+- The fork-after-ORT-init guard now also fires when a Silero VAD is constructed in a forked child, not only at the first inference, so `ForkAfterOrtInit` is raised before any ORT session is built on inherited state.
+
+### Added
+
+- `DecibriError::DeviceFailed`, a typed error carrying the cpal error text for a device or driver failure during streaming. `MicrophoneStream` and `SpeakerStream` gained `take_last_error()` so a consumer that sees a closed stream can tell a driver failure from an explicit `stop()`.
+- `MicrophoneStream::sample_rate()`, `channels()`, and `overrun_count()` accessors.
+
+### Changed
+
+- The microphone capture channel is now bounded: a stalled consumer drops the newest buffers (counted via `overrun_count()`) rather than growing memory without bound, and the realtime callback never blocks.
+- Removed the unused `parking_lot` and `dasp_sample` dependencies.
+
 ## [4.3.0] - 2026-06-10
 
 ### Fixed
