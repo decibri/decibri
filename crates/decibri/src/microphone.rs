@@ -76,9 +76,14 @@ pub struct AudioChunk {
 /// Bound on the capture channel. A stalled consumer cannot grow memory without
 /// limit: once this many `AudioChunk`s are queued, the realtime callback drops
 /// new chunks (counting them, see [`MicrophoneStream::overrun_count`]) rather
-/// than blocking the audio thread or allocating without bound. Sized generously
-/// (each chunk is one cpal buffer, roughly 100 ms at the 16 kHz / 1600-frame
-/// default) so normal consumer jitter never drops, only a genuine stall does.
+/// than blocking the audio thread or allocating without bound.
+///
+/// This is a memory bound, not a fixed-duration guarantee. One queued item is
+/// one cpal callback buffer, whose duration is backend-dependent: on WASAPI cpal
+/// ignores `BufferSize::Fixed` and delivers the driver period (often ~10 ms, not
+/// `frames_per_buffer`), so 64 items can be anywhere from well under a second to
+/// several seconds of audio. It is sized so a consumer that keeps pace never
+/// drops; only a genuine stall does.
 #[cfg(feature = "capture")]
 const CAPTURE_CHANNEL_CAPACITY: usize = 64;
 

@@ -320,10 +320,12 @@ impl Drop for SpeakerStream {
     /// cpal callback that advances the sentinel count, so without this a
     /// `drain()` already mid-wait at drop time would block forever (and, in the
     /// Node binding, leak the libuv worker running it). Clearing `running` lets
-    /// that loop return on its next poll. The store runs before the `_stream`
-    /// field is dropped (a custom `drop` body runs before field drops), so the
-    /// flag is already false when the callback is torn down. `stop()` performs
-    /// the same flip on the explicit path; this covers drop-without-stop.
+    /// that loop return on its next poll. The fix does not depend on drop
+    /// ordering: a parked drain escapes via `running` regardless of when the
+    /// cpal callback is torn down (the `drop` body runs before the `_stream`
+    /// field drops, which is simply the natural place to clear the flag).
+    /// `stop()` performs the same flip on the explicit path; this covers
+    /// drop-without-stop.
     fn drop(&mut self) {
         self.running.store(false, Ordering::Relaxed);
     }
