@@ -21,7 +21,7 @@ For other decibri packages, see:
 
 ### Added
 
-- `DecibriError::DeviceFailed`, a typed error carrying the cpal error text for a device or driver failure during streaming. `MicrophoneStream` and `SpeakerStream` gained `take_last_error()` so a consumer that sees a closed stream can tell a driver failure from an explicit `stop()`.
+- `DecibriError::DeviceFailed`, a typed error carrying the underlying cpal stream error as a structured source for a device or driver failure during streaming. `MicrophoneStream` and `SpeakerStream` gained `take_last_error()` so a consumer that sees a closed stream can tell a driver failure from an explicit `stop()`.
 - `MicrophoneStream::sample_rate()`, `channels()`, and `overrun_count()` accessors.
 
 ### Changed
