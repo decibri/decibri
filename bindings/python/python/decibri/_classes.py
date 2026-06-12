@@ -274,16 +274,15 @@ class Microphone:
         underlying stream within roughly 20ms; the wrapper then sees the
         closed state on its next read attempt and raises.
 
-        Threaded shutdown limitation in 0.1.0: calling ``stop()`` from a
-        thread other than the one currently blocked inside ``read()`` can
-        raise ``AlreadyBorrowed`` (a pyo3 ``RuntimeError`` from the
-        bridge's ``RefCell`` borrow). This is a known 0.1.0 limitation
-        pinned by ``test_sync_stop_from_other_thread_raises_already_borrowed``;
-        a thread-safe shutdown path is planned for a future release.
-        Workarounds:
-        use ``AsyncMicrophone`` (sibling-task cancellation works
-        correctly), or call ``stop()`` from the same thread that owns
-        the iteration loop.
+        Threaded shutdown: calling ``stop()`` from a thread other than
+        the one currently blocked inside ``read()`` is safe. It
+        interrupts the parked read, which then raises
+        ``MicrophoneStreamClosed``, and releases the device. The bridge
+        holds the core stream behind a shared handle and exposes
+        ``read()`` / ``stop()`` without an exclusive borrow, so the
+        cross-thread ``stop()`` reaches the core stop (which wakes the
+        parked read within roughly 20ms) instead of raising
+        ``AlreadyBorrowed``.
     """
 
     def __init__(
