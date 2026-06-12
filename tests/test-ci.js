@@ -276,6 +276,12 @@ const mEnergy = new Microphone({ sampleRate: 16000, channels: 1, vad: 'energy' }
 assert(mEnergy.vadScore === 0, 'vadScore starts at 0 in energy mode');
 mEnergy.stop();
 
+// overrunCount: readable accessor, 0 on a fresh (not-yet-overrun) stream.
+const mOverrun = new Microphone({ sampleRate: 16000, channels: 1 });
+assert(typeof mOverrun.overrunCount === 'number', 'overrunCount is a number');
+assert(mOverrun.overrunCount === 0, 'overrunCount is 0 on a fresh stream');
+mOverrun.stop();
+
 console.log('  Group 5 done\n');
 
 // ═══════════════════════════════════════════════════════════════════════════════

@@ -11,6 +11,16 @@ For other decibri packages, see:
 
 ## [Unreleased]
 
+## [4.4.2] - 2026-06-12
+
+### Fixed
+
+- Multichannel capture is now downmixed to mono before the Silero VAD, so `vadScore` and the `speech` / `silence` events are correct on devices opened with more than one channel. Previously the interleaved multichannel audio reached the VAD as if it were mono, so it scored garbled input. Only affected explicit multichannel capture with VAD enabled (the default is one channel); emitted audio is unchanged.
+
+### Added
+
+- `overrunCount`: a read-only accessor on `Microphone` exposing the core stream's dropped-buffer counter. 0 while the consumer keeps pace; a rising value means audio is being dropped to bound memory.
+
 ## [4.4.1] - 2026-06-11
 
 ### Fixed

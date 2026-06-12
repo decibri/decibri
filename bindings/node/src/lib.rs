@@ -257,6 +257,7 @@ impl DecibriBridge {
         let running = self.running.clone();
         let format = self.format;
         let target_samples = self.frames_per_buffer as usize * self.channels as usize;
+        let channels = self.channels;
         let vad_probability = self.vad_probability.clone();
 
         // Move VAD into the pump thread (SileroVad is Send); it is handed back
@@ -290,9 +291,23 @@ impl DecibriBridge {
                         while accum.len() >= target_samples {
                             let frame: Vec<f32> = accum.drain(..target_samples).collect();
 
-                            // Run Silero VAD on the f32 frame (before format conversion)
+                            // Run Silero VAD on the f32 frame (before format
+                            // conversion). Silero models a single channel, so
+                            // downmix interleaved multichannel frames to mono
+                            // first: feeding interleaved samples makes the VAD
+                            // read consecutive channels as successive mono
+                            // samples and score garbled input. The interleaved
+                            // `frame` is untouched and is still what gets
+                            // emitted to JS below.
                             if let Some(ref mut v) = vad {
-                                if let Ok(result) = v.process(&frame) {
+                                let downmixed;
+                                let vad_input: &[f32] = if channels > 1 {
+                                    downmixed = sample::downmix_to_mono(&frame, channels);
+                                    &downmixed
+                                } else {
+                                    &frame
+                                };
+                                if let Ok(result) = v.process(vad_input) {
                                     vad_probability
                                         .store(result.probability.to_bits(), Ordering::Relaxed);
                                 }
@@ -377,6 +392,15 @@ impl DecibriBridge {
     #[napi(getter)]
     pub fn vad_probability(&self) -> f64 {
         f32::from_bits(self.vad_probability.load(Ordering::Relaxed)) as f64
+    }
+
+    /// Number of capture buffers dropped because the consumer could not keep
+    /// pace (the core stream's overrun counter). Returns 0 while the consumer
+    /// keeps up or when no stream is active. Returned as f64 (an exact JS
+    /// number for any realistic count) to match the `vadProbability` getter.
+    #[napi(getter)]
+    pub fn overrun_count(&self) -> f64 {
+        self.stream.as_ref().map_or(0, |s| s.overrun_count()) as f64
     }
 
     /// List all available audio input devices.

@@ -11,6 +11,12 @@ For other decibri packages, see:
 
 ## [Unreleased]
 
+## [4.3.2] - 2026-06-12
+
+### Added
+
+- `sample::downmix_to_mono`, which averages interleaved multichannel frames to mono (one mono sample per frame, the trailing partial frame dropped). The Node and Python bindings now call it to downmix capture to mono before the Silero VAD, fixing garbled VAD probabilities on devices opened with more than one channel: the VAD models a single channel and previously received interleaved samples, reading consecutive channels as successive mono samples. Rust consumers running their own VAD on multichannel capture should downmix the same way. The interleaved data delivered to consumers is unchanged.
+
 ## [4.3.1] - 2026-06-11
 
 ### Fixed

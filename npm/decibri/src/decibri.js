@@ -375,6 +375,16 @@ class Microphone extends Readable {
   }
 
   /**
+   * Number of capture buffers dropped because the consumer could not keep
+   * pace. 0 while the consumer keeps up, or before capture starts. A rising
+   * value means audio is being dropped to bound memory.
+   * @returns {number}
+   */
+  get overrunCount() {
+    return this._native.overrunCount;
+  }
+
+  /**
    * List all available input devices on the system.
    * @returns {Array<{index: number, name: string, id: string, maxInputChannels: number, defaultSampleRate: number, isDefault: boolean}>}
    */

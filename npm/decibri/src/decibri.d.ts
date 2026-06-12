@@ -158,6 +158,13 @@ export declare class Microphone extends Readable {
    */
   readonly vadScore: number;
 
+  /**
+   * Number of capture buffers dropped because the consumer could not keep pace.
+   * 0 while the consumer keeps up, or before capture starts. A rising value
+   * means audio is being dropped to bound memory.
+   */
+  readonly overrunCount: number;
+
   /** List all available audio input devices. */
   static devices(): MicrophoneInfo[];
 
