@@ -8,6 +8,16 @@ For Rust core (`crates/decibri`) and npm binding (`bindings/node`) changes, see 
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.3] - 2026-06-12
+
+### Fixed
+
+- Multichannel capture is now downmixed to mono before the Silero VAD, so `vad_score` and `is_speaking` are correct on devices opened with more than one channel. Previously the interleaved multichannel audio reached the VAD as if it were mono, so it scored garbled input. Only affected explicit multichannel capture with VAD enabled (the default is one channel); audio returned from `read()` is unchanged.
+
+### Added
+
+- `Microphone.overrun_count`: a read-only property exposing the core stream's dropped-buffer counter. 0 while the consumer keeps pace; a rising value means audio is being dropped to bound memory.
+
 ## [0.4.2] - 2026-06-12
 
 ### Fixed

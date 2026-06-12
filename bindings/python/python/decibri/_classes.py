@@ -706,6 +706,16 @@ class Microphone:
             return 0.0
         return self._vad.vad_score
 
+    @property
+    def overrun_count(self) -> int:
+        """Number of capture buffers dropped because the consumer could not
+        keep pace.
+
+        0 while the consumer keeps up, or before capture starts. A rising
+        value means audio is being dropped to bound memory.
+        """
+        return self._bridge.overrun_count
+
     # -----------------------------------------------------------------------
     # Static methods
     # -----------------------------------------------------------------------

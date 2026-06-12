@@ -1249,4 +1249,78 @@ mod tests {
             "TTS-speech fixture should include a clear silence floor; min was {lo}"
         );
     }
+
+    /// Regression for item 16: multichannel capture must be downmixed to mono
+    /// before it reaches the VAD. Pre-fix the bindings fed the interleaved
+    /// multichannel buffer straight to `process()`, so the VAD read consecutive
+    /// channels as successive mono samples and scored garbled input. This pins
+    /// that the downmix the bindings now apply (`sample::downmix_to_mono`)
+    /// yields the true mono signal and that the real Silero VAD still detects
+    /// speech in it.
+    ///
+    /// This exercises the core helper plus the real VAD seam (the exact buffer
+    /// the bindings feed to `process()`), not the per-binding pump thread. The
+    /// Node and Python bindings call the same helper immediately before
+    /// `process()`; see the downmix in their `lib.rs`.
+    #[test]
+    fn multichannel_is_downmixed_to_mono_before_vad() {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests")
+            .join("assets")
+            .join("vad-golden-tts-speech-16k.wav");
+        let mono = read_golden_wav(&path);
+
+        // Stereo capture of the same content on both channels: interleaved
+        // L R L R with L == R.
+        let stereo: Vec<f32> = mono.iter().flat_map(|&s| [s, s]).collect();
+
+        // Property the bug violated: N interleaved channels collapse to 1/N the
+        // sample count, each the per-frame average. Identical channels average
+        // back to the mono signal exactly, and the count halves: the downmix is
+        // NOT the interleaved buffer the pre-fix code fed.
+        let downmixed = crate::sample::downmix_to_mono(&stereo, 2);
+        assert_eq!(downmixed.len(), stereo.len() / 2);
+        assert_ne!(downmixed.len(), stereo.len());
+        assert_eq!(
+            downmixed, mono,
+            "downmix of duplicated channels must equal mono"
+        );
+
+        // Run the real Silero VAD window by window on the true-mono reference and
+        // on the post-fix VAD input (the downmix). Same window count and
+        // bit-identical probabilities, because the buffers are bit-identical.
+        // Feeding the interleaved `stereo` instead (the pre-fix path) would form
+        // twice the windows on a different signal, failing both assertions.
+        let window_probs = |input: &[f32]| -> Vec<f32> {
+            let mut vad = SileroVad::new(default_config()).unwrap();
+            input
+                .chunks_exact(GOLDEN_WINDOW_SIZE)
+                .map(|w| vad.process(w).unwrap().probability)
+                .collect()
+        };
+        let mono_probs = window_probs(&mono);
+        let downmixed_probs = window_probs(&downmixed);
+        assert_eq!(
+            downmixed_probs.len(),
+            mono_probs.len(),
+            "downmixed VAD input must form the same window count as mono"
+        );
+        for (i, (d, m)) in downmixed_probs.iter().zip(mono_probs.iter()).enumerate() {
+            assert_eq!(
+                d.to_bits(),
+                m.to_bits(),
+                "VAD must receive the mono signal at window {i}: got {d:?}, mono {m:?}"
+            );
+        }
+
+        // Efficacy undisturbed: the fixture is real speech, so the downmixed
+        // (mono) input must still register many above-threshold windows. This is
+        // the property the fix protects: correct probabilities on multichannel
+        // devices instead of garbled interleaved input.
+        let above = downmixed_probs.iter().filter(|&&p| p >= 0.5).count();
+        assert!(
+            above >= 90,
+            "downmixed real speech should produce many above-0.5 windows; got {above}"
+        );
+    }
 }

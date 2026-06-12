@@ -49,7 +49,8 @@ use decibri::device::{
 use decibri::error::DecibriError as CoreDecibriError;
 use decibri::microphone::{AudioChunk, Microphone, MicrophoneConfig, MicrophoneStream};
 use decibri::sample::{
-    f32_le_bytes_to_f32, f32_to_f32_le_bytes, f32_to_i16_le_bytes, i16_le_bytes_to_f32,
+    downmix_to_mono, f32_le_bytes_to_f32, f32_to_f32_le_bytes, f32_to_i16_le_bytes,
+    i16_le_bytes_to_f32,
 };
 use decibri::speaker::{Speaker, SpeakerConfig, SpeakerStream};
 use decibri::vad::{SileroVad, VadConfig};
@@ -422,7 +423,7 @@ fn build_version_info() -> VersionInfo {
     VersionInfo {
         decibri: env!("CARGO_PKG_VERSION").to_string(),
         audio_backend: format!("cpal {}", CPAL_VERSION),
-        binding: "0.4.2".to_string(),
+        binding: "0.4.3".to_string(),
     }
 }
 
@@ -784,8 +785,19 @@ impl MicrophoneBridge {
         {
             let mut vad_guard = lock_recover(&self.vad);
             if let Some(vad) = vad_guard.as_mut() {
+                // Silero VAD models a single channel. Downmix interleaved
+                // multichannel audio to mono first so consecutive channels are
+                // not misread as successive mono samples. `chunk.data` stays
+                // interleaved and is what the caller receives below.
+                let downmixed;
+                let vad_input: &[f32] = if chunk.channels > 1 {
+                    downmixed = downmix_to_mono(&chunk.data, chunk.channels);
+                    &downmixed
+                } else {
+                    &chunk.data
+                };
                 let result = py
-                    .detach(|| vad.process(&chunk.data))
+                    .detach(|| vad.process(vad_input))
                     .map_err(|e| to_py_err(py, e))?;
                 self.last_vad_probability
                     .store(result.probability.to_bits(), Ordering::Relaxed);
@@ -998,6 +1010,17 @@ impl MicrophoneBridge {
     #[getter]
     fn vad_holdoff_ms(&self) -> u32 {
         self.vad_holdoff_ms
+    }
+
+    /// Number of capture buffers dropped because the consumer could not keep
+    /// pace (the core stream's overrun counter). Returns 0 while the consumer
+    /// keeps up or when no stream is active.
+    #[getter]
+    fn overrun_count(&self) -> u64 {
+        match lock_recover(&self.active).as_ref() {
+            Some(active) => active.stream.overrun_count(),
+            None => 0,
+        }
     }
 
     #[staticmethod]

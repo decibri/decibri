@@ -51,7 +51,7 @@ from decibri.exceptions import (
     VadThresholdOutOfRange,
 )
 
-__version__ = "0.4.2"
+__version__ = "0.4.3"
 
 
 def input_devices() -> list[MicrophoneInfo]:

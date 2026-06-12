@@ -67,6 +67,33 @@ pub fn f32_le_bytes_to_f32(bytes: &[u8]) -> Vec<f32> {
         .collect()
 }
 
+/// Downmix interleaved multichannel audio to mono by averaging channels.
+///
+/// `samples` holds interleaved f32 frames of `channels` samples each
+/// (`[c0, c1, .., c0, c1, ..]`). Each frame collapses to one mono sample equal
+/// to the arithmetic mean of its channels, so `N` interleaved channels produce
+/// `samples.len() / channels` mono samples.
+///
+/// `channels <= 1` returns the input unchanged (already mono, no allocation of a
+/// reshaped buffer beyond the copy). Any trailing partial frame (when
+/// `samples.len()` is not a multiple of `channels`) is dropped, matching the
+/// frame-exact buffering the capture path guarantees.
+///
+/// Used to feed mono audio to the Silero VAD, which models a single channel:
+/// without this, interleaved samples are misread as consecutive mono samples.
+/// The interleaved data delivered to the consumer is left untouched; only the
+/// VAD's private input is downmixed.
+pub fn downmix_to_mono(samples: &[f32], channels: u16) -> Vec<f32> {
+    if channels <= 1 {
+        return samples.to_vec();
+    }
+    let channels = channels as usize;
+    samples
+        .chunks_exact(channels)
+        .map(|frame| frame.iter().sum::<f32>() / channels as f32)
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -215,5 +242,59 @@ mod tests {
         let bytes: Vec<u8> = vec![];
         let samples = f32_le_bytes_to_f32(&bytes);
         assert!(samples.is_empty());
+    }
+
+    // ── downmix_to_mono (multichannel -> mono for the VAD feed) ───────────
+
+    #[test]
+    fn test_downmix_stereo_averages_and_halves() {
+        // L R L R: two stereo frames -> two mono samples, each the average.
+        let stereo = vec![0.5, 0.3, 0.4, 0.6];
+        let mono = downmix_to_mono(&stereo, 2);
+        // N interleaved channels produce 1/N the sample count.
+        assert_eq!(mono.len(), stereo.len() / 2);
+        assert!((mono[0] - 0.4).abs() < 1e-6); // (0.5 + 0.3) / 2
+        assert!((mono[1] - 0.5).abs() < 1e-6); // (0.4 + 0.6) / 2
+    }
+
+    #[test]
+    fn test_downmix_mono_passthrough() {
+        // channels == 1 is already mono: returns the samples unchanged.
+        let samples = vec![0.1, -0.2, 0.3];
+        assert_eq!(downmix_to_mono(&samples, 1), samples);
+        // channels == 0 is degenerate; treated as already-mono (no panic / div0).
+        assert_eq!(downmix_to_mono(&samples, 0), samples);
+    }
+
+    #[test]
+    fn test_downmix_six_channel() {
+        // One 5.1 frame averages all six channels into a single sample.
+        let frame = vec![0.0, 0.6, 0.3, -0.3, 1.2, -1.8];
+        let mono = downmix_to_mono(&frame, 6);
+        assert_eq!(mono.len(), 1);
+        assert!((mono[0] - 0.0).abs() < 1e-6); // sum is 0.0 -> mean 0.0
+    }
+
+    #[test]
+    fn test_downmix_preserves_sign_and_magnitude() {
+        // Opposite-phase channels cancel; equal channels pass through.
+        assert_eq!(downmix_to_mono(&[1.0, -1.0], 2), vec![0.0]);
+        assert_eq!(downmix_to_mono(&[-0.5, -0.5], 2), vec![-0.5]);
+    }
+
+    #[test]
+    fn test_downmix_drops_trailing_partial_frame() {
+        // 5 samples at 2 channels: two full frames, the trailing sample dropped.
+        let stereo = vec![0.2, 0.4, 0.6, 0.8, 0.9];
+        let mono = downmix_to_mono(&stereo, 2);
+        assert_eq!(mono.len(), 2);
+        assert!((mono[0] - 0.3).abs() < 1e-6);
+        assert!((mono[1] - 0.7).abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_downmix_empty() {
+        let empty: Vec<f32> = vec![];
+        assert!(downmix_to_mono(&empty, 2).is_empty());
     }
 }
