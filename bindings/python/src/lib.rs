@@ -24,8 +24,8 @@
 //! the bridge exposes via `vad_probability`.
 
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::sync::{Arc, Mutex as StdMutex};
 use std::time::Duration;
 
 use std::collections::HashMap;
@@ -68,11 +68,11 @@ use decibri::CPAL_VERSION;
 // Coverage:
 //   - MicrophoneBridge / SpeakerBridge: the sync pyclasses; their
 //     Send + 'static property comes from not being `unsendable`.
-//   - AsyncMicrophoneBridge / AsyncSpeakerBridge: the async wrappers;
-//     each holds an Arc<tokio::sync::Mutex<T>> where T is the matching
-//     sync bridge. Arc + tokio::sync::Mutex are Send + Sync when T is
-//     Send (which the sync bridges are), so the async wrappers inherit
-//     the property automatically.
+//   - AsyncMicrophoneBridge: holds an Arc<MicrophoneBridge> directly (the
+//     sync mic bridge is internally thread-safe, so no outer Mutex is
+//     needed); AsyncSpeakerBridge holds an Arc<tokio::sync::Mutex<SpeakerBridge>>.
+//     Arc<T> is Send + Sync when T is Send + Sync, so both async wrappers
+//     inherit the Send + 'static property automatically.
 //
 // If this assertion fails to compile, look for a recently added field
 // on any of the four pyclasses whose type is not `Send + 'static`: raw
@@ -422,7 +422,7 @@ fn build_version_info() -> VersionInfo {
     VersionInfo {
         decibri: env!("CARGO_PKG_VERSION").to_string(),
         audio_backend: format!("cpal {}", CPAL_VERSION),
-        binding: "0.4.1".to_string(),
+        binding: "0.4.2".to_string(),
     }
 }
 
@@ -686,23 +686,50 @@ fn numpy_smoke(py: Python<'_>) -> Bound<'_, PyArray1<i16>> {
 //     for diagnostic introspection)
 //   - format: BindingSampleFormat (parsed from constructor 'format' arg)
 //   - vad_holdoff_ms: u32 (inert; wrapper layer reads this if it wants to)
-//   - capture: Option<Microphone> (None until start())
-//   - stream: Option<MicrophoneStream> (None until start())
-//   - vad: Option<SileroVad> (None unless constructor's vad=True AND
+//   - active: Mutex<Option<ActiveCapture>> (the open Microphone plus an
+//     Arc<MicrophoneStream>; None until start(), cleared by stop())
+//   - vad: Mutex<Option<SileroVad>> (None unless constructor's vad=True AND
 //     vad_mode=="silero"; per VAD Option (b)+(h) decision)
-//   - last_vad_probability: f32 (most recent Silero raw probability; updated
-//     on each read() that runs Silero inference)
+//   - last_vad_probability: AtomicU32 (most recent Silero raw probability as
+//     f32 bits; updated on each read() that runs Silero inference)
+//
+// The mutable state lives behind interior-mutability primitives so read() and
+// stop() are both `&self`. read() takes only a transient lock to clone the
+// Arc<MicrophoneStream>, never holding it across the blocking next_chunk, so a
+// concurrent stop() can take the same lock, call the core stream's stop()
+// (which wakes a parked next_chunk in ~20ms), and clear the state. This is the
+// shape the Node binding already uses, and it is what lets stop() safely
+// interrupt a read() that is in flight on another thread (sync) or task
+// (async) instead of panicking on a borrow or deadlocking on a lock.
 // ---------------------------------------------------------------------------
+
+/// Lock a `std::sync::Mutex`, recovering the guard if a previous holder
+/// panicked while holding it. The critical sections here are short and
+/// panic-free, so poisoning is not expected; recovering rather than
+/// propagating keeps a stray panic from turning every later read()/stop()
+/// into a poison panic. Mirrors the poison tolerance in the core's stop().
+fn lock_recover<T>(m: &StdMutex<T>) -> std::sync::MutexGuard<'_, T> {
+    m.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+/// The live capture state: the open `Microphone` (kept alive so the device
+/// stays open for the stream's lifetime) and a shared handle to its
+/// `MicrophoneStream`. The stream is an `Arc` so stop() can hold a handle and
+/// call the core stop() out of band of a read() parked in next_chunk on
+/// another thread.
+struct ActiveCapture {
+    _capture: Microphone,
+    stream: Arc<MicrophoneStream>,
+}
 
 #[pyclass(module = "decibri._decibri")]
 struct MicrophoneBridge {
     capture_config: MicrophoneConfig,
     format: BindingSampleFormat,
     vad_holdoff_ms: u32,
-    capture: Option<Microphone>,
-    stream: Option<MicrophoneStream>,
-    vad: Option<SileroVad>,
-    last_vad_probability: f32,
+    active: StdMutex<Option<ActiveCapture>>,
+    vad: StdMutex<Option<SileroVad>>,
+    last_vad_probability: AtomicU32,
     /// When true, `read()` returns a numpy.ndarray instead of
     /// a bytes object. Constructor flag; per-instance commitment for
     /// the iterator's lifetime (the user picks one return type at
@@ -713,8 +740,8 @@ struct MicrophoneBridge {
 
 // Internal helpers on MicrophoneBridge; not exposed to Python.
 // Used by the public `read` pymethod (same module) and by
-// `AsyncMicrophoneBridge::read` (which locks the inner sync bridge inside
-// spawn_blocking, calls these to extract owned Vec data + metadata,
+// `AsyncMicrophoneBridge::read` (which calls these on the shared inner
+// bridge inside spawn_blocking to extract owned Vec data + metadata,
 // then constructs the Python object outside the spawn_blocking
 // boundary because `Bound<'py, ...>` is GIL-bound).
 impl MicrophoneBridge {
@@ -722,30 +749,47 @@ impl MicrophoneBridge {
     /// return the raw `Vec<f32>` data. No Python object construction;
     /// returning `Vec<f32>` lets the caller decide between PyBytes and
     /// PyArray encoding without re-running the cpal read or VAD pass.
-    fn read_raw(&mut self, py: Python<'_>, timeout_ms: Option<u64>) -> PyResult<Option<Vec<f32>>> {
+    fn read_raw(&self, py: Python<'_>, timeout_ms: Option<u64>) -> PyResult<Option<Vec<f32>>> {
         let timeout = timeout_ms.map(Duration::from_millis);
-        let stream = self
-            .stream
-            .as_mut()
-            .ok_or_else(|| raise_named(py, "MicrophoneStreamClosed", "capture is not running"))?;
 
-        // Release GIL for the blocking next_chunk call. Run VAD inference
-        // inside the same allow_threads region to avoid GIL ping-pong.
-        let result: Result<Option<AudioChunk>, CoreDecibriError> = py.detach(|| {
-            let chunk = stream.next_chunk(timeout)?;
-            Ok(chunk)
-        });
+        // Clone a handle to the core stream under a tiny lock, then release the
+        // lock BEFORE the blocking read. Holding only an Arc clone (not the
+        // `active` lock) across next_chunk is what lets a concurrent stop()
+        // take the lock and interrupt a parked read.
+        let stream = {
+            let guard = lock_recover(&self.active);
+            match guard.as_ref() {
+                Some(active) => Arc::clone(&active.stream),
+                None => {
+                    return Err(raise_named(
+                        py,
+                        "MicrophoneStreamClosed",
+                        "capture is not running",
+                    ))
+                }
+            }
+        };
+
+        // Release GIL for the blocking next_chunk call. The `active` lock is
+        // not held here, so stop() can proceed concurrently and wake us.
+        let result: Result<Option<AudioChunk>, CoreDecibriError> =
+            py.detach(|| stream.next_chunk(timeout));
 
         let Some(chunk) = result.map_err(|e| to_py_err(py, e))? else {
             return Ok(None);
         };
 
-        // Run Silero VAD inference if configured.
-        if let Some(vad) = self.vad.as_mut() {
-            let result = py
-                .detach(|| vad.process(&chunk.data))
-                .map_err(|e| to_py_err(py, e))?;
-            self.last_vad_probability = result.probability;
+        // Run Silero VAD inference if configured. Only read() touches `vad`, so
+        // this lock never contends with stop().
+        {
+            let mut vad_guard = lock_recover(&self.vad);
+            if let Some(vad) = vad_guard.as_mut() {
+                let result = py
+                    .detach(|| vad.process(&chunk.data))
+                    .map_err(|e| to_py_err(py, e))?;
+                self.last_vad_probability
+                    .store(result.probability.to_bits(), Ordering::Relaxed);
+            }
         }
 
         Ok(Some(chunk.data))
@@ -833,16 +877,16 @@ impl MicrophoneBridge {
             capture_config,
             format: parsed_format,
             vad_holdoff_ms: vad_holdoff,
-            capture: None,
-            stream: None,
-            vad: vad_instance,
-            last_vad_probability: 0.0,
+            active: StdMutex::new(None),
+            vad: StdMutex::new(vad_instance),
+            last_vad_probability: AtomicU32::new(0),
             numpy,
         })
     }
 
-    fn start(&mut self, py: Python<'_>) -> PyResult<()> {
-        if self.stream.is_some() {
+    fn start(&self, py: Python<'_>) -> PyResult<()> {
+        let mut active = lock_recover(&self.active);
+        if active.is_some() {
             return Err(raise_named(
                 py,
                 "AlreadyRunning",
@@ -851,20 +895,29 @@ impl MicrophoneBridge {
         }
         let capture = Microphone::new(self.capture_config.clone()).map_err(|e| to_py_err(py, e))?;
         let stream = capture.start().map_err(|e| to_py_err(py, e))?;
-        self.capture = Some(capture);
-        self.stream = Some(stream);
+        *active = Some(ActiveCapture {
+            _capture: capture,
+            stream: Arc::new(stream),
+        });
         Ok(())
     }
 
-    fn stop(&mut self) -> PyResult<()> {
-        // Drop the stream first, then the capture handle. Both are infallible
-        // on drop; the explicit Option swap clarifies intent.
-        self.stream = None;
-        self.capture = None;
+    fn stop(&self) -> PyResult<()> {
+        // Take the live capture out under a tiny lock, then signal the core
+        // stop OUTSIDE the lock. The core MicrophoneStream::stop() flips the
+        // running flag and drops the cpal stream, disconnecting the capture
+        // channel and waking any next_chunk parked in a concurrent read()
+        // within ~20ms. A parked read holds only an Arc clone of the stream
+        // (not the `active` lock), so taking the Option here never blocks on
+        // it. Dropping `active` then releases the device.
+        let active = lock_recover(&self.active).take();
+        if let Some(active) = active {
+            active.stream.stop();
+        }
         Ok(())
     }
 
-    fn close(&mut self) -> PyResult<()> {
+    fn close(&self) -> PyResult<()> {
         // Literal alias for stop, mirroring SpeakerBridge::close.
         // Bridge-level symmetry for users constructing MicrophoneBridge
         // directly (advanced use; surface in __all__).
@@ -873,7 +926,7 @@ impl MicrophoneBridge {
 
     #[pyo3(signature = (timeout_ms = None))]
     fn read<'py>(
-        &mut self,
+        &self,
         py: Python<'py>,
         timeout_ms: Option<u64>,
     ) -> PyResult<Option<Bound<'py, PyAny>>> {
@@ -901,7 +954,7 @@ impl MicrophoneBridge {
         slf
     }
 
-    fn __next__<'py>(mut slf: PyRefMut<'_, Self>, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+    fn __next__<'py>(slf: PyRef<'_, Self>, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
         // Block indefinitely on next_chunk by passing None timeout. If the
         // stream returns None (closed), raise StopIteration via PyO3's
         // None-as-StopIteration convention by returning the appropriate err.
@@ -914,14 +967,14 @@ impl MicrophoneBridge {
         }
     }
 
-    fn __enter__(mut slf: PyRefMut<'_, Self>) -> PyResult<PyRefMut<'_, Self>> {
+    fn __enter__(slf: PyRef<'_, Self>) -> PyResult<PyRef<'_, Self>> {
         let py = slf.py();
         slf.start(py)?;
         Ok(slf)
     }
 
     fn __exit__(
-        &mut self,
+        &self,
         _exc_type: Option<&Bound<'_, PyAny>>,
         _exc_value: Option<&Bound<'_, PyAny>>,
         _traceback: Option<&Bound<'_, PyAny>>,
@@ -932,12 +985,12 @@ impl MicrophoneBridge {
 
     #[getter]
     fn is_open(&self) -> bool {
-        self.stream.is_some()
+        lock_recover(&self.active).is_some()
     }
 
     #[getter]
     fn vad_probability(&self) -> f32 {
-        self.last_vad_probability
+        f32::from_bits(self.last_vad_probability.load(Ordering::Relaxed))
     }
 
     /// Returns inert vad_holdoff_ms set at construction; wrapper reads this
@@ -1213,11 +1266,11 @@ impl SpeakerBridge {
 // ---------------------------------------------------------------------------
 // AsyncMicrophoneBridge: async wrapper around MicrophoneBridge.
 //
-// Holds an `Arc<tokio::sync::Mutex<MicrophoneBridge>>` and
-// exposes the same blocking methods as the sync bridge, but async. Each
-// blocking method dispatches the underlying sync work to a Tokio worker
-// thread via `tokio::task::spawn_blocking`, keeping the runtime thread
-// responsive.
+// Holds an `Arc<MicrophoneBridge>` (the sync mic bridge is internally
+// thread-safe, so no outer Mutex is needed) and exposes the same blocking
+// methods as the sync bridge, but async. Each blocking method dispatches the
+// underlying sync work to a Tokio worker thread via
+// `tokio::task::spawn_blocking`, keeping the runtime thread responsive.
 //
 // The compile-time `Send + 'static` assertion at the top of this module is
 // extended to cover this pyclass; PyO3 + pyo3-async-runtimes capture into
@@ -1230,12 +1283,14 @@ impl SpeakerBridge {
 // async surface (`start`, `stop`, `read`, etc.) is what the
 // `AsyncMicrophone` Python wrapper proxies through.
 //
-// Concurrent calls on the same instance serialize via the inner Mutex.
-// This is a behavioural characteristic, not advertised concurrency.
-// spawn_blocking does not cooperatively cancel
-// OS threads; cancellation surfaces immediately to Python while the spawned
-// thread runs to completion. For `read`, the thread finishes its current
-// chunk (~100 ms); for `drain`, the thread waits for the cpal output to
+// stop() no longer serializes behind an in-flight read(): the sync bridge's
+// read() and stop() are both `&self` and share the core stream by `Arc`, so a
+// concurrent stop() calls the core MicrophoneStream::stop() (waking a parked
+// next_chunk in ~20ms) without contending on any bridge-wide lock.
+// spawn_blocking does not cooperatively cancel OS threads; cancellation
+// surfaces immediately to Python while the spawned thread runs to completion.
+// For `read`, the thread returns once the current chunk arrives or stop()
+// closes the stream; for `drain`, the thread waits for the cpal output to
 // flush (potentially seconds). The Python coroutine's `CancelledError`
 // arrives immediately regardless.
 //
@@ -1248,14 +1303,13 @@ impl SpeakerBridge {
 
 #[pyclass(module = "decibri._decibri")]
 pub(crate) struct AsyncMicrophoneBridge {
-    inner: Arc<Mutex<MicrophoneBridge>>,
-    // Lock-free mirror of inner.stream.is_some(). The
-    // public is_open getter is awaitable (acquires the tokio Mutex), which
-    // makes it unusable from a synchronous Python property. The wrapper
-    // class needs a sync property to keep API symmetry with sync
-    // Microphone.is_open; this AtomicBool is its source of truth.
-    // Updated by start() and stop() after the inner mutation succeeds;
-    // read by the is_open_sync getter without locking.
+    inner: Arc<MicrophoneBridge>,
+    // Lock-free mirror of the bridge's open state. The public is_open getter
+    // is awaitable (returns a future), which makes it unusable from a
+    // synchronous Python property. The wrapper class needs a sync property to
+    // keep API symmetry with sync Microphone.is_open; this AtomicBool is its
+    // source of truth. Updated by start() and stop() after the inner mutation
+    // succeeds; read by the is_open_sync getter without locking.
     is_open_atomic: Arc<AtomicBool>,
 }
 
@@ -1308,7 +1362,7 @@ impl AsyncMicrophoneBridge {
             ort_library_path,
         )?;
         Ok(AsyncMicrophoneBridge {
-            inner: Arc::new(Mutex::new(inner)),
+            inner: Arc::new(inner),
             is_open_atomic: Arc::new(AtomicBool::new(false)),
         })
     }
@@ -1318,8 +1372,7 @@ impl AsyncMicrophoneBridge {
         let is_open_atomic = Arc::clone(&self.is_open_atomic);
         future_into_py(py, async move {
             tokio::task::spawn_blocking(move || -> PyResult<()> {
-                let mut bridge = inner.blocking_lock();
-                Python::attach(|py| bridge.start(py))?;
+                Python::attach(|py| inner.start(py))?;
                 // Only set the atomic AFTER the inner
                 // start() succeeds. If start() returns Err, the ? operator
                 // returns early and the atomic stays false.
@@ -1335,13 +1388,12 @@ impl AsyncMicrophoneBridge {
         let inner = Arc::clone(&self.inner);
         let is_open_atomic = Arc::clone(&self.is_open_atomic);
         future_into_py(py, async move {
-            // stop() is non-blocking (just drops Options) but we still go
-            // through spawn_blocking so the Mutex acquisition is uniform
-            // with start/read; this avoids the awkward .blocking_lock()
-            // call inside an async context that tokio warns against.
+            // Run on a blocking worker: stop() calls the core stream stop(),
+            // which blocks briefly while the audio thread tears down. It needs
+            // no bridge-wide lock, so it proceeds even while a read() is parked
+            // in next_chunk, waking that read within ~20ms.
             tokio::task::spawn_blocking(move || -> PyResult<()> {
-                let mut bridge = inner.blocking_lock();
-                bridge.stop()?;
+                inner.stop()?;
                 // Clear the atomic after the inner
                 // stop() succeeds. inner.stop() itself is infallible, but
                 // mirroring the pattern from start() keeps the symmetry.
@@ -1369,17 +1421,19 @@ impl AsyncMicrophoneBridge {
             // Bound<'py, ...> is GIL-bound and not Send + 'static, so
             // it cannot cross the spawn_blocking boundary. Vec<f32>,
             // u16, bool, and BindingSampleFormat are all Send + 'static.
+            //
+            // read_raw is `&self` and holds no bridge-wide lock across the
+            // blocking next_chunk, so a concurrent stop() interrupts it.
             let extracted: Option<AsyncReadOutput> =
                 tokio::task::spawn_blocking(move || -> PyResult<Option<AsyncReadOutput>> {
-                    let mut bridge = inner.blocking_lock();
                     Python::attach(|py| {
-                        let opt = bridge.read_raw(py, timeout_ms)?;
+                        let opt = inner.read_raw(py, timeout_ms)?;
                         Ok(opt.map(|data| {
                             (
                                 data,
-                                bridge.binding_format(),
-                                bridge.channels(),
-                                bridge.numpy_mode(),
+                                inner.binding_format(),
+                                inner.channels(),
+                                inner.numpy_mode(),
                             )
                         }))
                     })
@@ -1404,10 +1458,9 @@ impl AsyncMicrophoneBridge {
     fn is_open<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
         let inner = Arc::clone(&self.inner);
         future_into_py(py, async move {
-            // Non-blocking getter: acquire the Mutex via async lock and
-            // read cached state inline. No spawn_blocking needed.
-            let bridge = inner.lock().await;
-            Ok(bridge.is_open())
+            // Non-blocking getter: the bridge's is_open() takes only a tiny
+            // lock on the capture state. No spawn_blocking needed.
+            Ok(inner.is_open())
         })
     }
 
@@ -1423,19 +1476,13 @@ impl AsyncMicrophoneBridge {
     #[getter]
     fn vad_probability<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
         let inner = Arc::clone(&self.inner);
-        future_into_py(py, async move {
-            let bridge = inner.lock().await;
-            Ok(bridge.vad_probability())
-        })
+        future_into_py(py, async move { Ok(inner.vad_probability()) })
     }
 
     #[getter]
     fn vad_holdoff_ms<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
         let inner = Arc::clone(&self.inner);
-        future_into_py(py, async move {
-            let bridge = inner.lock().await;
-            Ok(bridge.vad_holdoff_ms())
-        })
+        future_into_py(py, async move { Ok(inner.vad_holdoff_ms()) })
     }
 
     #[staticmethod]

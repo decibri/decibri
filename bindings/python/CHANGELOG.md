@@ -8,6 +8,13 @@ For Rust core (`crates/decibri`) and npm binding (`bindings/node`) changes, see 
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.2] - 2026-06-12
+
+### Fixed
+
+- `Microphone.stop()` called from a different thread than the one blocked inside `read()` no longer raises `RuntimeError` ("already borrowed"). The sync bridge now exposes `read()` / `stop()` without an exclusive borrow and shares the core stream behind a handle, so a cross-thread `stop()` interrupts the parked read (which then raises `MicrophoneStreamClosed`) and releases the device.
+- `AsyncMicrophone.stop()` no longer deadlocks against a `read()` parked on a silent (non-delivering) device. The async wrapper no longer holds a bridge-wide lock across the blocking read, so a concurrent `await stop()` reaches the core stop (which wakes the parked read within roughly 20ms) instead of waiting behind it. The two are the sync and async halves of the same "stop() cannot safely interrupt an in-flight read" issue.
+
 ## [0.4.1] - 2026-06-11
 
 ### Fixed

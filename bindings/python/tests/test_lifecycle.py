@@ -255,14 +255,16 @@ def _supports_kwarg(_obj: Any, _name: str) -> bool:
 
 
 # ---------------------------------------------------------------------------
-# Section 5: mid-stream device-disconnect surfacing.
+# Section 5: mid-stream device-disconnect and concurrent-stop surfacing.
 #
-# Pins the documented 0.1.0 behavior:
+# Pins the behavior:
 #   - read() after stop() raises MicrophoneStreamClosed (sync + async).
 #   - The wrapper's iterator propagates MicrophoneStreamClosed from the bridge.
-#   - Calling stop() from a thread other than the one inside read() raises
-#     AlreadyBorrowed (a pyo3 RuntimeError from the bridge's RefCell borrow).
-#     This is a known limitation pinned by the test below.
+#   - Calling stop() from a thread other than the one inside read() is safe:
+#     it interrupts the parked read and releases the device (sync), and a
+#     concurrent await stop() interrupts a parked await read() (async),
+#     instead of raising AlreadyBorrowed or deadlocking. Pinned by the tests
+#     below.
 # ---------------------------------------------------------------------------
 
 
@@ -323,18 +325,27 @@ def test_async_read_after_stop_raises_capture_closed() -> None:
 
 
 @pytest.mark.requires_audio_input
-def test_sync_stop_from_other_thread_raises_already_borrowed() -> None:
-    """Pins the 0.1.0 sync threaded-shutdown limitation.
+def test_sync_stop_from_other_thread_interrupts_read() -> None:
+    """stop() from another thread safely interrupts an in-flight read().
 
-    Calling Microphone.stop() from a thread other than the one currently
-    blocked inside read() raises a RuntimeError from pyo3's RefCell borrow
-    machinery (the bridge holds the borrow during read()). This is a
-    KNOWN 0.1.0 limitation. The documented workaround is AsyncMicrophone, which
-    serializes stop() against in-flight read() via the Rust-side tokio
-    mutex and supports sibling-task cancellation cleanly. This test pins
-    the current behaviour so that 0.2.0's fix is detectable as a behaviour
-    change rather than a silent regression.
+    Regression for the sync threaded-shutdown bug. Previously calling
+    Microphone.stop() from a thread other than the one blocked inside read()
+    raised a RuntimeError from pyo3's pyclass borrow check, because read() held
+    an exclusive (&mut self) borrow across the blocking call. The bridge now
+    shares the core stream behind an Arc and exposes read()/stop() as &self, so
+    the cross-thread stop() succeeds and the parked read() observes the stream
+    closing. This replaces the former pin
+    (test_sync_stop_from_other_thread_raises_already_borrowed) that asserted the
+    RuntimeError.
+
+    On a backend that honours a large frames_per_buffer (Linux ALSA) the read
+    parks for the buffer period, so the stopper deterministically races an
+    in-flight read. On WASAPI (which delivers ~10ms buffers regardless of
+    frames_per_buffer) the read may return before the stopper runs; the
+    assertions below hold in both cases.
     """
+    from decibri import MicrophoneStreamClosed
+
     d = Microphone(sample_rate=16000, channels=1, frames_per_buffer=8192)
     d.start()
     try:
@@ -343,34 +354,87 @@ def test_sync_stop_from_other_thread_raises_already_borrowed() -> None:
         def _stop_from_other_thread() -> None:
             try:
                 d.stop()
-            except BaseException as exc:  # noqa: BLE001 (pinning behaviour)
+            except BaseException as exc:  # noqa: BLE001
                 observed.append(exc)
 
-        # Start a thread that will call stop() while the main thread is
-        # blocked inside a long-timeout read().
         stopper = threading.Thread(target=_stop_from_other_thread, daemon=True)
         stopper.start()
         try:
-            # Block long enough that the stopper thread reaches stop()
-            # while the main thread is inside the bridge's read().
+            # Block inside read() so the stopper races an in-flight read.
             d.read(timeout_ms=300)
-        except BaseException:  # noqa: BLE001
+        except MicrophoneStreamClosed:
+            # Expected when stop() closed the stream while this read was
+            # parked. A clean chunk (no exception) is also fine if the device
+            # delivered a buffer before the stopper ran.
             pass
         stopper.join(timeout=2.0)
 
-        # Either the stopper observed the RefCell borrow conflict (the
-        # 0.1.0 limitation we are pinning) or the read completed cleanly
-        # before the stopper ran. The deterministic pin is that, when the
-        # race fires, we get a RuntimeError mentioning borrow.
-        if observed:
-            assert isinstance(observed[0], RuntimeError)
-            assert "borrow" in str(observed[0]).lower() or "already" in str(observed[0]).lower()
+        # The fix: stop() from another thread must NOT raise (it previously
+        # raised RuntimeError "already borrowed") and must return.
+        assert not observed, f"stop() from another thread raised: {observed!r}"
+        assert not stopper.is_alive(), "stop() from another thread did not return"
+
+        # After stop(), the stream is closed: a subsequent read() reports it.
+        assert d.is_open is False
+        with pytest.raises(MicrophoneStreamClosed):
+            d.read(timeout_ms=100)
     finally:
-        # Best-effort final cleanup; tolerate the limitation here too.
-        try:
-            d.stop()
-        except BaseException:  # noqa: BLE001
-            pass
+        # Idempotent; safe to call again from this (the owning) thread.
+        d.stop()
+
+
+@pytest.mark.requires_audio_input
+def test_async_stop_interrupts_parked_read() -> None:
+    """await stop() interrupts a concurrent parked read() instead of deadlocking.
+
+    Regression for the async half of the stop()-during-read() bug. The async
+    read() previously held the inner tokio Mutex across the blocking next_chunk,
+    so a concurrent await stop() (which needed the same lock) could not run
+    until the read returned; on a non-delivering device that deadlocked stop()
+    forever. The bridge now shares the core stream by Arc and read()/stop() hold
+    no bridge-wide lock across the blocking call, so stop() reaches the core
+    stop() (waking next_chunk in ~20ms) immediately.
+
+    A true non-delivering device cannot be simulated for a live cpal stream, so
+    this uses the largest frames_per_buffer (65536) as the narrowest seam that
+    exhibits the lock-hold: on a backend that honours it (Linux ALSA) next_chunk
+    parks for the buffer period (seconds), so pre-fix the stop() watchdog below
+    would time out and post-fix it passes. On WASAPI (~10ms buffers regardless)
+    it is a regression guard confirming stop() stays prompt and the parked read
+    is woken rather than left hanging.
+    """
+    import asyncio
+
+    from decibri import AsyncMicrophone, MicrophoneStreamClosed
+
+    async def _run() -> None:
+        d = AsyncMicrophone(sample_rate=16000, channels=1, frames_per_buffer=65536)
+        await d.start()
+
+        read_outcome: dict[str, object] = {}
+
+        async def _parked_read() -> None:
+            try:
+                read_outcome["chunk"] = await d.read(timeout_ms=None)
+            except MicrophoneStreamClosed:
+                read_outcome["closed"] = True
+            except BaseException as exc:  # noqa: BLE001
+                read_outcome["error"] = exc
+
+        reader = asyncio.create_task(_parked_read())
+        # Let the reader enter the blocking next_chunk before stopping.
+        await asyncio.sleep(0.05)
+
+        # The fix: stop() returns promptly even while a read is parked.
+        # wait_for raises TimeoutError if stop() deadlocks (the pre-fix bug).
+        await asyncio.wait_for(d.stop(), timeout=1.0)
+
+        # The parked read is woken by the close rather than hanging.
+        await asyncio.wait_for(reader, timeout=1.0)
+        assert "error" not in read_outcome, f"parked read errored: {read_outcome!r}"
+        assert d.is_open is False
+
+    asyncio.run(_run())
 
 
 # ---------------------------------------------------------------------------
