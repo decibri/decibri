@@ -190,7 +190,7 @@ jobs:
         # PyO3/maturin-action provides the container; before-script-linux
         # installs alsa-lib-devel + downloads + stages the ORT dylib before
         # maturin runs.
-        uses: PyO3/maturin-action@3e2bdf6ba6453a61e649744019b8a2d906c7eb38 # v1.51.0
+        uses: PyO3/maturin-action@e83996d129638aa358a18fbd1dfb82f0b0fb5d3b # v1.51.0
         with:
           manylinux: 2_28
           target: ${{ matrix.target }}
@@ -396,7 +396,7 @@ jobs:
         # decibri package). SHA pinned to match build-and-validate's
         # maturin-action usage so a single cross-job bump is the only
         # place the version lives.
-        uses: PyO3/maturin-action@3e2bdf6ba6453a61e649744019b8a2d906c7eb38 # v1.51.0
+        uses: PyO3/maturin-action@e83996d129638aa358a18fbd1dfb82f0b0fb5d3b # v1.51.0
         with:
           command: sdist
           args: --out ${{ github.workspace }}/target/wheels
