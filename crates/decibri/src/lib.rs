@@ -200,6 +200,11 @@ pub const CPAL_VERSION: &str = env!("DECIBRI_CPAL_VERSION");
 #[cfg(any(feature = "capture", feature = "playback"))]
 pub mod device;
 
+// Internal audio-backend seam: the one place the crate reaches the platform
+// audio library. Not part of the public API.
+#[cfg(any(feature = "capture", feature = "playback"))]
+mod backend;
+
 #[cfg(feature = "capture")]
 pub mod microphone;
 

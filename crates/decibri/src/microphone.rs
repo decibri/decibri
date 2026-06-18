@@ -14,10 +14,13 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 #[cfg(feature = "capture")]
-use cpal::traits::{DeviceTrait, StreamTrait};
-#[cfg(feature = "capture")]
 use crossbeam_channel::{Receiver, RecvTimeoutError, Sender, TryRecvError, TrySendError};
 
+#[cfg(feature = "capture")]
+use crate::backend::{
+    AudioBackend, BackendDevice, BackendStream, CpalBackend, InputDataCallback,
+    StreamErrorCallback, StreamParams,
+};
 use crate::device::DeviceSelector;
 use crate::error::DecibriError;
 
@@ -106,20 +109,16 @@ const CAPTURE_CHANNEL_CAPACITY: usize = 64;
 /// handle also releases it. The type is `Send + Sync`.
 #[cfg(feature = "capture")]
 pub struct MicrophoneStream {
-    /// Holds the cpal stream alive for the lifetime of this handle.
+    /// Owns the platform audio stream for the lifetime of this handle.
     ///
-    /// `Mutex<Option<...>>` (not `Cell`/`RefCell`) so [`stop`](Self::stop) can
-    /// `take()` and drop the stream under `&self`, releasing the device, while
-    /// keeping this type `Send + Sync`. The Python binding requires `Sync`: its
-    /// `#[pyclass]` (`assert_pyclass_send_sync`) and `py.detach` both need the
-    /// stream type to be `Sync`, and `cpal::Stream` is itself `Send + Sync` on
-    /// every backend. `Cell`/`RefCell` are `!Sync` and would break
-    /// `decibri-python`. The lock is uncontended: only `stop()` and `drop` ever
-    /// touch this field; the cpal callback owns the channel sender, not this.
-    /// The `Option` also lets the test-only `tests::test_stream()` helper build
-    /// a handle with no real device (`Mutex::new(None)`); production stores
-    /// `Mutex::new(Some(stream))`.
-    _stream: Mutex<Option<cpal::Stream>>,
+    /// Held behind [`BackendStream`](crate::backend::BackendStream), which keeps
+    /// the stream behind a `Mutex<Option<...>>` so [`stop`](Self::stop) can drop
+    /// it under `&self` to release the device while this type stays
+    /// `Send + Sync` (the bindings require `Sync` for their `#[pyclass]` and
+    /// `py.detach`). Dropping this field also releases the device. The test-only
+    /// `tests::test_stream()` helper builds it with `BackendStream::empty()`
+    /// (no real device); production stores the opened stream.
+    _stream: BackendStream,
     receiver: Receiver<AudioChunk>,
     running: Arc<AtomicBool>,
     sample_rate: u32,
@@ -306,9 +305,9 @@ impl MicrophoneStream {
 
     /// Stop capturing audio and release the device.
     ///
-    /// Flips the running flag, then drops the held `cpal::Stream`, so the OS
-    /// releases the input device (and the mic-in-use indicator clears) at once
-    /// rather than only when this handle is dropped. Dropping the stream also
+    /// Flips the running flag, then drops the held stream, so the OS releases
+    /// the input device (and the mic-in-use indicator clears) at once rather
+    /// than only when this handle is dropped. Dropping the stream also
     /// disconnects the capture channel; chunks already buffered remain readable
     /// via [`try_next_chunk`](Self::try_next_chunk) or
     /// [`next_chunk`](Self::next_chunk) until the buffer is drained, after which
@@ -320,12 +319,9 @@ impl MicrophoneStream {
     /// tears down.
     pub fn stop(&self) {
         self.running.store(false, Ordering::Relaxed);
-        // Drop the cpal stream to release the OS device now, not only on drop.
-        // Poison-tolerant: if a teardown elsewhere panicked while holding the
-        // lock, still clear the slot rather than panicking in stop().
-        if let Ok(mut guard) = self._stream.lock() {
-            *guard = None;
-        }
+        // Drop the held stream to release the OS device now, not only on drop.
+        // Poison-tolerant and idempotent (see `BackendStream::stop`).
+        self._stream.stop();
     }
 }
 
@@ -345,7 +341,7 @@ impl MicrophoneStream {
 #[cfg(feature = "capture")]
 pub struct Microphone {
     config: MicrophoneConfig,
-    device: cpal::Device,
+    device: BackendDevice,
 }
 
 #[cfg(feature = "capture")]
@@ -355,7 +351,7 @@ impl Microphone {
     /// for that.
     pub fn new(config: MicrophoneConfig) -> Result<Self, DecibriError> {
         config.validate()?;
-        let device = crate::device::resolve_device(&config.device)?;
+        let device = CpalBackend.resolve_input_device(&config.device)?;
         Ok(Self { config, device })
     }
 
@@ -376,66 +372,56 @@ impl Microphone {
         let channels = self.config.channels;
         let frames_per_buffer = self.config.frames_per_buffer;
 
-        let stream_config = cpal::StreamConfig {
-            channels,
-            sample_rate,
-            buffer_size: cpal::BufferSize::Fixed(frames_per_buffer),
-        };
-
         let err_running = running.clone();
         let last_error = Arc::new(Mutex::new(None));
         let err_last_error = last_error.clone();
         let overruns = Arc::new(AtomicU64::new(0));
         let overruns_cb = overruns.clone();
 
-        let stream = self
-            .device
-            .build_input_stream(
-                &stream_config,
-                move |data: &[f32], _: &cpal::InputCallbackInfo| {
-                    if !running_clone.load(Ordering::Relaxed) {
-                        return;
-                    }
-                    let chunk = AudioChunk {
-                        data: data.to_vec(),
-                        sample_rate,
-                        channels,
-                    };
-                    // Non-blocking send: the cpal callback must never block the
-                    // realtime audio thread. On a full channel (a stalled
-                    // consumer) drop this chunk and count it rather than growing
-                    // memory without bound; a disconnected receiver also just
-                    // discards.
-                    match sender.try_send(chunk) {
-                        Ok(()) => {}
-                        Err(TrySendError::Full(_)) => {
-                            overruns_cb.fetch_add(1, Ordering::Relaxed);
-                        }
-                        Err(TrySendError::Disconnected(_)) => {}
-                    }
-                },
-                move |err| {
-                    // Record a typed cause so a consumer that sees the stream
-                    // close can distinguish a driver failure from stop().
-                    let typed = DecibriError::DeviceFailed {
-                        source: Box::new(err),
-                    };
-                    eprintln!("{typed}");
-                    if let Ok(mut slot) = err_last_error.lock() {
-                        *slot = Some(typed);
-                    }
-                    err_running.store(false, Ordering::Relaxed);
-                },
-                None, // No timeout
-            )
-            .map_err(|e| DecibriError::StreamOpenFailed(e.to_string()))?;
+        // Realtime data callback: capture, copy, non-blocking send. Identical
+        // work as before; the seam wraps only stream construction.
+        let on_data: InputDataCallback = Box::new(move |data: &[f32]| {
+            if !running_clone.load(Ordering::Relaxed) {
+                return;
+            }
+            let chunk = AudioChunk {
+                data: data.to_vec(),
+                sample_rate,
+                channels,
+            };
+            // Non-blocking send: the realtime audio thread must never block. On
+            // a full channel (a stalled consumer) drop this chunk and count it
+            // rather than growing memory without bound; a disconnected receiver
+            // also just discards.
+            match sender.try_send(chunk) {
+                Ok(()) => {}
+                Err(TrySendError::Full(_)) => {
+                    overruns_cb.fetch_add(1, Ordering::Relaxed);
+                }
+                Err(TrySendError::Disconnected(_)) => {}
+            }
+        });
 
-        stream
-            .play()
-            .map_err(|e| DecibriError::StreamStartFailed(e.to_string()))?;
+        // Error callback: record the typed cause and mark the stream closed so a
+        // consumer that sees the stream close can distinguish a driver failure
+        // from stop(). The backend builds the typed `DeviceFailed`.
+        let on_error: StreamErrorCallback = Box::new(move |err: DecibriError| {
+            eprintln!("{err}");
+            if let Ok(mut slot) = err_last_error.lock() {
+                *slot = Some(err);
+            }
+            err_running.store(false, Ordering::Relaxed);
+        });
+
+        let params = StreamParams {
+            channels,
+            sample_rate,
+            frames_per_buffer: Some(frames_per_buffer),
+        };
+        let _stream = CpalBackend.open_input_stream(&self.device, &params, on_data, on_error)?;
 
         Ok(MicrophoneStream {
-            _stream: Mutex::new(Some(stream)),
+            _stream,
             receiver,
             running,
             sample_rate,
@@ -458,7 +444,7 @@ mod tests {
         let (sender, receiver) = crossbeam_channel::unbounded::<AudioChunk>();
         let running = Arc::new(AtomicBool::new(true));
         let stream = MicrophoneStream {
-            _stream: Mutex::new(None),
+            _stream: BackendStream::empty(),
             receiver,
             running: running.clone(),
             sample_rate: 16000,
@@ -671,7 +657,7 @@ mod tests {
         stream.stop();
         assert!(!stream.is_open(), "stop() clears the running flag");
         assert!(
-            stream._stream.lock().unwrap().is_none(),
+            !stream._stream.is_active(),
             "stop() leaves the stream slot empty (device released)"
         );
         stream.stop(); // idempotent: an already-empty slot must not panic
