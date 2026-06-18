@@ -11,6 +11,15 @@ For other decibri packages, see:
 
 ## [Unreleased]
 
+### Changed
+
+- The public config and result structs `MicrophoneConfig`, `AudioChunk`, `VadConfig`, `VadResult`, and `SpeakerConfig` are now `#[non_exhaustive]`. The fields stay public, but external crates can no longer construct these types with a struct literal (or a `..Default::default()` functional update). Construct a config with `Default::default()` and assign the fields you need; `AudioChunk` and `VadResult` are produced by the library and read field by field. This seals the surface so future field additions stay backward compatible. Breaking for Rust consumers that struct-literal these types.
+- `sample::i16_to_f32` is no longer part of the public API (the byte-oriented converters such as `i16_le_bytes_to_f32` remain public). It had no external callers; the bindings convert from bytes, never from `i16` samples.
+
+### Fixed
+
+- The macOS microphone-permission hint now reads "System Settings > Privacy & Security" (the modern macOS wording) instead of the pre-Ventura "System Preferences > Security & Privacy". The `PermissionDenied` message prefix is unchanged.
+
 ## [4.3.2] - 2026-06-12
 
 ### Added

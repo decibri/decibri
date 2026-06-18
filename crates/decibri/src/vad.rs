@@ -25,7 +25,13 @@ use crate::onnx::{
 };
 
 /// Configuration for Silero VAD.
+///
+/// `#[non_exhaustive]`: construct it with [`VadConfig::default`] and then assign
+/// the public fields you need. Direct struct-literal construction from another
+/// crate is intentionally not supported, so adding a field later stays backward
+/// compatible.
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub struct VadConfig {
     /// Path to the silero_vad.onnx model file.
     pub model_path: PathBuf,
@@ -92,7 +98,12 @@ impl VadConfig {
 }
 
 /// Result of processing an audio chunk through Silero VAD.
+///
+/// `#[non_exhaustive]`: produced by [`SileroVad::process`] and read field by
+/// field by consumers. Sealing it keeps future result fields backward
+/// compatible.
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub struct VadResult {
     /// Maximum speech probability across all windows in the chunk.
     pub probability: f32,

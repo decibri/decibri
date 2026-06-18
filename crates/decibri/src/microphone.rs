@@ -22,7 +22,13 @@ use crate::device::DeviceSelector;
 use crate::error::DecibriError;
 
 /// Configuration for a microphone capture session.
+///
+/// `#[non_exhaustive]`: construct it with [`MicrophoneConfig::default`] and then
+/// assign the public fields you need. Direct struct-literal construction from
+/// another crate is intentionally not supported, so adding a field later stays
+/// backward compatible.
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub struct MicrophoneConfig {
     /// Sample rate in Hz. Range: 1000–384000. Default: 16000.
     pub sample_rate: u32,
@@ -63,7 +69,11 @@ impl MicrophoneConfig {
 }
 
 /// A chunk of captured audio data.
+///
+/// `#[non_exhaustive]`: produced by the capture path and read field by field by
+/// consumers. Sealing it keeps future metadata additions backward compatible.
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub struct AudioChunk {
     /// Interleaved f32 samples in range [-1.0, 1.0].
     pub data: Vec<f32>,

@@ -130,6 +130,19 @@ function wrapNativeError(err) {
     return new OrtError(msg, 'ORT_TENSOR_EXTRACT_FAILED');
   }
 
+  // Runtime device/driver failure during streaming. Distinct from the
+  // enumeration/selection DeviceError family above (which mirrors the core's
+  // "Device errors"): this is the core's "Stream errors" DeviceFailed, surfaced
+  // as a base DecibriError with a dedicated code.
+  if (msg.startsWith('decibri: audio device error:')) {
+    return new DecibriError(msg, 'DEVICE_FAILED');
+  }
+  // Non-ORT ONNX backend failure: the reserved backend catch-all, surfaced as a
+  // base DecibriError with a dedicated code (not an OrtError).
+  if (msg.startsWith('ONNX backend error from')) {
+    return new DecibriError(msg, 'ONNX_BACKEND_FAILED');
+  }
+
   // Any other error from the native constructor is still a decibri error.
   return new DecibriError(msg, 'DECIBRI_ERROR');
 }

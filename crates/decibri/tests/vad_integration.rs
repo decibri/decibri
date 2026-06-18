@@ -32,10 +32,10 @@ fn bundled_model_path() -> PathBuf {
 
 #[test]
 fn test_ort_init_success_with_bundled_model() {
-    let config = VadConfig {
-        model_path: bundled_model_path(),
-        ..VadConfig::default()
-    };
+    // `VadConfig` is `#[non_exhaustive]`: default-construct then assign the
+    // public fields rather than using a struct literal or `..default()` FRU.
+    let mut config = VadConfig::default();
+    config.model_path = bundled_model_path();
     let vad = SileroVad::new(config);
     assert!(
         vad.is_ok(),
@@ -47,10 +47,8 @@ fn test_ort_init_success_with_bundled_model() {
 #[test]
 fn test_vad_model_load_fails_for_missing_file() {
     let bogus = PathBuf::from("does-not-exist-silero-xyz.onnx");
-    let config = VadConfig {
-        model_path: bogus.clone(),
-        ..VadConfig::default()
-    };
+    let mut config = VadConfig::default();
+    config.model_path = bogus.clone();
     let err = SileroVad::new(config)
         .err()
         .expect("expected VadModelLoadFailed");
@@ -68,10 +66,8 @@ fn test_vad_model_load_fails_for_missing_file() {
 #[test]
 fn test_vad_config_validate_typed_errors() {
     // Unsupported sample rate
-    let bad_rate = VadConfig {
-        sample_rate: 44_100,
-        ..VadConfig::default()
-    };
+    let mut bad_rate = VadConfig::default();
+    bad_rate.sample_rate = 44_100;
     match bad_rate
         .validate()
         .expect_err("expected VadSampleRateUnsupported")
@@ -83,10 +79,8 @@ fn test_vad_config_validate_typed_errors() {
     }
 
     // Out-of-range threshold
-    let bad_threshold = VadConfig {
-        threshold: 1.5,
-        ..VadConfig::default()
-    };
+    let mut bad_threshold = VadConfig::default();
+    bad_threshold.threshold = 1.5;
     match bad_threshold
         .validate()
         .expect_err("expected VadThresholdOutOfRange")
@@ -101,19 +95,15 @@ fn test_vad_config_validate_typed_errors() {
     }
 
     // A valid config passes
-    let good = VadConfig {
-        model_path: bundled_model_path(),
-        ..VadConfig::default()
-    };
+    let mut good = VadConfig::default();
+    good.model_path = bundled_model_path();
     assert!(good.validate().is_ok(), "default config should validate");
 }
 
 #[test]
 fn test_vad_end_to_end_silence_inference() {
-    let config = VadConfig {
-        model_path: bundled_model_path(),
-        ..VadConfig::default()
-    };
+    let mut config = VadConfig::default();
+    config.model_path = bundled_model_path();
     let mut vad = SileroVad::new(config).expect("model should load");
 
     // 1600 samples = three 512-sample windows + 64-sample remainder at 16 kHz.

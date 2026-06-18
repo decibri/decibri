@@ -11,6 +11,14 @@ For other decibri packages, see:
 
 ## [Unreleased]
 
+### Added
+
+- A device or driver failure during streaming now surfaces as a `DecibriError` with the dedicated `code` `'DEVICE_FAILED'`, and a non-ORT ONNX backend failure as `'ONNX_BACKEND_FAILED'`, instead of the generic `'DECIBRI_ERROR'`. Both are catchable by branching on `err.code`; the message text is unchanged.
+
+### Fixed
+
+- On macOS, the microphone-permission error message now reads "System Settings > Privacy & Security" (the modern macOS wording) instead of the pre-Ventura "System Preferences > Security & Privacy".
+
 ## [4.4.2] - 2026-06-12
 
 ### Fixed
