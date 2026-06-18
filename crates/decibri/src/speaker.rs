@@ -21,7 +21,13 @@ use crate::device::DeviceSelector;
 use crate::error::DecibriError;
 
 /// Configuration for audio output.
+///
+/// `#[non_exhaustive]`: construct it with [`SpeakerConfig::default`] and then
+/// assign the public fields you need. Direct struct-literal construction from
+/// another crate is intentionally not supported, so adding a field later stays
+/// backward compatible.
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub struct SpeakerConfig {
     /// Sample rate in Hz. Range: 1000–384000. Default: 16000.
     pub sample_rate: u32,

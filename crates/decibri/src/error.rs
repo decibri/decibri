@@ -11,7 +11,7 @@ use thiserror::Error;
 // any future target-os values uncategorized at compile time.
 
 #[cfg(target_os = "macos")]
-const PERMISSION_HINT: &str = "Enable in System Preferences > Security & Privacy > Microphone.";
+const PERMISSION_HINT: &str = "Enable in System Settings > Privacy & Security > Microphone.";
 
 #[cfg(target_os = "windows")]
 const PERMISSION_HINT: &str = "Enable in Settings > Privacy & Security > Microphone.";
@@ -316,5 +316,29 @@ mod tests {
         assert_eq!(err.to_string(), "decibri: audio device error: device gone");
         // The cause is structured and walkable, not merely stringified.
         assert!(err.source().is_some());
+    }
+
+    /// The macOS permission hint uses the modern System Settings wording
+    /// ("System Settings > Privacy & Security", not the pre-Ventura "System
+    /// Preferences > Security & Privacy"). Frozen public API text.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn macos_permission_hint_uses_modern_wording() {
+        assert_eq!(
+            PERMISSION_HINT,
+            "Enable in System Settings > Privacy & Security > Microphone."
+        );
+    }
+
+    /// The `PermissionDenied` Display message keeps its frozen leading prefix
+    /// regardless of platform, so binding-layer prefix classification stays
+    /// stable independent of the per-platform hint body.
+    #[test]
+    fn permission_denied_message_prefix_is_frozen() {
+        let msg = DecibriError::PermissionDenied.to_string();
+        assert!(
+            msg.starts_with("Microphone permission denied. "),
+            "frozen prefix must not drift: {msg}"
+        );
     }
 }

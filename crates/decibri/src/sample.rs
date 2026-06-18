@@ -30,7 +30,14 @@ pub fn f32_to_f32_le_bytes(samples: &[f32]) -> Vec<u8> {
 /// Convert i16 samples to f32 (range [-1.0, 1.0]).
 ///
 /// Divides by 32768.0, matching the JS convention.
-pub fn i16_to_f32(samples: &[i16]) -> Vec<f32> {
+///
+/// Crate-internal (`pub(crate)`), not part of decibri's public sample API: the
+/// bindings only ever convert from bytes via [`i16_le_bytes_to_f32`], never
+/// from `i16` samples. Its sole caller is the `i16` roundtrip unit test below,
+/// so it is `#[cfg(test)]`-gated to keep it off the public surface without
+/// tripping the dead-code lint in non-test builds.
+#[cfg(test)]
+pub(crate) fn i16_to_f32(samples: &[i16]) -> Vec<f32> {
     samples.iter().map(|&s| s as f32 / 32768.0).collect()
 }
 

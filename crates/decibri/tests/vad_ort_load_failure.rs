@@ -57,11 +57,11 @@ fn bundled_model_path() -> PathBuf {
 fn test_ort_load_fails_with_nonexistent_path() {
     let bogus = std::env::temp_dir().join("does-not-exist-onnxruntime-dylib-xyz");
 
-    let config = VadConfig {
-        model_path: bundled_model_path(),
-        ort_library_path: Some(bogus.clone()),
-        ..VadConfig::default()
-    };
+    // `VadConfig` is `#[non_exhaustive]`: default-construct then assign the
+    // public fields rather than using a struct literal or `..default()` FRU.
+    let mut config = VadConfig::default();
+    config.model_path = bundled_model_path();
+    config.ort_library_path = Some(bogus.clone());
     let err = SileroVad::new(config)
         .err()
         .expect("expected OrtPathInvalid");
@@ -100,11 +100,9 @@ fn test_ort_load_fails_when_path_is_directory() {
     // `temp_dir()` is guaranteed to exist and is a directory on every platform.
     let dir_path = std::env::temp_dir();
 
-    let config = VadConfig {
-        model_path: bundled_model_path(),
-        ort_library_path: Some(dir_path.clone()),
-        ..VadConfig::default()
-    };
+    let mut config = VadConfig::default();
+    config.model_path = bundled_model_path();
+    config.ort_library_path = Some(dir_path.clone());
     let err = SileroVad::new(config)
         .err()
         .expect("expected OrtPathInvalid when path is a directory");

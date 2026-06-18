@@ -119,12 +119,13 @@ fn build_microphone_parts(options: Option<DecibriOptions>) -> Result<MicrophoneP
 
     let device = resolve_device_option(&opts.device)?;
 
-    let config = MicrophoneConfig {
-        sample_rate,
-        channels,
-        frames_per_buffer,
-        device,
-    };
+    // `MicrophoneConfig` is `#[non_exhaustive]`: default-construct then assign
+    // the public fields rather than using a struct literal.
+    let mut config = MicrophoneConfig::default();
+    config.sample_rate = sample_rate;
+    config.channels = channels;
+    config.frames_per_buffer = frames_per_buffer;
+    config.device = device;
 
     let capture = Microphone::new(config).map_err(to_napi_error)?;
 
@@ -137,18 +138,19 @@ fn build_microphone_parts(options: Option<DecibriOptions>) -> Result<MicrophoneP
                 "modelPath is required when vadMode is 'silero'",
             )
         })?;
-        let vad_config = VadConfig {
-            model_path: std::path::PathBuf::from(model_path),
-            sample_rate,
-            threshold: 0.5, // JS wrapper controls the actual threshold
-            // Populated by the JS wrapper from require.resolve on the
-            // resolved platform package. When `None`, Rust falls through
-            // to `ort::init()` which honours the `ORT_DYLIB_PATH` env var.
-            ort_library_path: opts
-                .ort_library_path
-                .as_deref()
-                .map(std::path::PathBuf::from),
-        };
+        // `VadConfig` is `#[non_exhaustive]`: default-construct then assign.
+        let mut vad_config = VadConfig::default();
+        vad_config.model_path = std::path::PathBuf::from(model_path);
+        vad_config.sample_rate = sample_rate;
+        // JS wrapper controls the actual threshold.
+        vad_config.threshold = 0.5;
+        // Populated by the JS wrapper from require.resolve on the resolved
+        // platform package. When `None`, Rust falls through to `ort::init()`
+        // which honours the `ORT_DYLIB_PATH` env var.
+        vad_config.ort_library_path = opts
+            .ort_library_path
+            .as_deref()
+            .map(std::path::PathBuf::from);
         Some(SileroVad::new(vad_config).map_err(to_napi_error)?)
     } else {
         None
@@ -612,11 +614,11 @@ fn build_speaker_parts(options: Option<DecibriOutputOptions>) -> Result<SpeakerP
 
     let device = resolve_device_option(&opts.device)?;
 
-    let config = SpeakerConfig {
-        sample_rate,
-        channels,
-        device,
-    };
+    // `SpeakerConfig` is `#[non_exhaustive]`: default-construct then assign.
+    let mut config = SpeakerConfig::default();
+    config.sample_rate = sample_rate;
+    config.channels = channels;
+    config.device = device;
 
     let output = Speaker::new(config).map_err(to_napi_error)?;
 

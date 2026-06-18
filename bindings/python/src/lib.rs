@@ -99,7 +99,7 @@ const _: () = {
 // ---------------------------------------------------------------------------
 // Exception class lookup.
 //
-// The 31-class hierarchy is defined once in pure Python at
+// The class hierarchy is defined once in pure Python at
 // decibri.exceptions. The `__init__` overrides on OrtLoadFailed,
 // OrtPathInvalid, and VadModelLoadFailed unpack tuple args into named
 // `path` and `reason` attributes per CPython OSError convention.
@@ -116,6 +116,8 @@ const EXCEPTION_NAMES: &[&str] = &[
     "DecibriError",
     "AlreadyRunning",
     "MicrophoneStreamClosed",
+    "DeviceFailed",
+    "OnnxBackendFailed",
     "ChannelsOutOfRange",
     "DeviceEnumerationFailed",
     "DeviceIndexOutOfRange",
@@ -183,7 +185,7 @@ fn exception_class<'py>(py: Python<'py>, name: &'static str) -> PyResult<Bound<'
 // ---------------------------------------------------------------------------
 // Error mapping: DecibriError -> PyErr.
 //
-// Covers all 29 variants explicitly. Catch-all `_ =>` arm at end is required
+// Covers all 32 variants explicitly. Catch-all `_ =>` arm at end is required
 // because DecibriError is #[non_exhaustive] (per F10).
 //
 // For variants with a `path` field (OrtLoadFailed, OrtPathInvalid,
@@ -347,6 +349,24 @@ fn to_py_err(py: Python<'_>, err: CoreDecibriError) -> PyErr {
         // exposed in 0.1.0.
         CoreDecibriError::ForkAfterOrtInit { .. } => (
             "ForkAfterOrtInit",
+            Box::new(move |cls| PyErr::from_type(cls, (msg,))),
+        ),
+
+        // DeviceFailed: a runtime device/driver failure during streaming.
+        // Direct DecibriError subclass like the other stream-level variants
+        // (StreamOpenFailed, StreamStartFailed), not under DeviceError (which
+        // is the device-enumeration/selection family). Message-only.
+        CoreDecibriError::DeviceFailed { .. } => (
+            "DeviceFailed",
+            Box::new(move |cls| PyErr::from_type(cls, (msg,))),
+        ),
+
+        // OnnxBackendFailed: a non-ORT ONNX backend failure. Direct
+        // DecibriError subclass (not under OrtError, which is the ORT-specific
+        // family), mirroring ForkAfterOrtInit's deliberate placement.
+        // Message-only.
+        CoreDecibriError::OnnxBackendFailed { .. } => (
+            "OnnxBackendFailed",
             Box::new(move |cls| PyErr::from_type(cls, (msg,))),
         ),
 
@@ -859,12 +879,13 @@ impl MicrophoneBridge {
         let parsed_format = parse_sample_format(&format).map_err(|e| to_py_err(py, e))?;
         let device_selector = build_device_selector(device.as_ref())?;
 
-        let capture_config = MicrophoneConfig {
-            sample_rate,
-            channels,
-            frames_per_buffer,
-            device: device_selector,
-        };
+        // `MicrophoneConfig` is `#[non_exhaustive]`: default-construct then
+        // assign the public fields rather than using a struct literal.
+        let mut capture_config = MicrophoneConfig::default();
+        capture_config.sample_rate = sample_rate;
+        capture_config.channels = channels;
+        capture_config.frames_per_buffer = frames_per_buffer;
+        capture_config.device = device_selector;
 
         // VAD construction gate (Option (b)+(h)). The bridge constructs
         // SileroVad only if vad=True AND vad_mode=="silero". The vad_mode
@@ -874,12 +895,12 @@ impl MicrophoneBridge {
             let mp = model_path.ok_or_else(|| {
                 PyValueError::new_err("model_path is required when vad=True and vad_mode='silero'")
             })?;
-            let vad_config = VadConfig {
-                model_path: mp,
-                sample_rate,
-                threshold: vad_threshold,
-                ort_library_path,
-            };
+            // `VadConfig` is `#[non_exhaustive]`: default-construct then assign.
+            let mut vad_config = VadConfig::default();
+            vad_config.model_path = mp;
+            vad_config.sample_rate = sample_rate;
+            vad_config.threshold = vad_threshold;
+            vad_config.ort_library_path = ort_library_path;
             Some(SileroVad::new(vad_config).map_err(|e| to_py_err(py, e))?)
         } else {
             None
@@ -1147,11 +1168,11 @@ impl SpeakerBridge {
         let parsed_format = parse_sample_format(&format).map_err(|e| to_py_err(py, e))?;
         let device_selector = build_device_selector(device.as_ref())?;
 
-        let output_config = SpeakerConfig {
-            sample_rate,
-            channels,
-            device: device_selector,
-        };
+        // `SpeakerConfig` is `#[non_exhaustive]`: default-construct then assign.
+        let mut output_config = SpeakerConfig::default();
+        output_config.sample_rate = sample_rate;
+        output_config.channels = channels;
+        output_config.device = device_selector;
 
         Ok(SpeakerBridge {
             output_config,

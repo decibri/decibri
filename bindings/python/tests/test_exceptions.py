@@ -1,7 +1,7 @@
 """Exception hierarchy tests.
 
-Covers all 33 exception classes shipped in the public ``decibri`` namespace:
-1 base (DecibriError) + 11 direct subclasses + DeviceError intermediate
+Covers all 35 exception classes shipped in the public ``decibri`` namespace:
+1 base (DecibriError) + 14 direct subclasses + DeviceError intermediate
 + 8 direct DeviceError subclasses + OrtError intermediate + 7 direct
 OrtError subclasses + OrtPathError intermediate + 2 direct OrtPathError
 subclasses.
@@ -27,6 +27,7 @@ from decibri import (
     DecibriError,
     DeviceEnumerationFailed,
     DeviceError,
+    DeviceFailed,
     DeviceIndexOutOfRange,
     MicrophoneNotFound,
     FramesPerBufferOutOfRange,
@@ -35,6 +36,7 @@ from decibri import (
     NoMicrophoneFound,
     NoSpeakerFound,
     NotAnInputDevice,
+    OnnxBackendFailed,
     OrtError,
     OrtInferenceFailed,
     OrtInitFailed,
@@ -65,7 +67,10 @@ import pytest
 
 ALL_DECIBRI_ERROR_CLASSES = (
     DecibriError,
-    # 11 direct DecibriError subclasses (non-device, non-ORT)
+    # 14 direct DecibriError subclasses (non-device, non-ORT). DeviceFailed
+    # is a runtime device/driver failure (distinct from the DeviceError
+    # enumeration/selection family); OnnxBackendFailed is the non-ORT ONNX
+    # backend catch-all (distinct from the OrtError family).
     AlreadyRunning,
     MicrophoneStreamClosed,
     ChannelsOutOfRange,
@@ -78,6 +83,8 @@ ALL_DECIBRI_ERROR_CLASSES = (
     StreamStartFailed,
     VadSampleRateUnsupported,
     VadThresholdOutOfRange,
+    DeviceFailed,
+    OnnxBackendFailed,
     # DeviceError intermediate + 8 direct subclasses
     DeviceError,
     DeviceEnumerationFailed,
@@ -104,10 +111,11 @@ ALL_DECIBRI_ERROR_CLASSES = (
 
 
 def test_class_count() -> None:
-    # 33 total: 1 base + 11 direct + DeviceError + 8 device + OrtError
-    # + 7 ORT direct + OrtPathError + 2 path. 29 instance + 4 catch-target
-    # intermediates (DecibriError, DeviceError, OrtError, OrtPathError).
-    assert len(ALL_DECIBRI_ERROR_CLASSES) == 33
+    # 35 total: 1 base + 14 direct + DeviceError + 8 device + OrtError
+    # + 7 ORT direct + OrtPathError + 2 path. The two additions over the
+    # prior 33 are DeviceFailed and OnnxBackendFailed, both direct
+    # DecibriError subclasses.
+    assert len(ALL_DECIBRI_ERROR_CLASSES) == 35
 
 
 def test_all_inherit_from_decibri_error() -> None:
@@ -208,6 +216,44 @@ def test_device_error_is_not_ort_error() -> None:
     """DeviceError is independent of OrtError; no overlap."""
     assert not issubclass(DeviceError, OrtError)
     assert not issubclass(OrtError, DeviceError)
+
+
+# ---------------------------------------------------------------------------
+# DeviceFailed and OnnxBackendFailed: dedicated, distinct error types.
+#
+# Both are direct DecibriError subclasses (matching how the Rust core sections
+# them: DeviceFailed is a runtime "Stream error" beside StreamOpenFailed /
+# StreamStartFailed, not a device-enumeration DeviceError; OnnxBackendFailed
+# is the reserved non-ORT backend catch-all, not an OrtError). Before this
+# change both mapped to the generic DecibriError base; they are now catchable
+# as their own types.
+# ---------------------------------------------------------------------------
+
+
+def test_device_failed_is_dedicated_direct_subclass() -> None:
+    assert issubclass(DeviceFailed, DecibriError)
+    # NOT under the device-enumeration DeviceError family, nor OrtError.
+    assert not issubclass(DeviceFailed, DeviceError)
+    assert not issubclass(DeviceFailed, OrtError)
+    # Catchable by its own type.
+    with pytest.raises(DeviceFailed):
+        raise DeviceFailed("device gone")
+
+
+def test_onnx_backend_failed_is_dedicated_direct_subclass() -> None:
+    assert issubclass(OnnxBackendFailed, DecibriError)
+    # NOT under OrtError (it is the non-ORT backend catch-all), nor DeviceError.
+    assert not issubclass(OnnxBackendFailed, OrtError)
+    assert not issubclass(OnnxBackendFailed, DeviceError)
+    with pytest.raises(OnnxBackendFailed):
+        raise OnnxBackendFailed("backend boom")
+
+
+def test_new_error_types_importable_from_top_level() -> None:
+    """Both are reachable via attribute lookup on the package (not just the
+    exceptions submodule), even though they are not in ``__all__``."""
+    assert decibri.DeviceFailed is DeviceFailed
+    assert decibri.OnnxBackendFailed is OnnxBackendFailed
 
 
 # ---------------------------------------------------------------------------

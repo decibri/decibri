@@ -10,6 +10,7 @@
 
 const path = require('path');
 const { Microphone, Speaker, inputDevices, outputDevices, version, DecibriError, DeviceError } = require(path.join(__dirname, '..', 'npm', 'decibri', 'src', 'decibri.js'));
+const { wrapNativeError, OrtError } = require(path.join(__dirname, '..', 'npm', 'decibri', 'src', 'errors.js'));
 const pkg = require(path.join(__dirname, '..', 'npm', 'decibri', 'package.json'));
 
 let passed = 0;
@@ -337,6 +338,27 @@ try {
 } catch (e) {
   assert(e instanceof RangeError, 'bad sampleRate is a RangeError');
   assert(!(e instanceof DecibriError), 'validation error is NOT a DecibriError');
+}
+
+// DeviceFailed and OnnxBackendFailed surface as dedicated, distinct errors
+// (base DecibriError with a stable code), not the generic DECIBRI_ERROR
+// fallback. These device/driver and backend failures only fire at runtime
+// (mid-stream device loss, malformed ONNX), so wrapNativeError is exercised
+// directly with the frozen core Display strings.
+{
+  const dev = wrapNativeError(new Error('decibri: audio device error: device unplugged'));
+  assert(dev instanceof DecibriError, 'DeviceFailed maps to a DecibriError');
+  assert(!(dev instanceof DeviceError), 'DeviceFailed is NOT a DeviceError (enumeration family)');
+  assert(!(dev instanceof OrtError), 'DeviceFailed is NOT an OrtError');
+  assert(dev.code === 'DEVICE_FAILED', `code is DEVICE_FAILED (got ${dev.code})`);
+  assert(dev.message === 'decibri: audio device error: device unplugged', 'DeviceFailed message preserved verbatim');
+
+  const onnx = wrapNativeError(new Error('ONNX backend error from coreml: boom'));
+  assert(onnx instanceof DecibriError, 'OnnxBackendFailed maps to a DecibriError');
+  assert(!(onnx instanceof OrtError), 'OnnxBackendFailed is NOT an OrtError (non-ORT backend)');
+  assert(!(onnx instanceof DeviceError), 'OnnxBackendFailed is NOT a DeviceError');
+  assert(onnx.code === 'ONNX_BACKEND_FAILED', `code is ONNX_BACKEND_FAILED (got ${onnx.code})`);
+  assert(onnx.message === 'ONNX backend error from coreml: boom', 'OnnxBackendFailed message preserved verbatim');
 }
 
 console.log('  Group 7 done\n');

@@ -8,6 +8,16 @@ For Rust core (`crates/decibri`) and npm binding (`bindings/node`) changes, see 
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- Two dedicated exception classes, `DeviceFailed` (a device or driver failure during streaming) and `OnnxBackendFailed` (a non-ORT ONNX backend failure), both direct `DecibriError` subclasses. Previously these mapped to the generic `DecibriError` base; they are now catchable as their own types. Importable via `decibri.DeviceFailed` / `decibri.OnnxBackendFailed` or from `decibri.exceptions`.
+
+### Fixed
+
+- On macOS, the microphone-permission error message now reads "System Settings > Privacy & Security" (the modern macOS wording) instead of the pre-Ventura "System Preferences > Security & Privacy".
+
 ## [0.4.3] - 2026-06-12
 
 ### Fixed

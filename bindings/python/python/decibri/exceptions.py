@@ -4,15 +4,15 @@ This module is the public home for the decibri exception hierarchy. All
 classes are also re-exported at ``decibri.<X>`` for convenience; users
 may import from either path.
 
-29 instance classes (one per Rust DecibriError variant) plus 3 intermediate
+31 instance classes (one per Rust DecibriError variant) plus 3 intermediate
 parent classes (DeviceError, OrtError, OrtPathError) for catch ergonomics,
-totaling 32 class definitions. Single-inheritance hierarchy per CPython
+totaling 34 class definitions. Single-inheritance hierarchy per CPython
 convention.
 
 Hierarchy:
     DecibriError
-    + 11 direct subclasses (config + runtime errors that don't involve
-      device enumeration or ORT)
+    + 13 direct subclasses (config + runtime errors that don't involve
+      device enumeration or ORT, including DeviceFailed and OnnxBackendFailed)
     + DeviceError (intermediate; no instances; catches device-related)
         + 8 direct device subclasses (MicrophoneNotFound, SpeakerNotFound,
           MultipleDevicesMatch, DeviceIndexOutOfRange, NoMicrophoneFound,
@@ -139,6 +139,18 @@ class MicrophoneStreamClosed(DecibriError):
 
 class SpeakerStreamClosed(DecibriError):
     """Raised when writing to a closed speaker stream."""
+
+
+class DeviceFailed(DecibriError):
+    """Raised when an active stream fails at the device or driver level.
+
+    Fires when a running microphone or speaker stream is interrupted by a
+    device or driver fault (device unplugged, driver reset, exclusive-mode
+    preemption), as opposed to the device-enumeration and selection failures
+    grouped under DeviceError. A direct DecibriError subclass, alongside the
+    other runtime stream errors (StreamOpenFailed, StreamStartFailed); catch
+    via DecibriError to handle it generically.
+    """
 
 
 class VadSampleRateUnsupported(DecibriError):
@@ -289,4 +301,20 @@ class ForkAfterOrtInit(DecibriError):
           process, never in the parent before fork.
 
     See ``docs/ecosystem/multiprocessing.md`` for verified examples.
+    """
+
+
+# Non-ORT ONNX backend failure. Direct DecibriError subclass, NOT under
+# OrtError, because OrtError is the ORT-specific family: this variant is the
+# reserved catch-all for other ONNX backends. Placed here alongside
+# ForkAfterOrtInit, the other deliberate non-OrtError member of this region.
+
+
+class OnnxBackendFailed(DecibriError):
+    """Raised when an ONNX inference backend reports an error.
+
+    The reserved catch-all for ONNX backend failures that are not the
+    specific ORT setup or path failures grouped under OrtError. A direct
+    DecibriError subclass (not an OrtError), so catch via DecibriError to
+    handle it generically.
     """

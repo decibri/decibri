@@ -39,12 +39,13 @@ fn main() {
         );
     }
 
-    let config = VadConfig {
-        model_path: model,
-        sample_rate: SAMPLE_RATE,
-        threshold: 0.5,
-        ort_library_path: None,
-    };
+    // `VadConfig` is `#[non_exhaustive]`: default-construct then assign the
+    // public fields rather than using a struct literal.
+    let mut config = VadConfig::default();
+    config.model_path = model;
+    config.sample_rate = SAMPLE_RATE;
+    config.threshold = 0.5;
+    config.ort_library_path = None;
 
     let mut vad = SileroVad::new(config).expect("SileroVad construction should succeed");
 
