@@ -13,10 +13,13 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 #[cfg(feature = "playback")]
-use cpal::traits::{DeviceTrait, StreamTrait};
-#[cfg(feature = "playback")]
 use crossbeam_channel::{Receiver, Sender};
 
+#[cfg(feature = "playback")]
+use crate::backend::{
+    AudioBackend, BackendDevice, BackendStream, CpalBackend, OutputDataCallback,
+    StreamErrorCallback, StreamParams,
+};
 use crate::device::DeviceSelector;
 use crate::error::DecibriError;
 
@@ -188,17 +191,14 @@ fn drain_impl(
 /// `Send + Sync`.
 #[cfg(feature = "playback")]
 pub struct SpeakerStream {
-    // `Mutex<Option<...>>` (not `Cell`/`RefCell`) so `stop(&self)` can `take()`
-    // and drop the stream under `&self`, releasing the device, while keeping
-    // this type `Send + Sync`. The Python binding requires `Sync`: its
-    // `#[pyclass]` (`assert_pyclass_send_sync`) and `py.detach` both need the
-    // stream type to be `Sync`, and `cpal::Stream` is itself `Send + Sync` on
-    // every backend. `Cell`/`RefCell` are `!Sync` and would break
-    // `decibri-python`. The lock is uncontended: only `stop()` and `drop` ever
-    // touch this field; the cpal callback owns the channel receiver, not this.
-    // The `Option` also lets the test seam build a stream with no real device
-    // (`Mutex::new(None)`); production stores `Mutex::new(Some(stream))`.
-    _stream: Mutex<Option<cpal::Stream>>,
+    // Owns the platform audio stream, held behind
+    // [`BackendStream`](crate::backend::BackendStream), which keeps it behind a
+    // `Mutex<Option<...>>` so `stop(&self)` can drop it under `&self` to release
+    // the device while this type stays `Send + Sync` (the bindings require
+    // `Sync` for their `#[pyclass]` and `py.detach`). Dropping this field also
+    // releases the device. The test seam builds it with `BackendStream::empty()`
+    // (no real device); production stores the opened stream.
+    _stream: BackendStream,
     sender: Sender<Vec<f32>>,
     running: Arc<AtomicBool>,
     // Drain handshake. `drain()` reserves the next `sentinel_seq` ticket and
@@ -279,18 +279,15 @@ impl SpeakerStream {
     /// all queued audio is discarded; [`is_playing`](Self::is_playing) is false
     /// immediately and later non-empty [`send`](Self::send) calls (including via
     /// a surviving [`SpeakerSink`]) return [`DecibriError::SpeakerStreamClosed`].
-    /// The held `cpal::Stream` is dropped here, so the OS releases the output
-    /// device on stop rather than only when the handle is dropped; this blocks
-    /// briefly while the audio thread tears down.
+    /// The held stream is dropped here, so the OS releases the output device on
+    /// stop rather than only when the handle is dropped; this blocks briefly
+    /// while the audio thread tears down.
     pub fn stop(&self) {
         // Flag first: a surviving sink's send/drain key off this and short-circuit.
         self.running.store(false, Ordering::Relaxed);
-        // Then drop the cpal stream to release the OS device now, not only on
-        // drop. Poison-tolerant: if a teardown elsewhere panicked while holding
-        // the lock, still clear the slot rather than panicking in stop().
-        if let Ok(mut guard) = self._stream.lock() {
-            *guard = None;
-        }
+        // Then drop the held stream to release the OS device now, not only on
+        // drop. Poison-tolerant and idempotent (see `BackendStream::stop`).
+        self._stream.stop();
     }
 
     /// A cloneable, `Send` handle to this stream's sample channel and drain
@@ -397,7 +394,7 @@ impl SpeakerSink {
 #[cfg(feature = "playback")]
 pub struct Speaker {
     config: SpeakerConfig,
-    device: cpal::Device,
+    device: BackendDevice,
 }
 
 #[cfg(feature = "playback")]
@@ -407,7 +404,7 @@ impl Speaker {
     /// [`start`](Self::start) for that.
     pub fn new(config: SpeakerConfig) -> Result<Self, DecibriError> {
         config.validate()?;
-        let device = crate::device::resolve_output_device(&config.device)?;
+        let device = CpalBackend.resolve_output_device(&config.device)?;
         Ok(Self { config, device })
     }
 
@@ -433,51 +430,42 @@ impl Speaker {
         let sample_rate = self.config.sample_rate;
         let channels = self.config.channels;
 
-        let stream_config = cpal::StreamConfig {
-            channels,
-            sample_rate,
-            buffer_size: cpal::BufferSize::Default,
-        };
-
-        // Internal accumulator for the cpal callback.
-        // cpal requests variable-sized buffers; we feed from the channel.
+        // Internal accumulator for the render callback. The backend requests
+        // variable-sized buffers; we feed from the channel.
         let mut accum: Vec<f32> = Vec::new();
 
-        let stream = self
-            .device
-            .build_output_stream(
-                &stream_config,
-                move |data: &mut [f32], _: &cpal::OutputCallbackInfo| {
-                    render_output(
-                        data,
-                        &mut accum,
-                        &receiver,
-                        &running_cb,
-                        &sentinels_played_cb,
-                    );
-                },
-                move |err| {
-                    // Record a typed cause so a consumer that sees the stream
-                    // close can distinguish a driver failure from stop().
-                    let typed = DecibriError::DeviceFailed {
-                        source: Box::new(err),
-                    };
-                    eprintln!("{typed}");
-                    if let Ok(mut slot) = err_last_error.lock() {
-                        *slot = Some(typed);
-                    }
-                    running_clone.store(false, Ordering::Relaxed);
-                },
-                None,
-            )
-            .map_err(|e| DecibriError::StreamOpenFailed(e.to_string()))?;
+        // Realtime render callback: fill the buffer from the playback queue.
+        // Identical work as before; the seam wraps only stream construction.
+        let on_data: OutputDataCallback = Box::new(move |data: &mut [f32]| {
+            render_output(
+                data,
+                &mut accum,
+                &receiver,
+                &running_cb,
+                &sentinels_played_cb,
+            );
+        });
 
-        stream
-            .play()
-            .map_err(|e| DecibriError::StreamStartFailed(e.to_string()))?;
+        // Error callback: record the typed cause and mark the stream stopped so
+        // a consumer that sees the stream close can distinguish a driver failure
+        // from stop(). The backend builds the typed `DeviceFailed`.
+        let on_error: StreamErrorCallback = Box::new(move |err: DecibriError| {
+            eprintln!("{err}");
+            if let Ok(mut slot) = err_last_error.lock() {
+                *slot = Some(err);
+            }
+            running_clone.store(false, Ordering::Relaxed);
+        });
+
+        let params = StreamParams {
+            channels,
+            sample_rate,
+            frames_per_buffer: None,
+        };
+        let _stream = CpalBackend.open_output_stream(&self.device, &params, on_data, on_error)?;
 
         Ok(SpeakerStream {
-            _stream: Mutex::new(Some(stream)),
+            _stream,
             sender,
             running,
             sentinel_seq,
@@ -500,7 +488,7 @@ mod tests {
         let (sender, receiver) = crossbeam_channel::bounded::<Vec<f32>>(32);
         let sentinels_played = Arc::new(AtomicUsize::new(0));
         let stream = SpeakerStream {
-            _stream: Mutex::new(None),
+            _stream: BackendStream::empty(),
             sender,
             running: Arc::new(AtomicBool::new(true)),
             sentinel_seq: Arc::new(AtomicUsize::new(0)),
@@ -797,7 +785,7 @@ mod tests {
         stream.stop();
         assert!(!stream.is_playing(), "stop() clears the running flag");
         assert!(
-            stream._stream.lock().unwrap().is_none(),
+            !stream._stream.is_active(),
             "stop() leaves the stream slot empty (device released)"
         );
         stream.stop(); // idempotent: an already-empty slot must not panic
