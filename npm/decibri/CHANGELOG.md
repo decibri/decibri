@@ -15,6 +15,10 @@ For other decibri packages, see:
 
 - A device or driver failure during streaming now surfaces as a `DecibriError` with the dedicated `code` `'DEVICE_FAILED'`, and a non-ORT ONNX backend failure as `'ONNX_BACKEND_FAILED'`, instead of the generic `'DECIBRI_ERROR'`. Both are catchable by branching on `err.code`; the message text is unchanged.
 
+### Changed
+
+- Capture now emits a final, possibly-shorter `'data'` chunk at stream close (on `stop()`), carrying the buffered tail, before `'end'`. Steady-state chunks are unchanged (still exactly `framesPerBuffer * channels * bytesPerSample`); only the last chunk before `'end'` may be shorter, and no captured audio is dropped. Internally the binding now re-blocks through the Rust core instead of a binding-side accumulator, and `stop()` defers the stream's end-of-stream signal by one tick so the flushed tail is delivered before `'end'` rather than dropped.
+
 ### Fixed
 
 - On macOS, the microphone-permission error message now reads "System Settings > Privacy & Security" (the modern macOS wording) instead of the pre-Ventura "System Preferences > Security & Privacy".

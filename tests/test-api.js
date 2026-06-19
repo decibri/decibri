@@ -139,8 +139,12 @@ async function testFloat32() {
   assert(chunks.length > 0, 'received at least one float32 chunk');
 
   const expectedSize = 1600 * 1 * 4; // 6400 bytes
-  const allCorrect = chunks.every(c => c.length === expectedSize);
-  assert(allCorrect, `all chunks are ${expectedSize} bytes (got ${chunks[0]?.length})`);
+  // Every chunk is expectedSize during the stream; only the final chunk at
+  // close may be shorter (1..expectedSize), carrying the remaining tail.
+  const steadyOk = chunks.slice(0, -1).every(c => c.length === expectedSize);
+  const last = chunks[chunks.length - 1];
+  const lastOk = last === undefined || (last.length > 0 && last.length <= expectedSize);
+  assert(steadyOk && lastOk, `chunks are ${expectedSize} bytes (final tail may be shorter; got first ${chunks[0]?.length}, last ${last?.length})`);
 
   // Verify data is interpretable as Float32Array
   if (chunks.length > 0) {
@@ -267,8 +271,12 @@ async function testFramesPerBuffer() {
   assert(chunks.length > 0, 'received at least one chunk');
 
   const expectedSize = 800 * 1 * 2; // 1600 bytes
-  const allCorrect = chunks.every(c => c.length === expectedSize);
-  assert(allCorrect, `all chunks are ${expectedSize} bytes (got ${chunks[0]?.length})`);
+  // Every chunk is expectedSize during the stream; only the final chunk at
+  // close may be shorter (1..expectedSize), carrying the remaining tail.
+  const steadyOk = chunks.slice(0, -1).every(c => c.length === expectedSize);
+  const last = chunks[chunks.length - 1];
+  const lastOk = last === undefined || (last.length > 0 && last.length <= expectedSize);
+  assert(steadyOk && lastOk, `chunks are ${expectedSize} bytes (final tail may be shorter; got first ${chunks[0]?.length}, last ${last?.length})`);
 
   console.log(`  ${chunks.length} chunks, ${chunks[0]?.length} bytes each`);
   console.log('  Group 5 done\n');

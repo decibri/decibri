@@ -3,13 +3,19 @@
 //! Build a [`MicrophoneConfig`], construct a [`Microphone`], then
 //! [`start`](Microphone::start) it to obtain a [`MicrophoneStream`]. Read audio
 //! with [`next_chunk`](MicrophoneStream::next_chunk) (blocking, with a timeout)
-//! or [`try_next_chunk`](MicrophoneStream::try_next_chunk) (non-blocking). The
-//! playback counterpart is [`crate::speaker`].
+//! or [`try_next_chunk`](MicrophoneStream::try_next_chunk) (non-blocking). Both
+//! take a requested sample count and deliver exactly that many interleaved
+//! samples per chunk, re-blocking the device's native capture buffers on the
+//! consumer side. The final chunk at stream close may be shorter, carrying the
+//! remaining tail (no captured sample is dropped). The playback counterpart is
+//! [`crate::speaker`].
 
+#[cfg(feature = "capture")]
+use std::collections::VecDeque;
 #[cfg(feature = "capture")]
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 #[cfg(feature = "capture")]
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, PoisonError};
 #[cfg(feature = "capture")]
 use std::time::{Duration, Instant};
 
@@ -134,6 +140,15 @@ pub struct MicrophoneStream {
     // [`overrun_count`](Self::overrun_count). Bounds memory by dropping rather
     // than queuing without limit.
     overruns: Arc<AtomicU64>,
+    // Consumer-side re-block buffer: a FIFO of interleaved `f32` samples pulled
+    // from `receiver`, drained in fixed `samples`-sized blocks so
+    // [`next_chunk`](Self::next_chunk) / [`try_next_chunk`](Self::try_next_chunk)
+    // deliver exactly the requested size regardless of the device's native
+    // buffer size. Lives behind a `Mutex` (kept off the realtime callback, which
+    // only `try_send`s native buffers) so the type stays `Send + Sync` and
+    // concurrent consumers serialize. `Mutex<VecDeque<f32>>` is `Send + Sync`
+    // because `VecDeque<f32>` is `Send`.
+    reblock_buffer: Mutex<VecDeque<f32>>,
 }
 
 #[cfg(feature = "capture")]
@@ -154,66 +169,107 @@ impl MicrophoneStream {
         &self.receiver
     }
 
-    /// Attempt to read the next audio chunk without blocking.
+    /// Attempt to read exactly `samples` interleaved samples without blocking.
+    ///
+    /// `samples` is the requested block size in interleaved `f32` samples
+    /// (frames times channels). The device's native capture buffers are
+    /// re-blocked on the consumer side, so every returned chunk holds exactly
+    /// `samples` samples. `samples` should be non-zero and, for frame
+    /// alignment, a multiple of the channel count.
     ///
     /// # Returns
-    /// - `Ok(Some(chunk))`: a chunk was immediately available and has been
-    ///   dequeued.
-    /// - `Ok(None)`: the stream is open and running, but no chunk is
-    ///   currently buffered. Try again shortly, or call
-    ///   [`next_chunk`](Self::next_chunk) to block.
+    /// - `Ok(Some(chunk))`: a full block of exactly `samples` samples was
+    ///   available and has been dequeued.
+    /// - `Ok(None)`: the stream is open and running, but fewer than `samples`
+    ///   samples are buffered. Try again shortly, or call
+    ///   [`next_chunk`](Self::next_chunk) to block until a full block arrives.
     /// - `Err(DecibriError::MicrophoneStreamClosed)`: the stream is closed
-    ///   (either by explicit [`stop`](Self::stop) or by an audio-driver
-    ///   error reported via the cpal error callback). No further chunks
+    ///   (either by explicit [`stop`](Self::stop) or by an audio-driver error
+    ///   reported via the cpal error callback) and the buffer is now empty (any
+    ///   final tail was already delivered as a short chunk). No further chunks
     ///   will ever be available.
     ///
-    /// Any chunks that were buffered before the stream closed are delivered
-    /// first; the closed signal is only returned once the buffer is empty.
+    /// Buffered samples that form one or more full blocks are delivered first.
+    /// Once the stream closes with fewer than `samples` remaining, the final
+    /// partial block (1..`samples` samples) is delivered as one short chunk, and
+    /// the closed signal is returned on the next call once the buffer is empty.
+    /// No captured sample is dropped: every chunk is exactly `samples` long
+    /// except the final chunk at close, which carries the remaining tail.
     ///
     /// # Thread safety
-    /// May be called from any thread. Internally uses a lock-free
-    /// `crossbeam_channel::try_recv` and an atomic load.
+    /// May be called from any thread. Takes the re-block buffer mutex, so
+    /// concurrent callers serialize on it; a non-blocking
+    /// `crossbeam_channel::try_recv` drains the native buffers into it.
     ///
     /// # Stability
     /// Part of decibri's stable FFI-consumer API surface, alongside
-    /// [`next_chunk`](Self::next_chunk). Guaranteed signature-stable across
-    /// 4.x; any change will be a breaking version bump.
-    pub fn try_next_chunk(&self) -> Result<Option<AudioChunk>, DecibriError> {
-        match self.receiver.try_recv() {
-            Ok(chunk) => Ok(Some(chunk)),
-            Err(TryRecvError::Empty) => {
-                if self.is_open() {
-                    Ok(None)
-                } else {
-                    Err(DecibriError::MicrophoneStreamClosed)
+    /// [`next_chunk`](Self::next_chunk).
+    pub fn try_next_chunk(&self, samples: usize) -> Result<Option<AudioChunk>, DecibriError> {
+        let mut buf = self
+            .reblock_buffer
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+
+        // Pull every immediately-available native buffer into the re-block
+        // buffer without blocking.
+        let mut disconnected = false;
+        loop {
+            match self.receiver.try_recv() {
+                Ok(chunk) => buf.extend(chunk.data),
+                Err(TryRecvError::Empty) => break,
+                Err(TryRecvError::Disconnected) => {
+                    disconnected = true;
+                    break;
                 }
             }
-            Err(TryRecvError::Disconnected) => Err(DecibriError::MicrophoneStreamClosed),
+        }
+
+        if buf.len() >= samples {
+            // A full block is ready; deliver buffered data first, even when the
+            // stream has since closed.
+            Ok(Some(self.take_block(&mut buf, samples)))
+        } else if disconnected || !self.is_open() {
+            // Closed with fewer than a full block left: deliver the final tail
+            // as one short chunk, then report closed once the buffer is empty.
+            self.take_block_or_closed(&mut buf, samples)
+        } else {
+            // Open, but not yet a full block. Try again shortly.
+            Ok(None)
         }
     }
 
-    /// Read the next audio chunk, blocking the calling thread until one
-    /// arrives, the stream closes, or `timeout` elapses.
+    /// Read exactly `samples` interleaved samples, blocking the calling thread
+    /// until a full block arrives, the stream closes, or `timeout` elapses.
+    ///
+    /// `samples` is the requested block size in interleaved `f32` samples
+    /// (frames times channels). The device's native capture buffers are
+    /// re-blocked on the consumer side, so a returned chunk holds exactly
+    /// `samples` samples. `samples` should be non-zero and, for frame
+    /// alignment, a multiple of the channel count.
     ///
     /// # Arguments
-    /// - `timeout = None`: block indefinitely until a chunk arrives or the
+    /// - `timeout = None`: block indefinitely until a full block arrives or the
     ///   stream closes.
-    /// - `timeout = Some(dur)`: block at most `dur`; return `Ok(None)` if
-    ///   the deadline passes with no chunk.
+    /// - `timeout = Some(dur)`: block at most `dur`; return `Ok(None)` if the
+    ///   deadline passes before a full block accumulates. The partial block is
+    ///   retained for the next call.
     ///
     /// # Returns
-    /// - `Ok(Some(chunk))`: chunk received within the deadline.
-    /// - `Ok(None)`: `timeout` elapsed without a chunk arriving. The stream
-    ///   is still open.
-    /// - `Err(DecibriError::MicrophoneStreamClosed)`: stream closed before a
-    ///   chunk could be delivered. Any chunks that were buffered at the time
-    ///   of close are delivered first; this error is only returned once the
-    ///   buffer is empty.
+    /// - `Ok(Some(chunk))`: a full block of exactly `samples` samples was
+    ///   received within the deadline.
+    /// - `Ok(None)`: `timeout` elapsed before a full block accumulated. The
+    ///   stream is still open and the partial stays buffered.
+    /// - `Err(DecibriError::MicrophoneStreamClosed)`: the stream closed and the
+    ///   buffer is now empty. Any full blocks buffered at the time of close are
+    ///   delivered first, then the final partial block (1..`samples` samples) as
+    ///   one short chunk; this error is only returned once the buffer is empty.
+    ///   No captured sample is dropped.
     ///
     /// # Thread safety
     /// May be called from any thread. Blocks only the calling thread; other
-    /// threads can call [`stop`](Self::stop) concurrently to unblock this
-    /// call within approximately 20 ms.
+    /// threads can call [`stop`](Self::stop) concurrently to unblock this call
+    /// within approximately 20 ms. Holds the re-block buffer mutex for the
+    /// duration of the call, so concurrent reads serialize.
     ///
     /// Implementation note: this method polls both the channel and
     /// [`is_open`](Self::is_open) at a short interval. An explicit
@@ -226,6 +282,7 @@ impl MicrophoneStream {
     /// Part of decibri's stable FFI-consumer API surface.
     pub fn next_chunk(
         &self,
+        samples: usize,
         timeout: Option<Duration>,
     ) -> Result<Option<AudioChunk>, DecibriError> {
         // Poll both the channel and `is_open` at this cadence so concurrent
@@ -235,15 +292,29 @@ impl MicrophoneStream {
         const POLL_INTERVAL: Duration = Duration::from_millis(20);
 
         let deadline = timeout.map(|t| Instant::now() + t);
+        let mut buf = self
+            .reblock_buffer
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
 
         loop {
+            // Fast path: a full block is already buffered.
+            if buf.len() >= samples {
+                return Ok(Some(self.take_block(&mut buf, samples)));
+            }
+
             let wait = match deadline {
                 Some(dl) => {
                     let now = Instant::now();
                     if now >= dl {
-                        // Timeout elapsed without a chunk. Drain any
-                        // last-moment arrival before reporting None.
-                        return Ok(self.receiver.try_recv().ok());
+                        // Deadline reached. Absorb any last-moment arrivals,
+                        // then deliver a full block if one is now ready, else
+                        // `None` (the partial stays buffered for the next call).
+                        self.drain_available(&mut buf);
+                        if buf.len() >= samples {
+                            return Ok(Some(self.take_block(&mut buf, samples)));
+                        }
+                        return Ok(None);
                     }
                     std::cmp::min(dl - now, POLL_INTERVAL)
                 }
@@ -251,22 +322,67 @@ impl MicrophoneStream {
             };
 
             match self.receiver.recv_timeout(wait) {
-                Ok(chunk) => return Ok(Some(chunk)),
+                Ok(chunk) => {
+                    buf.extend(chunk.data);
+                    // Loop: re-check whether a full block is ready.
+                }
                 Err(RecvTimeoutError::Timeout) => {
-                    // Re-check whether `stop()` fired while we waited.
+                    // Re-check whether `stop()` or a driver error fired while we
+                    // waited (a driver-error close flips `is_open` without
+                    // disconnecting the channel).
                     if !self.is_open() {
-                        // Drain any buffered chunk (stop() does not flush).
-                        return match self.receiver.try_recv() {
-                            Ok(chunk) => Ok(Some(chunk)),
-                            Err(_) => Err(DecibriError::MicrophoneStreamClosed),
-                        };
+                        self.drain_available(&mut buf);
+                        return self.take_block_or_closed(&mut buf, samples);
                     }
                     // Stream still alive; loop with whatever deadline remains.
                 }
                 Err(RecvTimeoutError::Disconnected) => {
-                    return Err(DecibriError::MicrophoneStreamClosed);
+                    // Channel closed and drained. Deliver any remaining full
+                    // blocks and the final short tail before reporting closed.
+                    return self.take_block_or_closed(&mut buf, samples);
                 }
             }
+        }
+    }
+
+    /// Drain exactly `samples` interleaved samples off the front of the re-block
+    /// buffer into a fresh [`AudioChunk`], stamping it with this stream's sample
+    /// rate and channel count. The caller guarantees `buf.len() >= samples`.
+    /// Sample values and order are preserved; only the chunk boundary changes.
+    fn take_block(&self, buf: &mut VecDeque<f32>, samples: usize) -> AudioChunk {
+        AudioChunk {
+            data: buf.drain(..samples).collect(),
+            sample_rate: self.sample_rate,
+            channels: self.channels,
+        }
+    }
+
+    /// Close-path delivery. Drains a chunk off a closing/closed stream: a full
+    /// `samples`-block if one remains, then any final tail (1..`samples`
+    /// samples) as one short chunk, and finally `Err(MicrophoneStreamClosed)`
+    /// once the buffer is empty. No captured sample is dropped at close.
+    fn take_block_or_closed(
+        &self,
+        buf: &mut VecDeque<f32>,
+        samples: usize,
+    ) -> Result<Option<AudioChunk>, DecibriError> {
+        if buf.len() >= samples {
+            Ok(Some(self.take_block(buf, samples)))
+        } else if buf.is_empty() {
+            Err(DecibriError::MicrophoneStreamClosed)
+        } else {
+            // Final partial block: deliver the remaining 1..`samples` samples.
+            let remaining = buf.len();
+            Ok(Some(self.take_block(buf, remaining)))
+        }
+    }
+
+    /// Move every immediately-available native buffer from the channel into the
+    /// re-block buffer without blocking. Stops on an empty or disconnected
+    /// channel; the caller inspects `buf.len()` and the close state afterwards.
+    fn drain_available(&self, buf: &mut VecDeque<f32>) {
+        while let Ok(chunk) = self.receiver.try_recv() {
+            buf.extend(chunk.data);
         }
     }
 
@@ -428,6 +544,7 @@ impl Microphone {
             channels,
             last_error,
             overruns,
+            reblock_buffer: Mutex::new(VecDeque::new()),
         })
     }
 }
@@ -451,6 +568,7 @@ mod tests {
             channels: 1,
             last_error: Arc::new(Mutex::new(None)),
             overruns: Arc::new(AtomicU64::new(0)),
+            reblock_buffer: Mutex::new(VecDeque::new()),
         };
         (stream, sender, running)
     }
@@ -463,10 +581,20 @@ mod tests {
         }
     }
 
+    /// A native chunk carrying an arbitrary run of interleaved samples, for the
+    /// re-blocking tests (native buffers are variable-size).
+    fn make_native_chunk(data: Vec<f32>) -> AudioChunk {
+        AudioChunk {
+            data,
+            sample_rate: 16000,
+            channels: 1,
+        }
+    }
+
     #[test]
     fn test_try_next_chunk_returns_none_when_empty() {
         let (stream, _sender, _running) = test_stream();
-        let result = stream.try_next_chunk().unwrap();
+        let result = stream.try_next_chunk(1).unwrap();
         assert!(
             result.is_none(),
             "try_next_chunk on empty open stream should return Ok(None)"
@@ -478,7 +606,7 @@ mod tests {
         let (stream, sender, _running) = test_stream();
         sender.send(make_chunk(0.42)).unwrap();
 
-        let result = stream.try_next_chunk().unwrap();
+        let result = stream.try_next_chunk(1).unwrap();
         let chunk = result.expect("should have received the injected chunk");
         assert_eq!(chunk.data, vec![0.42]);
     }
@@ -489,7 +617,7 @@ mod tests {
         drop(sender); // simulate cpal stream dropping the sender
         running.store(false, Ordering::Relaxed);
 
-        let err = stream.try_next_chunk().unwrap_err();
+        let err = stream.try_next_chunk(1).unwrap_err();
         assert!(matches!(err, DecibriError::MicrophoneStreamClosed));
     }
 
@@ -502,7 +630,7 @@ mod tests {
             sender.send(make_chunk(0.77)).unwrap();
         });
 
-        let result = stream.next_chunk(None).unwrap();
+        let result = stream.next_chunk(1, None).unwrap();
         let chunk = result.expect("should have received the eventually-pushed chunk");
         assert_eq!(chunk.data, vec![0.77]);
 
@@ -513,7 +641,9 @@ mod tests {
     fn test_next_chunk_timeout_returns_none() {
         let (stream, _sender, _running) = test_stream();
         let start = Instant::now();
-        let result = stream.next_chunk(Some(Duration::from_millis(50))).unwrap();
+        let result = stream
+            .next_chunk(1, Some(Duration::from_millis(50)))
+            .unwrap();
         let elapsed = start.elapsed();
 
         assert!(
@@ -536,14 +666,18 @@ mod tests {
         running.store(false, Ordering::Relaxed);
 
         // First two calls drain the buffer, third reports closed.
-        let c1 = stream.next_chunk(Some(Duration::from_millis(100))).unwrap();
+        let c1 = stream
+            .next_chunk(1, Some(Duration::from_millis(100)))
+            .unwrap();
         assert_eq!(c1.unwrap().data, vec![1.0]);
 
-        let c2 = stream.next_chunk(Some(Duration::from_millis(100))).unwrap();
+        let c2 = stream
+            .next_chunk(1, Some(Duration::from_millis(100)))
+            .unwrap();
         assert_eq!(c2.unwrap().data, vec![2.0]);
 
         let err = stream
-            .next_chunk(Some(Duration::from_millis(100)))
+            .next_chunk(1, Some(Duration::from_millis(100)))
             .unwrap_err();
         assert!(matches!(err, DecibriError::MicrophoneStreamClosed));
     }
@@ -562,7 +696,7 @@ mod tests {
         // after stop() flips the running flag. Give a generous 250 ms ceiling
         // to absorb scheduler jitter on loaded CI runners.
         let start = Instant::now();
-        let err = stream.next_chunk(None).unwrap_err();
+        let err = stream.next_chunk(1, None).unwrap_err();
         let elapsed = start.elapsed();
 
         assert!(matches!(err, DecibriError::MicrophoneStreamClosed));
@@ -572,6 +706,175 @@ mod tests {
         );
 
         stopper.join().unwrap();
+    }
+
+    /// Re-blocking delivers full blocks of exactly the requested size, in order,
+    /// then a final short chunk carrying the tail, with no sample lost,
+    /// reordered, or altered. Irregular native buffers carrying the values 0..14
+    /// (not a multiple of the block size 4) are re-blocked; the concatenation of
+    /// the delivered chunks equals the FULL input stream, tail included.
+    #[test]
+    fn test_next_chunk_delivers_exact_blocks_then_final_tail() {
+        let (stream, sender, running) = test_stream();
+        sender
+            .send(make_native_chunk(vec![0.0, 1.0, 2.0, 3.0, 4.0]))
+            .unwrap();
+        sender.send(make_native_chunk(vec![5.0, 6.0])).unwrap();
+        sender
+            .send(make_native_chunk(vec![
+                7.0, 8.0, 9.0, 10.0, 11.0, 12.0, 13.0,
+            ]))
+            .unwrap();
+        drop(sender); // no more native buffers will arrive
+        running.store(false, Ordering::Relaxed);
+
+        let samples = 4;
+        let mut chunks: Vec<Vec<f32>> = Vec::new();
+        loop {
+            match stream.next_chunk(samples, Some(Duration::from_millis(100))) {
+                Ok(Some(chunk)) => chunks.push(chunk.data),
+                Ok(None) => panic!("unexpected timeout while data was buffered"),
+                Err(DecibriError::MicrophoneStreamClosed) => break,
+                Err(e) => panic!("unexpected error: {e}"),
+            }
+        }
+
+        // Every block is exactly `samples` long except the final tail (14 % 4 == 2).
+        let (last, full) = chunks.split_last().expect("at least one chunk delivered");
+        for block in full {
+            assert_eq!(
+                block.len(),
+                samples,
+                "non-final blocks are exactly `samples` long"
+            );
+        }
+        assert_eq!(last.len(), 2, "the final chunk carries the 2-sample tail");
+
+        // Sample identity: the full input stream is reconstructed, nothing dropped.
+        let collected: Vec<f32> = chunks.into_iter().flatten().collect();
+        assert_eq!(
+            collected,
+            (0..14).map(|n| n as f32).collect::<Vec<f32>>(),
+            "re-blocking preserves every sample value and order, including the tail"
+        );
+    }
+
+    /// A single native buffer larger than the requested block size is split
+    /// into successive full blocks across calls, the leftover carried forward;
+    /// the final sub-block remainder is delivered as a short chunk at close.
+    #[test]
+    fn test_next_chunk_splits_large_native_buffer_into_blocks() {
+        let (stream, sender, running) = test_stream();
+        sender
+            .send(make_native_chunk((0..10).map(|n| n as f32).collect()))
+            .unwrap();
+        drop(sender);
+        running.store(false, Ordering::Relaxed);
+
+        let samples = 3;
+        let b1 = stream
+            .next_chunk(samples, Some(Duration::from_millis(100)))
+            .unwrap()
+            .expect("first block");
+        let b2 = stream
+            .next_chunk(samples, Some(Duration::from_millis(100)))
+            .unwrap()
+            .expect("second block");
+        let b3 = stream
+            .next_chunk(samples, Some(Duration::from_millis(100)))
+            .unwrap()
+            .expect("third block");
+        assert_eq!(b1.data, vec![0.0, 1.0, 2.0]);
+        assert_eq!(b2.data, vec![3.0, 4.0, 5.0]);
+        assert_eq!(b3.data, vec![6.0, 7.0, 8.0]);
+
+        // 10 % 3 == 1 leftover sample: delivered as a final short chunk, then closed.
+        let tail = stream
+            .next_chunk(samples, Some(Duration::from_millis(100)))
+            .unwrap()
+            .expect("final tail");
+        assert_eq!(tail.data, vec![9.0]);
+        let err = stream
+            .next_chunk(samples, Some(Duration::from_millis(100)))
+            .unwrap_err();
+        assert!(matches!(err, DecibriError::MicrophoneStreamClosed));
+    }
+
+    /// `try_next_chunk` returns `Ok(None)` while fewer than a full block are
+    /// buffered on an open stream, then `Ok(Some)` once enough native samples
+    /// accumulate; the block is exactly `samples` long.
+    #[test]
+    fn test_try_next_chunk_short_returns_none_then_full_block() {
+        let (stream, sender, _running) = test_stream();
+        let samples = 4;
+
+        sender.send(make_native_chunk(vec![10.0, 11.0])).unwrap();
+        assert!(
+            stream.try_next_chunk(samples).unwrap().is_none(),
+            "fewer than `samples` on an open stream returns Ok(None)"
+        );
+
+        sender.send(make_native_chunk(vec![12.0, 13.0])).unwrap();
+        let chunk = stream
+            .try_next_chunk(samples)
+            .unwrap()
+            .expect("a full block is now available");
+        assert_eq!(chunk.data, vec![10.0, 11.0, 12.0, 13.0]);
+
+        // The buffer is empty again.
+        assert!(stream.try_next_chunk(samples).unwrap().is_none());
+    }
+
+    /// The final partial block (fewer than `samples` samples at close) is
+    /// delivered as one short chunk, then the stream reports closed.
+    #[test]
+    fn test_final_partial_tail_delivered_on_close() {
+        let (stream, sender, running) = test_stream();
+        sender
+            .send(make_native_chunk(vec![0.0, 1.0, 2.0, 3.0, 4.0, 5.0]))
+            .unwrap();
+        drop(sender);
+        running.store(false, Ordering::Relaxed);
+
+        let samples = 4;
+        let c1 = stream
+            .next_chunk(samples, Some(Duration::from_millis(100)))
+            .unwrap()
+            .expect("first full block");
+        assert_eq!(c1.data, vec![0.0, 1.0, 2.0, 3.0]);
+
+        // The remaining 2 samples are delivered as a final short chunk.
+        let tail = stream
+            .next_chunk(samples, Some(Duration::from_millis(100)))
+            .unwrap()
+            .expect("final tail");
+        assert_eq!(tail.data, vec![4.0, 5.0]);
+
+        // Now the buffer is empty: the stream reports closed.
+        let err = stream
+            .next_chunk(samples, Some(Duration::from_millis(100)))
+            .unwrap_err();
+        assert!(matches!(err, DecibriError::MicrophoneStreamClosed));
+    }
+
+    /// `try_next_chunk` delivers the final tail as a short chunk when the stream
+    /// closes with a partial buffered, then reports closed.
+    #[test]
+    fn test_try_next_chunk_delivers_tail_on_close() {
+        let (stream, sender, running) = test_stream();
+        sender.send(make_native_chunk(vec![1.0, 2.0])).unwrap();
+        drop(sender);
+        running.store(false, Ordering::Relaxed);
+
+        let samples = 4;
+        let tail = stream
+            .try_next_chunk(samples)
+            .unwrap()
+            .expect("final tail delivered");
+        assert_eq!(tail.data, vec![1.0, 2.0]);
+
+        let err = stream.try_next_chunk(samples).unwrap_err();
+        assert!(matches!(err, DecibriError::MicrophoneStreamClosed));
     }
 
     /// Compile-time assertion that `Arc<Mutex<MicrophoneStream>>` is `Send + Sync`,
@@ -612,7 +915,7 @@ mod tests {
         let t1 = thread::spawn(move || {
             b1.wait();
             let guard = s1.lock().unwrap();
-            guard.try_next_chunk().unwrap()
+            guard.try_next_chunk(1).unwrap()
         });
 
         let s2 = shared.clone();
@@ -620,7 +923,7 @@ mod tests {
         let t2 = thread::spawn(move || {
             b2.wait();
             let guard = s2.lock().unwrap();
-            guard.try_next_chunk().unwrap()
+            guard.try_next_chunk(1).unwrap()
         });
 
         let c1 = t1.join().unwrap().expect("thread 1 must receive a chunk");

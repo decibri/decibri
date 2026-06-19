@@ -14,6 +14,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 - Two dedicated exception classes, `DeviceFailed` (a device or driver failure during streaming) and `OnnxBackendFailed` (a non-ORT ONNX backend failure), both direct `DecibriError` subclasses. Previously these mapped to the generic `DecibriError` base; they are now catchable as their own types. Importable via `decibri.DeviceFailed` / `decibri.OnnxBackendFailed` or from `decibri.exceptions`.
 
+### Changed
+
+- `Microphone.read()` and `AsyncMicrophone.read()` now return exactly `frames_per_buffer` frames per chunk, because the core re-blocks the device's native capture buffers to the requested size. Previously they returned whole platform-native buffers whose size was platform-dependent and, on Windows WASAPI, unrelated to `frames_per_buffer`. Code that assumed a fixed chunk size now gets one on every platform; code that relied on the variable native size must not. The final chunk at stream close may be shorter than `frames_per_buffer` frames, carrying the remaining tail (no captured audio is dropped); the next `read()` then raises `MicrophoneStreamClosed`. The `read()` signature is unchanged. Breaking: the returned chunk size changes.
+
 ### Fixed
 
 - On macOS, the microphone-permission error message now reads "System Settings > Privacy & Security" (the modern macOS wording) instead of the pre-Ventura "System Preferences > Security & Privacy".

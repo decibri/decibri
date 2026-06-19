@@ -35,15 +35,13 @@ const mic = new Microphone({ sampleRate: 16000, channels: 1 });
 
 let chunkCount = 0;
 let totalBytes = 0;
-let allCorrectSize = true;
+const chunkLengths = [];
 
 mic.on('data', (chunk) => {
   chunkCount++;
   totalBytes += chunk.length;
-  if (chunk.length !== 3200) {
-    allCorrectSize = false;
-    console.log(`  chunk ${chunkCount}: ${chunk.length} bytes (UNEXPECTED)`);
-  } else if (chunkCount <= 3) {
+  chunkLengths.push(chunk.length);
+  if (chunkCount <= 3) {
     console.log(`  chunk ${chunkCount}: ${chunk.length} bytes`);
   }
 });
@@ -61,17 +59,26 @@ mic.on('end', () => {
 
 setTimeout(() => {
   mic.stop();
-  console.log(`\n  Total chunks: ${chunkCount}`);
-  console.log(`  Total bytes: ${totalBytes}`);
-  console.log(`  All chunks 3200 bytes: ${allCorrectSize}`);
-  console.log(`  isOpen after stop: ${mic.isOpen}`);
-  console.assert(chunkCount > 0, 'received at least one chunk');
-  console.assert(allCorrectSize, 'all chunks are 3200 bytes');
-  console.assert(!mic.isOpen, 'isOpen is false after stop');
-
-  // Give the stream a moment to emit 'end' after push(null)
+  // Validate after the stream has fully ended, so the final short tail chunk
+  // (flushed on close) is included in chunkLengths.
   setTimeout(() => {
+    // Every chunk is 3200 bytes during the stream; only the final chunk at
+    // close may be shorter (1..3200, nonzero), carrying the remaining tail.
+    const steady = chunkLengths.slice(0, -1);
+    const last = chunkLengths[chunkLengths.length - 1];
+    const steadyOk = steady.every((n) => n === 3200);
+    const lastOk = last === undefined || (last > 0 && last <= 3200);
+
+    console.log(`\n  Total chunks: ${chunkCount}`);
+    console.log(`  Total bytes: ${totalBytes}`);
+    console.log(`  Non-final chunks all 3200 bytes: ${steadyOk}`);
+    console.log(`  Final chunk: ${last} bytes (1..3200): ${lastOk}`);
+    console.log(`  isOpen after stop: ${mic.isOpen}`);
+    console.assert(chunkCount > 0, 'received at least one chunk');
+    console.assert(steadyOk, 'all chunks except the last are 3200 bytes');
+    console.assert(lastOk, `final chunk is 1..3200 bytes (got ${last})`);
+    console.assert(!mic.isOpen, 'isOpen is false after stop');
     console.assert(streamEnded, 'stream emitted end event');
     console.log('\nPASS: capture test');
-  }, 100);
+  }, 200);
 }, 2000);

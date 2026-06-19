@@ -82,10 +82,11 @@ use decibri::CPAL_VERSION;
 // (extract owned data instead).
 //
 // Sendability of the sync bridges is empirically backed: the Rust core's
-// `MicrophoneStream` is asserted `Send + Sync` at
-// `crates/decibri/src/microphone.rs:481` (compile-time, unconditional, runs
-// on every CI platform), and the documented `Send` contract for all
-// public capture/output types lives at `crates/decibri/src/lib.rs:119-140`.
+// `MicrophoneStream` is asserted `Send + Sync` by the
+// `test_microphone_stream_is_send_and_sync` compile-time guard in
+// `crates/decibri/src/microphone.rs` (unconditional, runs on every CI
+// platform), and the documented `Send` contract for all public
+// capture/output types lives in `crates/decibri/src/lib.rs`.
 // ---------------------------------------------------------------------------
 
 const _: () = {
@@ -697,8 +698,9 @@ fn numpy_smoke(py: Python<'_>) -> Bound<'_, PyArray1<i16>> {
 // do not add a field whose type lacks `Send + 'static` without first
 // removing the assertion (which would also block the async work).
 // Sendability comes from the Rust core's `MicrophoneStream` already being
-// `Send` (see `crates/decibri/src/lib.rs` for the contract and
-// `crates/decibri/src/microphone.rs:481` for the unconditional compile-time
+// `Send` (see `crates/decibri/src/lib.rs` for the contract and the
+// `test_microphone_stream_is_send_and_sync` guard in
+// `crates/decibri/src/microphone.rs` for the unconditional compile-time
 // assertion). The bridge holds the stream directly; no pump thread or
 // channel proxy is needed.
 //
@@ -791,10 +793,16 @@ impl MicrophoneBridge {
             }
         };
 
+        // Requested block size in interleaved samples: frames_per_buffer times
+        // channels. The core re-blocks the device's native buffers to exactly
+        // this size, so read() returns fixed-size chunks on every platform.
+        let samples =
+            self.capture_config.frames_per_buffer as usize * self.capture_config.channels as usize;
+
         // Release GIL for the blocking next_chunk call. The `active` lock is
         // not held here, so stop() can proceed concurrently and wake us.
         let result: Result<Option<AudioChunk>, CoreDecibriError> =
-            py.detach(|| stream.next_chunk(timeout));
+            py.detach(|| stream.next_chunk(samples, timeout));
 
         let Some(chunk) = result.map_err(|e| to_py_err(py, e))? else {
             return Ok(None);

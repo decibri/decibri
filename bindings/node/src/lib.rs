@@ -249,10 +249,10 @@ impl DecibriBridge {
         self.vad_probability
             .store(0.0f32.to_bits(), Ordering::Relaxed);
 
-        // Keep the core stream behind an `Arc` so the pump thread can poll its
-        // `is_open` / `take_last_error` while the bridge still owns it.
+        // Keep the core stream behind an `Arc` so the pump thread can pull
+        // re-blocked chunks and poll its `is_open` / `take_last_error` while the
+        // bridge still owns it.
         let stream = Arc::new(capture.start().map_err(to_napi_error)?);
-        let receiver = stream.receiver().clone();
         let pump_stream = stream.clone();
 
         self.running.store(true, Ordering::Relaxed);
@@ -273,77 +273,69 @@ impl DecibriBridge {
             .build()?;
 
         let handle = thread::spawn(move || {
-            // Frame-exact buffering: accumulate f32 samples from cpal and only
-            // send to JS when we have exactly frames_per_buffer * channels samples.
-            // WASAPI ignores BufferSize::Fixed and delivers its own chunk sizes,
-            // so this ensures the API contract (exact chunk size) is honoured.
-            let mut accum: Vec<f32> = Vec::with_capacity(target_samples);
-
-            // Timed receive so a device error (which closes the core stream
-            // without disconnecting our channel) is noticed within one interval
-            // instead of blocking forever. Matches the core's ~20 ms wakeup.
+            // The core re-blocks the device's native buffers to exactly
+            // `target_samples` (frames_per_buffer * channels), so each delivered
+            // chunk is one full frame (the final chunk at close may be shorter,
+            // carrying the remaining tail): no binding-side accumulation. A timed
+            // read (matching the core's ~20 ms wakeup) keeps the loop responsive.
+            // The loop runs until the core stream closes: an explicit stop() or a
+            // device error surfaces as Err, but next_chunk drains and forwards all
+            // buffered audio (full blocks then the final short tail) first, so no
+            // captured frame is lost.
             const POLL: Duration = Duration::from_millis(20);
 
-            while running.load(Ordering::Relaxed) {
-                match receiver.recv_timeout(POLL) {
-                    Ok(chunk) => {
-                        accum.extend_from_slice(&chunk.data);
+            loop {
+                match pump_stream.next_chunk(target_samples, Some(POLL)) {
+                    Ok(Some(chunk)) => {
+                        let frame = chunk.data;
 
-                        // Drain full frames from the accumulator
-                        while accum.len() >= target_samples {
-                            let frame: Vec<f32> = accum.drain(..target_samples).collect();
-
-                            // Run Silero VAD on the f32 frame (before format
-                            // conversion). Silero models a single channel, so
-                            // downmix interleaved multichannel frames to mono
-                            // first: feeding interleaved samples makes the VAD
-                            // read consecutive channels as successive mono
-                            // samples and score garbled input. The interleaved
-                            // `frame` is untouched and is still what gets
-                            // emitted to JS below.
-                            if let Some(ref mut v) = vad {
-                                let downmixed;
-                                let vad_input: &[f32] = if channels > 1 {
-                                    downmixed = sample::downmix_to_mono(&frame, channels);
-                                    &downmixed
-                                } else {
-                                    &frame
-                                };
-                                if let Ok(result) = v.process(vad_input) {
-                                    vad_probability
-                                        .store(result.probability.to_bits(), Ordering::Relaxed);
-                                }
-                            }
-
-                            let bytes = match format {
-                                SampleFormat::Int16 => sample::f32_to_i16_le_bytes(&frame),
-                                SampleFormat::Float32 => sample::f32_to_f32_le_bytes(&frame),
+                        // Run Silero VAD on the f32 frame (before format
+                        // conversion). Silero models a single channel, so
+                        // downmix interleaved multichannel frames to mono first:
+                        // feeding interleaved samples makes the VAD read
+                        // consecutive channels as successive mono samples and
+                        // score garbled input. The interleaved `frame` is
+                        // untouched and is still what gets emitted to JS below.
+                        if let Some(ref mut v) = vad {
+                            let downmixed;
+                            let vad_input: &[f32] = if channels > 1 {
+                                downmixed = sample::downmix_to_mono(&frame, channels);
+                                &downmixed
+                            } else {
+                                &frame
                             };
+                            if let Ok(result) = v.process(vad_input) {
+                                vad_probability
+                                    .store(result.probability.to_bits(), Ordering::Relaxed);
+                            }
+                        }
+
+                        let bytes = match format {
+                            SampleFormat::Int16 => sample::f32_to_i16_le_bytes(&frame),
+                            SampleFormat::Float32 => sample::f32_to_f32_le_bytes(&frame),
+                        };
+                        tsfn.call(
+                            Ok(Buffer::from(bytes)),
+                            ThreadsafeFunctionCallMode::NonBlocking,
+                        );
+                    }
+                    Ok(None) => {
+                        // Timeout with no full frame yet: keep waiting.
+                    }
+                    Err(_) => {
+                        // The core stream closed (an explicit stop() or a
+                        // device/driver error) and all buffered audio has been
+                        // forwarded. Forward the typed cause to JS when one was
+                        // recorded so the callback raises 'error' rather than
+                        // silently stalling; a clean stop records none.
+                        if let Some(err) = pump_stream.take_last_error() {
                             tsfn.call(
-                                Ok(Buffer::from(bytes)),
+                                Err(to_napi_error(err)),
                                 ThreadsafeFunctionCallMode::NonBlocking,
                             );
                         }
-                    }
-                    Err(e) => {
-                        // A plain timeout while the device is healthy: keep
-                        // waiting. But if the channel disconnected, or the core
-                        // stream closed (a driver error flips its `is_open` and
-                        // records a typed cause without our `stop()` running),
-                        // surface it instead of freezing with isOpen still true.
-                        if e.is_disconnected() || !pump_stream.is_open() {
-                            if let Some(err) = pump_stream.take_last_error() {
-                                // Device/driver failure: deliver the typed error
-                                // to the JS callback so it raises 'error' rather
-                                // than silently stalling.
-                                tsfn.call(
-                                    Err(to_napi_error(err)),
-                                    ThreadsafeFunctionCallMode::NonBlocking,
-                                );
-                            }
-                            running.store(false, Ordering::Relaxed);
-                            break;
-                        }
+                        running.store(false, Ordering::Relaxed);
+                        break;
                     }
                 }
             }
