@@ -23,6 +23,7 @@ For other decibri packages, see:
 
 ### Fixed
 
+- Resampled capture (a device whose native rate differs from the configured `sampleRate`) no longer drops the resampler's group-delay tail at stream close: the final, possibly-shorter `'data'` chunk(s) before `'end'` now carry it, so the complete resampled signal is delivered. A device already at the requested rate (no resample) is unchanged.
 - On macOS, the microphone-permission error message now reads "System Settings > Privacy & Security" (the modern macOS wording) instead of the pre-Ventura "System Preferences > Security & Privacy".
 
 ## [4.4.2] - 2026-06-12
