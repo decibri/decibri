@@ -186,6 +186,12 @@ pub(crate) struct CaptureStage {
     work: Vec<f32>,
     /// The ping-pong partner of `work`: each stage reads one and writes the other.
     scratch: Vec<f32>,
+    /// Snapshot of the post-`normalize`, pre-`transform` signal from the most
+    /// recent [`run`](Self::run) or [`flush`](Self::flush), captured only when
+    /// `transform` is non-empty (otherwise the delivered output already is that
+    /// signal). Read via [`tap`](Self::tap); the caller uses it to feed a detector
+    /// the signal before the transform step.
+    tap: Vec<f32>,
 }
 
 impl CaptureStage {
@@ -193,13 +199,27 @@ impl CaptureStage {
     ///
     /// Seeds `work` with `input`, then ping-pongs `work` <-> `scratch` first
     /// across the `normalize` stages and then across the `transform` stages,
-    /// leaving the final output in `work`.
+    /// leaving the final output in `work`. When `transform` is non-empty, snapshots
+    /// the post-`normalize`, pre-`transform` `work` into `tap` first, so the caller
+    /// can read the signal as it stood before the transform step.
     pub(crate) fn run(&mut self, input: &[f32]) -> Result<&[f32], DecibriError> {
         self.work.clear();
         self.work.extend_from_slice(input);
         Self::run_segment(&mut self.work, &mut self.scratch, &mut self.normalize)?;
+        self.capture_tap();
         Self::run_segment(&mut self.work, &mut self.scratch, &mut self.transform)?;
         Ok(&self.work)
+    }
+
+    /// Snapshot `work` (the post-`normalize`, pre-`transform` signal) into `tap`,
+    /// but only when `transform` is non-empty. With no transform the delivered
+    /// output already is this signal, so nothing is captured and `tap` stays empty
+    /// (zero overhead on the no-transform path).
+    fn capture_tap(&mut self) {
+        if !self.transform.is_empty() {
+            self.tap.clear();
+            self.tap.extend_from_slice(&self.work);
+        }
     }
 
     /// Ping-pong one block through a single segment's stages, leaving the result
@@ -234,9 +254,27 @@ impl CaptureStage {
         // carried unbroken from the `normalize` walk into the `transform` walk.
         self.work.clear();
         Self::flush_segment(&mut self.work, &mut self.scratch, &mut self.normalize)?;
+        // Capture the post-`normalize` tail (the resampler's group-delay tail)
+        // before it passes through `transform`, so the tap stays aligned with the
+        // delivered output across the close path too.
+        self.capture_tap();
         Self::flush_segment(&mut self.work, &mut self.scratch, &mut self.transform)?;
         out.extend_from_slice(&self.work);
         Ok(())
+    }
+
+    /// The post-`normalize`, pre-`transform` signal captured by the most recent
+    /// [`run`](Self::run) or [`flush`](Self::flush). Empty when the chain has no
+    /// `transform` segment (nothing is captured on that path).
+    pub(crate) fn tap(&self) -> &[f32] {
+        &self.tap
+    }
+
+    /// Whether the chain has a `transform` segment, so the delivered output is the
+    /// post-transform signal and the [`tap`](Self::tap) carries the distinct
+    /// pre-transform signal.
+    pub(crate) fn has_transform(&self) -> bool {
+        !self.transform.is_empty()
     }
 
     /// Drain one segment's tail, carrying `work` across its stages. At each stage
@@ -313,6 +351,7 @@ pub(crate) fn build_capture_stage(
             transform,
             work: Vec::new(),
             scratch: Vec::new(),
+            tap: Vec::new(),
         })
     })
 }
@@ -651,6 +690,106 @@ mod tests {
             got.len(),
             process_only + tail.len(),
             "the flushed tail is appended after the run output, nothing reordered"
+        );
+    }
+
+    /// With no `transform` segment, `run` captures no tap (the delivered output
+    /// already is the post-normalize signal), and `has_transform` is false.
+    #[test]
+    fn run_skips_tap_when_no_transform() {
+        let mut chain = build_capture_stage(2, 1, 16_000, 16_000, &EnhancementConfig::default())
+            .unwrap()
+            .expect("stereo -> downmix-only chain");
+        assert!(
+            !chain.has_transform(),
+            "a downmix-only chain has no transform"
+        );
+        let _ = chain.run(&[0.5, 0.3, 0.4, 0.6]).expect("downmix runs");
+        assert!(
+            chain.tap().is_empty(),
+            "no transform: nothing is captured into the tap"
+        );
+    }
+
+    /// With a `transform` present, `run` captures the post-normalize,
+    /// pre-transform signal into the tap. For a downmix + resample + DC chain the
+    /// tap equals the downmix+resample output (process path) and the delivered
+    /// output equals the DC blocker applied to that tap, so the tap is genuinely
+    /// the pre-transform signal and differs from the delivered output.
+    #[test]
+    fn run_captures_post_normalize_tap() {
+        let on = EnhancementConfig { dc_removal: true };
+        let mut chain = build_capture_stage(2, 1, 48_000, 16_000, &on)
+            .unwrap()
+            .expect("downmix + resample + DC chain");
+        assert!(chain.has_transform());
+
+        // Stereo 48k with a DC offset on both channels.
+        let frames = 6_000;
+        let mut input = Vec::with_capacity(frames * 2);
+        for k in 0..frames {
+            let s = (k as f32 * 0.01).sin() + 0.5;
+            input.push(s);
+            input.push(s);
+        }
+
+        let out = chain.run(&input).expect("run").to_vec();
+        let tap = chain.tap().to_vec();
+
+        // Reference post-normalize signal: downmix then resample (process only,
+        // no flush in run).
+        let mono = sample::downmix_to_mono(&input, 2);
+        let mut resampler = PolyphaseResampler::new(48_000, 16_000).unwrap();
+        let mut expected_norm = Vec::new();
+        resampler.process(&mono, &mut expected_norm);
+        assert_eq!(
+            tap, expected_norm,
+            "the tap is exactly the post-normalize (pre-transform) signal"
+        );
+
+        // The delivered output is the DC blocker applied to the tap.
+        let mut dc = DcBlocker::new();
+        let mut expected_out = tap.clone();
+        dc.process_in_place(&mut expected_out);
+        assert_eq!(out, expected_out, "delivered output is DC(tap)");
+        assert_ne!(
+            tap, out,
+            "the DC step changes the signal, so tap != delivered"
+        );
+        assert_eq!(
+            tap.len(),
+            out.len(),
+            "the DC step preserves length, so aligned"
+        );
+    }
+
+    /// At close, `flush` captures the post-normalize flush tail (the resampler's
+    /// group-delay tail) into the tap before it passes through the transform, so
+    /// the tap stays aligned with the delivered tail across the close path.
+    #[test]
+    fn flush_captures_post_normalize_tail() {
+        let on = EnhancementConfig { dc_removal: true };
+        let mut chain = build_capture_stage(1, 1, 48_000, 16_000, &on)
+            .unwrap()
+            .expect("resample + DC chain");
+        let input: Vec<f32> = (0..24_000).map(|n| (n as f32 * 0.01).sin()).collect();
+        let _ = chain.run(&input).expect("run");
+        let mut tail = Vec::new();
+        chain.flush(&mut tail).expect("flush");
+        let tap_tail = chain.tap().to_vec();
+        assert!(
+            !tap_tail.is_empty(),
+            "the resampler holds a group-delay tail, captured into the tap"
+        );
+        assert_eq!(
+            tap_tail.len(),
+            tail.len(),
+            "the tap tail and delivered tail are aligned (DC preserves length)"
+        );
+        // The delivered tail is DC(tap_tail), continuing the filter state from run.
+        assert_ne!(
+            tap_tail, tail,
+            "the delivered tail is post-transform, the tap tail is pre-transform"
         );
     }
 

@@ -127,6 +127,16 @@ pub struct AudioChunk {
 #[cfg(feature = "capture")]
 const CAPTURE_CHANNEL_CAPACITY: usize = 64;
 
+/// Memory bound for the pre-transform VAD tap, in seconds of audio at the target
+/// rate. The tap accumulates the post-normalize signal in lockstep with the
+/// delivered output and is drained by [`MicrophoneStream::vad_input`]. A consumer
+/// that enables an enhancement step but never drains the tap would otherwise grow
+/// memory without limit; beyond this many seconds the oldest tapped samples are
+/// dropped. Sized far above the in-flight reblock depth, so an actively draining
+/// VAD never reaches it and the tap stays aligned with the delivered output.
+#[cfg(feature = "capture")]
+const VAD_TAP_BOUND_SECS: usize = 2;
+
 /// An open capture stream you pull [`AudioChunk`]s from.
 ///
 /// Obtained from [`Microphone::start`]. Read audio with
@@ -184,6 +194,22 @@ pub struct MicrophoneStream {
     // close is detected with a chain present, under the `reblock_buffer` lock, so
     // the drain runs exactly once. `AtomicBool` keeps the type `Send + Sync`.
     chain_flushed: AtomicBool,
+    // Pre-transform (post-normalize) side channel for the VAD feed. `Some` only
+    // when the chain has a `transform` segment, so the delivered output (which is
+    // post-transform) differs from the signal a detector should read. Populated in
+    // lockstep with `reblock_buffer` during `ingest`/`flush_chain` (same sample
+    // count, the transform preserves length) and drained by
+    // [`vad_input`](Self::vad_input). `None` when there is no transform: the
+    // delivered output already is the post-normalize signal, so the tap is unused
+    // and `vad_input` returns `None` with zero overhead. `Mutex<VecDeque<f32>>` is
+    // `Send + Sync`, so the type stays `Send + Sync`.
+    vad_tap: Option<Mutex<VecDeque<f32>>>,
+    // Memory bound (in samples) for `vad_tap`, computed from the target rate at
+    // construction (see `VAD_TAP_BOUND_SECS`). Oldest tapped samples are dropped
+    // beyond this so a consumer that enables an enhancement step but never drains
+    // `vad_input` cannot grow memory without limit. Never reached while a VAD
+    // actively drains the tap, so it does not perturb alignment.
+    vad_tap_cap: usize,
 }
 
 #[cfg(feature = "capture")]
@@ -434,6 +460,11 @@ impl MicrophoneStream {
     /// the A0b path, with no lock, allocation, or copy beyond the existing
     /// reblock. `Some` chain: the chain runs behind its `Mutex` and its
     /// conditioned output is appended instead.
+    ///
+    /// When the chain has a transform, the post-normalize, pre-transform tap is
+    /// captured into the VAD side channel in lockstep with the delivered output,
+    /// so [`vad_input`](Self::vad_input) can hand a detector the signal before the
+    /// enhancement step.
     fn ingest(&self, buf: &mut VecDeque<f32>, chunk: AudioChunk) -> Result<(), DecibriError> {
         match &self.capture_stage {
             None => {
@@ -444,7 +475,29 @@ impl MicrophoneStream {
                 let mut stage = stage.lock().unwrap_or_else(PoisonError::into_inner);
                 let out = stage.run(&chunk.data)?;
                 buf.extend(out.iter().copied());
+                // Copy the pre-transform tap out, release the stage lock, then
+                // append it to the VAD buffer so the two locks are never nested.
+                let tap = stage.has_transform().then(|| stage.tap().to_vec());
+                drop(stage);
+                if let Some(tap) = tap {
+                    self.push_vad_tap(tap);
+                }
                 Ok(())
+            }
+        }
+    }
+
+    /// Append post-normalize samples to the VAD tap, dropping the oldest beyond
+    /// the [`VAD_TAP_BOUND_SECS`] memory bound. A no-op when the tap is inactive
+    /// (no transform). The bound only trips when a transform is enabled but the
+    /// tap is not being drained, so it never perturbs an actively draining VAD.
+    fn push_vad_tap(&self, samples: Vec<f32>) {
+        if let Some(tap) = &self.vad_tap {
+            let mut tap = tap.lock().unwrap_or_else(PoisonError::into_inner);
+            tap.extend(samples);
+            if tap.len() > self.vad_tap_cap {
+                let excess = tap.len() - self.vad_tap_cap;
+                tap.drain(..excess);
             }
         }
     }
@@ -471,6 +524,15 @@ impl MicrophoneStream {
                 let mut tail = Vec::new();
                 stage.flush(&mut tail)?;
                 buf.extend(tail);
+                // Capture the post-normalize flush tail into the VAD tap too, so
+                // the tap does not desync from the delivered output at close: the
+                // resampler's group-delay tail is part of the post-normalize
+                // signal the detector should read.
+                let tap = stage.has_transform().then(|| stage.tap().to_vec());
+                drop(stage);
+                if let Some(tap) = tap {
+                    self.push_vad_tap(tap);
+                }
             }
         }
         Ok(())
@@ -489,6 +551,38 @@ impl MicrophoneStream {
     /// The channel count this stream was opened with.
     pub fn channels(&self) -> u16 {
         self.channels
+    }
+
+    /// The pre-transform (post-normalize) samples for the VAD feed, drained in
+    /// lockstep with [`next_chunk`](Self::next_chunk).
+    ///
+    /// Binding-internal plumbing: a binding that runs voice-activity detection
+    /// calls this right after a `next_chunk` / `try_next_chunk` delivery, passing
+    /// the delivered chunk's length, and feeds the returned samples to the
+    /// detector instead of the delivered chunk. This makes the detector read the
+    /// signal BEFORE the opt-in enhancement step, so enabling enhancement does not
+    /// change detection. Not part of the stable FFI-consumer surface.
+    ///
+    /// # Returns
+    /// - `Some(v)`: the chain has an enhancement step, so the delivered output is
+    ///   the post-enhancement signal; `v` holds up to `samples` post-normalize
+    ///   samples, the pre-enhancement counterpart of the just-delivered block.
+    ///   Sample-aligned with that block because the enhancement step preserves
+    ///   length.
+    /// - `None`: the chain has no enhancement step, so the delivered chunk already
+    ///   is the post-normalize signal; feed the detector the delivered chunk
+    ///   exactly as before, with no allocation or copy.
+    ///
+    /// # Thread safety
+    /// Takes only the tap mutex (never the reblock or chain locks), so it composes
+    /// with a concurrent [`next_chunk`](Self::next_chunk). Sample-alignment relies
+    /// on the same consumer calling it once per delivered block, as the binding
+    /// pump does.
+    pub fn vad_input(&self, samples: usize) -> Option<Vec<f32>> {
+        let tap = self.vad_tap.as_ref()?;
+        let mut tap = tap.lock().unwrap_or_else(PoisonError::into_inner);
+        let take = samples.min(tap.len());
+        Some(tap.drain(..take).collect())
     }
 
     /// Take the last device/driver error reported while streaming, if any.
@@ -656,6 +750,16 @@ impl Microphone {
         };
         let _stream = CpalBackend.open_input_stream(&self.device, &params, on_data, on_error)?;
 
+        // The VAD tap is active only when the chain has a transform segment, so
+        // the delivered (post-transform) output differs from the pre-transform
+        // signal a detector should read. With no transform the delivered output
+        // already is that signal, so no tap is allocated.
+        let vad_tap = match &capture_stage {
+            Some(stage) if stage.has_transform() => Some(Mutex::new(VecDeque::new())),
+            _ => None,
+        };
+        let vad_tap_cap = target_rate as usize * VAD_TAP_BOUND_SECS;
+
         Ok(MicrophoneStream {
             _stream,
             receiver,
@@ -669,6 +773,8 @@ impl Microphone {
             reblock_buffer: Mutex::new(VecDeque::new()),
             capture_stage: capture_stage.map(Mutex::new),
             chain_flushed: AtomicBool::new(false),
+            vad_tap,
+            vad_tap_cap,
         })
     }
 }
@@ -687,6 +793,10 @@ mod tests {
     ) -> (MicrophoneStream, Sender<AudioChunk>, Arc<AtomicBool>) {
         let (sender, receiver) = crossbeam_channel::unbounded::<AudioChunk>();
         let running = Arc::new(AtomicBool::new(true));
+        let vad_tap = match &capture_stage {
+            Some(stage) if stage.has_transform() => Some(Mutex::new(VecDeque::new())),
+            _ => None,
+        };
         let stream = MicrophoneStream {
             _stream: BackendStream::empty(),
             receiver,
@@ -697,6 +807,8 @@ mod tests {
             overruns: Arc::new(AtomicU64::new(0)),
             reblock_buffer: Mutex::new(VecDeque::new()),
             capture_stage: capture_stage.map(Mutex::new),
+            vad_tap,
+            vad_tap_cap: 16000 * VAD_TAP_BOUND_SECS,
             chain_flushed: AtomicBool::new(false),
         };
         (stream, sender, running)
@@ -1302,6 +1414,164 @@ mod tests {
         assert!(
             mean.abs() < 1e-3,
             "the DC offset is removed end to end (settled mean {mean})"
+        );
+    }
+
+    /// VAD tap inactive (enhancement off): a chain with no transform (here a
+    /// downmix-only chain) leaves the tap unallocated, so `vad_input` is `None`
+    /// throughout and a binding feeds VAD the delivered chunk exactly as before.
+    #[test]
+    fn test_vad_input_none_when_no_transform() {
+        let stage = build_capture_stage(2, 1, 16_000, 16_000, &EnhancementConfig::default())
+            .unwrap()
+            .expect("stereo -> downmix-only chain");
+        let (stream, sender, running) = test_stream_with(Some(stage), 1);
+        assert!(
+            stream.vad_input(4).is_none(),
+            "no transform: the tap is inactive and vad_input returns None"
+        );
+
+        sender
+            .send(make_native_chunk(vec![0.5, 0.3, 0.4, 0.6]))
+            .unwrap();
+        drop(sender);
+        running.store(false, Ordering::Relaxed);
+        loop {
+            match stream.next_chunk(2, Some(Duration::from_millis(100))) {
+                Ok(Some(c)) => assert!(
+                    stream.vad_input(c.data.len()).is_none(),
+                    "vad_input stays None throughout when no transform is present"
+                ),
+                Ok(None) => panic!("unexpected timeout"),
+                Err(DecibriError::MicrophoneStreamClosed) => break,
+                Err(e) => panic!("unexpected error: {e}"),
+            }
+        }
+    }
+
+    /// A mono device builds no chain at all, so the tap is inactive and
+    /// `vad_input` is `None` (the binding uses the delivered chunk).
+    #[test]
+    fn test_vad_input_none_for_no_chain() {
+        let (stream, _sender, _running) = test_stream();
+        assert!(stream.capture_stage.is_none(), "a mono stream has no chain");
+        assert!(
+            stream.vad_input(4).is_none(),
+            "no chain: vad_input returns None"
+        );
+    }
+
+    /// Enhancement-on tap correctness: with DC removal active, `vad_input` returns
+    /// the post-normalize (pre-DC-removal) signal, NOT the post-transform delivered
+    /// output. A constant DC offset proves it: the delivered output has the offset
+    /// removed, but the VAD feed still carries it, so VAD reads the pre-transform
+    /// signal. The tap and the delivered output stay aligned (same sample count).
+    #[test]
+    fn test_vad_input_returns_pre_transform_signal() {
+        let enhancement = EnhancementConfig { dc_removal: true };
+        let stage = build_capture_stage(1, 1, 16_000, 16_000, &enhancement)
+            .unwrap()
+            .expect("dc-only chain");
+        let (stream, sender, running) = test_stream_with(Some(stage), 1);
+
+        let n = 16_000;
+        let input = vec![0.5_f32; n];
+        sender.send(make_native_chunk(input)).unwrap();
+        drop(sender);
+        running.store(false, Ordering::Relaxed);
+
+        let samples = 320;
+        let mut delivered: Vec<f32> = Vec::new();
+        let mut vad_feed: Vec<f32> = Vec::new();
+        loop {
+            match stream.next_chunk(samples, Some(Duration::from_millis(100))) {
+                Ok(Some(c)) => {
+                    let pre = stream
+                        .vad_input(c.data.len())
+                        .expect("tap active when a transform is present");
+                    vad_feed.extend_from_slice(&pre);
+                    delivered.extend_from_slice(&c.data);
+                }
+                Ok(None) => panic!("unexpected timeout"),
+                Err(DecibriError::MicrophoneStreamClosed) => break,
+                Err(e) => panic!("unexpected error: {e}"),
+            }
+        }
+
+        assert_eq!(delivered.len(), n, "no resample, length preserved");
+        assert_eq!(
+            vad_feed.len(),
+            n,
+            "the VAD feed is aligned with the delivered output"
+        );
+        // The VAD feed carries the DC offset (pre-transform).
+        assert!(
+            vad_feed.iter().all(|&s| (s - 0.5).abs() < 1e-6),
+            "the VAD feed is the exact post-normalize (pre-DC) signal, offset intact"
+        );
+        // The delivered output has the offset removed (post-transform).
+        let settled = &delivered[n - n / 4..];
+        let d_mean = settled.iter().sum::<f32>() / settled.len() as f32;
+        assert!(
+            d_mean.abs() < 1e-3,
+            "the delivered output has the DC offset removed (post-transform)"
+        );
+    }
+
+    /// The tap stays aligned with the delivered output through the resampler's
+    /// flushed group-delay tail at close: the VAD feed equals the post-normalize
+    /// signal (resample process + flush) bit for bit and matches the delivered
+    /// count, so the close path does not desync the tap.
+    #[test]
+    fn test_vad_input_aligned_through_resampler_flush_tail() {
+        use decibri_resampler::{PolyphaseResampler, Resampler};
+
+        let enhancement = EnhancementConfig { dc_removal: true };
+        let stage = build_capture_stage(1, 1, 48_000, 16_000, &enhancement)
+            .unwrap()
+            .expect("resample + DC chain");
+        let (stream, sender, running) = test_stream_with(Some(stage), 1);
+
+        let input: Vec<f32> = (0..24_000).map(|k| (k as f32 * 0.01).sin() + 0.5).collect();
+        sender.send(make_native_chunk(input.clone())).unwrap();
+        drop(sender);
+        running.store(false, Ordering::Relaxed);
+
+        let samples = 320;
+        let mut delivered: Vec<f32> = Vec::new();
+        let mut vad_feed: Vec<f32> = Vec::new();
+        loop {
+            match stream.next_chunk(samples, Some(Duration::from_millis(100))) {
+                Ok(Some(c)) => {
+                    let pre = stream.vad_input(c.data.len()).expect("tap active");
+                    vad_feed.extend_from_slice(&pre);
+                    delivered.extend_from_slice(&c.data);
+                }
+                Ok(None) => panic!("unexpected timeout"),
+                Err(DecibriError::MicrophoneStreamClosed) => break,
+                Err(e) => panic!("unexpected error: {e}"),
+            }
+        }
+
+        // Ground truth post-normalize signal: the resampler over the whole input,
+        // process then flush (no DC removal).
+        let mut resampler = PolyphaseResampler::new(48_000, 16_000).unwrap();
+        let mut expected_norm = Vec::new();
+        resampler.process(&input, &mut expected_norm);
+        resampler.flush(&mut expected_norm);
+
+        assert_eq!(
+            vad_feed, expected_norm,
+            "the VAD feed is the post-normalize signal incl. the resampler flush tail"
+        );
+        assert_eq!(
+            vad_feed.len(),
+            delivered.len(),
+            "tap and delivered stay aligned through the flushed tail"
+        );
+        assert_ne!(
+            vad_feed, delivered,
+            "the delivered output is post-transform (DC removed), so it differs from the feed"
         );
     }
 

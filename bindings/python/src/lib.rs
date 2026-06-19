@@ -820,16 +820,22 @@ impl MicrophoneBridge {
         {
             let mut vad_guard = lock_recover(&self.vad);
             if let Some(vad) = vad_guard.as_mut() {
+                // Feed VAD the signal BEFORE the opt-in enhancement step when the
+                // tap is active; otherwise the delivered chunk already is that
+                // signal. Called once per delivered chunk so the tap drains in
+                // lockstep. `chunk.data` stays untouched and is what the caller
+                // receives below.
+                let pre_enh = stream.vad_input(chunk.data.len());
+                let vad_frame: &[f32] = pre_enh.as_deref().unwrap_or(&chunk.data);
                 // Silero VAD models a single channel. Downmix interleaved
                 // multichannel audio to mono first so consecutive channels are
-                // not misread as successive mono samples. `chunk.data` stays
-                // interleaved and is what the caller receives below.
+                // not misread as successive mono samples.
                 let downmixed;
                 let vad_input: &[f32] = if chunk.channels > 1 {
-                    downmixed = downmix_to_mono(&chunk.data, chunk.channels);
+                    downmixed = downmix_to_mono(vad_frame, chunk.channels);
                     &downmixed
                 } else {
-                    &chunk.data
+                    vad_frame
                 };
                 let result = py
                     .detach(|| vad.process(vad_input))

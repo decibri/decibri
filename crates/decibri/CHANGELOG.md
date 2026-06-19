@@ -14,6 +14,7 @@ For other decibri packages, see:
 ### Added
 
 - An opt-in capture enhancement with a DC-removal step. `MicrophoneConfig` gains an `enhancement: EnhancementConfig` field (a `#[non_exhaustive]` struct whose every setting defaults to off), re-exported as `decibri::EnhancementConfig`. Setting `enhancement.dc_removal = true` adds a one-pole DC-blocking high-pass to the capture chain, applied after the channel and rate normalization, which removes a constant offset from the captured audio while leaving the voice band essentially flat. Default off, so the capture path stays byte-identical unless a consumer opts in.
+- Voice-activity detection reads the capture signal before the opt-in enhancement step. When a capture enhancement (such as DC removal) is enabled, the detector is fed the normalized signal as it stands before the enhancement step, so the enhancement does not affect detection. A new internal `MicrophoneStream::vad_input` accessor exposes the pre-enhancement samples aligned with each delivered chunk, and the Node and Python bindings feed the detector from it. With no enhancement enabled (the default) the detector reads the delivered audio exactly as before, with no added overhead.
 
 ### Changed
 
