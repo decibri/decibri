@@ -103,7 +103,9 @@ use decibri::{Microphone, MicrophoneConfig};
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let microphone = Microphone::new(MicrophoneConfig::default())?;
     let stream = microphone.start()?;
-    while let Ok(Some(chunk)) = stream.next_chunk(None) {
+    // 1600 interleaved samples per block = frames_per_buffer * channels for the
+    // default config (one 100 ms block of mono 16 kHz audio).
+    while let Ok(Some(chunk)) = stream.next_chunk(1600, None) {
         println!("Got {} samples", chunk.data.len());
     }
     Ok(())

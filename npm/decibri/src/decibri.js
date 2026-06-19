@@ -120,6 +120,12 @@ class Microphone extends Readable {
     this._isSpeaking = false;
     this._silenceTimer = null;
     this._started = false;
+    // Terminal once stop() runs: blocks _read() from restarting native capture
+    // while the end-of-stream push(null) is deferred past the flushed tail.
+    this._stopped = false;
+    // Set just before the deferred push(null); the data callback drops any
+    // straggler that arrives after end-of-stream rather than pushing past EOF.
+    this._ended = false;
 
     // ── Create or adopt native bridge ───────────────────────────────────────
 
@@ -287,13 +293,24 @@ class Microphone extends Readable {
 
   /** @internal */
   _read() {
-    if (this._started) return;
+    // Never (re)start native capture once stopped: stop() defers the
+    // end-of-stream push(null), and a _read() in that window would otherwise
+    // reopen the device.
+    if (this._started || this._stopped) return;
     this._started = true;
 
     this._native.start((err, chunk) => {
       if (err) {
         this._started = false;
         this.destroy(err);
+        return;
+      }
+
+      // On close the native pump flushes the buffered tail; that final data
+      // callback can run after stop() has begun ending the stream. Once the
+      // end-of-stream push(null) has been issued (or the stream was destroyed),
+      // drop any straggler rather than pushing past EOF.
+      if (this._ended || this.destroyed) {
         return;
       }
 
@@ -350,10 +367,23 @@ class Microphone extends Readable {
   stop() {
     if (!this._started) return;
     this._started = false;
+    this._stopped = true;
     this._native.stop();
     clearTimeout(this._silenceTimer);
     this._silenceTimer = null;
-    this.push(null); // signals stream end
+    // The native pump flushes any buffered tail on close; those final data
+    // callbacks are queued on the event loop and run before a setImmediate
+    // scheduled now. Defer the end-of-stream push(null) past them so the final
+    // short chunk reaches consumers without landing after EOF
+    // (ERR_STREAM_PUSH_AFTER_EOF). `_ended` is set first so the data callback
+    // drops any straggler that somehow arrives after this point.
+    setImmediate(() => {
+      // A device error in the same tick may have destroyed the stream before
+      // this runs; don't end an already-destroyed stream.
+      if (this.destroyed) return;
+      this._ended = true;
+      this.push(null); // signals stream end
+    });
   }
 
   /**

@@ -38,8 +38,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let stream = microphone.start()?;
     let mut vad = SileroVad::new(VadConfig::default())?;
 
+    // 1600 interleaved samples = one 100 ms block of mono 16 kHz audio
+    // (frames_per_buffer * channels for the default config).
     loop {
-        match stream.next_chunk(Some(Duration::from_millis(100))) {
+        match stream.next_chunk(1600, Some(Duration::from_millis(100))) {
             Ok(Some(chunk)) => {
                 let result = vad.process(&chunk.data)?;
                 if result.is_speech {

@@ -56,8 +56,10 @@
 //! let stream = microphone.start()?;
 //! let mut vad = SileroVad::new(VadConfig::default())?;
 //!
+//! // 1600 interleaved samples = one 100 ms block of mono 16 kHz audio
+//! // (frames_per_buffer * channels for the default config).
 //! loop {
-//!     match stream.next_chunk(Some(Duration::from_millis(100))) {
+//!     match stream.next_chunk(1600, Some(Duration::from_millis(100))) {
 //!         Ok(Some(chunk)) => {
 //!             let result = vad.process(&chunk.data)?;
 //!             if result.is_speech {
@@ -135,8 +137,8 @@
 //!
 //! # Stability
 //!
-//! Within 4.x, the following stream surface is stable and will not change
-//! signature without a breaking version bump:
+//! The following stream surface is stable and changes signature only with a
+//! breaking version bump:
 //!
 //! - [`microphone::MicrophoneStream`][]:
 //!   [`try_next_chunk`](microphone::MicrophoneStream::try_next_chunk),
