@@ -769,10 +769,15 @@ struct MicrophoneBridge {
 // boundary because `Bound<'py, ...>` is GIL-bound).
 impl MicrophoneBridge {
     /// Read the next audio chunk, run VAD inference if configured, and
-    /// return the raw `Vec<f32>` data. No Python object construction;
-    /// returning `Vec<f32>` lets the caller decide between PyBytes and
-    /// PyArray encoding without re-running the cpal read or VAD pass.
-    fn read_raw(&self, py: Python<'_>, timeout_ms: Option<u64>) -> PyResult<Option<Vec<f32>>> {
+    /// return the raw `Vec<f32>` data plus the output channel count. No Python
+    /// object construction; returning the raw data lets the caller decide
+    /// between PyBytes and PyArray encoding without re-running the cpal read or
+    /// VAD pass, and the channel count drives the ndarray shape.
+    fn read_raw(
+        &self,
+        py: Python<'_>,
+        timeout_ms: Option<u64>,
+    ) -> PyResult<Option<(Vec<f32>, u16)>> {
         let timeout = timeout_ms.map(Duration::from_millis);
 
         // Clone a handle to the core stream under a tiny lock, then release the
@@ -793,11 +798,13 @@ impl MicrophoneBridge {
             }
         };
 
-        // Requested block size in interleaved samples: frames_per_buffer times
-        // channels. The core re-blocks the device's native buffers to exactly
-        // this size, so read() returns fixed-size chunks on every platform.
-        let samples =
-            self.capture_config.frames_per_buffer as usize * self.capture_config.channels as usize;
+        // Requested block size in interleaved OUTPUT samples: frames_per_buffer
+        // times the stream's output channel count. The engine's normalize chain
+        // makes a multichannel device mono, so this is counted in output (not
+        // device) channels; the core re-blocks to exactly this size on every
+        // platform.
+        let output_channels = stream.channels();
+        let samples = self.capture_config.frames_per_buffer as usize * output_channels as usize;
 
         // Release GIL for the blocking next_chunk call. The `active` lock is
         // not held here, so stop() can proceed concurrently and wake us.
@@ -832,12 +839,7 @@ impl MicrophoneBridge {
             }
         }
 
-        Ok(Some(chunk.data))
-    }
-
-    /// Channel count accessor for the async wrapper's encoding step.
-    fn channels(&self) -> u16 {
-        self.capture_config.channels
+        Ok(Some((chunk.data, chunk.channels)))
     }
 
     /// numpy-mode flag accessor for the async wrapper's encoding step.
@@ -971,21 +973,17 @@ impl MicrophoneBridge {
         py: Python<'py>,
         timeout_ms: Option<u64>,
     ) -> PyResult<Option<Bound<'py, PyAny>>> {
-        let Some(data) = self.read_raw(py, timeout_ms)? else {
+        let Some((data, channels)) = self.read_raw(py, timeout_ms)? else {
             return Ok(None);
         };
         // Branch on the constructor-set numpy flag. Default
         // (numpy=False) returns PyBytes (wire format); numpy=True
         // returns a numpy.ndarray with dtype matching format and shape
-        // matching channel count. Both arms are returned as Bound<PyAny>
-        // so the union is expressed at the Python boundary.
+        // matching the OUTPUT channel count (mono after the normalize chain).
+        // Both arms are returned as Bound<PyAny> so the union is expressed at
+        // the Python boundary.
         if self.numpy {
-            Ok(Some(encode_chunk_numpy(
-                py,
-                data,
-                self.format,
-                self.capture_config.channels,
-            )?))
+            Ok(Some(encode_chunk_numpy(py, data, self.format, channels)?))
         } else {
             Ok(Some(encode_chunk_bytes(py, &data, self.format)))
         }
@@ -1480,13 +1478,8 @@ impl AsyncMicrophoneBridge {
                 tokio::task::spawn_blocking(move || -> PyResult<Option<AsyncReadOutput>> {
                     Python::attach(|py| {
                         let opt = inner.read_raw(py, timeout_ms)?;
-                        Ok(opt.map(|data| {
-                            (
-                                data,
-                                inner.binding_format(),
-                                inner.channels(),
-                                inner.numpy_mode(),
-                            )
+                        Ok(opt.map(|(data, channels)| {
+                            (data, inner.binding_format(), channels, inner.numpy_mode())
                         }))
                     })
                 })

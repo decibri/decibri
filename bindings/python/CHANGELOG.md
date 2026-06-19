@@ -16,6 +16,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Changed
 
+- A multichannel microphone is now downmixed to mono. `Microphone.read()` and `AsyncMicrophone.read()` return mono data (each frame averaged across its channels), the numpy array is 1-D, and a chunk holds `frames_per_buffer` mono samples. Previously a multichannel device returned interleaved multichannel data. Single-channel capture is unchanged. Breaking for consumers that opened a multichannel device.
 - `Microphone.read()` and `AsyncMicrophone.read()` now return exactly `frames_per_buffer` frames per chunk, because the core re-blocks the device's native capture buffers to the requested size. Previously they returned whole platform-native buffers whose size was platform-dependent and, on Windows WASAPI, unrelated to `frames_per_buffer`. Code that assumed a fixed chunk size now gets one on every platform; code that relied on the variable native size must not. The final chunk at stream close may be shorter than `frames_per_buffer` frames, carrying the remaining tail (no captured audio is dropped); the next `read()` then raises `MicrophoneStreamClosed`. The `read()` signature is unchanged. Breaking: the returned chunk size changes.
 
 ### Fixed
