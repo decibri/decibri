@@ -207,6 +207,11 @@ pub mod device;
 #[cfg(any(feature = "capture", feature = "playback"))]
 mod backend;
 
+// Internal capture stage chain: the normalize segment applied between the raw
+// device buffers and the exact-size reblock. Not part of the public API.
+#[cfg(feature = "capture")]
+mod stage;
+
 #[cfg(feature = "capture")]
 pub mod microphone;
 

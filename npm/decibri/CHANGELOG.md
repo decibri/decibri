@@ -17,6 +17,7 @@ For other decibri packages, see:
 
 ### Changed
 
+- A microphone opened with more than one channel now emits mono audio: the engine downmixes the device's channels (each frame averaged) before delivery, where previously the full interleaved multichannel frame was emitted. The default single-channel capture is unchanged. Chunk size stays `framesPerBuffer * outputChannels * bytesPerSample` (mono after the downmix). Breaking for consumers that opened a multichannel device.
 - Capture now emits a final, possibly-shorter `'data'` chunk at stream close (on `stop()`), carrying the buffered tail, before `'end'`. Steady-state chunks are unchanged (still exactly `framesPerBuffer * channels * bytesPerSample`); only the last chunk before `'end'` may be shorter, and no captured audio is dropped. Internally the binding now re-blocks through the Rust core instead of a binding-side accumulator, and `stop()` defers the stream's end-of-stream signal by one tick so the flushed tail is delivered before `'end'` rather than dropped.
 
 ### Fixed

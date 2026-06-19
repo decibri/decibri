@@ -29,6 +29,8 @@ use crate::backend::{
 };
 use crate::device::DeviceSelector;
 use crate::error::DecibriError;
+#[cfg(feature = "capture")]
+use crate::stage::{build_capture_stage, CaptureStage};
 
 /// Configuration for a microphone capture session.
 ///
@@ -149,6 +151,13 @@ pub struct MicrophoneStream {
     // concurrent consumers serialize. `Mutex<VecDeque<f32>>` is `Send + Sync`
     // because `VecDeque<f32>` is `Send`.
     reblock_buffer: Mutex<VecDeque<f32>>,
+    // The capture stage chain, applied to each native block before it lands in
+    // `reblock_buffer`. `None` when no conditioning is needed (an already-mono
+    // device), keeping the drain on the direct, zero-cost A0b path. When `Some`,
+    // the chain runs behind its own `Mutex` so the stage buffers mutate under a
+    // shared `&self` while the type stays `Send + Sync` (a `CaptureStage` is
+    // `Send`, so `Mutex<CaptureStage>` is `Send + Sync`).
+    capture_stage: Option<Mutex<CaptureStage>>,
 }
 
 #[cfg(feature = "capture")]
@@ -215,7 +224,7 @@ impl MicrophoneStream {
         let mut disconnected = false;
         loop {
             match self.receiver.try_recv() {
-                Ok(chunk) => buf.extend(chunk.data),
+                Ok(chunk) => self.ingest(&mut buf, chunk)?,
                 Err(TryRecvError::Empty) => break,
                 Err(TryRecvError::Disconnected) => {
                     disconnected = true;
@@ -310,7 +319,7 @@ impl MicrophoneStream {
                         // Deadline reached. Absorb any last-moment arrivals,
                         // then deliver a full block if one is now ready, else
                         // `None` (the partial stays buffered for the next call).
-                        self.drain_available(&mut buf);
+                        self.drain_available(&mut buf)?;
                         if buf.len() >= samples {
                             return Ok(Some(self.take_block(&mut buf, samples)));
                         }
@@ -323,7 +332,7 @@ impl MicrophoneStream {
 
             match self.receiver.recv_timeout(wait) {
                 Ok(chunk) => {
-                    buf.extend(chunk.data);
+                    self.ingest(&mut buf, chunk)?;
                     // Loop: re-check whether a full block is ready.
                 }
                 Err(RecvTimeoutError::Timeout) => {
@@ -331,7 +340,7 @@ impl MicrophoneStream {
                     // waited (a driver-error close flips `is_open` without
                     // disconnecting the channel).
                     if !self.is_open() {
-                        self.drain_available(&mut buf);
+                        self.drain_available(&mut buf)?;
                         return self.take_block_or_closed(&mut buf, samples);
                     }
                     // Stream still alive; loop with whatever deadline remains.
@@ -380,9 +389,32 @@ impl MicrophoneStream {
     /// Move every immediately-available native buffer from the channel into the
     /// re-block buffer without blocking. Stops on an empty or disconnected
     /// channel; the caller inspects `buf.len()` and the close state afterwards.
-    fn drain_available(&self, buf: &mut VecDeque<f32>) {
+    fn drain_available(&self, buf: &mut VecDeque<f32>) -> Result<(), DecibriError> {
         while let Ok(chunk) = self.receiver.try_recv() {
-            buf.extend(chunk.data);
+            self.ingest(buf, chunk)?;
+        }
+        Ok(())
+    }
+
+    /// Feed one native capture block into the re-block buffer, running the
+    /// capture stage chain first when one is present.
+    ///
+    /// `None` chain: the block's samples are appended directly, byte-identical to
+    /// the A0b path, with no lock, allocation, or copy beyond the existing
+    /// reblock. `Some` chain: the chain runs behind its `Mutex` and its
+    /// conditioned output is appended instead.
+    fn ingest(&self, buf: &mut VecDeque<f32>, chunk: AudioChunk) -> Result<(), DecibriError> {
+        match &self.capture_stage {
+            None => {
+                buf.extend(chunk.data);
+                Ok(())
+            }
+            Some(stage) => {
+                let mut stage = stage.lock().unwrap_or_else(PoisonError::into_inner);
+                let out = stage.run(&chunk.data)?;
+                buf.extend(out.iter().copied());
+                Ok(())
+            }
         }
     }
 
@@ -488,6 +520,19 @@ impl Microphone {
         let channels = self.config.channels;
         let frames_per_buffer = self.config.frames_per_buffer;
 
+        // Build the normalize chain for this device. The target is mono (1
+        // channel): `build_capture_stage` returns `Some([Downmix])` for a
+        // multichannel device and `None` for an already-mono one. The stream
+        // reports the OUTPUT channel count (mono when the chain downmixes), which
+        // is what consumers and the exact-size `samples` math are counted in.
+        let target_channels: u16 = 1;
+        let capture_stage = build_capture_stage(channels, target_channels);
+        let output_channels = if capture_stage.is_some() {
+            target_channels
+        } else {
+            channels
+        };
+
         let err_running = running.clone();
         let last_error = Arc::new(Mutex::new(None));
         let err_last_error = last_error.clone();
@@ -541,10 +586,11 @@ impl Microphone {
             receiver,
             running,
             sample_rate,
-            channels,
+            channels: output_channels,
             last_error,
             overruns,
             reblock_buffer: Mutex::new(VecDeque::new()),
+            capture_stage: capture_stage.map(Mutex::new),
         })
     }
 }
@@ -554,10 +600,13 @@ mod tests {
     use super::*;
     use std::thread;
 
-    /// Construct a synthetic `MicrophoneStream` with no underlying cpal device
-    /// for unit-testing the channel-reading methods. Returns the stream
-    /// plus test-side handles to inject chunks and flip the running flag.
-    fn test_stream() -> (MicrophoneStream, Sender<AudioChunk>, Arc<AtomicBool>) {
+    /// Construct a synthetic `MicrophoneStream` with no underlying cpal device,
+    /// the given stage chain, and the given output channel count. Returns the
+    /// stream plus test-side handles to inject native chunks and flip running.
+    fn test_stream_with(
+        capture_stage: Option<CaptureStage>,
+        channels: u16,
+    ) -> (MicrophoneStream, Sender<AudioChunk>, Arc<AtomicBool>) {
         let (sender, receiver) = crossbeam_channel::unbounded::<AudioChunk>();
         let running = Arc::new(AtomicBool::new(true));
         let stream = MicrophoneStream {
@@ -565,12 +614,18 @@ mod tests {
             receiver,
             running: running.clone(),
             sample_rate: 16000,
-            channels: 1,
+            channels,
             last_error: Arc::new(Mutex::new(None)),
             overruns: Arc::new(AtomicU64::new(0)),
             reblock_buffer: Mutex::new(VecDeque::new()),
+            capture_stage: capture_stage.map(Mutex::new),
         };
         (stream, sender, running)
+    }
+
+    /// Mono stream with no stage chain (the `None`, A0b-identical path).
+    fn test_stream() -> (MicrophoneStream, Sender<AudioChunk>, Arc<AtomicBool>) {
+        test_stream_with(None, 1)
     }
 
     fn make_chunk(first_sample: f32) -> AudioChunk {
@@ -875,6 +930,101 @@ mod tests {
 
         let err = stream.try_next_chunk(samples).unwrap_err();
         assert!(matches!(err, DecibriError::MicrophoneStreamClosed));
+    }
+
+    /// Empty-chain no-op (the `None` path): with no stage chain (a mono device),
+    /// `next_chunk` delivers the raw reblocked samples byte-identically to the
+    /// A0b path, exact size and final-tail behaviour included.
+    #[test]
+    fn test_empty_chain_is_byte_identical_noop() {
+        let (stream, sender, running) = test_stream(); // mono, capture_stage = None
+        assert!(stream.capture_stage.is_none(), "a mono stream has no chain");
+        sender
+            .send(make_native_chunk(vec![0.0, 1.0, 2.0, 3.0, 4.0]))
+            .unwrap();
+        sender
+            .send(make_native_chunk(vec![5.0, 6.0, 7.0, 8.0]))
+            .unwrap();
+        drop(sender);
+        running.store(false, Ordering::Relaxed);
+
+        let samples = 4;
+        let mut collected: Vec<f32> = Vec::new();
+        loop {
+            match stream.next_chunk(samples, Some(Duration::from_millis(100))) {
+                Ok(Some(c)) => collected.extend_from_slice(&c.data),
+                Ok(None) => panic!("unexpected timeout"),
+                Err(DecibriError::MicrophoneStreamClosed) => break,
+                Err(e) => panic!("unexpected error: {e}"),
+            }
+        }
+        // None path == A0b reblock: 9 samples -> two blocks of 4 then a 1-sample
+        // tail, every value passed through untransformed and in order.
+        assert_eq!(collected, (0..9).map(|n| n as f32).collect::<Vec<f32>>());
+    }
+
+    /// Cost no-op (the `None` path): a mono device builds no chain, so the drain
+    /// stays on the direct reblock. The `None` arm of `ingest` is a plain
+    /// `buf.extend(chunk.data)` with no chain lock, allocation, or copy,
+    /// structurally identical to A0b.
+    #[test]
+    fn test_mono_device_builds_no_chain() {
+        assert!(
+            build_capture_stage(1, 1).is_none(),
+            "a mono device needs no normalize chain"
+        );
+        let (stream, _sender, _running) = test_stream();
+        assert!(
+            stream.capture_stage.is_none(),
+            "no CaptureStage is allocated for a mono stream"
+        );
+    }
+
+    /// Auto-normalize (the `Some([Downmix])` path): a multichannel source is
+    /// downmixed to correct mono, exact size holds on the mono output, the
+    /// downmix is sample-identical to `sample::downmix_to_mono`, and the final
+    /// tail is delivered.
+    #[test]
+    fn test_downmix_chain_yields_correct_mono() {
+        let stage = build_capture_stage(2, 1);
+        assert!(stage.is_some(), "a stereo device gets a downmix chain");
+        let (stream, sender, running) = test_stream_with(stage, 1); // output is mono
+
+        // Stereo native chunks (interleaved L,R). Frame means:
+        //   [0.5,0.3]->0.4 [0.4,0.6]->0.5 ; [0.0,0.2]->0.1 [0.8,0.4]->0.6 [0.1,0.1]->0.1
+        sender
+            .send(make_native_chunk(vec![0.5, 0.3, 0.4, 0.6]))
+            .unwrap();
+        sender
+            .send(make_native_chunk(vec![0.0, 0.2, 0.8, 0.4, 0.1, 0.1]))
+            .unwrap();
+        drop(sender);
+        running.store(false, Ordering::Relaxed);
+
+        let samples = 2; // 2 MONO samples per block
+        let mut collected: Vec<f32> = Vec::new();
+        loop {
+            match stream.next_chunk(samples, Some(Duration::from_millis(100))) {
+                Ok(Some(c)) => {
+                    assert_eq!(c.channels, 1, "the normalized output is mono");
+                    collected.extend_from_slice(&c.data);
+                }
+                Ok(None) => panic!("unexpected timeout"),
+                Err(DecibriError::MicrophoneStreamClosed) => break,
+                Err(e) => panic!("unexpected error: {e}"),
+            }
+        }
+
+        // Mono stream [0.4,0.5,0.1,0.6,0.1] -> blocks [0.4,0.5] [0.1,0.6], tail [0.1].
+        let expected = [0.4, 0.5, 0.1, 0.6, 0.1];
+        assert_eq!(
+            collected.len(),
+            expected.len(),
+            "nothing dropped beyond the final-tail rule"
+        );
+        for (got, want) in collected.iter().zip(expected.iter()) {
+            assert!((got - want).abs() < 1e-6, "{got} vs {want}");
+        }
     }
 
     /// Compile-time assertion that `Arc<Mutex<MicrophoneStream>>` is `Send + Sync`,

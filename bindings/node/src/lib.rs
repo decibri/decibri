@@ -66,7 +66,6 @@ pub struct DecibriBridge {
     stream: Option<Arc<MicrophoneStream>>,
     format: SampleFormat,
     frames_per_buffer: u32,
-    channels: u16,
     running: Arc<AtomicBool>,
     pump_handle: Option<thread::JoinHandle<Option<SileroVad>>>,
     vad: Option<SileroVad>,
@@ -85,7 +84,6 @@ pub struct MicrophoneParts {
     capture: Microphone,
     format: SampleFormat,
     frames_per_buffer: u32,
-    channels: u16,
     vad: Option<SileroVad>,
 }
 
@@ -160,7 +158,6 @@ fn build_microphone_parts(options: Option<DecibriOptions>) -> Result<MicrophoneP
         capture,
         format,
         frames_per_buffer,
-        channels,
         vad,
     })
 }
@@ -175,7 +172,6 @@ impl MicrophoneParts {
             stream: None,
             format: self.format,
             frames_per_buffer: self.frames_per_buffer,
-            channels: self.channels,
             running: Arc::new(AtomicBool::new(false)),
             pump_handle: None,
             vad: self.vad,
@@ -258,8 +254,13 @@ impl DecibriBridge {
         self.running.store(true, Ordering::Relaxed);
         let running = self.running.clone();
         let format = self.format;
-        let target_samples = self.frames_per_buffer as usize * self.channels as usize;
-        let channels = self.channels;
+        // After the engine's normalize chain the output is mono, so the block
+        // size and the VAD downmix trigger are counted in OUTPUT channels (read
+        // from the stream), not the device channels. The binding-side downmix
+        // becomes a no-op once the engine has already delivered mono.
+        let output_channels = stream.channels();
+        let target_samples = self.frames_per_buffer as usize * output_channels as usize;
+        let channels = output_channels;
         let vad_probability = self.vad_probability.clone();
 
         // Move VAD into the pump thread (SileroVad is Send); it is handed back
