@@ -11,6 +11,10 @@ For other decibri packages, see:
 
 ## [Unreleased]
 
+### Added
+
+- An opt-in capture enhancement with a DC-removal step. `MicrophoneConfig` gains an `enhancement: EnhancementConfig` field (a `#[non_exhaustive]` struct whose every setting defaults to off), re-exported as `decibri::EnhancementConfig`. Setting `enhancement.dc_removal = true` adds a one-pole DC-blocking high-pass to the capture chain, applied after the channel and rate normalization, which removes a constant offset from the captured audio while leaving the voice band essentially flat. Default off, so the capture path stays byte-identical unless a consumer opts in.
+
 ### Changed
 
 - Capture now delivers audio at exactly the requested `sample_rate` on every device by resampling in the engine. The input device is opened at its native sample rate (its default supported format) and a resample stage in the capture chain converts the native rate to the requested rate (after the downmix, so the resampler receives mono), using the owned anti-aliased polyphase `decibri-resampler`. A device already at the requested rate keeps the direct path with no resample stage. Previously `start()` handed the requested rate to the platform audio backend, which delivered it only when the device or OS could and otherwise failed to open. `MicrophoneStream::sample_rate()` and `AudioChunk::sample_rate` still report the requested rate, now guaranteed regardless of the device's native rate. Breaking for Rust consumers: the captured audio is now produced by decibri's resampler when the device's native rate differs from the configured rate.
