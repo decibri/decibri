@@ -516,18 +516,26 @@ impl Microphone {
         let running = Arc::new(AtomicBool::new(true));
         let running_clone = running.clone();
 
-        let sample_rate = self.config.sample_rate;
+        // The requested rate is the TARGET the consumer receives. The device is
+        // opened at its native rate, settled here from its default supported
+        // format, and the capture chain resamples native -> target so delivery
+        // is at exactly the requested rate.
+        let target_rate = self.config.sample_rate;
+        let native_rate = CpalBackend.native_input_rate(&self.device)?;
         let channels = self.config.channels;
         let frames_per_buffer = self.config.frames_per_buffer;
 
         // Build the normalize chain for this device. The target is mono (1
-        // channel): `build_capture_stage` returns `Some([Downmix])` for a
-        // multichannel device and `None` for an already-mono one. The stream
-        // reports the OUTPUT channel count (mono when the chain downmixes), which
-        // is what consumers and the exact-size `samples` math are counted in.
+        // channel) at the requested rate: `build_capture_stage` adds a downmix
+        // for a multichannel device and a resample when the native rate differs,
+        // and returns `None` only for a mono device already at the target rate.
+        // The stream reports the OUTPUT channel count (mono when the chain
+        // downmixes, which is what the exact-size `samples` math is counted in)
+        // and the target rate.
         let target_channels: u16 = 1;
-        let capture_stage = build_capture_stage(channels, target_channels);
-        let output_channels = if capture_stage.is_some() {
+        let capture_stage =
+            build_capture_stage(channels, target_channels, native_rate, target_rate)?;
+        let output_channels = if channels > target_channels {
             target_channels
         } else {
             channels
@@ -545,9 +553,11 @@ impl Microphone {
             if !running_clone.load(Ordering::Relaxed) {
                 return;
             }
+            // The native chunk carries the device's capture format (its native
+            // rate and channel count); the consumer-side chain normalizes it.
             let chunk = AudioChunk {
                 data: data.to_vec(),
-                sample_rate,
+                sample_rate: native_rate,
                 channels,
             };
             // Non-blocking send: the realtime audio thread must never block. On
@@ -574,9 +584,11 @@ impl Microphone {
             err_running.store(false, Ordering::Relaxed);
         });
 
+        // Open the device at its native rate; the capture chain resamples to the
+        // target. A device already at the target rate has no resample stage.
         let params = StreamParams {
             channels,
-            sample_rate,
+            sample_rate: native_rate,
             frames_per_buffer: Some(frames_per_buffer),
         };
         let _stream = CpalBackend.open_input_stream(&self.device, &params, on_data, on_error)?;
@@ -585,7 +597,9 @@ impl Microphone {
             _stream,
             receiver,
             running,
-            sample_rate,
+            // Consumers receive the target rate; `take_block` stamps it on every
+            // delivered chunk.
+            sample_rate: target_rate,
             channels: output_channels,
             last_error,
             overruns,
@@ -970,8 +984,8 @@ mod tests {
     #[test]
     fn test_mono_device_builds_no_chain() {
         assert!(
-            build_capture_stage(1, 1).is_none(),
-            "a mono device needs no normalize chain"
+            build_capture_stage(1, 1, 16000, 16000).unwrap().is_none(),
+            "a mono device at the target rate needs no normalize chain"
         );
         let (stream, _sender, _running) = test_stream();
         assert!(
@@ -986,7 +1000,7 @@ mod tests {
     /// tail is delivered.
     #[test]
     fn test_downmix_chain_yields_correct_mono() {
-        let stage = build_capture_stage(2, 1);
+        let stage = build_capture_stage(2, 1, 16000, 16000).unwrap();
         assert!(stage.is_some(), "a stereo device gets a downmix chain");
         let (stream, sender, running) = test_stream_with(stage, 1); // output is mono
 
@@ -1025,6 +1039,62 @@ mod tests {
         for (got, want) in collected.iter().zip(expected.iter()) {
             assert!((got - want).abs() < 1e-6, "{got} vs {want}");
         }
+    }
+
+    /// Resample-in-capture (the `Some([ResampleStage])` path): a mono device
+    /// above the target rate has its audio resampled to the target inside
+    /// `ingest`, exact-size delivery holds on the resampled output, every
+    /// delivered chunk reports the target rate and mono, and the total sample
+    /// count tracks the 1:3 rate ratio (48 kHz -> 16 kHz).
+    #[test]
+    fn test_resample_chain_delivers_exact_blocks_at_target_rate() {
+        let stage = build_capture_stage(1, 1, 48_000, 16_000)
+            .unwrap()
+            .expect("48k mono -> resample chain");
+        // test_stream_with stamps the stream at 16 kHz (the target), mono.
+        let (stream, sender, running) = test_stream_with(Some(stage), 1);
+
+        let input: Vec<f32> = (0..24_000).map(|n| (n as f32 * 0.01).sin()).collect();
+        sender.send(make_native_chunk(input.clone())).unwrap();
+        drop(sender);
+        running.store(false, Ordering::Relaxed);
+
+        let samples = 320; // 20 ms at 16 kHz
+        let mut blocks: Vec<Vec<f32>> = Vec::new();
+        loop {
+            match stream.next_chunk(samples, Some(Duration::from_millis(100))) {
+                Ok(Some(c)) => {
+                    assert_eq!(c.channels, 1, "resampled output is mono");
+                    assert_eq!(c.sample_rate, 16_000, "chunks report the target rate");
+                    blocks.push(c.data);
+                }
+                Ok(None) => panic!("unexpected timeout while data was buffered"),
+                Err(DecibriError::MicrophoneStreamClosed) => break,
+                Err(e) => panic!("unexpected error: {e}"),
+            }
+        }
+
+        let (last, full) = blocks.split_last().expect("at least one block delivered");
+        for block in full {
+            assert_eq!(
+                block.len(),
+                samples,
+                "non-final blocks are exactly `samples` long on the resampled output"
+            );
+        }
+        assert!(
+            !last.is_empty() && last.len() <= samples,
+            "the final tail carries 1..=`samples` resampled samples"
+        );
+
+        let total: usize = blocks.iter().map(|b| b.len()).sum();
+        // 1:3 downsample of 24000 input is at most 8000 output, and after the
+        // brief filter warmup comfortably above a quarter of the input.
+        assert!(
+            total <= input.len() / 3 && total > input.len() / 4,
+            "resampled total {total} tracks the 1:3 ratio of {} input",
+            input.len()
+        );
     }
 
     /// Compile-time assertion that `Arc<Mutex<MicrophoneStream>>` is `Send + Sync`,

@@ -103,6 +103,12 @@ pub(crate) trait AudioBackend: Send + Sync {
         selector: &DeviceSelector,
     ) -> Result<BackendDevice, DecibriError>;
 
+    /// Report the device's native input sample rate: the rate of its default
+    /// supported format, which the capture stream is opened at before the
+    /// capture chain resamples to the requested target rate.
+    #[cfg(feature = "capture")]
+    fn native_input_rate(&self, device: &BackendDevice) -> Result<u32, DecibriError>;
+
     /// Resolve a selector to an output device handle.
     #[cfg(feature = "playback")]
     fn resolve_output_device(
@@ -154,6 +160,19 @@ impl AudioBackend for CpalBackend {
         Ok(BackendDevice {
             inner: resolve_device_generic::<Input>(selector)?,
         })
+    }
+
+    #[cfg(feature = "capture")]
+    fn native_input_rate(&self, device: &BackendDevice) -> Result<u32, DecibriError> {
+        // The default input config is the device's native supported format, so
+        // opening at this rate is always accepted; the capture chain resamples
+        // it to the requested target. A query failure maps to the same
+        // enumeration error the rest of the seam uses.
+        device
+            .inner
+            .default_input_config()
+            .map(|config| config.sample_rate())
+            .map_err(|e| DecibriError::DeviceEnumerationFailed(e.to_string()))
     }
 
     #[cfg(feature = "playback")]

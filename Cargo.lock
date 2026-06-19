@@ -225,6 +225,7 @@ version = "4.3.2"
 dependencies = [
  "cpal",
  "crossbeam-channel",
+ "decibri-resampler",
  "ort",
  "thiserror 2.0.18",
 ]
@@ -250,6 +251,16 @@ dependencies = [
  "pyo3",
  "pyo3-async-runtimes",
  "tokio",
+]
+
+[[package]]
+name = "decibri-resampler"
+version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2021658007fe9fa58b0fe7b4feb0f89c0ad3ffdd43d311c8cdef58dc7178fb7f"
+dependencies = [
+ "thiserror 2.0.18",
+ "tracing",
 ]
 
 [[package]]

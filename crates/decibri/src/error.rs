@@ -118,6 +118,21 @@ pub enum DecibriError {
         source: Box<dyn std::error::Error + Send + Sync>,
     },
 
+    // ── Resample config validation ─────────────────────────────────────
+    /// The capture resampler could not be constructed for the negotiated
+    /// device-native to requested-target sample rate conversion.
+    ///
+    /// The payload carries the offending rates for programmatic inspection;
+    /// they are not formatted into the Display string, so the message text
+    /// stays stable (matching [`Self::VadSampleRateUnsupported`]). Unreachable
+    /// for a configured rate in the validated `1000..=384000` range over any
+    /// device-native rate (every such pair is far below the resampler's filter
+    /// cap); surfaced defensively. Additive variant permitted by
+    /// `#[non_exhaustive]`.
+    #[cfg(feature = "capture")]
+    #[error("the requested sample rate conversion is not supported by the resampler")]
+    ResampleConfigInvalid { in_rate: u32, out_rate: u32 },
+
     // ── VAD config validation ──────────────────────────────────────────
     /// Payload carries the offending sample rate; not formatted into the
     /// Display string to keep the message text stable.
@@ -267,6 +282,29 @@ pub enum DecibriError {
         #[source]
         source: Box<dyn std::error::Error + Send + Sync>,
     },
+}
+
+/// Bridge the capture resampler's construction error into the central error.
+///
+/// Both `ResamplerError` variants are construction-time; the resampler's steady
+/// `process` path is infallible, so there is no per-chunk error to map.
+/// `RatePairUnsupported` carries the offending rates through; `ZeroSampleRate`
+/// (guarded: the configured target is validated nonzero and the device-native
+/// rate is nonzero) and any future variant route to the same error defensively.
+#[cfg(feature = "capture")]
+impl From<decibri_resampler::ResamplerError> for DecibriError {
+    fn from(e: decibri_resampler::ResamplerError) -> Self {
+        use decibri_resampler::ResamplerError;
+        match e {
+            ResamplerError::RatePairUnsupported { in_rate, out_rate } => {
+                DecibriError::ResampleConfigInvalid { in_rate, out_rate }
+            }
+            _ => DecibriError::ResampleConfigInvalid {
+                in_rate: 0,
+                out_rate: 0,
+            },
+        }
+    }
 }
 
 impl DecibriError {

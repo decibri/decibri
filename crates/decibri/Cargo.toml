@@ -33,7 +33,7 @@ no-default-features = true
 default = ["capture", "playback", "vad", "denoise", "gain", "ort-load-dynamic"]
 
 # Core feature set.
-capture = ["dep:cpal", "dep:crossbeam-channel"]
+capture = ["dep:cpal", "dep:crossbeam-channel", "dep:decibri-resampler"]
 playback = ["dep:cpal", "dep:crossbeam-channel"]
 vad = ["dep:ort"]
 denoise = []
@@ -56,6 +56,9 @@ cpal = { workspace = true, optional = true }
 thiserror = { workspace = true }
 crossbeam-channel = { workspace = true, optional = true }
 ort = { workspace = true, optional = true }
+# Capture-path resampler: converts a device's native sample rate to the
+# requested target rate. Optional, pulled by the `capture` feature only.
+decibri-resampler = { version = "0.2", optional = true }
 
 # Auto-discovered example targets that use a feature-gated module must declare
 # the feature they need, so cargo skips them when that feature is off instead of
