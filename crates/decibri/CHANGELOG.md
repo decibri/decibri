@@ -21,6 +21,7 @@ For other decibri packages, see:
 
 ### Fixed
 
+- Resampled capture no longer drops the resampler's group-delay tail at stream close. The capture chain now drains the resampler's held tail once when the stream closes, appending it to the re-block buffer so it is delivered as part of the final chunk(s). The complete resampled signal is now delivered and no captured sample is dropped on the resample path. A device already at the requested rate (no resample stage) and a single-channel device (no chain) are unchanged.
 - The macOS microphone-permission hint now reads "System Settings > Privacy & Security" (the modern macOS wording) instead of the pre-Ventura "System Preferences > Security & Privacy". The `PermissionDenied` message prefix is unchanged.
 
 ## [4.3.2] - 2026-06-12

@@ -158,6 +158,13 @@ pub struct MicrophoneStream {
     // shared `&self` while the type stays `Send + Sync` (a `CaptureStage` is
     // `Send`, so `Mutex<CaptureStage>` is `Send + Sync`).
     capture_stage: Option<Mutex<CaptureStage>>,
+    // One-time guard for the close-path chain flush. The chain's stages carry
+    // conditioning state between blocks (the resampler holds its anti-alias
+    // filter's group-delay tail); at close that held tail is drained once into
+    // `reblock_buffer` so it is delivered rather than dropped. Set the first time
+    // close is detected with a chain present, under the `reblock_buffer` lock, so
+    // the drain runs exactly once. `AtomicBool` keeps the type `Send + Sync`.
+    chain_flushed: AtomicBool,
 }
 
 #[cfg(feature = "capture")]
@@ -238,8 +245,10 @@ impl MicrophoneStream {
             // stream has since closed.
             Ok(Some(self.take_block(&mut buf, samples)))
         } else if disconnected || !self.is_open() {
-            // Closed with fewer than a full block left: deliver the final tail
-            // as one short chunk, then report closed once the buffer is empty.
+            // Closed with fewer than a full block left. Drain the chain's
+            // end-of-stream tail (once) into the buffer first, then deliver the
+            // remaining samples as full blocks plus one final short chunk.
+            self.flush_chain(&mut buf)?;
             self.take_block_or_closed(&mut buf, samples)
         } else {
             // Open, but not yet a full block. Try again shortly.
@@ -341,13 +350,16 @@ impl MicrophoneStream {
                     // disconnecting the channel).
                     if !self.is_open() {
                         self.drain_available(&mut buf)?;
+                        self.flush_chain(&mut buf)?;
                         return self.take_block_or_closed(&mut buf, samples);
                     }
                     // Stream still alive; loop with whatever deadline remains.
                 }
                 Err(RecvTimeoutError::Disconnected) => {
-                    // Channel closed and drained. Deliver any remaining full
+                    // Channel closed and drained. Drain the chain's end-of-stream
+                    // tail (once) into the buffer, then deliver any remaining full
                     // blocks and the final short tail before reporting closed.
+                    self.flush_chain(&mut buf)?;
                     return self.take_block_or_closed(&mut buf, samples);
                 }
             }
@@ -416,6 +428,33 @@ impl MicrophoneStream {
                 Ok(())
             }
         }
+    }
+
+    /// Drain the capture chain's end-of-stream tail into the re-block buffer,
+    /// exactly once, when the stream closes.
+    ///
+    /// The chain's stages carry conditioning state between blocks (the resampler
+    /// holds its anti-alias filter's group-delay tail). At close this drains that
+    /// held tail through the chain and appends it to `buf`, so the existing
+    /// reblock delivers it as part of the final chunk(s) rather than dropping it.
+    /// Runs at most once, guarded by `chain_flushed`; a stream with no chain
+    /// (`None`) drains nothing and the direct path is unchanged. The caller holds
+    /// the `reblock_buffer` lock, which orders this drain against every other
+    /// buffer access and makes the guard's check-and-set effectively atomic.
+    ///
+    /// Called after the last native block has been drained through
+    /// [`ingest`](Self::ingest) and before the close-time delivery, so the tail
+    /// is appended after all processed output and reblocked normally.
+    fn flush_chain(&self, buf: &mut VecDeque<f32>) -> Result<(), DecibriError> {
+        if let Some(stage) = &self.capture_stage {
+            if !self.chain_flushed.swap(true, Ordering::Relaxed) {
+                let mut stage = stage.lock().unwrap_or_else(PoisonError::into_inner);
+                let mut tail = Vec::new();
+                stage.flush(&mut tail)?;
+                buf.extend(tail);
+            }
+        }
+        Ok(())
     }
 
     /// Check whether the stream is still actively capturing.
@@ -605,6 +644,7 @@ impl Microphone {
             overruns,
             reblock_buffer: Mutex::new(VecDeque::new()),
             capture_stage: capture_stage.map(Mutex::new),
+            chain_flushed: AtomicBool::new(false),
         })
     }
 }
@@ -633,6 +673,7 @@ mod tests {
             overruns: Arc::new(AtomicU64::new(0)),
             reblock_buffer: Mutex::new(VecDeque::new()),
             capture_stage: capture_stage.map(Mutex::new),
+            chain_flushed: AtomicBool::new(false),
         };
         (stream, sender, running)
     }
@@ -1088,13 +1129,102 @@ mod tests {
         );
 
         let total: usize = blocks.iter().map(|b| b.len()).sum();
-        // 1:3 downsample of 24000 input is at most 8000 output, and after the
-        // brief filter warmup comfortably above a quarter of the input.
+        // A 1:3 downsample of the 24000-sample input yields roughly 8000 output
+        // samples, plus the resampler's group-delay tail now drained at close, so
+        // the total sits just above input/3 and well below half the input.
         assert!(
-            total <= input.len() / 3 && total > input.len() / 4,
+            total > input.len() / 4 && total < input.len() / 2,
             "resampled total {total} tracks the 1:3 ratio of {} input",
             input.len()
         );
+    }
+
+    /// Resample close path, the no-sample-dropped proof: a known signal fed
+    /// through the resampling capture chain and read to close delivers the
+    /// COMPLETE resampled signal, group-delay tail included. The concatenation of
+    /// every delivered chunk (steady full blocks plus the final short tail)
+    /// equals a bare resampler fed the whole input then flushed once, bit for
+    /// bit: no sample lost, reordered, requantized, or scaled. The flushed tail
+    /// arrives as part of the final chunk(s) through the normal reblock (full
+    /// blocks then one final partial), not a separate post-close emission.
+    /// Bit-equality also proves the flush ran exactly once: a missing flush would
+    /// drop the tail and a double flush would append extra samples, either of
+    /// which breaks the equality.
+    #[test]
+    fn test_resample_close_delivers_full_signal_with_flushed_tail() {
+        use decibri_resampler::{PolyphaseResampler, Resampler};
+
+        let input: Vec<f32> = (0..24_000).map(|n| (n as f32 * 0.01).sin()).collect();
+
+        // Ground truth: a bare resampler fed the whole input, then one flush.
+        let mut reference = PolyphaseResampler::new(48_000, 16_000).unwrap();
+        let mut expected = Vec::new();
+        reference.process(&input, &mut expected);
+        reference.flush(&mut expected);
+
+        // The process-only count (no flush) shows the tail is a real contribution
+        // that the resample path dropped before this drain existed.
+        let mut process_only = PolyphaseResampler::new(48_000, 16_000).unwrap();
+        let mut process_out = Vec::new();
+        process_only.process(&input, &mut process_out);
+
+        let stage = build_capture_stage(1, 1, 48_000, 16_000)
+            .unwrap()
+            .expect("48k mono -> resample chain");
+        let (stream, sender, running) = test_stream_with(Some(stage), 1);
+        sender.send(make_native_chunk(input)).unwrap();
+        drop(sender);
+        running.store(false, Ordering::Relaxed);
+
+        let samples = 320; // 20 ms at 16 kHz
+        let mut blocks: Vec<Vec<f32>> = Vec::new();
+        loop {
+            match stream.next_chunk(samples, Some(Duration::from_millis(100))) {
+                Ok(Some(c)) => {
+                    assert_eq!(c.sample_rate, 16_000, "chunks report the target rate");
+                    assert_eq!(c.channels, 1, "resampled output is mono");
+                    blocks.push(c.data);
+                }
+                Ok(None) => panic!("unexpected timeout while data was buffered"),
+                Err(DecibriError::MicrophoneStreamClosed) => break,
+                Err(e) => panic!("unexpected error: {e}"),
+            }
+        }
+
+        // Delivered as full blocks then one final partial: the tail rides the
+        // normal reblock, not a separate emission.
+        let (last, full) = blocks.split_last().expect("at least one block delivered");
+        for block in full {
+            assert_eq!(
+                block.len(),
+                samples,
+                "non-final blocks are exactly `samples` long, tail included"
+            );
+        }
+        assert!(
+            !last.is_empty() && last.len() <= samples,
+            "the final chunk carries 1..=`samples` resampled samples"
+        );
+
+        // No sample dropped, none added: the delivered stream equals the full
+        // resampled signal (steady output plus the flushed group-delay tail).
+        let delivered: Vec<f32> = blocks.into_iter().flatten().collect();
+        assert_eq!(
+            delivered, expected,
+            "the resample close path delivers the complete resampled signal, tail included"
+        );
+        assert!(
+            expected.len() > process_out.len(),
+            "the flushed tail adds the samples the process-only path dropped"
+        );
+
+        // Idempotent close: further reads stay closed with no resurrected audio.
+        for _ in 0..3 {
+            let err = stream
+                .next_chunk(samples, Some(Duration::from_millis(20)))
+                .unwrap_err();
+            assert!(matches!(err, DecibriError::MicrophoneStreamClosed));
+        }
     }
 
     /// Compile-time assertion that `Arc<Mutex<MicrophoneStream>>` is `Send + Sync`,

@@ -9,7 +9,9 @@
 //! so the resampler receives mono, the format it expects.
 //!
 //! Each [`Stage`] reads one block of interleaved f32 samples and writes its
-//! output, so stages compose by ping-ponging two buffers. The chain is built by
+//! output, so stages compose by ping-ponging two buffers. At stream close the
+//! chain drains each stage's held tail through the same walk, so the resampler's
+//! group-delay tail is delivered rather than dropped. The chain is built by
 //! [`build_capture_stage`], which returns `None` when no conditioning is needed
 //! (an already-mono device already at the target rate), keeping the capture path
 //! on its zero-cost direct path.
@@ -27,6 +29,18 @@ use crate::sample;
 pub(crate) trait Stage: Send {
     /// Process `input`, appending the result to `out`.
     fn process(&mut self, input: &[f32], out: &mut Vec<f32>) -> Result<(), DecibriError>;
+
+    /// Drain any end-of-stream tail held in the stage's state into `out`.
+    ///
+    /// Called once at stream close, after the final [`process`](Stage::process).
+    /// A stateless stage holds no tail and keeps this default no-op; a stage that
+    /// carries state across blocks (the resampler's anti-alias filter holds a
+    /// group-delay tail) overrides it to append the held samples, so no captured
+    /// audio is dropped at close.
+    fn flush(&mut self, out: &mut Vec<f32>) -> Result<(), DecibriError> {
+        let _ = out;
+        Ok(())
+    }
 }
 
 /// Downmix interleaved multichannel audio to mono by averaging channels.
@@ -67,6 +81,14 @@ impl Stage for ResampleStage {
         self.0.process(input, out);
         Ok(())
     }
+
+    fn flush(&mut self, out: &mut Vec<f32>) -> Result<(), DecibriError> {
+        // Drain the resampler's group-delay tail (and any partial-frame carry)
+        // into `out`. Called once at close; the resampler appends and is
+        // infallible, so wrap it as `Ok(())`.
+        self.0.flush(out);
+        Ok(())
+    }
 }
 
 /// The capture stage chain: the `normalize` segment applied to each native
@@ -98,6 +120,35 @@ impl CaptureStage {
             std::mem::swap(&mut self.work, &mut self.scratch);
         }
         Ok(&self.work)
+    }
+
+    /// Drain the chain's complete end-of-stream tail, appending it to `out`.
+    ///
+    /// Walks the `normalize` stages in order carrying a buffer: at each stage it
+    /// processes the upstream-carried tail (when non-empty) through the stage,
+    /// then drains that stage's own held tail into the same buffer, and passes the
+    /// combined result to the next stage. So a tail produced by one stage flows
+    /// through every downstream stage exactly as a normal block would. For the
+    /// stateless [`Downmix`] this contributes nothing; for [`ResampleStage`] it
+    /// yields the resampler's group-delay tail. Call once at stream close, after
+    /// the last [`run`](Self::run).
+    pub(crate) fn flush(&mut self, out: &mut Vec<f32>) -> Result<(), DecibriError> {
+        // `work` carries the inter-stage buffer. It starts empty because there is
+        // no new input at end of stream, only each stage's drained tail.
+        self.work.clear();
+        for stage in &mut self.normalize {
+            self.scratch.clear();
+            // Feed the upstream stage's tail through this stage first (skipped for
+            // the first stage, whose carry is always empty), then drain this
+            // stage's own tail into the same buffer.
+            if !self.work.is_empty() {
+                stage.process(&self.work, &mut self.scratch)?;
+            }
+            stage.flush(&mut self.scratch)?;
+            std::mem::swap(&mut self.work, &mut self.scratch);
+        }
+        out.extend_from_slice(&self.work);
+        Ok(())
     }
 }
 
@@ -254,6 +305,69 @@ mod tests {
         assert!(
             matches!(result, Err(DecibriError::ResampleConfigInvalid { .. })),
             "an enormous native rate exceeds the resampler's filter cap"
+        );
+    }
+
+    /// `CaptureStage::flush` drains the resampling chain's complete end-of-stream
+    /// tail: processing the whole stream through the chain and then flushing once
+    /// reproduces, bit for bit, a bare resampler fed the whole stream then
+    /// flushed once. The flushed tail is nonzero (the resampler holds a
+    /// group-delay tail), it is appended after the process output, and no sample
+    /// is lost, reordered, or scaled. This is the no-sample-dropped guarantee for
+    /// the resample path at the chain level.
+    #[test]
+    fn flush_drains_resampler_tail_exactly() {
+        use decibri_resampler::{PolyphaseResampler, Resampler};
+
+        let input: Vec<f32> = (0..24_000).map(|n| (n as f32 * 0.01).sin()).collect();
+
+        // Ground truth: a bare resampler, whole input then a single flush.
+        let mut reference = PolyphaseResampler::new(48_000, 16_000).unwrap();
+        let mut expected = Vec::new();
+        reference.process(&input, &mut expected);
+        reference.flush(&mut expected);
+
+        // The chain: process the whole input via run(), then flush() the tail.
+        let mut chain = build_capture_stage(1, 1, 48_000, 16_000)
+            .unwrap()
+            .expect("48k mono -> resample chain");
+        let mut got = chain.run(&input).expect("process runs").to_vec();
+        let process_only = got.len();
+        let mut tail = Vec::new();
+        chain.flush(&mut tail).expect("flush drains the tail");
+
+        assert!(
+            !tail.is_empty(),
+            "the resampler holds a group-delay tail to drain"
+        );
+        got.extend_from_slice(&tail);
+        assert_eq!(
+            got, expected,
+            "chain process+flush reproduces the full resampled signal, tail included, bit for bit"
+        );
+        assert_eq!(
+            got.len(),
+            process_only + tail.len(),
+            "the flushed tail is appended after the process output, nothing reordered"
+        );
+    }
+
+    /// `Downmix` is stateless, so its trait-default `flush` appends nothing: a
+    /// downmix-only chain has no end-of-stream tail and `flush` yields no extra
+    /// samples (the unchanged downmix-only path).
+    #[test]
+    fn downmix_only_flush_is_empty() {
+        let mut chain = build_capture_stage(2, 1, 16_000, 16_000)
+            .unwrap()
+            .expect("stereo -> downmix chain");
+        let _ = chain.run(&[0.5, 0.3, 0.4, 0.6]).expect("downmix runs");
+        let mut tail = Vec::new();
+        chain
+            .flush(&mut tail)
+            .expect("flush on a downmix-only chain");
+        assert!(
+            tail.is_empty(),
+            "a stateless downmix chain has no flush tail"
         );
     }
 

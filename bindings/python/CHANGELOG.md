@@ -22,6 +22,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Fixed
 
+- Resampled capture (a device whose native rate differs from the configured `sample_rate`) no longer drops the resampler's group-delay tail at stream close: the final, possibly-shorter chunk now carries it, so `Microphone.read()` and `AsyncMicrophone.read()` deliver the complete resampled signal. A device already at the requested rate (no resample) is unchanged.
 - On macOS, the microphone-permission error message now reads "System Settings > Privacy & Security" (the modern macOS wording) instead of the pre-Ventura "System Preferences > Security & Privacy".
 
 ## [0.4.3] - 2026-06-12
