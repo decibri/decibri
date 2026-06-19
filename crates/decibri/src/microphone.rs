@@ -32,6 +32,21 @@ use crate::error::DecibriError;
 #[cfg(feature = "capture")]
 use crate::stage::{build_capture_stage, CaptureStage};
 
+/// Opt-in capture enhancement settings.
+///
+/// Carried on [`MicrophoneConfig::enhancement`]. Every field defaults to off, so
+/// the capture path is unchanged unless a consumer opts in. `#[non_exhaustive]`:
+/// construct it with [`EnhancementConfig::default`] and assign the fields you
+/// want, so adding an enhancement later stays backward compatible.
+#[derive(Debug, Clone, Default)]
+#[non_exhaustive]
+pub struct EnhancementConfig {
+    /// Remove a constant (DC) offset from captured audio with a one-pole
+    /// DC-blocking high-pass, applied after the channel and rate normalization.
+    /// Default: false (off).
+    pub dc_removal: bool,
+}
+
 /// Configuration for a microphone capture session.
 ///
 /// `#[non_exhaustive]`: construct it with [`MicrophoneConfig::default`] and then
@@ -49,6 +64,9 @@ pub struct MicrophoneConfig {
     pub frames_per_buffer: u32,
     /// Device selection. Default: system default input.
     pub device: DeviceSelector,
+    /// Opt-in capture enhancement. Default: every enhancement off, so the
+    /// capture path is unchanged.
+    pub enhancement: EnhancementConfig,
 }
 
 impl Default for MicrophoneConfig {
@@ -58,6 +76,7 @@ impl Default for MicrophoneConfig {
             channels: 1,
             frames_per_buffer: 1600,
             device: DeviceSelector::Default,
+            enhancement: EnhancementConfig::default(),
         }
     }
 }
@@ -572,8 +591,13 @@ impl Microphone {
         // downmixes, which is what the exact-size `samples` math is counted in)
         // and the target rate.
         let target_channels: u16 = 1;
-        let capture_stage =
-            build_capture_stage(channels, target_channels, native_rate, target_rate)?;
+        let capture_stage = build_capture_stage(
+            channels,
+            target_channels,
+            native_rate,
+            target_rate,
+            &self.config.enhancement,
+        )?;
         let output_channels = if channels > target_channels {
             target_channels
         } else {
@@ -1025,7 +1049,9 @@ mod tests {
     #[test]
     fn test_mono_device_builds_no_chain() {
         assert!(
-            build_capture_stage(1, 1, 16000, 16000).unwrap().is_none(),
+            build_capture_stage(1, 1, 16000, 16000, &EnhancementConfig::default())
+                .unwrap()
+                .is_none(),
             "a mono device at the target rate needs no normalize chain"
         );
         let (stream, _sender, _running) = test_stream();
@@ -1041,7 +1067,7 @@ mod tests {
     /// tail is delivered.
     #[test]
     fn test_downmix_chain_yields_correct_mono() {
-        let stage = build_capture_stage(2, 1, 16000, 16000).unwrap();
+        let stage = build_capture_stage(2, 1, 16000, 16000, &EnhancementConfig::default()).unwrap();
         assert!(stage.is_some(), "a stereo device gets a downmix chain");
         let (stream, sender, running) = test_stream_with(stage, 1); // output is mono
 
@@ -1089,7 +1115,7 @@ mod tests {
     /// count tracks the 1:3 rate ratio (48 kHz -> 16 kHz).
     #[test]
     fn test_resample_chain_delivers_exact_blocks_at_target_rate() {
-        let stage = build_capture_stage(1, 1, 48_000, 16_000)
+        let stage = build_capture_stage(1, 1, 48_000, 16_000, &EnhancementConfig::default())
             .unwrap()
             .expect("48k mono -> resample chain");
         // test_stream_with stamps the stream at 16 kHz (the target), mono.
@@ -1168,7 +1194,7 @@ mod tests {
         let mut process_out = Vec::new();
         process_only.process(&input, &mut process_out);
 
-        let stage = build_capture_stage(1, 1, 48_000, 16_000)
+        let stage = build_capture_stage(1, 1, 48_000, 16_000, &EnhancementConfig::default())
             .unwrap()
             .expect("48k mono -> resample chain");
         let (stream, sender, running) = test_stream_with(Some(stage), 1);
@@ -1225,6 +1251,58 @@ mod tests {
                 .unwrap_err();
             assert!(matches!(err, DecibriError::MicrophoneStreamClosed));
         }
+    }
+
+    /// Enhancement-on, end to end through `ingest` (the `Some([transform])`
+    /// path): with `dc_removal` enabled on a mono device already at the target
+    /// rate, the chain is transform-only (no downmix, no resample), so a constant
+    /// DC offset fed through the stream is delivered with the same sample count
+    /// (the DC step preserves length and holds no tail) and a settled mean near
+    /// zero (the offset is removed). This proves the transform segment is applied
+    /// to delivered audio through the normal capture path.
+    #[test]
+    fn test_enhancement_on_removes_dc_end_to_end() {
+        let enhancement = EnhancementConfig { dc_removal: true };
+        let stage = build_capture_stage(1, 1, 16_000, 16_000, &enhancement)
+            .unwrap()
+            .expect("dc_removal builds a transform-only chain for a mono device");
+        let (stream, sender, running) = test_stream_with(Some(stage), 1);
+
+        // A constant 0.5 offset: pure DC, no audio content.
+        let n = 16_000;
+        let input = vec![0.5_f32; n];
+        sender.send(make_native_chunk(input)).unwrap();
+        drop(sender);
+        running.store(false, Ordering::Relaxed);
+
+        let samples = 320;
+        let mut collected: Vec<f32> = Vec::new();
+        loop {
+            match stream.next_chunk(samples, Some(Duration::from_millis(100))) {
+                Ok(Some(c)) => {
+                    assert_eq!(c.channels, 1, "the enhanced output stays mono");
+                    assert_eq!(c.sample_rate, 16_000, "no resample, the rate is unchanged");
+                    collected.extend_from_slice(&c.data);
+                }
+                Ok(None) => panic!("unexpected timeout while data was buffered"),
+                Err(DecibriError::MicrophoneStreamClosed) => break,
+                Err(e) => panic!("unexpected error: {e}"),
+            }
+        }
+
+        assert_eq!(
+            collected.len(),
+            n,
+            "the DC step preserves the sample count exactly (no resample, no tail)"
+        );
+        // After the filter settles, the constant offset is gone: the mean of the
+        // last quarter is essentially zero.
+        let settled = &collected[n - n / 4..];
+        let mean = settled.iter().sum::<f32>() / settled.len() as f32;
+        assert!(
+            mean.abs() < 1e-3,
+            "the DC offset is removed end to end (settled mean {mean})"
+        );
     }
 
     /// Compile-time assertion that `Arc<Mutex<MicrophoneStream>>` is `Send + Sync`,
