@@ -32,21 +32,6 @@ use crate::error::DecibriError;
 #[cfg(feature = "capture")]
 use crate::stage::{build_capture_stage, CaptureStage};
 
-/// Opt-in capture enhancement settings.
-///
-/// Carried on [`MicrophoneConfig::enhancement`]. Every field defaults to off, so
-/// the capture path is unchanged unless a consumer opts in. `#[non_exhaustive]`:
-/// construct it with [`EnhancementConfig::default`] and assign the fields you
-/// want, so adding an enhancement later stays backward compatible.
-#[derive(Debug, Clone, Default)]
-#[non_exhaustive]
-pub struct EnhancementConfig {
-    /// Remove a constant (DC) offset from captured audio with a one-pole
-    /// DC-blocking high-pass, applied after the channel and rate normalization.
-    /// Default: false (off).
-    pub dc_removal: bool,
-}
-
 /// Configuration for a microphone capture session.
 ///
 /// `#[non_exhaustive]`: construct it with [`MicrophoneConfig::default`] and then
@@ -64,9 +49,10 @@ pub struct MicrophoneConfig {
     pub frames_per_buffer: u32,
     /// Device selection. Default: system default input.
     pub device: DeviceSelector,
-    /// Opt-in capture enhancement. Default: every enhancement off, so the
-    /// capture path is unchanged.
-    pub enhancement: EnhancementConfig,
+    /// Remove a constant (DC) offset from captured audio with a one-pole
+    /// DC-blocking high-pass, applied after the channel and rate normalization.
+    /// Default: false (off).
+    pub dc_removal: bool,
 }
 
 impl Default for MicrophoneConfig {
@@ -76,7 +62,7 @@ impl Default for MicrophoneConfig {
             channels: 1,
             frames_per_buffer: 1600,
             device: DeviceSelector::Default,
-            enhancement: EnhancementConfig::default(),
+            dc_removal: false,
         }
     }
 }
@@ -690,7 +676,7 @@ impl Microphone {
             target_channels,
             native_rate,
             target_rate,
-            &self.config.enhancement,
+            self.config.dc_removal,
         )?;
         let output_channels = if channels > target_channels {
             target_channels
@@ -1161,7 +1147,7 @@ mod tests {
     #[test]
     fn test_mono_device_builds_no_chain() {
         assert!(
-            build_capture_stage(1, 1, 16000, 16000, &EnhancementConfig::default())
+            build_capture_stage(1, 1, 16000, 16000, false)
                 .unwrap()
                 .is_none(),
             "a mono device at the target rate needs no normalize chain"
@@ -1179,7 +1165,7 @@ mod tests {
     /// tail is delivered.
     #[test]
     fn test_downmix_chain_yields_correct_mono() {
-        let stage = build_capture_stage(2, 1, 16000, 16000, &EnhancementConfig::default()).unwrap();
+        let stage = build_capture_stage(2, 1, 16000, 16000, false).unwrap();
         assert!(stage.is_some(), "a stereo device gets a downmix chain");
         let (stream, sender, running) = test_stream_with(stage, 1); // output is mono
 
@@ -1227,7 +1213,7 @@ mod tests {
     /// count tracks the 1:3 rate ratio (48 kHz -> 16 kHz).
     #[test]
     fn test_resample_chain_delivers_exact_blocks_at_target_rate() {
-        let stage = build_capture_stage(1, 1, 48_000, 16_000, &EnhancementConfig::default())
+        let stage = build_capture_stage(1, 1, 48_000, 16_000, false)
             .unwrap()
             .expect("48k mono -> resample chain");
         // test_stream_with stamps the stream at 16 kHz (the target), mono.
@@ -1306,7 +1292,7 @@ mod tests {
         let mut process_out = Vec::new();
         process_only.process(&input, &mut process_out);
 
-        let stage = build_capture_stage(1, 1, 48_000, 16_000, &EnhancementConfig::default())
+        let stage = build_capture_stage(1, 1, 48_000, 16_000, false)
             .unwrap()
             .expect("48k mono -> resample chain");
         let (stream, sender, running) = test_stream_with(Some(stage), 1);
@@ -1374,8 +1360,8 @@ mod tests {
     /// to delivered audio through the normal capture path.
     #[test]
     fn test_enhancement_on_removes_dc_end_to_end() {
-        let enhancement = EnhancementConfig { dc_removal: true };
-        let stage = build_capture_stage(1, 1, 16_000, 16_000, &enhancement)
+        let enhancement = true;
+        let stage = build_capture_stage(1, 1, 16_000, 16_000, enhancement)
             .unwrap()
             .expect("dc_removal builds a transform-only chain for a mono device");
         let (stream, sender, running) = test_stream_with(Some(stage), 1);
@@ -1422,7 +1408,7 @@ mod tests {
     /// throughout and a binding feeds VAD the delivered chunk exactly as before.
     #[test]
     fn test_vad_input_none_when_no_transform() {
-        let stage = build_capture_stage(2, 1, 16_000, 16_000, &EnhancementConfig::default())
+        let stage = build_capture_stage(2, 1, 16_000, 16_000, false)
             .unwrap()
             .expect("stereo -> downmix-only chain");
         let (stream, sender, running) = test_stream_with(Some(stage), 1);
@@ -1468,8 +1454,8 @@ mod tests {
     /// signal. The tap and the delivered output stay aligned (same sample count).
     #[test]
     fn test_vad_input_returns_pre_transform_signal() {
-        let enhancement = EnhancementConfig { dc_removal: true };
-        let stage = build_capture_stage(1, 1, 16_000, 16_000, &enhancement)
+        let enhancement = true;
+        let stage = build_capture_stage(1, 1, 16_000, 16_000, enhancement)
             .unwrap()
             .expect("dc-only chain");
         let (stream, sender, running) = test_stream_with(Some(stage), 1);
@@ -1526,8 +1512,8 @@ mod tests {
     fn test_vad_input_aligned_through_resampler_flush_tail() {
         use decibri_resampler::{PolyphaseResampler, Resampler};
 
-        let enhancement = EnhancementConfig { dc_removal: true };
-        let stage = build_capture_stage(1, 1, 48_000, 16_000, &enhancement)
+        let enhancement = true;
+        let stage = build_capture_stage(1, 1, 48_000, 16_000, enhancement)
             .unwrap()
             .expect("resample + DC chain");
         let (stream, sender, running) = test_stream_with(Some(stage), 1);

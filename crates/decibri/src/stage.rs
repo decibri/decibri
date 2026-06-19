@@ -21,7 +21,6 @@
 use decibri_resampler::{PolyphaseResampler, Resampler};
 
 use crate::error::DecibriError;
-use crate::microphone::EnhancementConfig;
 use crate::sample;
 
 /// A capture processing stage: reads one block of interleaved f32 samples and
@@ -305,9 +304,9 @@ impl CaptureStage {
 /// Pushes [`Downmix`] when the device delivers more channels than the output
 /// target (averaging down to the target, which is mono here), then
 /// [`ResampleStage`] when the device's `native_rate` differs from `target_rate`
-/// (converting the captured audio to the requested rate). When `enhancement`
-/// enables the DC-removal step, pushes the [`DcBlocker`] into the `transform`
-/// segment, which runs after `normalize` on the mono signal at the target rate.
+/// (converting the captured audio to the requested rate). When `dc_removal` is
+/// set, pushes the [`DcBlocker`] into the `transform` segment, which runs after
+/// `normalize` on the mono signal at the target rate.
 /// Returns `Some(chain)` when at least one stage is needed and `None` when no
 /// segment has any (a mono device already at the target rate with no enhancement
 /// enabled), leaving the capture path on its direct, zero-cost reblock.
@@ -320,7 +319,7 @@ pub(crate) fn build_capture_stage(
     target_channels: u16,
     native_rate: u32,
     target_rate: u32,
-    enhancement: &EnhancementConfig,
+    dc_removal: bool,
 ) -> Result<Option<CaptureStage>, DecibriError> {
     let mut normalize: Vec<Box<dyn Stage>> = Vec::new();
 
@@ -338,7 +337,7 @@ pub(crate) fn build_capture_stage(
 
     let mut transform: Vec<Box<dyn Stage>> = Vec::new();
 
-    if enhancement.dc_removal {
+    if dc_removal {
         // Runs after `normalize`, on the mono signal at the target rate.
         transform.push(Box::new(InPlace(DcBlocker::new())));
     }
@@ -365,37 +364,37 @@ mod tests {
     /// downmix and/or a resample is needed.
     #[test]
     fn build_returns_none_only_for_mono_at_target_rate() {
-        let off = EnhancementConfig::default();
+        let off = false;
         // Mono, native == target: nothing to normalize.
         assert!(
-            build_capture_stage(1, 1, 16_000, 16_000, &off)
+            build_capture_stage(1, 1, 16_000, 16_000, off)
                 .unwrap()
                 .is_none(),
             "mono device at the target rate needs no chain"
         );
         // Multichannel, native == target: downmix only.
         assert!(
-            build_capture_stage(2, 1, 16_000, 16_000, &off)
+            build_capture_stage(2, 1, 16_000, 16_000, off)
                 .unwrap()
                 .is_some(),
             "stereo device gets a chain (downmix)"
         );
         assert!(
-            build_capture_stage(6, 1, 16_000, 16_000, &off)
+            build_capture_stage(6, 1, 16_000, 16_000, off)
                 .unwrap()
                 .is_some(),
             "5.1 device gets a chain (downmix)"
         );
         // Mono, native != target: resample only.
         assert!(
-            build_capture_stage(1, 1, 48_000, 16_000, &off)
+            build_capture_stage(1, 1, 48_000, 16_000, off)
                 .unwrap()
                 .is_some(),
             "mono device above the target rate gets a chain (resample)"
         );
         // Multichannel, native != target: downmix then resample.
         assert!(
-            build_capture_stage(2, 1, 48_000, 16_000, &off)
+            build_capture_stage(2, 1, 48_000, 16_000, off)
                 .unwrap()
                 .is_some(),
             "stereo device above the target rate gets a chain (downmix + resample)"
@@ -408,10 +407,10 @@ mod tests {
     /// segments are empty.
     #[test]
     fn build_with_dc_removal_adds_transform_even_with_empty_normalize() {
-        let on = EnhancementConfig { dc_removal: true };
+        let on = true;
 
         // Mono at target, enhancement on: a transform-only chain (no normalize).
-        let chain = build_capture_stage(1, 1, 16_000, 16_000, &on)
+        let chain = build_capture_stage(1, 1, 16_000, 16_000, on)
             .unwrap()
             .expect("dc_removal builds a chain even with nothing to normalize");
         assert!(
@@ -425,7 +424,7 @@ mod tests {
         );
 
         // Stereo above target, enhancement on: downmix + resample + DC.
-        let full = build_capture_stage(2, 1, 48_000, 16_000, &on)
+        let full = build_capture_stage(2, 1, 48_000, 16_000, on)
             .unwrap()
             .expect("downmix + resample + DC chain");
         assert_eq!(full.normalize.len(), 2, "downmix then resample");
@@ -438,7 +437,7 @@ mod tests {
     /// pure downmix.
     #[test]
     fn downmix_chain_averages_to_mono() {
-        let mut chain = build_capture_stage(2, 1, 16_000, 16_000, &EnhancementConfig::default())
+        let mut chain = build_capture_stage(2, 1, 16_000, 16_000, false)
             .unwrap()
             .expect("stereo -> downmix chain");
         // Two stereo frames: (0.5, 0.3) -> 0.4, (0.4, 0.6) -> 0.5.
@@ -455,7 +454,7 @@ mod tests {
     /// filter's startup ramp, since this `process`-only path does not flush).
     #[test]
     fn resample_chain_changes_rate_and_count() {
-        let mut chain = build_capture_stage(1, 1, 48_000, 16_000, &EnhancementConfig::default())
+        let mut chain = build_capture_stage(1, 1, 48_000, 16_000, false)
             .unwrap()
             .expect("48k mono -> resample chain");
         let input: Vec<f32> = (0..24_000).map(|n| (n as f32 * 0.01).sin()).collect();
@@ -503,7 +502,7 @@ mod tests {
     /// cap to exercise the `?` bridge end to end.
     #[test]
     fn build_capture_stage_surfaces_unsupported_rate_pair() {
-        let result = build_capture_stage(1, 1, 316_800_000, 16_000, &EnhancementConfig::default());
+        let result = build_capture_stage(1, 1, 316_800_000, 16_000, false);
         assert!(
             matches!(result, Err(DecibriError::ResampleConfigInvalid { .. })),
             "an enormous native rate exceeds the resampler's filter cap"
@@ -530,7 +529,7 @@ mod tests {
         reference.flush(&mut expected);
 
         // The chain: process the whole input via run(), then flush() the tail.
-        let mut chain = build_capture_stage(1, 1, 48_000, 16_000, &EnhancementConfig::default())
+        let mut chain = build_capture_stage(1, 1, 48_000, 16_000, false)
             .unwrap()
             .expect("48k mono -> resample chain");
         let mut got = chain.run(&input).expect("process runs").to_vec();
@@ -559,7 +558,7 @@ mod tests {
     /// samples (the unchanged downmix-only path).
     #[test]
     fn downmix_only_flush_is_empty() {
-        let mut chain = build_capture_stage(2, 1, 16_000, 16_000, &EnhancementConfig::default())
+        let mut chain = build_capture_stage(2, 1, 16_000, 16_000, false)
             .unwrap()
             .expect("stereo -> downmix chain");
         let _ = chain.run(&[0.5, 0.3, 0.4, 0.6]).expect("downmix runs");
@@ -578,7 +577,7 @@ mod tests {
     /// no DC step, and the output is exactly the downmix.
     #[test]
     fn transform_off_leaves_segment_empty_and_output_unchanged() {
-        let mut chain = build_capture_stage(2, 1, 16_000, 16_000, &EnhancementConfig::default())
+        let mut chain = build_capture_stage(2, 1, 16_000, 16_000, false)
             .unwrap()
             .expect("stereo -> downmix chain");
         assert!(
@@ -599,10 +598,10 @@ mod tests {
     /// so splitting the input into two chunks yields the same samples as one.
     #[test]
     fn dc_removal_removes_offset_preserves_length_and_is_continuous() {
-        let on = EnhancementConfig { dc_removal: true };
+        let on = true;
 
         // Mono at the target rate: a transform-only chain (just the DC step).
-        let mut chain = build_capture_stage(1, 1, 16_000, 16_000, &on)
+        let mut chain = build_capture_stage(1, 1, 16_000, 16_000, on)
             .unwrap()
             .expect("dc-only chain");
         let n = 16_000;
@@ -624,7 +623,7 @@ mod tests {
 
         // Continuity: the same input split across two chunks (state carried)
         // yields identical output, so there is no per-chunk discontinuity.
-        let mut split = build_capture_stage(1, 1, 16_000, 16_000, &on)
+        let mut split = build_capture_stage(1, 1, 16_000, 16_000, on)
             .unwrap()
             .expect("dc-only chain");
         let mut combined = split.run(&input[..8_000]).expect("first half").to_vec();
@@ -646,7 +645,7 @@ mod tests {
     /// guarantee still holds with a transform present.
     #[test]
     fn two_segment_run_and_flush_order_and_tail() {
-        let on = EnhancementConfig { dc_removal: true };
+        let on = true;
 
         // Stereo 48k input: a sine plus a DC offset on both channels (so the
         // downmix keeps the offset for the DC step to remove).
@@ -669,7 +668,7 @@ mod tests {
         dc.process_in_place(&mut expected);
 
         // The chain: process the whole input via run(), then flush() the tail.
-        let mut chain = build_capture_stage(2, 1, 48_000, 16_000, &on)
+        let mut chain = build_capture_stage(2, 1, 48_000, 16_000, on)
             .unwrap()
             .expect("downmix + resample + DC chain");
         let mut got = chain.run(&input).expect("run").to_vec();
@@ -697,7 +696,7 @@ mod tests {
     /// already is the post-normalize signal), and `has_transform` is false.
     #[test]
     fn run_skips_tap_when_no_transform() {
-        let mut chain = build_capture_stage(2, 1, 16_000, 16_000, &EnhancementConfig::default())
+        let mut chain = build_capture_stage(2, 1, 16_000, 16_000, false)
             .unwrap()
             .expect("stereo -> downmix-only chain");
         assert!(
@@ -718,8 +717,8 @@ mod tests {
     /// the pre-transform signal and differs from the delivered output.
     #[test]
     fn run_captures_post_normalize_tap() {
-        let on = EnhancementConfig { dc_removal: true };
-        let mut chain = build_capture_stage(2, 1, 48_000, 16_000, &on)
+        let on = true;
+        let mut chain = build_capture_stage(2, 1, 48_000, 16_000, on)
             .unwrap()
             .expect("downmix + resample + DC chain");
         assert!(chain.has_transform());
@@ -768,8 +767,8 @@ mod tests {
     /// the tap stays aligned with the delivered tail across the close path.
     #[test]
     fn flush_captures_post_normalize_tail() {
-        let on = EnhancementConfig { dc_removal: true };
-        let mut chain = build_capture_stage(1, 1, 48_000, 16_000, &on)
+        let on = true;
+        let mut chain = build_capture_stage(1, 1, 48_000, 16_000, on)
             .unwrap()
             .expect("resample + DC chain");
         let input: Vec<f32> = (0..24_000).map(|n| (n as f32 * 0.01).sin()).collect();
