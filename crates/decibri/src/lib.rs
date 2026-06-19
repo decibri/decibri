@@ -230,9 +230,7 @@ pub mod gain;
 // Crate-root re-exports so consumers can write `use decibri::Microphone`
 // rather than reaching through the module path.
 #[cfg(feature = "capture")]
-pub use microphone::{
-    AudioChunk, EnhancementConfig, Microphone, MicrophoneConfig, MicrophoneStream,
-};
+pub use microphone::{AudioChunk, Microphone, MicrophoneConfig, MicrophoneStream};
 
 #[cfg(feature = "playback")]
 pub use speaker::{Speaker, SpeakerConfig, SpeakerSink, SpeakerStream};
