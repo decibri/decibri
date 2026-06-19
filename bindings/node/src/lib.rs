@@ -298,12 +298,18 @@ impl DecibriBridge {
                         // score garbled input. The interleaved `frame` is
                         // untouched and is still what gets emitted to JS below.
                         if let Some(ref mut v) = vad {
+                            // Feed VAD the signal BEFORE the opt-in enhancement
+                            // step when the tap is active; otherwise the delivered
+                            // frame already is that signal. Called once per
+                            // delivered chunk so the tap drains in lockstep.
+                            let pre_enh = pump_stream.vad_input(frame.len());
+                            let vad_frame: &[f32] = pre_enh.as_deref().unwrap_or(&frame);
                             let downmixed;
                             let vad_input: &[f32] = if channels > 1 {
-                                downmixed = sample::downmix_to_mono(&frame, channels);
+                                downmixed = sample::downmix_to_mono(vad_frame, channels);
                                 &downmixed
                             } else {
-                                &frame
+                                vad_frame
                             };
                             if let Ok(result) = v.process(vad_input) {
                                 vad_probability
