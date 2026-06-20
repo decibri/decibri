@@ -36,7 +36,11 @@ default = ["capture", "playback", "vad", "denoise", "gain", "ort-load-dynamic"]
 capture = ["dep:cpal", "dep:crossbeam-channel", "dep:decibri-resampler"]
 playback = ["dep:cpal", "dep:crossbeam-channel"]
 vad = ["dep:ort"]
-denoise = []
+# Single-channel speech enhancement (denoise). Pulls `ort`: the capture denoise
+# stage runs an ONNX model through the same session seam as `vad`. Meaningful
+# only alongside `capture` (it is a capture-path stage); see the `mod onnx` gate
+# in lib.rs.
+denoise = ["dep:ort"]
 gain = []
 
 # ORT distribution mode (mutually exclusive; pick exactly one).

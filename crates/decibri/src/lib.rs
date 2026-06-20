@@ -164,10 +164,12 @@ pub mod sample;
 // Internal ONNX session abstraction. The trait is `pub(crate)` and not part
 // of the public API.
 //
-// Gated on `feature = "vad"` matching the only consumer (`vad`) and the
-// only backend (`dep:ort`). When vad is disabled, the trait has no purpose
-// since there is no inference workload and no ORT backend to wrap.
-#[cfg(feature = "vad")]
+// Gated on the presence of an ONNX consumer: `vad` (the Silero VAD) or the
+// capture denoise stage (`capture` + `denoise`, which runs FastEnhancer-T
+// through this seam). Denoise is a capture-path stage, so a `denoise` build
+// without `capture` has no consumer and the module is left out rather than
+// compiled dead. Either consumer pulls the `ort` backend via its feature.
+#[cfg(any(feature = "vad", all(feature = "capture", feature = "denoise")))]
 mod onnx;
 
 /// Resolved cpal version (major.minor) extracted at build time from the
@@ -230,7 +232,7 @@ pub mod gain;
 // Crate-root re-exports so consumers can write `use decibri::Microphone`
 // rather than reaching through the module path.
 #[cfg(feature = "capture")]
-pub use microphone::{AudioChunk, Microphone, MicrophoneConfig, MicrophoneStream};
+pub use microphone::{AudioChunk, DenoiseModel, Microphone, MicrophoneConfig, MicrophoneStream};
 
 #[cfg(feature = "playback")]
 pub use speaker::{Speaker, SpeakerConfig, SpeakerSink, SpeakerStream};
