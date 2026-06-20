@@ -1,20 +1,20 @@
 """Exception hierarchy tests.
 
-Covers all 35 exception classes shipped in the public ``decibri`` namespace:
+Covers all 36 exception classes shipped in the public ``decibri`` namespace:
 1 base (DecibriError) + 14 direct subclasses + DeviceError intermediate
-+ 8 direct DeviceError subclasses + OrtError intermediate + 7 direct
++ 8 direct DeviceError subclasses + OrtError intermediate + 8 direct
 OrtError subclasses + OrtPathError intermediate + 2 direct OrtPathError
 subclasses.
 
 Verifies:
 - Each class is reachable, raisable, and catchable by its own type.
 - The catch-target hierarchy: ``except DeviceError`` catches all 8
-  device-related instance variants; ``except OrtError`` catches all 9
+  device-related instance variants; ``except OrtError`` catches all 10
   ORT-family instance variants; ``except OrtPathError`` catches the 2
   path-specific variants; ``except DecibriError`` catches everything.
-- Path-bearing exceptions (OrtLoadFailed, OrtPathInvalid, VadModelLoadFailed)
-  expose .path (and .reason for OrtPathInvalid) as named attributes per
-  CPython OSError convention.
+- Path-bearing exceptions (OrtLoadFailed, OrtPathInvalid, VadModelLoadFailed,
+  ModelLoadFailed) expose .path (and .reason for OrtPathInvalid) as named
+  attributes per CPython OSError convention.
 - Single source of truth: the binding raises
   instances of the pure-Python exception classes, not Rust-side duplicates.
 """
@@ -32,6 +32,7 @@ from decibri import (
     MicrophoneNotFound,
     FramesPerBufferOutOfRange,
     InvalidFormat,
+    ModelLoadFailed,
     MultipleDevicesMatch,
     NoMicrophoneFound,
     NoSpeakerFound,
@@ -95,12 +96,13 @@ ALL_DECIBRI_ERROR_CLASSES = (
     NoSpeakerFound,
     NotAnInputDevice,
     SpeakerNotFound,
-    # OrtError + 7 direct + OrtPathError + 2 direct
+    # OrtError + 8 direct + OrtPathError + 2 direct
     OrtError,
     OrtInitFailed,
     OrtSessionBuildFailed,
     OrtThreadsConfigFailed,
     VadModelLoadFailed,
+    ModelLoadFailed,
     OrtInferenceFailed,
     OrtTensorCreateFailed,
     OrtTensorExtractFailed,
@@ -111,11 +113,11 @@ ALL_DECIBRI_ERROR_CLASSES = (
 
 
 def test_class_count() -> None:
-    # 35 total: 1 base + 14 direct + DeviceError + 8 device + OrtError
-    # + 7 ORT direct + OrtPathError + 2 path. The two additions over the
-    # prior 33 are DeviceFailed and OnnxBackendFailed, both direct
-    # DecibriError subclasses.
-    assert len(ALL_DECIBRI_ERROR_CLASSES) == 35
+    # 36 total: 1 base + 14 direct + DeviceError + 8 device + OrtError
+    # + 8 ORT direct + OrtPathError + 2 path. The addition over the prior 35 is
+    # ModelLoadFailed, the model-agnostic counterpart to VadModelLoadFailed
+    # raised by the capture denoise stage; like it, a direct OrtError subclass.
+    assert len(ALL_DECIBRI_ERROR_CLASSES) == 36
 
 
 def test_all_inherit_from_decibri_error() -> None:
@@ -137,6 +139,7 @@ ORT_FAMILY_INSTANCE_CLASSES = (
     OrtSessionBuildFailed,
     OrtThreadsConfigFailed,
     VadModelLoadFailed,
+    ModelLoadFailed,
     OrtInferenceFailed,
     OrtTensorCreateFailed,
     OrtTensorExtractFailed,
@@ -151,9 +154,9 @@ ORT_PATH_INSTANCE_CLASSES = (
 )
 
 
-def test_ort_error_catches_all_nine_variants() -> None:
-    """except OrtError catches all 9 ORT-family instance classes."""
-    assert len(ORT_FAMILY_INSTANCE_CLASSES) == 9
+def test_ort_error_catches_all_ten_variants() -> None:
+    """except OrtError catches all 10 ORT-family instance classes."""
+    assert len(ORT_FAMILY_INSTANCE_CLASSES) == 10
     for cls in ORT_FAMILY_INSTANCE_CLASSES:
         assert issubclass(cls, OrtError), f"{cls.__name__} is not an OrtError subclass"
 
@@ -281,6 +284,20 @@ def test_vad_model_load_failed_exposes_path() -> None:
     assert str(e) == "model load failed"
 
 
+def test_model_load_failed_exposes_path() -> None:
+    e = ModelLoadFailed("model load failed", "/some/fastenhancer_t.onnx")
+    assert e.path == "/some/fastenhancer_t.onnx"
+    assert str(e) == "model load failed"
+
+
+def test_model_load_failed_is_ort_error_not_vad() -> None:
+    """ModelLoadFailed is an OrtError but distinct from VadModelLoadFailed."""
+    assert issubclass(ModelLoadFailed, OrtError)
+    assert issubclass(ModelLoadFailed, DecibriError)
+    assert ModelLoadFailed is not VadModelLoadFailed
+    assert not issubclass(ModelLoadFailed, OrtPathError)
+
+
 # ---------------------------------------------------------------------------
 # Each class can be raised and caught by its own type.
 # ---------------------------------------------------------------------------
@@ -293,7 +310,7 @@ def test_each_class_raises_and_catches_itself() -> None:
     a single message arg per CPython BaseException.__init__.
     """
     for cls in ALL_DECIBRI_ERROR_CLASSES:
-        if cls is OrtLoadFailed or cls is VadModelLoadFailed:
+        if cls is OrtLoadFailed or cls is VadModelLoadFailed or cls is ModelLoadFailed:
             instance = cls("test msg", "/test/path")
         elif cls is OrtPathInvalid:
             instance = cls("test msg", "/test/path", "test reason")

@@ -42,7 +42,7 @@ import importlib.resources
 import time
 from pathlib import Path
 from types import TracebackType
-from typing import TYPE_CHECKING, Any, AsyncIterator, Union, cast
+from typing import TYPE_CHECKING, Any, AsyncIterator, Literal, Union, cast
 
 from typing_extensions import Self
 
@@ -56,7 +56,13 @@ else:
     SampleData = bytes
 
 from decibri import _decibri, exceptions
-from decibri._classes import Chunk, _VadStateMachine, _VALID_FORMATS, _VALID_MODES
+from decibri._classes import (
+    Chunk,
+    _VadStateMachine,
+    _VALID_DENOISE_MODELS,
+    _VALID_FORMATS,
+    _VALID_MODES,
+)
 from decibri._decibri import MicrophoneInfo, SpeakerInfo, VersionInfo
 
 __all__ = ["AsyncMicrophone", "AsyncSpeaker"]
@@ -130,6 +136,7 @@ class AsyncMicrophone:
         model_path: str | Path | None = None,
         as_ndarray: bool = False,
         ort_library_path: str | Path | None = None,
+        denoise: Literal["fastenhancer-t"] | None = None,
     ) -> None:
         """Construct an AsyncMicrophone audio capture instance.
 
@@ -234,11 +241,41 @@ class AsyncMicrophone:
                     "installation, or pass model_path explicitly."
                 ) from exc
 
+        # Validate and resolve denoise. Same logic as sync Microphone: a
+        # closed-set model name resolves to the bundled ONNX file via
+        # importlib.resources; absence leaves denoise off; an unknown name is a
+        # clear ValueError.
+        resolved_denoise_model_path: str | None = None
+        if denoise is not None:
+            if denoise not in _VALID_DENOISE_MODELS:
+                raise ValueError(
+                    f"Invalid denoise value: {denoise!r}. Expected 'fastenhancer-t'."
+                )
+            try:
+                denoise_resource = (
+                    importlib.resources.files("decibri")
+                    / "models"
+                    / "fastenhancer_t.onnx"
+                )
+                if not denoise_resource.is_file():
+                    raise FileNotFoundError(
+                        f"Bundled denoise model resource exists but is not a "
+                        f"file: {denoise_resource}"
+                    )
+                resolved_denoise_model_path = str(denoise_resource)
+            except (FileNotFoundError, ModuleNotFoundError, AttributeError) as exc:
+                raise ValueError(
+                    "the bundled denoise model could not be located in the "
+                    "installed wheel. Ensure the models/ directory was included "
+                    "during installation."
+                ) from exc
+
         # Resolve the ORT dylib path via the same four-arm priority order
         # the sync wrapper uses (see _ort_resolver.resolve_ort_dylib_path).
-        # Lazy import: only loaded when Silero VAD is enabled.
+        # Lazy import: only loaded when an ONNX stage (Silero VAD or denoise)
+        # will run.
         resolved_ort_path: str | None = None
-        if vad_enabled and vad_mode == "silero":
+        if (vad_enabled and vad_mode == "silero") or denoise is not None:
             from decibri._ort_resolver import resolve_ort_dylib_path
 
             resolved_ort_path = resolve_ort_dylib_path(ort_library_path)
@@ -260,6 +297,8 @@ class AsyncMicrophone:
             model_path=resolved_model_path,
             numpy=as_ndarray,
             ort_library_path=resolved_ort_path,
+            denoise=denoise,
+            denoise_model_path=resolved_denoise_model_path,
         )
 
         self._vad_enabled = vad_enabled

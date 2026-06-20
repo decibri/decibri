@@ -315,9 +315,11 @@ impl CaptureStage {
 /// [`ResampleStage`] when the device's `native_rate` differs from `target_rate`
 /// (converting the captured audio to the requested rate). When `dc_removal` is
 /// set, pushes the [`DcBlocker`] into the `transform` segment; when `denoise` is
-/// `Some((model, path))` (and the `denoise` feature is compiled in), pushes the
-/// framed denoise stage immediately after it. Both transform stages run after
-/// `normalize` on the mono signal at the target rate.
+/// `Some((model, model_path, ort_library_path))` (and the `denoise` feature is
+/// compiled in), pushes the framed denoise stage immediately after it, loading
+/// the model through the ONNX seam (initialising ORT from `ort_library_path` when
+/// supplied). Both transform stages run after `normalize` on the mono signal at
+/// the target rate.
 /// Returns `Some(chain)` when at least one stage is needed and `None` when no
 /// segment has any (a mono device already at the target rate with no enhancement
 /// enabled), leaving the capture path on its direct, zero-cost reblock.
@@ -331,7 +333,7 @@ pub(crate) fn build_capture_stage(
     native_rate: u32,
     target_rate: u32,
     dc_removal: bool,
-    denoise: Option<(DenoiseModel, &Path)>,
+    denoise: Option<(DenoiseModel, &Path, Option<&Path>)>,
 ) -> Result<Option<CaptureStage>, DecibriError> {
     let mut normalize: Vec<Box<dyn Stage>> = Vec::new();
 
@@ -361,8 +363,12 @@ pub(crate) fn build_capture_stage(
     // DcBlocker, denoise is framed and latency-introducing, so it sits in the
     // transform segment after the VAD tap (see the tap docs in `microphone`).
     #[cfg(feature = "denoise")]
-    if let Some((model, path)) = denoise {
-        transform.push(Box::new(crate::denoise::Denoise::new(model, path)?));
+    if let Some((model, path, ort_library_path)) = denoise {
+        transform.push(Box::new(crate::denoise::Denoise::new(
+            model,
+            path,
+            ort_library_path,
+        )?));
     }
     // Without the `denoise` feature the parameter is accepted but unused.
     #[cfg(not(feature = "denoise"))]
@@ -872,9 +878,16 @@ mod tests {
         let path = denoise_model_path();
         let model = DenoiseModel::FastEnhancerT;
 
-        let both = build_capture_stage(1, 1, 16_000, 16_000, true, Some((model, path.as_path())))
-            .unwrap()
-            .expect("dc + denoise builds a transform chain");
+        let both = build_capture_stage(
+            1,
+            1,
+            16_000,
+            16_000,
+            true,
+            Some((model, path.as_path(), None)),
+        )
+        .unwrap()
+        .expect("dc + denoise builds a transform chain");
         assert_eq!(
             both.transform.len(),
             2,
@@ -885,10 +898,16 @@ mod tests {
             "a mono device at the target rate needs no normalize stage"
         );
 
-        let denoise_only =
-            build_capture_stage(1, 1, 16_000, 16_000, false, Some((model, path.as_path())))
-                .unwrap()
-                .expect("denoise alone builds a transform chain");
+        let denoise_only = build_capture_stage(
+            1,
+            1,
+            16_000,
+            16_000,
+            false,
+            Some((model, path.as_path(), None)),
+        )
+        .unwrap()
+        .expect("denoise alone builds a transform chain");
         assert_eq!(
             denoise_only.transform.len(),
             1,
@@ -919,7 +938,7 @@ mod tests {
             16_000,
             16_000,
             false,
-            Some((DenoiseModel::FastEnhancerT, path.as_path())),
+            Some((DenoiseModel::FastEnhancerT, path.as_path(), None)),
         )
         .unwrap()
         .expect("denoise chain");
@@ -966,7 +985,7 @@ mod tests {
             16_000,
             16_000,
             false,
-            Some((DenoiseModel::FastEnhancerT, path.as_path())),
+            Some((DenoiseModel::FastEnhancerT, path.as_path(), None)),
         )
         .unwrap()
         .expect("denoise chain");

@@ -27,6 +27,7 @@ from decibri.exceptions import (
     InvalidFormat,
     MicrophoneNotFound,
     MicrophoneStreamClosed,
+    ModelLoadFailed,
     MultipleDevicesMatch,
     NoMicrophoneFound,
     NoSpeakerFound,

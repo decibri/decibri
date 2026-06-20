@@ -39,7 +39,7 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 from types import TracebackType
-from typing import TYPE_CHECKING, Any, Iterator, Union, cast
+from typing import TYPE_CHECKING, Any, Iterator, Literal, Union, cast
 
 from typing_extensions import Self
 
@@ -244,6 +244,7 @@ def _compute_rms(chunk_bytes: bytes, sample_format: str) -> float:
 
 _VALID_MODES = frozenset({"silero", "energy"})
 _VALID_FORMATS = frozenset({"int16", "float32"})
+_VALID_DENOISE_MODELS = frozenset({"fastenhancer-t"})
 
 
 class Microphone:
@@ -264,6 +265,11 @@ class Microphone:
     wrapper-layer state machine. ``vad`` accepts ``False`` (disabled),
     ``"silero"``, or ``"energy"``. With ``vad=False``, ``vad_score``
     returns 0.0 and ``is_speaking`` returns False unconditionally.
+
+    The ``denoise`` parameter selects an optional bundled single-channel
+    speech-enhancement model (``"fastenhancer-t"``) applied to the captured
+    audio; omit it (the default ``None``) to leave denoise off, which keeps the
+    capture path unchanged.
 
     This class is synchronous. For async iteration, use ``AsyncMicrophone``.
 
@@ -298,6 +304,7 @@ class Microphone:
         model_path: str | Path | None = None,
         as_ndarray: bool = False,
         ort_library_path: str | Path | None = None,
+        denoise: Literal["fastenhancer-t"] | None = None,
     ) -> None:
         """Construct a Microphone audio capture instance.
 
@@ -434,13 +441,44 @@ class Microphone:
                     "installation, or pass model_path explicitly."
                 ) from exc
 
+        # Validate and resolve denoise. Closed-set selector mirroring the Silero
+        # VAD shape: a model name resolves to a bundled ONNX file, absence leaves
+        # denoise off. The only accepted value is 'fastenhancer-t'; anything else
+        # is a clear ValueError, not a silent miss. The bundled model file is
+        # resolved via importlib.resources, exactly as the Silero model is.
+        resolved_denoise_model_path: str | None = None
+        if denoise is not None:
+            if denoise not in _VALID_DENOISE_MODELS:
+                raise ValueError(
+                    f"Invalid denoise value: {denoise!r}. Expected 'fastenhancer-t'."
+                )
+            try:
+                denoise_resource = (
+                    importlib.resources.files("decibri")
+                    / "models"
+                    / "fastenhancer_t.onnx"
+                )
+                if not denoise_resource.is_file():
+                    raise FileNotFoundError(
+                        f"Bundled denoise model resource exists but is not a "
+                        f"file: {denoise_resource}"
+                    )
+                resolved_denoise_model_path = str(denoise_resource)
+            except (FileNotFoundError, ModuleNotFoundError, AttributeError) as exc:
+                raise ValueError(
+                    "the bundled denoise model could not be located in the "
+                    "installed wheel. Ensure the models/ directory was included "
+                    "during installation."
+                ) from exc
+
         # Resolve the ORT dylib path via the four-arm priority order in
-        # _ort_resolver. Only consulted when Silero VAD is enabled; energy
-        # mode and vad=False never load ORT, so the resolver call (and its
-        # bundled-dylib lookup) is skipped to avoid the import-time cost.
-        # See _ort_resolver.resolve_ort_dylib_path for the priority order.
+        # _ort_resolver. Consulted when an ONNX stage loads (Silero VAD or
+        # denoise); energy mode and vad=False with no denoise never load ORT, so
+        # the resolver call (and its bundled-dylib lookup) is skipped to avoid
+        # the import-time cost. See _ort_resolver.resolve_ort_dylib_path for the
+        # priority order.
         resolved_ort_path: str | None = None
-        if vad_enabled and vad_mode == "silero":
+        if (vad_enabled and vad_mode == "silero") or denoise is not None:
             from decibri._ort_resolver import resolve_ort_dylib_path
 
             resolved_ort_path = resolve_ort_dylib_path(ort_library_path)
@@ -467,6 +505,8 @@ class Microphone:
             model_path=resolved_model_path,
             numpy=as_ndarray,
             ort_library_path=resolved_ort_path,
+            denoise=denoise,
+            denoise_model_path=resolved_denoise_model_path,
         )
 
         self._vad_enabled = vad_enabled

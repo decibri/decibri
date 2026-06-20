@@ -13,6 +13,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 ### Added
 
 - Two dedicated exception classes, `DeviceFailed` (a device or driver failure during streaming) and `OnnxBackendFailed` (a non-ORT ONNX backend failure), both direct `DecibriError` subclasses. Previously these mapped to the generic `DecibriError` base; they are now catchable as their own types. Importable via `decibri.DeviceFailed` / `decibri.OnnxBackendFailed` or from `decibri.exceptions`.
+- `denoise`: an opt-in `Microphone` / `AsyncMicrophone` constructor option that runs a bundled single-channel speech-enhancement model over the captured audio. The only accepted value is `'fastenhancer-t'`; omit it (the default `None`) to leave denoise off, which keeps the capture path unchanged. The model ships with the wheel, so no path or download is needed. `read()` returns the enhanced audio; VAD reads the pre-enhancement signal, so `vad_score` and `is_speaking` are unaffected. An unknown model name raises `ValueError`; a model that fails to load raises the new `ModelLoadFailed` exception, the denoise counterpart to `VadModelLoadFailed` (a model-agnostic `OrtError` subclass with a `path` attribute), importable via `decibri.ModelLoadFailed` or from `decibri.exceptions`.
 
 ### Changed
 

@@ -72,6 +72,7 @@ const DEVICE_CODES = [
 const ORT_CODES = [
   ['decibri: failed to initialize ONNX Runtime', 'ORT_INIT_FAILED'],
   ['Failed to load Silero VAD model from', 'VAD_MODEL_LOAD_FAILED'],
+  ['Failed to load model from', 'MODEL_LOAD_FAILED'],
   ['Failed to create ort session builder', 'ORT_SESSION_BUILD_FAILED'],
   ['Failed to set ort threads', 'ORT_THREADS_CONFIG_FAILED'],
   ['Silero VAD inference failed', 'ORT_INFERENCE_FAILED'],

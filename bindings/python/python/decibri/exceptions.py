@@ -168,9 +168,9 @@ class OrtError(DecibriError):
     """Base class for all ORT-related errors.
 
     Catches: OrtInitFailed, OrtSessionBuildFailed, OrtThreadsConfigFailed,
-    VadModelLoadFailed, OrtInferenceFailed, OrtTensorCreateFailed,
-    OrtTensorExtractFailed, OrtLoadFailed, OrtPathInvalid (the last two
-    via OrtPathError intermediate). 9 instance classes total.
+    VadModelLoadFailed, ModelLoadFailed, OrtInferenceFailed,
+    OrtTensorCreateFailed, OrtTensorExtractFailed, OrtLoadFailed, OrtPathInvalid
+    (the last two via OrtPathError intermediate). 10 instance classes total.
 
     Use this when you want to catch any ORT setup or runtime failure with
     a single except clause. For path-specific failures only (where the
@@ -180,7 +180,7 @@ class OrtError(DecibriError):
     """
 
 
-# Direct OrtError subclasses (7 instance classes)
+# Direct OrtError subclasses (8 instance classes)
 
 
 class OrtInitFailed(OrtError):
@@ -205,6 +205,20 @@ class OrtThreadsConfigFailed(OrtError):
 
 class VadModelLoadFailed(OrtError):
     """Raised when loading the Silero VAD ONNX model fails."""
+
+    def __init__(self, msg: str, path: str) -> None:
+        super().__init__(msg)
+        self.path = path
+
+
+class ModelLoadFailed(OrtError):
+    """Raised when a bundled model loaded through the ONNX session seam fails.
+
+    The model-agnostic counterpart to ``VadModelLoadFailed``: the capture
+    denoise stage raises this when its ONNX model file cannot be opened, so a
+    denoise load failure is not reported as a VAD error. The ``path`` attribute
+    on the exception identifies which model file failed.
+    """
 
     def __init__(self, msg: str, path: str) -> None:
         super().__init__(msg)

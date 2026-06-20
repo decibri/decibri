@@ -84,10 +84,18 @@ impl Denoise {
     /// # Errors
     /// - [`DecibriError::ModelLoadFailed`] if the model file cannot be opened.
     /// - The ORT init / session-build errors surfaced by the shared seam.
-    pub(crate) fn new(model: DenoiseModel, path: &Path) -> Result<Self, DecibriError> {
+    pub(crate) fn new(
+        model: DenoiseModel,
+        path: &Path,
+        ort_library_path: Option<&Path>,
+    ) -> Result<Self, DecibriError> {
         // ORT initialises exactly once per process (first-wins). A VAD in the
-        // same process may have done it already; if not, denoise does it here.
-        crate::onnx::init_ort_once(None)?;
+        // same process may have done it already; if not, denoise does it here,
+        // from `ort_library_path` when the caller supplied one (the bindings pass
+        // their bundled dylib path so a denoise-only capture finds ORT without a
+        // VAD or an `ORT_DYLIB_PATH` env var). `None` leaves ORT to its own
+        // discovery. Under `ort-download-binaries` the path is ignored.
+        crate::onnx::init_ort_once(ort_library_path)?;
 
         let session = match model {
             // One model today; the exhaustive match keeps a future tier from
@@ -290,7 +298,7 @@ mod tests {
     /// tracks the input minus the framing latency.
     #[test]
     fn denoise_stage_processes_and_advances_caches() {
-        let mut stage = Denoise::new(DenoiseModel::FastEnhancerT, &model_path())
+        let mut stage = Denoise::new(DenoiseModel::FastEnhancerT, &model_path(), None)
             .expect("bundled FastEnhancer-T model loads");
 
         // Caches start zeroed and the accumulator carries the left-pad.
@@ -329,7 +337,7 @@ mod tests {
     /// the left-pad re-seeded).
     #[test]
     fn denoise_flush_drains_tail_and_resets() {
-        let mut stage = Denoise::new(DenoiseModel::FastEnhancerT, &model_path())
+        let mut stage = Denoise::new(DenoiseModel::FastEnhancerT, &model_path(), None)
             .expect("bundled FastEnhancer-T model loads");
 
         let mut out = Vec::new();
@@ -363,7 +371,7 @@ mod tests {
         let missing = Path::new(env!("CARGO_MANIFEST_DIR")).join("no-such-model.onnx");
         // Match on the Result (not `expect_err`) because `Denoise` holds a
         // `Box<dyn OnnxSession>` and is not `Debug`.
-        let err = match Denoise::new(DenoiseModel::FastEnhancerT, &missing) {
+        let err = match Denoise::new(DenoiseModel::FastEnhancerT, &missing, None) {
             Ok(_) => panic!("a missing model file must fail to load"),
             Err(e) => e,
         };

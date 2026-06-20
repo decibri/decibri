@@ -364,7 +364,70 @@ try {
 console.log('  Group 7 done\n');
 
 // ═══════════════════════════════════════════════════════════════════════════════
-// Group 8: async open() factories (deterministic, no hardware required)
+// Group 8: Denoise option (deterministic, no hardware required)
+// ═══════════════════════════════════════════════════════════════════════════════
+//
+// Construction resolves the bundled model path but does NOT load the model
+// (the ONNX load happens at start(), the hardware tier). So the closed-set
+// validation, the bundled-path resolution, and the off-by-default path are all
+// CI-safe. The runtime model-load failure is classified by wrapNativeError
+// (exercised directly with the frozen core Display string, like Group 7).
+
+console.log('--- Group 8: Denoise option ---');
+
+// A valid model name constructs (model loads later, at start()).
+try {
+  const m = new Microphone({ sampleRate: 16000, channels: 1, denoise: 'fastenhancer-t' });
+  assert(m instanceof Microphone, "denoise: 'fastenhancer-t' constructs");
+  m.stop();
+} catch (e) {
+  console.log(`  FAIL: denoise 'fastenhancer-t' construction rejected: ${e.message}`);
+  failed++;
+}
+
+// An unrecognized model name is a clear TypeError, not a silent miss.
+assertThrows(
+  () => new Microphone({ denoise: 'whisper' }),
+  TypeError,
+  'Invalid denoise value'
+);
+
+// Off by default: no denoise key constructs identically to a plain mic.
+try {
+  const m = new Microphone({ sampleRate: 16000, channels: 1 });
+  assert(m instanceof Microphone, 'no denoise key constructs (off by default)');
+  m.stop();
+} catch (e) {
+  console.log(`  FAIL: no-denoise construction rejected: ${e.message}`);
+  failed++;
+}
+
+// A denoise model-load failure surfaces as a dedicated OrtError with the
+// 'MODEL_LOAD_FAILED' code, distinct from the VAD-named 'VAD_MODEL_LOAD_FAILED'
+// and from the generic 'DECIBRI_ERROR' fallback. The load only fails at
+// runtime (bad/missing model file), so wrapNativeError is exercised directly
+// with the frozen core Display string.
+{
+  const model = wrapNativeError(new Error('Failed to load model from /x/fastenhancer_t.onnx: boom'));
+  assert(model instanceof OrtError, 'ModelLoadFailed maps to an OrtError');
+  assert(model instanceof DecibriError, 'ModelLoadFailed is a DecibriError');
+  assert(model.code === 'MODEL_LOAD_FAILED', `code is MODEL_LOAD_FAILED (got ${model.code})`);
+  assert(model.code !== 'VAD_MODEL_LOAD_FAILED', 'ModelLoadFailed is NOT the VAD-named code');
+  assert(
+    model.message === 'Failed to load model from /x/fastenhancer_t.onnx: boom',
+    'ModelLoadFailed message preserved verbatim'
+  );
+
+  // Regression guard: the VAD model-load string still maps to its own code,
+  // so the two model-load prefixes do not collide.
+  const vad = wrapNativeError(new Error('Failed to load Silero VAD model from /x/silero_vad.onnx: boom'));
+  assert(vad.code === 'VAD_MODEL_LOAD_FAILED', `VAD model load still VAD_MODEL_LOAD_FAILED (got ${vad.code})`);
+}
+
+console.log('  Group 8 done\n');
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// Group 9: async open() factories (deterministic, no hardware required)
 // ═══════════════════════════════════════════════════════════════════════════════
 //
 // Asserts what is deterministic: the factory resolves to a working instance and
@@ -373,7 +436,7 @@ console.log('  Group 7 done\n');
 // hardware tier in tests/test-async-open.js; it is not asserted here.
 
 async function asyncOpenTests() {
-  console.log('--- Group 8: async open() factories ---');
+  console.log('--- Group 9: async open() factories ---');
 
   // Microphone.open() resolves to a working instance (default device, no model).
   // Mirrors the synchronous construction already exercised in Group 5; if the CI
@@ -443,11 +506,11 @@ async function asyncOpenTests() {
     s.stop();
   }
 
-  console.log('  Group 8 done\n');
+  console.log('  Group 9 done\n');
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
-// Group 9: async write/drain (deterministic, no hardware required)
+// Group 10: async write/drain (deterministic, no hardware required)
 // ═══════════════════════════════════════════════════════════════════════════════
 //
 // Asserts what is deterministic without an output device: the no-op paths
@@ -456,7 +519,7 @@ async function asyncOpenTests() {
 // in tests/test-async-write-drain.js.
 
 async function asyncWriteDrainTests() {
-  console.log('--- Group 9: async write/drain ---');
+  console.log('--- Group 10: async write/drain ---');
 
   const s = new Speaker({ sampleRate: 16000, channels: 1 });
 
@@ -485,7 +548,7 @@ async function asyncWriteDrainTests() {
     assert(true, 'sync write/stop still works alongside the async path');
   }
 
-  console.log('  Group 9 done\n');
+  console.log('  Group 10 done\n');
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
