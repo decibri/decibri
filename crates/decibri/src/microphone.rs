@@ -84,6 +84,17 @@ pub struct MicrophoneConfig {
     /// bytes). Required when [`denoise`](Self::denoise) names a model; ignored
     /// otherwise. Default: `None`.
     pub denoise_model_path: Option<PathBuf>,
+    /// Filesystem path to the ONNX Runtime dynamic library, used to initialise
+    /// ORT for the capture-path denoise stage (the same role
+    /// [`VadConfig::ort_library_path`](crate::vad::VadConfig::ort_library_path)
+    /// plays for the VAD). Consulted only when [`denoise`](Self::denoise) names a
+    /// model and the `denoise` feature is compiled with `ort-load-dynamic`; under
+    /// `ort-download-binaries` ORT is statically linked and this is ignored.
+    /// `None` (the default) leaves ORT to its own discovery (the `ORT_DYLIB_PATH`
+    /// environment variable, then the system loader). ORT initialises once per
+    /// process (first-wins), so when a VAD has already initialised it this is a
+    /// no-op. Default: `None`.
+    pub ort_library_path: Option<PathBuf>,
 }
 
 impl Default for MicrophoneConfig {
@@ -96,6 +107,7 @@ impl Default for MicrophoneConfig {
             dc_removal: false,
             denoise: None,
             denoise_model_path: None,
+            ort_library_path: None,
         }
     }
 }
@@ -728,7 +740,8 @@ impl Microphone {
         let denoise = self
             .config
             .denoise
-            .zip(self.config.denoise_model_path.as_deref());
+            .zip(self.config.denoise_model_path.as_deref())
+            .map(|(model, path)| (model, path, self.config.ort_library_path.as_deref()));
         let capture_stage = build_capture_stage(
             channels,
             target_channels,

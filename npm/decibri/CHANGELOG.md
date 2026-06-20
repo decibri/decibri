@@ -14,6 +14,7 @@ For other decibri packages, see:
 ### Added
 
 - A device or driver failure during streaming now surfaces as a `DecibriError` with the dedicated `code` `'DEVICE_FAILED'`, and a non-ORT ONNX backend failure as `'ONNX_BACKEND_FAILED'`, instead of the generic `'DECIBRI_ERROR'`. Both are catchable by branching on `err.code`; the message text is unchanged.
+- `denoise`: an opt-in `Microphone` option that runs a bundled single-channel speech-enhancement model over the captured audio. The only accepted value is `'fastenhancer-t'`; omit it to leave denoise off (the default), which keeps the capture path unchanged. The model ships with the package, so no path or download is needed. The delivered `'data'` chunks carry the enhanced audio; VAD reads the pre-enhancement signal, so `vadScore` and the `speech` / `silence` events are unaffected. An unknown model name throws a `TypeError`. A denoise model-load failure raises a dedicated `MODEL_LOAD_FAILED` `OrtError` via `wrapNativeError`; note that a failure surfaced from `start()` is delivered on the `'error'` event as the raw native error without the decibri `code` attached (as with device-open failures), so match it by message there.
 
 ### Changed
 

@@ -47,7 +47,9 @@ use decibri::device::{
     SpeakerInfo as CoreOutputDeviceInfo,
 };
 use decibri::error::DecibriError as CoreDecibriError;
-use decibri::microphone::{AudioChunk, Microphone, MicrophoneConfig, MicrophoneStream};
+use decibri::microphone::{
+    AudioChunk, DenoiseModel, Microphone, MicrophoneConfig, MicrophoneStream,
+};
 use decibri::sample::{
     downmix_to_mono, f32_le_bytes_to_f32, f32_to_f32_le_bytes, f32_to_i16_le_bytes,
     i16_le_bytes_to_f32,
@@ -139,6 +141,7 @@ const EXCEPTION_NAMES: &[&str] = &[
     "VadSampleRateUnsupported",
     "VadThresholdOutOfRange",
     "VadModelLoadFailed",
+    "ModelLoadFailed",
     "OrtError",
     "OrtInitFailed",
     "OrtSessionBuildFailed",
@@ -186,12 +189,12 @@ fn exception_class<'py>(py: Python<'py>, name: &'static str) -> PyResult<Bound<'
 // ---------------------------------------------------------------------------
 // Error mapping: DecibriError -> PyErr.
 //
-// Covers all 32 variants explicitly. Catch-all `_ =>` arm at end is required
+// Covers all 33 variants explicitly. Catch-all `_ =>` arm at end is required
 // because DecibriError is #[non_exhaustive] (per F10).
 //
 // For variants with a `path` field (OrtLoadFailed, OrtPathInvalid,
-// VadModelLoadFailed), the mapper passes a tuple as the args so the Python
-// __init__ override can store named attributes per F11.
+// VadModelLoadFailed, ModelLoadFailed), the mapper passes a tuple as the args
+// so the Python __init__ override can store named attributes per F11.
 // ---------------------------------------------------------------------------
 
 type ExceptionRaiser = Box<dyn FnOnce(Bound<'_, PyType>) -> PyErr>;
@@ -318,7 +321,7 @@ fn to_py_err(py: Python<'_>, err: CoreDecibriError) -> PyErr {
             Box::new(move |cls| PyErr::from_type(cls, (msg,))),
         ),
 
-        // Struct variants with path attribute (3). Multi-element args
+        // Struct variants with path attribute (4). Multi-element args
         // tuples that the pure-Python __init__ unpacks into named attributes.
         CoreDecibriError::OrtLoadFailed { ref path, .. } => {
             let path_str = path_to_string(path);
@@ -339,6 +342,15 @@ fn to_py_err(py: Python<'_>, err: CoreDecibriError) -> PyErr {
             let path_str = path_to_string(path);
             (
                 "VadModelLoadFailed",
+                Box::new(move |cls| PyErr::from_type(cls, (msg, path_str))),
+            )
+        }
+        // Model-agnostic counterpart to VadModelLoadFailed: the capture denoise
+        // stage's model file failed to load. Same path-bearing shape.
+        CoreDecibriError::ModelLoadFailed { ref path, .. } => {
+            let path_str = path_to_string(path);
+            (
+                "ModelLoadFailed",
                 Box::new(move |cls| PyErr::from_type(cls, (msg, path_str))),
             )
         }
@@ -875,6 +887,8 @@ impl MicrophoneBridge {
         model_path = None,
         numpy = false,
         ort_library_path = None,
+        denoise = None,
+        denoise_model_path = None,
     ))]
     #[allow(clippy::too_many_arguments)]
     fn new(
@@ -891,6 +905,8 @@ impl MicrophoneBridge {
         model_path: Option<PathBuf>,
         numpy: bool,
         ort_library_path: Option<PathBuf>,
+        denoise: Option<String>,
+        denoise_model_path: Option<PathBuf>,
     ) -> PyResult<Self> {
         let parsed_format = parse_sample_format(&format).map_err(|e| to_py_err(py, e))?;
         let device_selector = build_device_selector(device.as_ref())?;
@@ -902,6 +918,32 @@ impl MicrophoneBridge {
         capture_config.channels = channels;
         capture_config.frames_per_buffer = frames_per_buffer;
         capture_config.device = device_selector;
+
+        // Denoise: map the closed-set model name to the core selector and attach
+        // the bundled model path the wrapper resolved. Absent leaves denoise off
+        // and the capture path unchanged. The model loads later, in start(), so
+        // an unknown name fails here but a load failure surfaces from start().
+        if let Some(name) = denoise.as_deref() {
+            let model = match name {
+                "fastenhancer-t" => DenoiseModel::FastEnhancerT,
+                other => {
+                    return Err(PyValueError::new_err(format!(
+                        "denoise must be 'fastenhancer-t', got '{other}'"
+                    )))
+                }
+            };
+            let mp = denoise_model_path.ok_or_else(|| {
+                PyValueError::new_err("denoise_model_path is required when denoise is set")
+            })?;
+            capture_config.denoise = Some(model);
+            capture_config.denoise_model_path = Some(mp);
+            // The denoise stage loads through the ONNX seam, so hand the core the
+            // bundled ORT dylib path the wrapper resolved (the same path the VAD
+            // uses). Cloned because the VAD construction below also consumes it.
+            // Without it a denoise-only capture could not find the bundled
+            // runtime on a default install.
+            capture_config.ort_library_path = ort_library_path.clone();
+        }
 
         // VAD construction gate (Option (b)+(h)). The bridge constructs
         // SileroVad only if vad=True AND vad_mode=="silero". The vad_mode
@@ -1385,6 +1427,8 @@ impl AsyncMicrophoneBridge {
         model_path = None,
         numpy = false,
         ort_library_path = None,
+        denoise = None,
+        denoise_model_path = None,
     ))]
     #[allow(clippy::too_many_arguments)]
     fn new(
@@ -1401,6 +1445,8 @@ impl AsyncMicrophoneBridge {
         model_path: Option<PathBuf>,
         numpy: bool,
         ort_library_path: Option<PathBuf>,
+        denoise: Option<String>,
+        denoise_model_path: Option<PathBuf>,
     ) -> PyResult<Self> {
         let inner = MicrophoneBridge::new(
             py,
@@ -1416,6 +1462,8 @@ impl AsyncMicrophoneBridge {
             model_path,
             numpy,
             ort_library_path,
+            denoise,
+            denoise_model_path,
         )?;
         Ok(AsyncMicrophoneBridge {
             inner: Arc::new(inner),

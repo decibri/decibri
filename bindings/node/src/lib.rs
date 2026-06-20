@@ -9,7 +9,7 @@ use napi::{Env, Task};
 use napi_derive::napi;
 
 use decibri::device::{self, DeviceSelector};
-use decibri::microphone::{Microphone, MicrophoneConfig, MicrophoneStream};
+use decibri::microphone::{DenoiseModel, Microphone, MicrophoneConfig, MicrophoneStream};
 use decibri::sample;
 use decibri::speaker::{Speaker, SpeakerConfig, SpeakerSink, SpeakerStream};
 use decibri::vad::{SileroVad, VadConfig};
@@ -55,6 +55,16 @@ pub struct DecibriOptions {
     pub device: Option<serde_json::Value>,
     pub vad_mode: Option<String>,
     pub model_path: Option<String>,
+    /// Capture denoise model selector. The only accepted value is
+    /// `'fastenhancer-t'`; absent leaves denoise off. The JS wrapper resolves
+    /// the bundled model file and passes its path through `denoise_model_path`.
+    pub denoise: Option<String>,
+    /// Filesystem path to the denoise model's ONNX file, resolved by the JS
+    /// wrapper from its bundled copy. Required when `denoise` names a model.
+    /// Internal plumbing (the user passes only `denoise`), so it is hidden from
+    /// the generated TypeScript like `ort_library_path`.
+    #[napi(skip_typescript)]
+    pub denoise_model_path: Option<String>,
     #[napi(skip_typescript)]
     pub ort_library_path: Option<String>,
 }
@@ -124,6 +134,38 @@ fn build_microphone_parts(options: Option<DecibriOptions>) -> Result<MicrophoneP
     config.channels = channels;
     config.frames_per_buffer = frames_per_buffer;
     config.device = device;
+
+    // Denoise: map the closed-set model name to the core selector and attach
+    // the bundled model path the JS wrapper resolved. Absent leaves denoise off
+    // and the capture path unchanged. The model is loaded later, in start(), so
+    // an unknown name fails here but a load failure surfaces from start().
+    if let Some(name) = opts.denoise.as_deref() {
+        let model = match name {
+            "fastenhancer-t" => DenoiseModel::FastEnhancerT,
+            other => {
+                return Err(Error::new(
+                    Status::InvalidArg,
+                    format!("denoise must be 'fastenhancer-t', got '{other}'"),
+                ))
+            }
+        };
+        let model_path = opts.denoise_model_path.ok_or_else(|| {
+            Error::new(
+                Status::InvalidArg,
+                "denoiseModelPath is required when denoise is set",
+            )
+        })?;
+        config.denoise = Some(model);
+        config.denoise_model_path = Some(std::path::PathBuf::from(model_path));
+        // The denoise stage loads through the ONNX seam, so hand the core the
+        // bundled ORT dylib path the JS wrapper resolved (the same path the VAD
+        // uses). Without it a denoise-only capture could not find the bundled
+        // runtime on a default install.
+        config.ort_library_path = opts
+            .ort_library_path
+            .as_deref()
+            .map(std::path::PathBuf::from);
+    }
 
     let capture = Microphone::new(config).map_err(to_napi_error)?;
 
@@ -521,6 +563,7 @@ fn to_napi_error(e: decibri::error::DecibriError) -> Error {
         | OrtSessionBuildFailed(_)
         | OrtThreadsConfigFailed(_)
         | VadModelLoadFailed { .. }
+        | ModelLoadFailed { .. }
         | OrtInferenceFailed(_)
         | OrtTensorCreateFailed { .. }
         | OrtTensorExtractFailed { .. } => Status::GenericFailure,

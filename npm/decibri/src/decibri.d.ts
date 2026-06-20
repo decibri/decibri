@@ -106,6 +106,19 @@ export interface MicrophoneOptions extends ReadableOptions {
    * Defaults to `models/silero_vad.onnx` relative to the package.
    */
   modelPath?: string;
+
+  /**
+   * Single-channel speech enhancement (denoise) model applied to the captured
+   * audio. The only accepted value is `'fastenhancer-t'`; omit to leave denoise
+   * off (the default), which keeps the capture path unchanged. The bundled
+   * model ships with the package; no path is required.
+   *
+   * When set, the captured audio is denoised before delivery and the `'data'`
+   * chunks carry the enhanced signal. VAD reads the pre-enhancement signal, so
+   * `vadScore` and the `speech` / `silence` events are unaffected.
+   * @default undefined
+   */
+  denoise?: 'fastenhancer-t';
 }
 
 /**

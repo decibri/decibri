@@ -228,16 +228,41 @@ class Microphone extends Readable {
     }
 
     let modelPath = undefined;
-    let ortLibraryPath = undefined;
     if (vadEnabled && vadMode === 'silero') {
       modelPath = options.modelPath || path.join(__dirname, '..', 'models', 'silero_vad.onnx');
       if (!fs.existsSync(modelPath)) {
         throw new Error(`Silero VAD model not found at ${modelPath}. Ensure the models/ directory is included in your installation.`);
       }
-      // Internal plumbing: inject the bundled ORT dylib path into the napi
-      // constructor. If resolution fails (unknown platform, platform package
-      // not installed), leaves ortLibraryPath as undefined and lets Rust fall
-      // through to ORT_DYLIB_PATH or surface a decibri-specific init error.
+    }
+
+    // ── Validate and resolve denoise ─────────────────────────────────────────
+
+    // Closed-set selector mirroring the Silero VAD shape: a model name resolves
+    // to a bundled ONNX file, absence leaves denoise off. The only accepted
+    // value is 'fastenhancer-t'; anything else is an explicit error rather than
+    // a silent miss. The bundled model file is resolved relative to the package
+    // exactly as the Silero model is.
+    const denoise = options.denoise;
+    let denoiseModelPath = undefined;
+    if (denoise !== undefined) {
+      if (denoise !== 'fastenhancer-t') {
+        throw new TypeError(
+          `Invalid denoise value: ${JSON.stringify(denoise)}. Expected 'fastenhancer-t'.`
+        );
+      }
+      denoiseModelPath = path.join(__dirname, '..', 'models', 'fastenhancer_t.onnx');
+      if (!fs.existsSync(denoiseModelPath)) {
+        throw new Error(`Denoise model not found at ${denoiseModelPath}. Ensure the models/ directory is included in your installation.`);
+      }
+    }
+
+    // Internal plumbing: inject the bundled ORT dylib path into the napi
+    // constructor whenever an ONNX stage loads (Silero VAD or denoise). If
+    // resolution fails (unknown platform, platform package not installed), this
+    // is left undefined and Rust falls through to ORT_DYLIB_PATH or surfaces a
+    // decibri-specific init error.
+    let ortLibraryPath = undefined;
+    if ((vadEnabled && vadMode === 'silero') || denoise !== undefined) {
       ortLibraryPath = resolveBundledOrtPath();
     }
 
@@ -255,6 +280,8 @@ class Microphone extends Readable {
         device: resolvedDevice,
         vadMode,
         modelPath,
+        denoise,
+        denoiseModelPath,
         ortLibraryPath,
       },
     };
@@ -302,6 +329,10 @@ class Microphone extends Readable {
     this._native.start((err, chunk) => {
       if (err) {
         this._started = false;
+        // A start()-time failure is delivered here as the raw native error (not
+        // via wrapNativeError), so no decibri `code` is attached on the 'error'
+        // event, as with device-open failures; the dedicated MODEL_LOAD_FAILED
+        // code is reachable through wrapNativeError, not on this streaming path.
         this.destroy(err);
         return;
       }
