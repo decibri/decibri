@@ -27,10 +27,30 @@ use crate::backend::{
     AudioBackend, BackendDevice, BackendStream, CpalBackend, InputDataCallback,
     StreamErrorCallback, StreamParams,
 };
+use std::path::PathBuf;
+
 use crate::device::DeviceSelector;
 use crate::error::DecibriError;
 #[cfg(feature = "capture")]
 use crate::stage::{build_capture_stage, CaptureStage};
+
+/// Single-channel speech-enhancement (denoise) model selector.
+///
+/// A closed, `#[non_exhaustive]` set: today the only value is
+/// [`DenoiseModel::FastEnhancerT`]. Naming the model rather than taking a bool
+/// keeps adding further models a non-breaking widening (a new variant), and
+/// keeps the caller on record about which model, and which license, they
+/// invoked. The model weights ship with the binding that bundles them; the core
+/// loads them from [`MicrophoneConfig::denoise_model_path`] and embeds no model
+/// bytes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum DenoiseModel {
+    /// FastEnhancer-T: the tiny tier of FastEnhancer, the VoiceBank-DEMAND
+    /// waveform checkpoint. Maps a window of noisy speech samples to a hop of
+    /// cleaned speech samples, frame by frame, for streaming use.
+    FastEnhancerT,
+}
 
 /// Configuration for a microphone capture session.
 ///
@@ -53,6 +73,17 @@ pub struct MicrophoneConfig {
     /// DC-blocking high-pass, applied after the channel and rate normalization.
     /// Default: false (off).
     pub dc_removal: bool,
+    /// Single-channel speech-enhancement (denoise) model to run on the captured
+    /// audio, applied after DC removal. `None` (the default) leaves denoise off.
+    /// Naming a model also requires [`denoise_model_path`](Self::denoise_model_path);
+    /// with the model set but no path the stage stays off. Honoured only when the
+    /// `denoise` feature is compiled in.
+    pub denoise: Option<DenoiseModel>,
+    /// Filesystem path to the denoise model's ONNX file, supplied by the caller
+    /// (the bindings resolve it from their bundled copy; the core ships no model
+    /// bytes). Required when [`denoise`](Self::denoise) names a model; ignored
+    /// otherwise. Default: `None`.
+    pub denoise_model_path: Option<PathBuf>,
 }
 
 impl Default for MicrophoneConfig {
@@ -63,6 +94,8 @@ impl Default for MicrophoneConfig {
             frames_per_buffer: 1600,
             device: DeviceSelector::Default,
             dc_removal: false,
+            denoise: None,
+            denoise_model_path: None,
         }
     }
 }
@@ -118,8 +151,9 @@ const CAPTURE_CHANNEL_CAPACITY: usize = 64;
 /// delivered output and is drained by [`MicrophoneStream::vad_input`]. A consumer
 /// that enables an enhancement step but never drains the tap would otherwise grow
 /// memory without limit; beyond this many seconds the oldest tapped samples are
-/// dropped. Sized far above the in-flight reblock depth, so an actively draining
-/// VAD never reaches it and the tap stays aligned with the delivered output.
+/// dropped. Sized far above the in-flight reblock depth and any transform
+/// latency, so an actively draining VAD never reaches it even when the tap leads
+/// the delivered output (as it does once a length-changing denoise stage runs).
 #[cfg(feature = "capture")]
 const VAD_TAP_BOUND_SECS: usize = 2;
 
@@ -182,13 +216,21 @@ pub struct MicrophoneStream {
     chain_flushed: AtomicBool,
     // Pre-transform (post-normalize) side channel for the VAD feed. `Some` only
     // when the chain has a `transform` segment, so the delivered output (which is
-    // post-transform) differs from the signal a detector should read. Populated in
-    // lockstep with `reblock_buffer` during `ingest`/`flush_chain` (same sample
-    // count, the transform preserves length) and drained by
-    // [`vad_input`](Self::vad_input). `None` when there is no transform: the
-    // delivered output already is the post-normalize signal, so the tap is unused
-    // and `vad_input` returns `None` with zero overhead. `Mutex<VecDeque<f32>>` is
-    // `Send + Sync`, so the type stays `Send + Sync`.
+    // post-transform) differs from the signal a detector should read. It holds the
+    // post-normalize signal at real-time rate, filled per block during
+    // `ingest`/`flush_chain` and drained by [`vad_input`](Self::vad_input). When
+    // every transform is length-preserving (the DC-removal step), the tap and the
+    // delivered output advance one-for-one. When a length-changing, latency-
+    // introducing transform is present (denoise re-blocks into frames), the tap
+    // LEADS the delivered enhanced output by the chain's latency: it accrues real-
+    // time samples while the delivered stream lags by the framing delay. That lead
+    // is bounded (`vad_tap_cap` caps it) and invisible to VAD consumers, which keep
+    // only a rolling probability scalar and never pair a score to specific returned
+    // samples; the exact tap-vs-returned skew is not compensated for here. `None`
+    // when there is no transform: the delivered output already is the
+    // post-normalize signal, so the tap is unused and `vad_input` returns `None`
+    // with zero overhead. `Mutex<VecDeque<f32>>` is `Send + Sync`, so the type
+    // stays `Send + Sync`.
     vad_tap: Option<Mutex<VecDeque<f32>>>,
     // Memory bound (in samples) for `vad_tap`, computed from the target rate at
     // construction (see `VAD_TAP_BOUND_SECS`). Oldest tapped samples are dropped
@@ -448,9 +490,11 @@ impl MicrophoneStream {
     /// conditioned output is appended instead.
     ///
     /// When the chain has a transform, the post-normalize, pre-transform tap is
-    /// captured into the VAD side channel in lockstep with the delivered output,
-    /// so [`vad_input`](Self::vad_input) can hand a detector the signal before the
-    /// enhancement step.
+    /// captured into the VAD side channel per block, so
+    /// [`vad_input`](Self::vad_input) can hand a detector the signal before the
+    /// enhancement step. The tap holds real-time samples, so a length-changing
+    /// transform (denoise) leaves it leading the delivered enhanced output; see
+    /// the [`vad_tap`](Self::vad_tap) field and `vad_input` docs.
     fn ingest(&self, buf: &mut VecDeque<f32>, chunk: AudioChunk) -> Result<(), DecibriError> {
         match &self.capture_stage {
             None => {
@@ -539,8 +583,8 @@ impl MicrophoneStream {
         self.channels
     }
 
-    /// The pre-transform (post-normalize) samples for the VAD feed, drained in
-    /// lockstep with [`next_chunk`](Self::next_chunk).
+    /// The pre-transform (post-normalize) samples for the VAD feed, drained as
+    /// [`next_chunk`](Self::next_chunk) delivers blocks.
     ///
     /// Binding-internal plumbing: a binding that runs voice-activity detection
     /// calls this right after a `next_chunk` / `try_next_chunk` delivery, passing
@@ -552,18 +596,24 @@ impl MicrophoneStream {
     /// # Returns
     /// - `Some(v)`: the chain has an enhancement step, so the delivered output is
     ///   the post-enhancement signal; `v` holds up to `samples` post-normalize
-    ///   samples, the pre-enhancement counterpart of the just-delivered block.
-    ///   Sample-aligned with that block because the enhancement step preserves
-    ///   length.
+    ///   samples from the front of the tap, the pre-enhancement signal a detector
+    ///   should read. With only a length-preserving transform (DC removal) those
+    ///   are the exact pre-transform twin of the just-delivered block. With a
+    ///   length-changing, latency-introducing transform (denoise), the tap is the
+    ///   real-time pre-enhancement signal and LEADS the delivered enhanced block by
+    ///   the chain's latency, so `v` is a bounded amount ahead rather than sample-
+    ///   aligned. That lead is intended (the detector reads audio sooner, never
+    ///   later) and invisible to consumers, which keep only a rolling probability
+    ///   and never pair a score to specific returned samples.
     /// - `None`: the chain has no enhancement step, so the delivered chunk already
     ///   is the post-normalize signal; feed the detector the delivered chunk
     ///   exactly as before, with no allocation or copy.
     ///
     /// # Thread safety
     /// Takes only the tap mutex (never the reblock or chain locks), so it composes
-    /// with a concurrent [`next_chunk`](Self::next_chunk). Sample-alignment relies
-    /// on the same consumer calling it once per delivered block, as the binding
-    /// pump does.
+    /// with a concurrent [`next_chunk`](Self::next_chunk). The lead stays bounded
+    /// as long as the same consumer calls this once per delivered block, as the
+    /// binding pump does.
     pub fn vad_input(&self, samples: usize) -> Option<Vec<f32>> {
         let tap = self.vad_tap.as_ref()?;
         let mut tap = tap.lock().unwrap_or_else(PoisonError::into_inner);
@@ -671,12 +721,21 @@ impl Microphone {
         // downmixes, which is what the exact-size `samples` math is counted in)
         // and the target rate.
         let target_channels: u16 = 1;
+        // Denoise is enabled only when a model AND its path are both set; with a
+        // model but no path (or vice versa) the chain leaves denoise off. The
+        // path is borrowed for construction only (the stage loads the model and
+        // does not retain the path).
+        let denoise = self
+            .config
+            .denoise
+            .zip(self.config.denoise_model_path.as_deref());
         let capture_stage = build_capture_stage(
             channels,
             target_channels,
             native_rate,
             target_rate,
             self.config.dc_removal,
+            denoise,
         )?;
         let output_channels = if channels > target_channels {
             target_channels
@@ -1147,7 +1206,7 @@ mod tests {
     #[test]
     fn test_mono_device_builds_no_chain() {
         assert!(
-            build_capture_stage(1, 1, 16000, 16000, false)
+            build_capture_stage(1, 1, 16000, 16000, false, None)
                 .unwrap()
                 .is_none(),
             "a mono device at the target rate needs no normalize chain"
@@ -1165,7 +1224,7 @@ mod tests {
     /// tail is delivered.
     #[test]
     fn test_downmix_chain_yields_correct_mono() {
-        let stage = build_capture_stage(2, 1, 16000, 16000, false).unwrap();
+        let stage = build_capture_stage(2, 1, 16000, 16000, false, None).unwrap();
         assert!(stage.is_some(), "a stereo device gets a downmix chain");
         let (stream, sender, running) = test_stream_with(stage, 1); // output is mono
 
@@ -1213,7 +1272,7 @@ mod tests {
     /// count tracks the 1:3 rate ratio (48 kHz -> 16 kHz).
     #[test]
     fn test_resample_chain_delivers_exact_blocks_at_target_rate() {
-        let stage = build_capture_stage(1, 1, 48_000, 16_000, false)
+        let stage = build_capture_stage(1, 1, 48_000, 16_000, false, None)
             .unwrap()
             .expect("48k mono -> resample chain");
         // test_stream_with stamps the stream at 16 kHz (the target), mono.
@@ -1292,7 +1351,7 @@ mod tests {
         let mut process_out = Vec::new();
         process_only.process(&input, &mut process_out);
 
-        let stage = build_capture_stage(1, 1, 48_000, 16_000, false)
+        let stage = build_capture_stage(1, 1, 48_000, 16_000, false, None)
             .unwrap()
             .expect("48k mono -> resample chain");
         let (stream, sender, running) = test_stream_with(Some(stage), 1);
@@ -1361,7 +1420,7 @@ mod tests {
     #[test]
     fn test_enhancement_on_removes_dc_end_to_end() {
         let enhancement = true;
-        let stage = build_capture_stage(1, 1, 16_000, 16_000, enhancement)
+        let stage = build_capture_stage(1, 1, 16_000, 16_000, enhancement, None)
             .unwrap()
             .expect("dc_removal builds a transform-only chain for a mono device");
         let (stream, sender, running) = test_stream_with(Some(stage), 1);
@@ -1408,7 +1467,7 @@ mod tests {
     /// throughout and a binding feeds VAD the delivered chunk exactly as before.
     #[test]
     fn test_vad_input_none_when_no_transform() {
-        let stage = build_capture_stage(2, 1, 16_000, 16_000, false)
+        let stage = build_capture_stage(2, 1, 16_000, 16_000, false, None)
             .unwrap()
             .expect("stereo -> downmix-only chain");
         let (stream, sender, running) = test_stream_with(Some(stage), 1);
@@ -1455,7 +1514,7 @@ mod tests {
     #[test]
     fn test_vad_input_returns_pre_transform_signal() {
         let enhancement = true;
-        let stage = build_capture_stage(1, 1, 16_000, 16_000, enhancement)
+        let stage = build_capture_stage(1, 1, 16_000, 16_000, enhancement, None)
             .unwrap()
             .expect("dc-only chain");
         let (stream, sender, running) = test_stream_with(Some(stage), 1);
@@ -1513,7 +1572,7 @@ mod tests {
         use decibri_resampler::{PolyphaseResampler, Resampler};
 
         let enhancement = true;
-        let stage = build_capture_stage(1, 1, 48_000, 16_000, enhancement)
+        let stage = build_capture_stage(1, 1, 48_000, 16_000, enhancement, None)
             .unwrap()
             .expect("resample + DC chain");
         let (stream, sender, running) = test_stream_with(Some(stage), 1);

@@ -7,8 +7,11 @@
 //! multichannel device down to mono, then [`ResampleStage`], which converts the
 //! device's native sample rate to the requested target rate. Downmix runs first
 //! so the resampler receives mono, the format it expects. The optional
-//! `transform` segment runs after `normalize`, holding the same-length
-//! conditioning step a consumer opts into (the [`DcBlocker`] DC-removal step).
+//! `transform` segment runs after `normalize`, holding the conditioning a
+//! consumer opts into: the same-length [`DcBlocker`] DC-removal step, then the
+//! framed, length-changing denoise stage. A `transform` stage need not preserve
+//! length (denoise re-blocks and introduces latency), which is why the VAD tap
+//! is snapshotted before this segment runs.
 //!
 //! Each [`Stage`] reads one block of interleaved f32 samples and writes its
 //! output, so stages compose by ping-ponging two buffers. At stream close the
@@ -18,9 +21,12 @@
 //! (an already-mono device already at the target rate with no enhancement
 //! enabled), keeping the capture path on its zero-cost direct path.
 
+use std::path::Path;
+
 use decibri_resampler::{PolyphaseResampler, Resampler};
 
 use crate::error::DecibriError;
+use crate::microphone::DenoiseModel;
 use crate::sample;
 
 /// A capture processing stage: reads one block of interleaved f32 samples and
@@ -167,7 +173,9 @@ impl InPlaceDsp for DcBlocker {
 
 /// The capture stage chain: a `normalize` segment (downmix, resample) that
 /// conditions a device to the output format, then an optional `transform`
-/// segment (the DC-removal step) applied to the normalized signal.
+/// segment (DC removal, then denoise) applied to the normalized signal. The
+/// `transform` stages need not preserve length: the framed denoise stage
+/// re-blocks and introduces latency.
 ///
 /// Invariant: at least one segment is non-empty. [`build_capture_stage`] is the
 /// only constructor and returns `None` rather than an empty chain when both
@@ -177,8 +185,9 @@ pub(crate) struct CaptureStage {
     /// Channel and rate normalization stages (downmix, then resample), applied
     /// first.
     normalize: Vec<Box<dyn Stage>>,
-    /// Optional same-length conditioning stages (the DC-removal step), applied
-    /// after `normalize`.
+    /// Optional conditioning stages (DC removal, then denoise), applied after
+    /// `normalize`. Not necessarily same-length: the denoise stage re-blocks and
+    /// introduces latency, so its output count differs from its input.
     transform: Vec<Box<dyn Stage>>,
     /// Holds the current block as it passes through the chain; [`run`](Self::run)
     /// returns a borrow of this after the last stage.
@@ -305,21 +314,24 @@ impl CaptureStage {
 /// target (averaging down to the target, which is mono here), then
 /// [`ResampleStage`] when the device's `native_rate` differs from `target_rate`
 /// (converting the captured audio to the requested rate). When `dc_removal` is
-/// set, pushes the [`DcBlocker`] into the `transform` segment, which runs after
+/// set, pushes the [`DcBlocker`] into the `transform` segment; when `denoise` is
+/// `Some((model, path))` (and the `denoise` feature is compiled in), pushes the
+/// framed denoise stage immediately after it. Both transform stages run after
 /// `normalize` on the mono signal at the target rate.
 /// Returns `Some(chain)` when at least one stage is needed and `None` when no
 /// segment has any (a mono device already at the target rate with no enhancement
 /// enabled), leaving the capture path on its direct, zero-cost reblock.
 ///
-/// Returns an error when the resampler rejects the rate pair at construction;
-/// every in-range configured rate over any device-native rate constructs, so
-/// this is reached only for an out-of-range rate (surfaced defensively).
+/// Returns an error when the resampler rejects the rate pair at construction (as
+/// above), or when the denoise model fails to load (a
+/// [`DecibriError::ModelLoadFailed`]).
 pub(crate) fn build_capture_stage(
     device_channels: u16,
     target_channels: u16,
     native_rate: u32,
     target_rate: u32,
     dc_removal: bool,
+    denoise: Option<(DenoiseModel, &Path)>,
 ) -> Result<Option<CaptureStage>, DecibriError> {
     let mut normalize: Vec<Box<dyn Stage>> = Vec::new();
 
@@ -341,6 +353,20 @@ pub(crate) fn build_capture_stage(
         // Runs after `normalize`, on the mono signal at the target rate.
         transform.push(Box::new(InPlace(DcBlocker::new())));
     }
+
+    // Denoise runs immediately AFTER DC removal (chain order: DcRemoval ->
+    // Denoise), on the DC-blocked mono signal at the target rate. The order is
+    // load-bearing (denoise wants a clean-rate, DC-free input) and is pinned by
+    // this push order and `build_orders_denoise_after_dc`. Unlike the same-length
+    // DcBlocker, denoise is framed and latency-introducing, so it sits in the
+    // transform segment after the VAD tap (see the tap docs in `microphone`).
+    #[cfg(feature = "denoise")]
+    if let Some((model, path)) = denoise {
+        transform.push(Box::new(crate::denoise::Denoise::new(model, path)?));
+    }
+    // Without the `denoise` feature the parameter is accepted but unused.
+    #[cfg(not(feature = "denoise"))]
+    let _ = denoise;
 
     Ok(if normalize.is_empty() && transform.is_empty() {
         None
@@ -367,34 +393,34 @@ mod tests {
         let off = false;
         // Mono, native == target: nothing to normalize.
         assert!(
-            build_capture_stage(1, 1, 16_000, 16_000, off)
+            build_capture_stage(1, 1, 16_000, 16_000, off, None)
                 .unwrap()
                 .is_none(),
             "mono device at the target rate needs no chain"
         );
         // Multichannel, native == target: downmix only.
         assert!(
-            build_capture_stage(2, 1, 16_000, 16_000, off)
+            build_capture_stage(2, 1, 16_000, 16_000, off, None)
                 .unwrap()
                 .is_some(),
             "stereo device gets a chain (downmix)"
         );
         assert!(
-            build_capture_stage(6, 1, 16_000, 16_000, off)
+            build_capture_stage(6, 1, 16_000, 16_000, off, None)
                 .unwrap()
                 .is_some(),
             "5.1 device gets a chain (downmix)"
         );
         // Mono, native != target: resample only.
         assert!(
-            build_capture_stage(1, 1, 48_000, 16_000, off)
+            build_capture_stage(1, 1, 48_000, 16_000, off, None)
                 .unwrap()
                 .is_some(),
             "mono device above the target rate gets a chain (resample)"
         );
         // Multichannel, native != target: downmix then resample.
         assert!(
-            build_capture_stage(2, 1, 48_000, 16_000, off)
+            build_capture_stage(2, 1, 48_000, 16_000, off, None)
                 .unwrap()
                 .is_some(),
             "stereo device above the target rate gets a chain (downmix + resample)"
@@ -410,7 +436,7 @@ mod tests {
         let on = true;
 
         // Mono at target, enhancement on: a transform-only chain (no normalize).
-        let chain = build_capture_stage(1, 1, 16_000, 16_000, on)
+        let chain = build_capture_stage(1, 1, 16_000, 16_000, on, None)
             .unwrap()
             .expect("dc_removal builds a chain even with nothing to normalize");
         assert!(
@@ -424,7 +450,7 @@ mod tests {
         );
 
         // Stereo above target, enhancement on: downmix + resample + DC.
-        let full = build_capture_stage(2, 1, 48_000, 16_000, on)
+        let full = build_capture_stage(2, 1, 48_000, 16_000, on, None)
             .unwrap()
             .expect("downmix + resample + DC chain");
         assert_eq!(full.normalize.len(), 2, "downmix then resample");
@@ -437,7 +463,7 @@ mod tests {
     /// pure downmix.
     #[test]
     fn downmix_chain_averages_to_mono() {
-        let mut chain = build_capture_stage(2, 1, 16_000, 16_000, false)
+        let mut chain = build_capture_stage(2, 1, 16_000, 16_000, false, None)
             .unwrap()
             .expect("stereo -> downmix chain");
         // Two stereo frames: (0.5, 0.3) -> 0.4, (0.4, 0.6) -> 0.5.
@@ -454,7 +480,7 @@ mod tests {
     /// filter's startup ramp, since this `process`-only path does not flush).
     #[test]
     fn resample_chain_changes_rate_and_count() {
-        let mut chain = build_capture_stage(1, 1, 48_000, 16_000, false)
+        let mut chain = build_capture_stage(1, 1, 48_000, 16_000, false, None)
             .unwrap()
             .expect("48k mono -> resample chain");
         let input: Vec<f32> = (0..24_000).map(|n| (n as f32 * 0.01).sin()).collect();
@@ -502,7 +528,7 @@ mod tests {
     /// cap to exercise the `?` bridge end to end.
     #[test]
     fn build_capture_stage_surfaces_unsupported_rate_pair() {
-        let result = build_capture_stage(1, 1, 316_800_000, 16_000, false);
+        let result = build_capture_stage(1, 1, 316_800_000, 16_000, false, None);
         assert!(
             matches!(result, Err(DecibriError::ResampleConfigInvalid { .. })),
             "an enormous native rate exceeds the resampler's filter cap"
@@ -529,7 +555,7 @@ mod tests {
         reference.flush(&mut expected);
 
         // The chain: process the whole input via run(), then flush() the tail.
-        let mut chain = build_capture_stage(1, 1, 48_000, 16_000, false)
+        let mut chain = build_capture_stage(1, 1, 48_000, 16_000, false, None)
             .unwrap()
             .expect("48k mono -> resample chain");
         let mut got = chain.run(&input).expect("process runs").to_vec();
@@ -558,7 +584,7 @@ mod tests {
     /// samples (the unchanged downmix-only path).
     #[test]
     fn downmix_only_flush_is_empty() {
-        let mut chain = build_capture_stage(2, 1, 16_000, 16_000, false)
+        let mut chain = build_capture_stage(2, 1, 16_000, 16_000, false, None)
             .unwrap()
             .expect("stereo -> downmix chain");
         let _ = chain.run(&[0.5, 0.3, 0.4, 0.6]).expect("downmix runs");
@@ -577,7 +603,7 @@ mod tests {
     /// no DC step, and the output is exactly the downmix.
     #[test]
     fn transform_off_leaves_segment_empty_and_output_unchanged() {
-        let mut chain = build_capture_stage(2, 1, 16_000, 16_000, false)
+        let mut chain = build_capture_stage(2, 1, 16_000, 16_000, false, None)
             .unwrap()
             .expect("stereo -> downmix chain");
         assert!(
@@ -601,7 +627,7 @@ mod tests {
         let on = true;
 
         // Mono at the target rate: a transform-only chain (just the DC step).
-        let mut chain = build_capture_stage(1, 1, 16_000, 16_000, on)
+        let mut chain = build_capture_stage(1, 1, 16_000, 16_000, on, None)
             .unwrap()
             .expect("dc-only chain");
         let n = 16_000;
@@ -623,7 +649,7 @@ mod tests {
 
         // Continuity: the same input split across two chunks (state carried)
         // yields identical output, so there is no per-chunk discontinuity.
-        let mut split = build_capture_stage(1, 1, 16_000, 16_000, on)
+        let mut split = build_capture_stage(1, 1, 16_000, 16_000, on, None)
             .unwrap()
             .expect("dc-only chain");
         let mut combined = split.run(&input[..8_000]).expect("first half").to_vec();
@@ -668,7 +694,7 @@ mod tests {
         dc.process_in_place(&mut expected);
 
         // The chain: process the whole input via run(), then flush() the tail.
-        let mut chain = build_capture_stage(2, 1, 48_000, 16_000, on)
+        let mut chain = build_capture_stage(2, 1, 48_000, 16_000, on, None)
             .unwrap()
             .expect("downmix + resample + DC chain");
         let mut got = chain.run(&input).expect("run").to_vec();
@@ -696,7 +722,7 @@ mod tests {
     /// already is the post-normalize signal), and `has_transform` is false.
     #[test]
     fn run_skips_tap_when_no_transform() {
-        let mut chain = build_capture_stage(2, 1, 16_000, 16_000, false)
+        let mut chain = build_capture_stage(2, 1, 16_000, 16_000, false, None)
             .unwrap()
             .expect("stereo -> downmix-only chain");
         assert!(
@@ -718,7 +744,7 @@ mod tests {
     #[test]
     fn run_captures_post_normalize_tap() {
         let on = true;
-        let mut chain = build_capture_stage(2, 1, 48_000, 16_000, on)
+        let mut chain = build_capture_stage(2, 1, 48_000, 16_000, on, None)
             .unwrap()
             .expect("downmix + resample + DC chain");
         assert!(chain.has_transform());
@@ -768,7 +794,7 @@ mod tests {
     #[test]
     fn flush_captures_post_normalize_tail() {
         let on = true;
-        let mut chain = build_capture_stage(1, 1, 48_000, 16_000, on)
+        let mut chain = build_capture_stage(1, 1, 48_000, 16_000, on, None)
             .unwrap()
             .expect("resample + DC chain");
         let input: Vec<f32> = (0..24_000).map(|n| (n as f32 * 0.01).sin()).collect();
@@ -807,5 +833,172 @@ mod tests {
     fn dc_stage_is_send() {
         fn assert_send<T: Send>() {}
         assert_send::<InPlace<DcBlocker>>();
+    }
+
+    // ── Denoise (framed transform) ──────────────────────────────────────
+    //
+    // These load the bundled FastEnhancer-T model through the real ONNX seam, so
+    // they run under `cargo test-decibri` (download-binaries) and are gated on the
+    // `denoise` feature. They exercise denoise through the chain build path and
+    // the tap, complementing the stage's own unit tests in `crate::denoise`.
+
+    #[cfg(feature = "denoise")]
+    fn denoise_model_path() -> std::path::PathBuf {
+        Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("..")
+            .join("..")
+            .join("models")
+            .join("fastenhancer_t.onnx")
+    }
+
+    /// A deterministic mono voiced signal (a single tone); the content does not
+    /// matter for these structural tests, only that frames form.
+    #[cfg(feature = "denoise")]
+    fn mono_signal(n: usize) -> Vec<f32> {
+        (0..n)
+            .map(|i| 0.3 * (2.0 * std::f32::consts::PI * 180.0 * i as f32 / 16_000.0).sin())
+            .collect()
+    }
+
+    /// The denoise stage is pushed AFTER the DC-removal step. `dc_removal +
+    /// denoise` yields a two-stage transform (DC then denoise), denoise alone
+    /// yields one transform stage, and denoise off with nothing else stays `None`
+    /// (the byte-identical no-op for a mono device already at the target rate).
+    /// The relative order (DC before denoise) is pinned here and by the
+    /// construction order in `build_capture_stage`.
+    #[cfg(feature = "denoise")]
+    #[test]
+    fn build_orders_denoise_after_dc() {
+        let path = denoise_model_path();
+        let model = DenoiseModel::FastEnhancerT;
+
+        let both = build_capture_stage(1, 1, 16_000, 16_000, true, Some((model, path.as_path())))
+            .unwrap()
+            .expect("dc + denoise builds a transform chain");
+        assert_eq!(
+            both.transform.len(),
+            2,
+            "dc_removal then denoise: two transform stages"
+        );
+        assert!(
+            both.normalize.is_empty(),
+            "a mono device at the target rate needs no normalize stage"
+        );
+
+        let denoise_only =
+            build_capture_stage(1, 1, 16_000, 16_000, false, Some((model, path.as_path())))
+                .unwrap()
+                .expect("denoise alone builds a transform chain");
+        assert_eq!(
+            denoise_only.transform.len(),
+            1,
+            "denoise alone: one transform stage"
+        );
+
+        assert!(
+            build_capture_stage(1, 1, 16_000, 16_000, false, None)
+                .unwrap()
+                .is_none(),
+            "denoise off and nothing else: no chain, byte-identical passthrough"
+        );
+    }
+
+    /// Denoise is a framed, latency-introducing transform (unlike the same-length
+    /// DcBlocker): running a block yields finite, hop-quantized enhanced output,
+    /// `flush` drains a non-empty latency tail (a same-length transform holds
+    /// none), and the total delivered (process output plus flushed tail) exceeds
+    /// the input by the warm-up and latency the model adds. This proves denoise
+    /// runs end to end through the chain and is length-changing overall.
+    #[cfg(feature = "denoise")]
+    #[test]
+    fn denoise_chain_is_framed_with_latency_tail() {
+        let path = denoise_model_path();
+        let mut chain = build_capture_stage(
+            1,
+            1,
+            16_000,
+            16_000,
+            false,
+            Some((DenoiseModel::FastEnhancerT, path.as_path())),
+        )
+        .unwrap()
+        .expect("denoise chain");
+
+        let input = mono_signal(8000);
+        let out = chain.run(&input).expect("denoise runs").to_vec();
+        assert!(!out.is_empty(), "enough input produces enhanced hops");
+        assert!(
+            out.iter().all(|s| s.is_finite()),
+            "enhanced output is finite"
+        );
+        assert_eq!(out.len() % 256, 0, "output is whole 256-sample hops");
+
+        let mut tail = Vec::new();
+        chain.flush(&mut tail).expect("flush drains the tail");
+        assert!(
+            !tail.is_empty(),
+            "denoise holds a latency tail to flush at close (a same-length \
+             transform would have none)"
+        );
+        assert!(
+            out.len() + tail.len() > input.len(),
+            "delivered (process + flush) exceeds the input by the warm-up and \
+             latency: denoise is length-changing overall"
+        );
+    }
+
+    /// With denoise in the transform segment, the pre-transform tap LEADS the
+    /// delivered enhanced output. The tap is the post-normalize signal at real-
+    /// time rate (equal to the mono input length here); the delivered output is
+    /// hop-quantized and trails by the buffered partial frame, so the tap leads by
+    /// a positive amount bounded by one hop (256 samples) for this non-hop-aligned
+    /// input. The tap is non-empty (the detector is still fed). The length-equal
+    /// lockstep holds only for same-length transforms (asserted for the DC case in
+    /// `microphone`); denoise breaks it, so the tap leads instead of staying
+    /// length-aligned.
+    #[cfg(feature = "denoise")]
+    #[test]
+    fn denoise_tap_leads_delivered_by_bounded_amount() {
+        let path = denoise_model_path();
+        let mut chain = build_capture_stage(
+            1,
+            1,
+            16_000,
+            16_000,
+            false,
+            Some((DenoiseModel::FastEnhancerT, path.as_path())),
+        )
+        .unwrap()
+        .expect("denoise chain");
+        assert!(
+            chain.has_transform(),
+            "denoise is a transform, so the tap is active"
+        );
+
+        // 8000 is not a multiple of the hop (256), so a partial frame stays
+        // buffered and the tap strictly leads the delivered output by that
+        // remainder.
+        let input = mono_signal(8000);
+        let out = chain.run(&input).expect("denoise runs").to_vec();
+        let tap = chain.tap().to_vec();
+
+        assert_eq!(
+            tap.len(),
+            input.len(),
+            "the tap is the real-time post-normalize signal (input length here)"
+        );
+        assert!(
+            !tap.is_empty(),
+            "the tap is non-empty: the detector is still fed"
+        );
+        assert!(
+            out.len() < tap.len(),
+            "the tap leads the delivered enhanced output (delivered trails by the \
+             buffered partial frame)"
+        );
+        assert!(
+            tap.len() - out.len() <= 256,
+            "the per-call lead is bounded by one hop"
+        );
     }
 }

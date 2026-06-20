@@ -257,10 +257,18 @@ pub(crate) struct OnnxTensorView<'a> {
 
 /// Borrowed input tensor data.
 ///
-/// Closed enum over the dtypes Silero VAD needs. Adding a variant requires a
-/// matching arm in every [`OnnxSession`] impl.
+/// Closed enum over the dtypes the local-ONNX consumers need, kept model-
+/// agnostic so any model can pass either. Adding a variant requires a matching
+/// arm in every [`OnnxSession`] impl.
+///
+/// `I64` is part of the seam API (Silero VAD feeds an i64 `sr` input) but is
+/// unused by the f32-only denoise model, so a denoise-without-vad build
+/// constructs no i64 input. Kept allowed-dead in that build rather than gated on
+/// `vad`, which would couple this model-agnostic seam to one model's feature;
+/// mirrors the sibling [`OnnxTensorOwned::I64`] convention below.
 pub(crate) enum OnnxTensorData<'a> {
     F32(&'a [f32]),
+    #[allow(dead_code)]
     I64(&'a [i64]),
 }
 

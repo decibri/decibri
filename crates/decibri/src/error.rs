@@ -1,4 +1,4 @@
-#[cfg(feature = "vad")]
+#[cfg(any(feature = "vad", feature = "denoise"))]
 use std::path::PathBuf;
 
 use thiserror::Error;
@@ -150,7 +150,7 @@ pub enum DecibriError {
     // downstream consumers can walk `error.source()` to the underlying
     // ORT error for programmatic handling. Paths are `PathBuf` (not
     // `String`) so consumers retain path semantics without re-parsing.
-    #[cfg(feature = "vad")]
+    #[cfg(any(feature = "vad", feature = "denoise"))]
     #[error(
         "decibri: failed to initialize ONNX Runtime: {source}. \
          Either pass ort_library_path when constructing the VAD, set \
@@ -162,7 +162,7 @@ pub enum DecibriError {
         source: ort::Error,
     },
 
-    #[cfg(feature = "vad")]
+    #[cfg(any(feature = "vad", feature = "denoise"))]
     #[error(
         "decibri: failed to load ONNX Runtime from {}: {source}. \
          If ORT_DYLIB_PATH is set, verify it points to a valid ONNX Runtime \
@@ -189,7 +189,7 @@ pub enum DecibriError {
     /// Display message matches [`Self::OrtLoadFailed`] so Node, Python, and
     /// future FFI consumers see the same actionable hint regardless of which
     /// failure path was taken.
-    #[cfg(feature = "vad")]
+    #[cfg(any(feature = "vad", feature = "denoise"))]
     #[error(
         "decibri: failed to load ONNX Runtime from {}: {reason}. \
          If ORT_DYLIB_PATH is set, verify it points to a valid ONNX Runtime \
@@ -199,15 +199,15 @@ pub enum DecibriError {
     )]
     OrtPathInvalid { path: PathBuf, reason: &'static str },
 
-    #[cfg(feature = "vad")]
+    #[cfg(any(feature = "vad", feature = "denoise"))]
     #[error("Failed to create ort session builder: {0}")]
     OrtSessionBuildFailed(#[source] ort::Error),
 
-    #[cfg(feature = "vad")]
+    #[cfg(any(feature = "vad", feature = "denoise"))]
     #[error("Failed to set ort threads: {0}")]
     OrtThreadsConfigFailed(#[source] ort::Error),
 
-    #[cfg(feature = "vad")]
+    #[cfg(any(feature = "vad", feature = "denoise"))]
     #[error("Failed to load Silero VAD model from {}: {source}", path.display())]
     VadModelLoadFailed {
         path: PathBuf,
@@ -215,11 +215,27 @@ pub enum DecibriError {
         source: ort::Error,
     },
 
-    #[cfg(feature = "vad")]
+    /// A bundled model file failed to load through the shared ONNX session seam.
+    ///
+    /// Model-agnostic counterpart to [`Self::VadModelLoadFailed`]: the capture
+    /// denoise stage surfaces this when its model file cannot be opened, so a
+    /// denoise load failure is not reported as a VAD error. Carries the
+    /// offending path and the underlying `ort::Error` via `#[source]`, matching
+    /// the other model-load variants. Additive variant permitted by
+    /// `#[non_exhaustive]`.
+    #[cfg(any(feature = "vad", feature = "denoise"))]
+    #[error("Failed to load model from {}: {source}", path.display())]
+    ModelLoadFailed {
+        path: PathBuf,
+        #[source]
+        source: ort::Error,
+    },
+
+    #[cfg(any(feature = "vad", feature = "denoise"))]
     #[error("Silero VAD inference failed: {0}")]
     OrtInferenceFailed(#[source] ort::Error),
 
-    #[cfg(feature = "vad")]
+    #[cfg(any(feature = "vad", feature = "denoise"))]
     #[error("Failed to create {kind} tensor: {source}")]
     OrtTensorCreateFailed {
         kind: &'static str,
@@ -227,7 +243,7 @@ pub enum DecibriError {
         source: ort::Error,
     },
 
-    #[cfg(feature = "vad")]
+    #[cfg(any(feature = "vad", feature = "denoise"))]
     #[error("Failed to extract {kind} tensor: {source}")]
     OrtTensorExtractFailed {
         kind: &'static str,
@@ -325,14 +341,14 @@ impl DecibriError {
     /// rustdoc on [`Self::OrtPathInvalid`]), not a categorization users
     /// need to care about.
     pub fn is_ort_path_error(&self) -> bool {
-        #[cfg(feature = "vad")]
+        #[cfg(any(feature = "vad", feature = "denoise"))]
         {
             matches!(
                 self,
                 Self::OrtLoadFailed { .. } | Self::OrtPathInvalid { .. }
             )
         }
-        #[cfg(not(feature = "vad"))]
+        #[cfg(not(any(feature = "vad", feature = "denoise")))]
         {
             false
         }
