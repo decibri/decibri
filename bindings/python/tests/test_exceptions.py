@@ -1,7 +1,7 @@
 """Exception hierarchy tests.
 
-Covers all 36 exception classes shipped in the public ``decibri`` namespace:
-1 base (DecibriError) + 14 direct subclasses + DeviceError intermediate
+Covers all 37 exception classes shipped in the public ``decibri`` namespace:
+1 base (DecibriError) + 15 direct subclasses + DeviceError intermediate
 + 8 direct DeviceError subclasses + OrtError intermediate + 8 direct
 OrtError subclasses + OrtPathError intermediate + 2 direct OrtPathError
 subclasses.
@@ -21,6 +21,7 @@ Verifies:
 
 import decibri
 from decibri import (
+    AgcTargetOutOfRange,
     AlreadyRunning,
     MicrophoneStreamClosed,
     ChannelsOutOfRange,
@@ -62,13 +63,13 @@ import pytest
 
 
 # ---------------------------------------------------------------------------
-# All 32 classes are reachable and inherit from Exception via DecibriError.
+# All 37 classes are reachable and inherit from Exception via DecibriError.
 # ---------------------------------------------------------------------------
 
 
 ALL_DECIBRI_ERROR_CLASSES = (
     DecibriError,
-    # 14 direct DecibriError subclasses (non-device, non-ORT). DeviceFailed
+    # 15 direct DecibriError subclasses (non-device, non-ORT). DeviceFailed
     # is a runtime device/driver failure (distinct from the DeviceError
     # enumeration/selection family); OnnxBackendFailed is the non-ORT ONNX
     # backend catch-all (distinct from the OrtError family).
@@ -76,6 +77,7 @@ ALL_DECIBRI_ERROR_CLASSES = (
     MicrophoneStreamClosed,
     ChannelsOutOfRange,
     FramesPerBufferOutOfRange,
+    AgcTargetOutOfRange,
     InvalidFormat,
     SpeakerStreamClosed,
     PermissionDenied,
@@ -113,11 +115,11 @@ ALL_DECIBRI_ERROR_CLASSES = (
 
 
 def test_class_count() -> None:
-    # 36 total: 1 base + 14 direct + DeviceError + 8 device + OrtError
-    # + 8 ORT direct + OrtPathError + 2 path. The addition over the prior 35 is
-    # ModelLoadFailed, the model-agnostic counterpart to VadModelLoadFailed
-    # raised by the capture denoise stage; like it, a direct OrtError subclass.
-    assert len(ALL_DECIBRI_ERROR_CLASSES) == 36
+    # 37 total: 1 base + 15 direct + DeviceError + 8 device + OrtError
+    # + 8 ORT direct + OrtPathError + 2 path. The addition over the prior 36 is
+    # AgcTargetOutOfRange, the config-validation error for an out-of-range agc
+    # target; like SampleRateOutOfRange, a direct DecibriError subclass.
+    assert len(ALL_DECIBRI_ERROR_CLASSES) == 37
 
 
 def test_all_inherit_from_decibri_error() -> None:

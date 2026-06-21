@@ -124,8 +124,9 @@ impl Stage for ResampleStage {
 /// any `InPlaceDsp` as a [`Stage`].
 ///
 /// `Send` so the wrapped step can live behind the stream's `Mutex`, matching the
-/// [`Stage`] bound.
-trait InPlaceDsp: Send {
+/// [`Stage`] bound. `pub(crate)` so a stage authored in another module (the
+/// [`crate::gain::LevelControl`] engine) can implement it.
+pub(crate) trait InPlaceDsp: Send {
     /// Filter `samples` in place: each element is replaced by its processed
     /// value, the length unchanged.
     fn process_in_place(&mut self, samples: &mut [f32]);
@@ -417,6 +418,23 @@ impl CaptureStage {
     }
 }
 
+/// The opt-in conditioning [`build_capture_stage`] applies after normalization,
+/// bundled into one argument so that adding a capability is a new field rather
+/// than another positional parameter. The fields map one-to-one to the transform
+/// stages, listed in chain order.
+pub(crate) struct Transforms<'a> {
+    /// Remove a constant DC offset (the [`DcBlocker`]).
+    pub dc_removal: bool,
+    /// Denoise model selector with its model-file path and optional ORT library
+    /// path; `None` leaves denoise off. Honoured only with the `denoise` feature.
+    pub denoise: Option<(DenoiseModel, &'a Path, Option<&'a Path>)>,
+    /// High-pass cutoff selector (the [`Biquad`]); `None` leaves it off.
+    pub highpass: Option<HighpassFilter>,
+    /// AGC target level in dBFS (the [`crate::gain::LevelControl`] engine); `None`
+    /// leaves it off. Honoured only with the `gain` feature.
+    pub agc: Option<i8>,
+}
+
 /// Build the capture stage chain that normalizes a device to the output format
 /// and applies any opt-in enhancement.
 ///
@@ -430,8 +448,11 @@ impl CaptureStage {
 /// the model through the ONNX seam (initialising ORT from `ort_library_path` when
 /// supplied). When `highpass` names a cutoff, pushes a [`Biquad`] high-pass
 /// immediately after denoise, so the denoise model receives near-full-band
-/// input. All transform stages run after `normalize` on the mono signal at the
-/// target rate.
+/// input. When `agc` names a target level, pushes the
+/// [`crate::gain::LevelControl`] engine immediately after high-pass (when the
+/// `gain` feature is compiled in), reserving the level-control slot that sits
+/// before the limiter in the full chain order. All transform stages run after
+/// `normalize` on the mono signal at the target rate.
 /// Returns `Some(chain)` when at least one stage is needed and `None` when no
 /// segment has any (a mono device already at the target rate with no enhancement
 /// enabled), leaving the capture path on its direct, zero-cost reblock.
@@ -444,10 +465,17 @@ pub(crate) fn build_capture_stage(
     target_channels: u16,
     native_rate: u32,
     target_rate: u32,
-    dc_removal: bool,
-    denoise: Option<(DenoiseModel, &Path, Option<&Path>)>,
-    highpass: Option<HighpassFilter>,
+    transforms: Transforms<'_>,
 ) -> Result<Option<CaptureStage>, DecibriError> {
+    // Unpack the bundle back into locals so the build below reads one field per
+    // stage, in chain order.
+    let Transforms {
+        dc_removal,
+        denoise,
+        highpass,
+        agc,
+    } = transforms;
+
     let mut normalize: Vec<Box<dyn Stage>> = Vec::new();
 
     if device_channels > target_channels {
@@ -499,6 +527,22 @@ pub(crate) fn build_capture_stage(
         ))));
     }
 
+    // Level control (AGC) runs after high-pass, reserving the slot that sits
+    // before the limiter in the full chain order. It is a same-length,
+    // sample-in-sample-out engine, so it wraps via `InPlace` like the DC blocker
+    // and high-pass and adds no latency. Gated on the `gain` feature, like
+    // denoise is gated on `denoise`; without the feature the target is accepted
+    // but unused.
+    #[cfg(feature = "gain")]
+    if let Some(target_db) = agc {
+        transform.push(Box::new(InPlace(crate::gain::LevelControl::agc(
+            target_db,
+            target_rate,
+        ))));
+    }
+    #[cfg(not(feature = "gain"))]
+    let _ = agc;
+
     Ok(if normalize.is_empty() && transform.is_empty() {
         None
     } else {
@@ -524,36 +568,91 @@ mod tests {
         let off = false;
         // Mono, native == target: nothing to normalize.
         assert!(
-            build_capture_stage(1, 1, 16_000, 16_000, off, None, None)
-                .unwrap()
-                .is_none(),
+            build_capture_stage(
+                1,
+                1,
+                16_000,
+                16_000,
+                Transforms {
+                    dc_removal: off,
+                    denoise: None,
+                    highpass: None,
+                    agc: None
+                }
+            )
+            .unwrap()
+            .is_none(),
             "mono device at the target rate needs no chain"
         );
         // Multichannel, native == target: downmix only.
         assert!(
-            build_capture_stage(2, 1, 16_000, 16_000, off, None, None)
-                .unwrap()
-                .is_some(),
+            build_capture_stage(
+                2,
+                1,
+                16_000,
+                16_000,
+                Transforms {
+                    dc_removal: off,
+                    denoise: None,
+                    highpass: None,
+                    agc: None
+                }
+            )
+            .unwrap()
+            .is_some(),
             "stereo device gets a chain (downmix)"
         );
         assert!(
-            build_capture_stage(6, 1, 16_000, 16_000, off, None, None)
-                .unwrap()
-                .is_some(),
+            build_capture_stage(
+                6,
+                1,
+                16_000,
+                16_000,
+                Transforms {
+                    dc_removal: off,
+                    denoise: None,
+                    highpass: None,
+                    agc: None
+                }
+            )
+            .unwrap()
+            .is_some(),
             "5.1 device gets a chain (downmix)"
         );
         // Mono, native != target: resample only.
         assert!(
-            build_capture_stage(1, 1, 48_000, 16_000, off, None, None)
-                .unwrap()
-                .is_some(),
+            build_capture_stage(
+                1,
+                1,
+                48_000,
+                16_000,
+                Transforms {
+                    dc_removal: off,
+                    denoise: None,
+                    highpass: None,
+                    agc: None
+                }
+            )
+            .unwrap()
+            .is_some(),
             "mono device above the target rate gets a chain (resample)"
         );
         // Multichannel, native != target: downmix then resample.
         assert!(
-            build_capture_stage(2, 1, 48_000, 16_000, off, None, None)
-                .unwrap()
-                .is_some(),
+            build_capture_stage(
+                2,
+                1,
+                48_000,
+                16_000,
+                Transforms {
+                    dc_removal: off,
+                    denoise: None,
+                    highpass: None,
+                    agc: None
+                }
+            )
+            .unwrap()
+            .is_some(),
             "stereo device above the target rate gets a chain (downmix + resample)"
         );
     }
@@ -567,9 +666,20 @@ mod tests {
         let on = true;
 
         // Mono at target, enhancement on: a transform-only chain (no normalize).
-        let chain = build_capture_stage(1, 1, 16_000, 16_000, on, None, None)
-            .unwrap()
-            .expect("dc_removal builds a chain even with nothing to normalize");
+        let chain = build_capture_stage(
+            1,
+            1,
+            16_000,
+            16_000,
+            Transforms {
+                dc_removal: on,
+                denoise: None,
+                highpass: None,
+                agc: None,
+            },
+        )
+        .unwrap()
+        .expect("dc_removal builds a chain even with nothing to normalize");
         assert!(
             chain.normalize.is_empty(),
             "a mono device at the target rate needs no normalize stage"
@@ -581,9 +691,20 @@ mod tests {
         );
 
         // Stereo above target, enhancement on: downmix + resample + DC.
-        let full = build_capture_stage(2, 1, 48_000, 16_000, on, None, None)
-            .unwrap()
-            .expect("downmix + resample + DC chain");
+        let full = build_capture_stage(
+            2,
+            1,
+            48_000,
+            16_000,
+            Transforms {
+                dc_removal: on,
+                denoise: None,
+                highpass: None,
+                agc: None,
+            },
+        )
+        .unwrap()
+        .expect("downmix + resample + DC chain");
         assert_eq!(full.normalize.len(), 2, "downmix then resample");
         assert_eq!(full.transform.len(), 1, "the DC-removal step");
     }
@@ -594,9 +715,20 @@ mod tests {
     /// pure downmix.
     #[test]
     fn downmix_chain_averages_to_mono() {
-        let mut chain = build_capture_stage(2, 1, 16_000, 16_000, false, None, None)
-            .unwrap()
-            .expect("stereo -> downmix chain");
+        let mut chain = build_capture_stage(
+            2,
+            1,
+            16_000,
+            16_000,
+            Transforms {
+                dc_removal: false,
+                denoise: None,
+                highpass: None,
+                agc: None,
+            },
+        )
+        .unwrap()
+        .expect("stereo -> downmix chain");
         // Two stereo frames: (0.5, 0.3) -> 0.4, (0.4, 0.6) -> 0.5.
         let out = chain.run(&[0.5, 0.3, 0.4, 0.6]).expect("downmix runs");
         assert_eq!(out.len(), 2, "stereo input halves to mono");
@@ -611,9 +743,20 @@ mod tests {
     /// filter's startup ramp, since this `process`-only path does not flush).
     #[test]
     fn resample_chain_changes_rate_and_count() {
-        let mut chain = build_capture_stage(1, 1, 48_000, 16_000, false, None, None)
-            .unwrap()
-            .expect("48k mono -> resample chain");
+        let mut chain = build_capture_stage(
+            1,
+            1,
+            48_000,
+            16_000,
+            Transforms {
+                dc_removal: false,
+                denoise: None,
+                highpass: None,
+                agc: None,
+            },
+        )
+        .unwrap()
+        .expect("48k mono -> resample chain");
         let input: Vec<f32> = (0..24_000).map(|n| (n as f32 * 0.01).sin()).collect();
         let out = chain.run(&input).expect("resample runs").to_vec();
         // Downsampling 1:3 from 24000 input is at most 8000 output samples and,
@@ -659,7 +802,18 @@ mod tests {
     /// cap to exercise the `?` bridge end to end.
     #[test]
     fn build_capture_stage_surfaces_unsupported_rate_pair() {
-        let result = build_capture_stage(1, 1, 316_800_000, 16_000, false, None, None);
+        let result = build_capture_stage(
+            1,
+            1,
+            316_800_000,
+            16_000,
+            Transforms {
+                dc_removal: false,
+                denoise: None,
+                highpass: None,
+                agc: None,
+            },
+        );
         assert!(
             matches!(result, Err(DecibriError::ResampleConfigInvalid { .. })),
             "an enormous native rate exceeds the resampler's filter cap"
@@ -686,9 +840,20 @@ mod tests {
         reference.flush(&mut expected);
 
         // The chain: process the whole input via run(), then flush() the tail.
-        let mut chain = build_capture_stage(1, 1, 48_000, 16_000, false, None, None)
-            .unwrap()
-            .expect("48k mono -> resample chain");
+        let mut chain = build_capture_stage(
+            1,
+            1,
+            48_000,
+            16_000,
+            Transforms {
+                dc_removal: false,
+                denoise: None,
+                highpass: None,
+                agc: None,
+            },
+        )
+        .unwrap()
+        .expect("48k mono -> resample chain");
         let mut got = chain.run(&input).expect("process runs").to_vec();
         let process_only = got.len();
         let mut tail = Vec::new();
@@ -715,9 +880,20 @@ mod tests {
     /// samples (the unchanged downmix-only path).
     #[test]
     fn downmix_only_flush_is_empty() {
-        let mut chain = build_capture_stage(2, 1, 16_000, 16_000, false, None, None)
-            .unwrap()
-            .expect("stereo -> downmix chain");
+        let mut chain = build_capture_stage(
+            2,
+            1,
+            16_000,
+            16_000,
+            Transforms {
+                dc_removal: false,
+                denoise: None,
+                highpass: None,
+                agc: None,
+            },
+        )
+        .unwrap()
+        .expect("stereo -> downmix chain");
         let _ = chain.run(&[0.5, 0.3, 0.4, 0.6]).expect("downmix runs");
         let mut tail = Vec::new();
         chain
@@ -734,9 +910,20 @@ mod tests {
     /// no DC step, and the output is exactly the downmix.
     #[test]
     fn transform_off_leaves_segment_empty_and_output_unchanged() {
-        let mut chain = build_capture_stage(2, 1, 16_000, 16_000, false, None, None)
-            .unwrap()
-            .expect("stereo -> downmix chain");
+        let mut chain = build_capture_stage(
+            2,
+            1,
+            16_000,
+            16_000,
+            Transforms {
+                dc_removal: false,
+                denoise: None,
+                highpass: None,
+                agc: None,
+            },
+        )
+        .unwrap()
+        .expect("stereo -> downmix chain");
         assert!(
             chain.transform.is_empty(),
             "enhancement off leaves the transform segment empty"
@@ -758,9 +945,20 @@ mod tests {
         let on = true;
 
         // Mono at the target rate: a transform-only chain (just the DC step).
-        let mut chain = build_capture_stage(1, 1, 16_000, 16_000, on, None, None)
-            .unwrap()
-            .expect("dc-only chain");
+        let mut chain = build_capture_stage(
+            1,
+            1,
+            16_000,
+            16_000,
+            Transforms {
+                dc_removal: on,
+                denoise: None,
+                highpass: None,
+                agc: None,
+            },
+        )
+        .unwrap()
+        .expect("dc-only chain");
         let n = 16_000;
         let input = vec![0.5_f32; n];
         let out = chain.run(&input).expect("dc runs").to_vec();
@@ -780,9 +978,20 @@ mod tests {
 
         // Continuity: the same input split across two chunks (state carried)
         // yields identical output, so there is no per-chunk discontinuity.
-        let mut split = build_capture_stage(1, 1, 16_000, 16_000, on, None, None)
-            .unwrap()
-            .expect("dc-only chain");
+        let mut split = build_capture_stage(
+            1,
+            1,
+            16_000,
+            16_000,
+            Transforms {
+                dc_removal: on,
+                denoise: None,
+                highpass: None,
+                agc: None,
+            },
+        )
+        .unwrap()
+        .expect("dc-only chain");
         let mut combined = split.run(&input[..8_000]).expect("first half").to_vec();
         combined.extend_from_slice(split.run(&input[8_000..]).expect("second half"));
         assert_eq!(
@@ -825,9 +1034,20 @@ mod tests {
         dc.process_in_place(&mut expected);
 
         // The chain: process the whole input via run(), then flush() the tail.
-        let mut chain = build_capture_stage(2, 1, 48_000, 16_000, on, None, None)
-            .unwrap()
-            .expect("downmix + resample + DC chain");
+        let mut chain = build_capture_stage(
+            2,
+            1,
+            48_000,
+            16_000,
+            Transforms {
+                dc_removal: on,
+                denoise: None,
+                highpass: None,
+                agc: None,
+            },
+        )
+        .unwrap()
+        .expect("downmix + resample + DC chain");
         let mut got = chain.run(&input).expect("run").to_vec();
         let process_only = got.len();
         let mut tail = Vec::new();
@@ -853,9 +1073,20 @@ mod tests {
     /// already is the post-normalize signal), and `has_transform` is false.
     #[test]
     fn run_skips_tap_when_no_transform() {
-        let mut chain = build_capture_stage(2, 1, 16_000, 16_000, false, None, None)
-            .unwrap()
-            .expect("stereo -> downmix-only chain");
+        let mut chain = build_capture_stage(
+            2,
+            1,
+            16_000,
+            16_000,
+            Transforms {
+                dc_removal: false,
+                denoise: None,
+                highpass: None,
+                agc: None,
+            },
+        )
+        .unwrap()
+        .expect("stereo -> downmix-only chain");
         assert!(
             !chain.has_transform(),
             "a downmix-only chain has no transform"
@@ -875,9 +1106,20 @@ mod tests {
     #[test]
     fn run_captures_post_normalize_tap() {
         let on = true;
-        let mut chain = build_capture_stage(2, 1, 48_000, 16_000, on, None, None)
-            .unwrap()
-            .expect("downmix + resample + DC chain");
+        let mut chain = build_capture_stage(
+            2,
+            1,
+            48_000,
+            16_000,
+            Transforms {
+                dc_removal: on,
+                denoise: None,
+                highpass: None,
+                agc: None,
+            },
+        )
+        .unwrap()
+        .expect("downmix + resample + DC chain");
         assert!(chain.has_transform());
 
         // Stereo 48k with a DC offset on both channels.
@@ -925,9 +1167,20 @@ mod tests {
     #[test]
     fn flush_captures_post_normalize_tail() {
         let on = true;
-        let mut chain = build_capture_stage(1, 1, 48_000, 16_000, on, None, None)
-            .unwrap()
-            .expect("resample + DC chain");
+        let mut chain = build_capture_stage(
+            1,
+            1,
+            48_000,
+            16_000,
+            Transforms {
+                dc_removal: on,
+                denoise: None,
+                highpass: None,
+                agc: None,
+            },
+        )
+        .unwrap()
+        .expect("resample + DC chain");
         let input: Vec<f32> = (0..24_000).map(|n| (n as f32 * 0.01).sin()).collect();
         let _ = chain.run(&input).expect("run");
         let mut tail = Vec::new();
@@ -1008,9 +1261,12 @@ mod tests {
             1,
             16_000,
             16_000,
-            true,
-            Some((model, path.as_path(), None)),
-            None,
+            Transforms {
+                dc_removal: true,
+                denoise: Some((model, path.as_path(), None)),
+                highpass: None,
+                agc: None,
+            },
         )
         .unwrap()
         .expect("dc + denoise builds a transform chain");
@@ -1029,9 +1285,12 @@ mod tests {
             1,
             16_000,
             16_000,
-            false,
-            Some((model, path.as_path(), None)),
-            None,
+            Transforms {
+                dc_removal: false,
+                denoise: Some((model, path.as_path(), None)),
+                highpass: None,
+                agc: None,
+            },
         )
         .unwrap()
         .expect("denoise alone builds a transform chain");
@@ -1042,9 +1301,20 @@ mod tests {
         );
 
         assert!(
-            build_capture_stage(1, 1, 16_000, 16_000, false, None, None)
-                .unwrap()
-                .is_none(),
+            build_capture_stage(
+                1,
+                1,
+                16_000,
+                16_000,
+                Transforms {
+                    dc_removal: false,
+                    denoise: None,
+                    highpass: None,
+                    agc: None
+                }
+            )
+            .unwrap()
+            .is_none(),
             "denoise off and nothing else: no chain, byte-identical passthrough"
         );
     }
@@ -1064,9 +1334,12 @@ mod tests {
             1,
             16_000,
             16_000,
-            false,
-            Some((DenoiseModel::FastEnhancerT, path.as_path(), None)),
-            None,
+            Transforms {
+                dc_removal: false,
+                denoise: Some((DenoiseModel::FastEnhancerT, path.as_path(), None)),
+                highpass: None,
+                agc: None,
+            },
         )
         .unwrap()
         .expect("denoise chain");
@@ -1112,9 +1385,12 @@ mod tests {
             1,
             16_000,
             16_000,
-            false,
-            Some((DenoiseModel::FastEnhancerT, path.as_path(), None)),
-            None,
+            Transforms {
+                dc_removal: false,
+                denoise: Some((DenoiseModel::FastEnhancerT, path.as_path(), None)),
+                highpass: None,
+                agc: None,
+            },
         )
         .unwrap()
         .expect("denoise chain");
@@ -1164,18 +1440,40 @@ mod tests {
     /// zero.
     #[test]
     fn transform_latency_is_zero_without_a_framed_stage() {
-        let dc_only = build_capture_stage(1, 1, 16_000, 16_000, true, None, None)
-            .unwrap()
-            .expect("dc-only chain");
+        let dc_only = build_capture_stage(
+            1,
+            1,
+            16_000,
+            16_000,
+            Transforms {
+                dc_removal: true,
+                denoise: None,
+                highpass: None,
+                agc: None,
+            },
+        )
+        .unwrap()
+        .expect("dc-only chain");
         assert_eq!(
             dc_only.transform_latency(),
             0,
             "the DC blocker is same-length, so it adds no latency"
         );
 
-        let downmix_resample_dc = build_capture_stage(2, 1, 48_000, 16_000, true, None, None)
-            .unwrap()
-            .expect("downmix + resample + DC chain");
+        let downmix_resample_dc = build_capture_stage(
+            2,
+            1,
+            48_000,
+            16_000,
+            Transforms {
+                dc_removal: true,
+                denoise: None,
+                highpass: None,
+                agc: None,
+            },
+        )
+        .unwrap()
+        .expect("downmix + resample + DC chain");
         assert_eq!(
             downmix_resample_dc.transform_latency(),
             0,
@@ -1215,9 +1513,20 @@ mod tests {
 
         // In a chain, that normalize-segment latency stays out of the transform
         // latency.
-        let chain = build_capture_stage(1, 1, 48_000, 16_000, true, None, None)
-            .unwrap()
-            .expect("resample + DC chain");
+        let chain = build_capture_stage(
+            1,
+            1,
+            48_000,
+            16_000,
+            Transforms {
+                dc_removal: true,
+                denoise: None,
+                highpass: None,
+                agc: None,
+            },
+        )
+        .unwrap()
+        .expect("resample + DC chain");
         assert_eq!(
             chain.transform_latency(),
             0,
@@ -1238,9 +1547,12 @@ mod tests {
             1,
             16_000,
             16_000,
-            false,
-            Some((DenoiseModel::FastEnhancerT, path.as_path(), None)),
-            None,
+            Transforms {
+                dc_removal: false,
+                denoise: Some((DenoiseModel::FastEnhancerT, path.as_path(), None)),
+                highpass: None,
+                agc: None,
+            },
         )
         .unwrap()
         .expect("denoise chain");
@@ -1273,9 +1585,12 @@ mod tests {
             1,
             16_000,
             16_000,
-            false,
-            None,
-            Some(HighpassFilter::Hz80),
+            Transforms {
+                dc_removal: false,
+                denoise: None,
+                highpass: Some(HighpassFilter::Hz80),
+                agc: None,
+            },
         )
         .unwrap()
         .expect("high-pass-only chain");
@@ -1325,9 +1640,12 @@ mod tests {
             1,
             16_000,
             16_000,
-            false,
-            None,
-            Some(HighpassFilter::Hz80),
+            Transforms {
+                dc_removal: false,
+                denoise: None,
+                highpass: Some(HighpassFilter::Hz80),
+                agc: None,
+            },
         )
         .unwrap()
         .expect("high-pass-only chain");
@@ -1364,9 +1682,12 @@ mod tests {
                 1,
                 16_000,
                 16_000,
-                false,
-                None,
-                Some(HighpassFilter::Hz80),
+                Transforms {
+                    dc_removal: false,
+                    denoise: None,
+                    highpass: Some(HighpassFilter::Hz80),
+                    agc: None,
+                },
             )
             .unwrap()
             .expect("high-pass-only chain");
@@ -1378,9 +1699,12 @@ mod tests {
             1,
             16_000,
             16_000,
-            false,
-            None,
-            Some(HighpassFilter::Hz80),
+            Transforms {
+                dc_removal: false,
+                denoise: None,
+                highpass: Some(HighpassFilter::Hz80),
+                agc: None,
+            },
         )
         .unwrap()
         .expect("high-pass-only chain");
@@ -1408,15 +1732,37 @@ mod tests {
     #[test]
     fn highpass_off_builds_no_stage() {
         assert!(
-            build_capture_stage(1, 1, 16_000, 16_000, false, None, None)
-                .unwrap()
-                .is_none(),
+            build_capture_stage(
+                1,
+                1,
+                16_000,
+                16_000,
+                Transforms {
+                    dc_removal: false,
+                    denoise: None,
+                    highpass: None,
+                    agc: None
+                }
+            )
+            .unwrap()
+            .is_none(),
             "high-pass off and nothing else: no chain, byte-identical passthrough"
         );
 
-        let downmix_only = build_capture_stage(2, 1, 16_000, 16_000, false, None, None)
-            .unwrap()
-            .expect("stereo -> downmix chain");
+        let downmix_only = build_capture_stage(
+            2,
+            1,
+            16_000,
+            16_000,
+            Transforms {
+                dc_removal: false,
+                denoise: None,
+                highpass: None,
+                agc: None,
+            },
+        )
+        .unwrap()
+        .expect("stereo -> downmix chain");
         assert!(
             downmix_only.transform.is_empty(),
             "high-pass off pushes no transform stage, not a transparent filter"
@@ -1427,9 +1773,12 @@ mod tests {
             1,
             16_000,
             16_000,
-            false,
-            None,
-            Some(HighpassFilter::Hz80),
+            Transforms {
+                dc_removal: false,
+                denoise: None,
+                highpass: Some(HighpassFilter::Hz80),
+                agc: None,
+            },
         )
         .unwrap()
         .expect("high-pass-only chain");
@@ -1450,10 +1799,20 @@ mod tests {
     /// `build_capture_stage` (DC, then denoise, then high-pass).
     #[test]
     fn build_orders_highpass_after_dc() {
-        let chain =
-            build_capture_stage(1, 1, 16_000, 16_000, true, None, Some(HighpassFilter::Hz80))
-                .unwrap()
-                .expect("dc + high-pass chain");
+        let chain = build_capture_stage(
+            1,
+            1,
+            16_000,
+            16_000,
+            Transforms {
+                dc_removal: true,
+                denoise: None,
+                highpass: Some(HighpassFilter::Hz80),
+                agc: None,
+            },
+        )
+        .unwrap()
+        .expect("dc + high-pass chain");
         assert_eq!(
             chain.transform.len(),
             2,
@@ -1471,9 +1830,12 @@ mod tests {
             1,
             16_000,
             16_000,
-            false,
-            None,
-            Some(HighpassFilter::Hz80),
+            Transforms {
+                dc_removal: false,
+                denoise: None,
+                highpass: Some(HighpassFilter::Hz80),
+                agc: None,
+            },
         )
         .unwrap()
         .expect("high-pass-only chain");
@@ -1483,10 +1845,20 @@ mod tests {
             "the high-pass biquad is same-length, so it adds no latency"
         );
 
-        let dc_and_hp =
-            build_capture_stage(1, 1, 16_000, 16_000, true, None, Some(HighpassFilter::Hz80))
-                .unwrap()
-                .expect("dc + high-pass chain");
+        let dc_and_hp = build_capture_stage(
+            1,
+            1,
+            16_000,
+            16_000,
+            Transforms {
+                dc_removal: true,
+                denoise: None,
+                highpass: Some(HighpassFilter::Hz80),
+                agc: None,
+            },
+        )
+        .unwrap()
+        .expect("dc + high-pass chain");
         assert_eq!(
             dc_and_hp.transform_latency(),
             0,
@@ -1519,9 +1891,12 @@ mod tests {
             1,
             16_000,
             16_000,
-            true,
-            Some((DenoiseModel::FastEnhancerT, path.as_path(), None)),
-            Some(HighpassFilter::Hz80),
+            Transforms {
+                dc_removal: true,
+                denoise: Some((DenoiseModel::FastEnhancerT, path.as_path(), None)),
+                highpass: Some(HighpassFilter::Hz80),
+                agc: None,
+            },
         )
         .unwrap()
         .expect("dc + denoise + high-pass chain");
@@ -1535,5 +1910,208 @@ mod tests {
             256,
             "high-pass after denoise adds no latency: the 256 is the denoise lead alone"
         );
+    }
+
+    // ── Level control (AGC, same-length transform) ──────────────────────
+    //
+    // AGC is the LevelControl engine driven through `InPlace`, a same-length,
+    // sample-in-sample-out stage like the DC blocker and high-pass. These cover
+    // its chain placement (after high-pass), that it builds no stage when off,
+    // that it adds no latency, and that it conditions delivered audio. The
+    // engine's temporal behaviour (cold start, convergence, gating) is covered by
+    // the unit tests in `crate::gain`. Gated on the `gain` feature, which owns the
+    // engine and the chain push.
+
+    /// Off is a true no-op: with `agc` `None` and nothing else, the chain is not
+    /// built at all (byte-identical passthrough); a downmix-only chain with AGC
+    /// off has an empty transform segment (no transparent stage); turning it on
+    /// pushes exactly one transform stage.
+    #[cfg(feature = "gain")]
+    #[test]
+    fn agc_off_builds_no_stage() {
+        assert!(
+            build_capture_stage(
+                1,
+                1,
+                16_000,
+                16_000,
+                Transforms {
+                    dc_removal: false,
+                    denoise: None,
+                    highpass: None,
+                    agc: None
+                }
+            )
+            .unwrap()
+            .is_none(),
+            "AGC off and nothing else: no chain, byte-identical passthrough"
+        );
+
+        let downmix_only = build_capture_stage(
+            2,
+            1,
+            16_000,
+            16_000,
+            Transforms {
+                dc_removal: false,
+                denoise: None,
+                highpass: None,
+                agc: None,
+            },
+        )
+        .unwrap()
+        .expect("stereo -> downmix chain");
+        assert!(
+            downmix_only.transform.is_empty(),
+            "AGC off pushes no transform stage, not a transparent stage"
+        );
+
+        let agc = build_capture_stage(
+            1,
+            1,
+            16_000,
+            16_000,
+            Transforms {
+                dc_removal: false,
+                denoise: None,
+                highpass: None,
+                agc: Some(-18),
+            },
+        )
+        .unwrap()
+        .expect("AGC-only chain");
+        assert!(
+            agc.normalize.is_empty(),
+            "a mono device at the target rate needs no normalize stage"
+        );
+        assert_eq!(
+            agc.transform.len(),
+            1,
+            "AGC on pushes exactly one transform stage"
+        );
+    }
+
+    /// Chain placement: with DC removal, high-pass, and AGC all on, the transform
+    /// segment is [DcBlocker, Biquad, LevelControl], so AGC runs last, after
+    /// high-pass, reserving the slot before the (not-yet-built) limiter. The
+    /// relative order is pinned by the push order in `build_capture_stage`.
+    #[cfg(feature = "gain")]
+    #[test]
+    fn build_orders_agc_after_highpass() {
+        let chain = build_capture_stage(
+            1,
+            1,
+            16_000,
+            16_000,
+            Transforms {
+                dc_removal: true,
+                denoise: None,
+                highpass: Some(HighpassFilter::Hz80),
+                agc: Some(-18),
+            },
+        )
+        .unwrap()
+        .expect("dc + high-pass + AGC chain");
+        assert_eq!(
+            chain.transform.len(),
+            3,
+            "dc_removal, high-pass, then AGC: three transform stages, AGC last"
+        );
+    }
+
+    /// AGC adds no transform latency: it is a same-length, feedback (no
+    /// look-ahead) engine, so it contributes zero to `transform_latency()`, on its
+    /// own and stacked with the same-length DC blocker and high-pass. The latency
+    /// seam and the VAD-tap invariant are unchanged by AGC.
+    #[cfg(feature = "gain")]
+    #[test]
+    fn agc_adds_no_transform_latency() {
+        let agc = build_capture_stage(
+            1,
+            1,
+            16_000,
+            16_000,
+            Transforms {
+                dc_removal: false,
+                denoise: None,
+                highpass: None,
+                agc: Some(-18),
+            },
+        )
+        .unwrap()
+        .expect("AGC-only chain");
+        assert_eq!(
+            agc.transform_latency(),
+            0,
+            "the level-control engine is feedback with no look-ahead: zero latency"
+        );
+
+        let stacked = build_capture_stage(
+            1,
+            1,
+            16_000,
+            16_000,
+            Transforms {
+                dc_removal: true,
+                denoise: None,
+                highpass: Some(HighpassFilter::Hz80),
+                agc: Some(-18),
+            },
+        )
+        .unwrap()
+        .expect("dc + high-pass + AGC chain");
+        assert_eq!(
+            stacked.transform_latency(),
+            0,
+            "DC, high-pass, and AGC are all same-length: zero transform latency"
+        );
+    }
+
+    /// AGC conditions delivered audio through the chain: a quiet but present tone
+    /// (below the target, above the noise floor) run through an AGC-only chain is
+    /// boosted toward the target, so its settled output level exceeds its input
+    /// level. This proves the engine is wired into the chain's run path; its
+    /// detailed trajectory is covered in `crate::gain`.
+    #[cfg(feature = "gain")]
+    #[test]
+    fn agc_conditions_audio_through_the_chain() {
+        let mut chain = build_capture_stage(
+            1,
+            1,
+            16_000,
+            16_000,
+            Transforms {
+                dc_removal: false,
+                denoise: None,
+                highpass: None,
+                agc: Some(-18),
+            },
+        )
+        .unwrap()
+        .expect("AGC-only chain");
+        // Half a second of a quiet -30 dBFS tone, above the -50 dBFS noise floor.
+        let amp = 0.0316_f32 * std::f32::consts::SQRT_2; // -30 dBFS RMS sine
+        let input: Vec<f32> = (0..8000)
+            .map(|i| amp * (2.0 * std::f32::consts::PI * 220.0 * i as f32 / 16_000.0).sin())
+            .collect();
+        let out = chain.run(&input).expect("AGC runs").to_vec();
+        assert_eq!(out.len(), input.len(), "AGC is same-length");
+        let rms = |s: &[f32]| (s.iter().map(|v| v * v).sum::<f32>() / s.len() as f32).sqrt();
+        let in_rms = rms(&input[input.len() - 1600..]);
+        let out_rms = rms(&out[out.len() - 1600..]);
+        assert!(
+            out_rms > in_rms * 2.0,
+            "AGC boosts the quiet input toward target (in {in_rms}, out {out_rms})"
+        );
+    }
+
+    /// `InPlace<LevelControl>` is `Send`, so a chain carrying AGC in its
+    /// `transform` segment stays `Send` and can live behind the stream's `Mutex`,
+    /// matching the DC blocker and high-pass.
+    #[cfg(feature = "gain")]
+    #[test]
+    fn agc_stage_is_send() {
+        fn assert_send<T: Send>() {}
+        assert_send::<InPlace<crate::gain::LevelControl>>();
     }
 }

@@ -139,6 +139,7 @@ class AsyncMicrophone:
         ort_library_path: str | Path | None = None,
         denoise: Literal["fastenhancer-t"] | None = None,
         highpass: Literal["80hz"] | None = None,
+        agc: int | None = None,
     ) -> None:
         """Construct an AsyncMicrophone audio capture instance.
 
@@ -281,6 +282,12 @@ class AsyncMicrophone:
                 f"Invalid highpass value: {highpass!r}. Expected '80hz'."
             )
 
+        # Validate AGC. Same logic as the sync Microphone: an integer dBFS target
+        # in [-40, -3] (typical -18); absence leaves it off. The Rust core guards
+        # the same range as a backstop.
+        if agc is not None and not -40 <= agc <= -3:
+            raise ValueError(f"agc must be in [-40, -3]; got {agc}")
+
         # Resolve the ORT dylib path via the same four-arm priority order
         # the sync wrapper uses (see _ort_resolver.resolve_ort_dylib_path).
         # Lazy import: only loaded when an ONNX stage (Silero VAD or denoise)
@@ -311,6 +318,7 @@ class AsyncMicrophone:
             denoise=denoise,
             denoise_model_path=resolved_denoise_model_path,
             highpass=highpass,
+            agc=agc,
         )
 
         self._vad_enabled = vad_enabled

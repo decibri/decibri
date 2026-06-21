@@ -73,6 +73,10 @@ pub struct DecibriOptions {
     /// an 80 Hz second-order Butterworth high-pass; absent leaves the high-pass
     /// off. Pure DSP: no bundled file and no model path, unlike `denoise`.
     pub highpass: Option<String>,
+    /// Capture AGC target level in dBFS: an integer in `-40..=-3` (typical -18);
+    /// absent leaves AGC off. Drives the captured level toward the target. Pure
+    /// DSP: no bundled file and no model path, like `highpass`.
+    pub agc: Option<i32>,
 }
 
 /// Native bridge class exposed to Node.js via napi-rs.
@@ -189,6 +193,20 @@ fn build_microphone_parts(options: Option<DecibriOptions>) -> Result<MicrophoneP
             }
         };
         config.highpass = Some(filter);
+    }
+
+    // AGC: a dBFS target level threaded to the core level-control engine. The JS
+    // wrapper performs the user-facing range check (a RangeError); this is the
+    // native backstop, range-checking the JS number before narrowing it to the
+    // core's i8 (the core also guards in validate()).
+    if let Some(target) = opts.agc {
+        if !(-40..=-3).contains(&target) {
+            return Err(Error::new(
+                Status::InvalidArg,
+                "agc target level must be between -40 and -3",
+            ));
+        }
+        config.agc = Some(target as i8);
     }
 
     let capture = Microphone::new(config).map_err(to_napi_error)?;
@@ -559,6 +577,7 @@ fn to_napi_error(e: decibri::error::DecibriError) -> Error {
         SampleRateOutOfRange
         | ChannelsOutOfRange
         | FramesPerBufferOutOfRange
+        | AgcTargetOutOfRange
         | InvalidFormat
         | VadSampleRateUnsupported(_)
         | VadThresholdOutOfRange(_) => Status::InvalidArg,

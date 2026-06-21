@@ -8,6 +8,7 @@ from decibri._classes import Speaker as Speaker
 from decibri._decibri import MicrophoneInfo as MicrophoneInfo
 from decibri._decibri import SpeakerInfo as SpeakerInfo
 from decibri._decibri import VersionInfo as VersionInfo
+from decibri.exceptions import AgcTargetOutOfRange as AgcTargetOutOfRange
 from decibri.exceptions import AlreadyRunning as AlreadyRunning
 from decibri.exceptions import MicrophoneStreamClosed as MicrophoneStreamClosed
 from decibri.exceptions import ChannelsOutOfRange as ChannelsOutOfRange

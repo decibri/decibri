@@ -270,6 +270,17 @@ class Microphone extends Readable {
       );
     }
 
+    // ── Validate AGC ─────────────────────────────────────────────────────────
+
+    // AGC target level in dBFS: a number in [-40, -3] (typical -18) drives the
+    // captured level toward the target; absence leaves it off. Mirrors the
+    // sample-rate range check, a RangeError on an out-of-range numeric value;
+    // the native backstop and the Rust core guard the same range.
+    const agc = options.agc;
+    if (agc !== undefined && (agc < -40 || agc > -3)) {
+      throw new RangeError('agc target level must be between -40 and -3');
+    }
+
     // Internal plumbing: inject the bundled ORT dylib path into the napi
     // constructor whenever an ONNX stage loads (Silero VAD or denoise). If
     // resolution fails (unknown platform, platform package not installed), this
@@ -298,6 +309,7 @@ class Microphone extends Readable {
         denoiseModelPath,
         ortLibraryPath,
         highpass,
+        agc,
       },
     };
   }

@@ -15,6 +15,7 @@ from decibri._decibri import (
     VersionInfo,
 )
 from decibri.exceptions import (
+    AgcTargetOutOfRange,
     AlreadyRunning,
     ChannelsOutOfRange,
     DecibriError,

@@ -473,6 +473,52 @@ try {
 console.log('  Group 8b done\n');
 
 // ═══════════════════════════════════════════════════════════════════════════════
+// Group 8c: AGC option (deterministic, no hardware required)
+// ═══════════════════════════════════════════════════════════════════════════════
+//
+// AGC is pure DSP (no bundled file, no ONNX, no ORT), so the range validation
+// and the off-by-default path are fully CI-safe. The engine is built at start()
+// like the other transform stages; its temporal behaviour is covered by the core
+// Rust tests. The target is a numeric dBFS level, so an out-of-range value is a
+// RangeError (a numeric range violation), not a TypeError.
+
+console.log('--- Group 8c: AGC option ---');
+
+// A valid in-range target constructs.
+try {
+  const m = new Microphone({ sampleRate: 16000, channels: 1, agc: -18 });
+  assert(m instanceof Microphone, 'agc: -18 constructs');
+  m.stop();
+} catch (e) {
+  console.log(`  FAIL: agc -18 construction rejected: ${e.message}`);
+  failed++;
+}
+
+// An out-of-range target is a clear RangeError, below and above the range.
+assertThrows(
+  () => new Microphone({ agc: -100 }),
+  RangeError,
+  'agc target level must be between -40 and -3'
+);
+assertThrows(
+  () => new Microphone({ agc: 0 }),
+  RangeError,
+  'agc target level must be between -40 and -3'
+);
+
+// Off by default: no agc key constructs identically to a plain mic.
+try {
+  const m = new Microphone({ sampleRate: 16000, channels: 1 });
+  assert(m instanceof Microphone, 'no agc key constructs (off by default)');
+  m.stop();
+} catch (e) {
+  console.log(`  FAIL: no-agc construction rejected: ${e.message}`);
+  failed++;
+}
+
+console.log('  Group 8c done\n');
+
+// ═══════════════════════════════════════════════════════════════════════════════
 // Group 9: async open() factories (deterministic, no hardware required)
 // ═══════════════════════════════════════════════════════════════════════════════
 //

@@ -277,6 +277,11 @@ class Microphone:
     rumble below the voice band, applied after denoise; omit it (the default
     ``None``) to leave the high-pass off and the capture path full-range.
 
+    The ``agc`` parameter sets an optional automatic gain control target level
+    in dBFS (an integer in ``-40..-3``, typical ``-18``), driving the captured
+    level toward the target with a smoothed, rate-limited gain applied after the
+    high-pass step; omit it (the default ``None``) to leave the level untouched.
+
     This class is synchronous. For async iteration, use ``AsyncMicrophone``.
 
     Cleanup and disconnect:
@@ -312,6 +317,7 @@ class Microphone:
         ort_library_path: str | Path | None = None,
         denoise: Literal["fastenhancer-t"] | None = None,
         highpass: Literal["80hz"] | None = None,
+        agc: int | None = None,
     ) -> None:
         """Construct a Microphone audio capture instance.
 
@@ -487,6 +493,12 @@ class Microphone:
                 f"Invalid highpass value: {highpass!r}. Expected '80hz'."
             )
 
+        # Validate AGC. The target is an integer dBFS level in [-40, -3]
+        # (typical -18); absence leaves it off. Mirrors the vad_threshold range
+        # check; the Rust core guards the same range as a backstop.
+        if agc is not None and not -40 <= agc <= -3:
+            raise ValueError(f"agc must be in [-40, -3]; got {agc}")
+
         # Resolve the ORT dylib path via the four-arm priority order in
         # _ort_resolver. Consulted when an ONNX stage loads (Silero VAD or
         # denoise); energy mode and vad=False with no denoise never load ORT, so
@@ -524,6 +536,7 @@ class Microphone:
             denoise=denoise,
             denoise_model_path=resolved_denoise_model_path,
             highpass=highpass,
+            agc=agc,
         )
 
         self._vad_enabled = vad_enabled
