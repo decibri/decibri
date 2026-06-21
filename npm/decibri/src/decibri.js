@@ -256,6 +256,20 @@ class Microphone extends Readable {
       }
     }
 
+    // ── Validate high-pass ───────────────────────────────────────────────────
+
+    // Closed growable cutoff-named selector mirroring the denoise shape: a name
+    // selects a filter, absence leaves the high-pass off. The only accepted
+    // value is '80hz'; anything else is an explicit TypeError rather than a
+    // silent miss. The filter is pure DSP with no bundled file, so there is
+    // nothing to resolve here, only the closed-set check.
+    const highpass = options.highpass;
+    if (highpass !== undefined && highpass !== '80hz') {
+      throw new TypeError(
+        `Invalid highpass value: ${JSON.stringify(highpass)}. Expected '80hz'.`
+      );
+    }
+
     // Internal plumbing: inject the bundled ORT dylib path into the napi
     // constructor whenever an ONNX stage loads (Silero VAD or denoise). If
     // resolution fails (unknown platform, platform package not installed), this
@@ -283,6 +297,7 @@ class Microphone extends Readable {
         denoise,
         denoiseModelPath,
         ortLibraryPath,
+        highpass,
       },
     };
   }

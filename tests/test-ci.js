@@ -427,6 +427,52 @@ try {
 console.log('  Group 8 done\n');
 
 // ═══════════════════════════════════════════════════════════════════════════════
+// Group 8b: High-pass option (deterministic, no hardware required)
+// ═══════════════════════════════════════════════════════════════════════════════
+//
+// High-pass is pure DSP (no bundled file, no ONNX, no ORT), so the closed-set
+// validation and the off-by-default path are fully CI-safe. The filter is built
+// at start() like the other transform stages; its DSP response is covered by the
+// core Rust tests. The closed value set is designed to grow, so an unknown value
+// is a clear TypeError, mirroring the denoise selector.
+
+console.log('--- Group 8b: High-pass option ---');
+
+// A valid cutoff name constructs.
+try {
+  const m = new Microphone({ sampleRate: 16000, channels: 1, highpass: '80hz' });
+  assert(m instanceof Microphone, "highpass: '80hz' constructs");
+  m.stop();
+} catch (e) {
+  console.log(`  FAIL: highpass '80hz' construction rejected: ${e.message}`);
+  failed++;
+}
+
+// An unrecognized cutoff name is a clear TypeError, not a silent miss.
+assertThrows(
+  () => new Microphone({ highpass: '50hz' }),
+  TypeError,
+  'Invalid highpass value'
+);
+assertThrows(
+  () => new Microphone({ highpass: 'whatever' }),
+  TypeError,
+  'Invalid highpass value'
+);
+
+// Off by default: no highpass key constructs identically to a plain mic.
+try {
+  const m = new Microphone({ sampleRate: 16000, channels: 1 });
+  assert(m instanceof Microphone, 'no highpass key constructs (off by default)');
+  m.stop();
+} catch (e) {
+  console.log(`  FAIL: no-highpass construction rejected: ${e.message}`);
+  failed++;
+}
+
+console.log('  Group 8b done\n');
+
+// ═══════════════════════════════════════════════════════════════════════════════
 // Group 9: async open() factories (deterministic, no hardware required)
 // ═══════════════════════════════════════════════════════════════════════════════
 //

@@ -245,6 +245,7 @@ def _compute_rms(chunk_bytes: bytes, sample_format: str) -> float:
 _VALID_MODES = frozenset({"silero", "energy"})
 _VALID_FORMATS = frozenset({"int16", "float32"})
 _VALID_DENOISE_MODELS = frozenset({"fastenhancer-t"})
+_VALID_HIGHPASS = frozenset({"80hz"})
 
 
 class Microphone:
@@ -270,6 +271,11 @@ class Microphone:
     speech-enhancement model (``"fastenhancer-t"``) applied to the captured
     audio; omit it (the default ``None``) to leave denoise off, which keeps the
     capture path unchanged.
+
+    The ``highpass`` parameter selects an optional high-pass filter
+    (``"80hz"``, an 80 Hz second-order Butterworth) that removes low-frequency
+    rumble below the voice band, applied after denoise; omit it (the default
+    ``None``) to leave the high-pass off and the capture path full-range.
 
     This class is synchronous. For async iteration, use ``AsyncMicrophone``.
 
@@ -305,6 +311,7 @@ class Microphone:
         as_ndarray: bool = False,
         ort_library_path: str | Path | None = None,
         denoise: Literal["fastenhancer-t"] | None = None,
+        highpass: Literal["80hz"] | None = None,
     ) -> None:
         """Construct a Microphone audio capture instance.
 
@@ -471,6 +478,15 @@ class Microphone:
                     "during installation."
                 ) from exc
 
+        # Validate high-pass. Closed growable cutoff-named selector mirroring the
+        # denoise shape: a name selects a filter, absence leaves the high-pass
+        # off, an unknown name is a clear ValueError. Pure DSP, so there is no
+        # bundled file to resolve, only the closed-set check.
+        if highpass is not None and highpass not in _VALID_HIGHPASS:
+            raise ValueError(
+                f"Invalid highpass value: {highpass!r}. Expected '80hz'."
+            )
+
         # Resolve the ORT dylib path via the four-arm priority order in
         # _ort_resolver. Consulted when an ONNX stage loads (Silero VAD or
         # denoise); energy mode and vad=False with no denoise never load ORT, so
@@ -507,6 +523,7 @@ class Microphone:
             ort_library_path=resolved_ort_path,
             denoise=denoise,
             denoise_model_path=resolved_denoise_model_path,
+            highpass=highpass,
         )
 
         self._vad_enabled = vad_enabled

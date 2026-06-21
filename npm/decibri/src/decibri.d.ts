@@ -119,6 +119,17 @@ export interface MicrophoneOptions extends ReadableOptions {
    * @default undefined
    */
   denoise?: 'fastenhancer-t';
+
+  /**
+   * High-pass filter applied to the captured audio, removing low-frequency
+   * rumble below the voice band. The only accepted value is `'80hz'` (an 80 Hz
+   * second-order Butterworth high-pass); omit to leave the high-pass off (the
+   * default), which keeps the capture path full-range. Runs after denoise in
+   * the chain. The closed value set is designed to grow (further cutoffs are
+   * additive) the way `denoise` grows.
+   * @default undefined
+   */
+  highpass?: '80hz';
 }
 
 /**

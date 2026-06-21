@@ -26,7 +26,7 @@ use std::path::Path;
 use decibri_resampler::{PolyphaseResampler, Resampler};
 
 use crate::error::DecibriError;
-use crate::microphone::DenoiseModel;
+use crate::microphone::{DenoiseModel, HighpassFilter};
 use crate::sample;
 
 /// A capture processing stage: reads one block of interleaved f32 samples and
@@ -191,6 +191,85 @@ impl InPlaceDsp for DcBlocker {
     }
 }
 
+/// A second-order (biquad) Butterworth high-pass: attenuates content below the
+/// corner frequency at 12 dB per octave while leaving the passband essentially
+/// flat (the maximally-flat Butterworth response, quality factor `1/sqrt(2)`).
+/// Removes low-frequency rumble below the voice band, a steeper and
+/// higher-cornered filter than the always-near-DC [`DcBlocker`].
+///
+/// Same-length and sample-by-sample (one input sample yields one output
+/// sample), so it is an [`InPlaceDsp`] driven through [`InPlace`], the same
+/// wrapper the [`DcBlocker`] uses. It runs as a Direct Form II Transposed
+/// section carrying two state samples (`z1`, `z2`) across blocks, so the
+/// response is continuous at chunk boundaries; it holds no end-of-stream tail,
+/// so it keeps the default no-op flush, and there is no reset path, so a fresh
+/// filter (with zero state) is built per stream open. The coefficients are
+/// computed once at construction from the corner frequency and sample rate via
+/// the RBJ audio-EQ-cookbook high-pass design.
+struct Biquad {
+    /// Feed-forward (numerator) coefficients, already normalised by `a0`.
+    b0: f32,
+    b1: f32,
+    b2: f32,
+    /// Feedback (denominator) coefficients, already normalised by `a0` (so the
+    /// stored `a0` is 1 and is not kept).
+    a1: f32,
+    a2: f32,
+    /// Direct Form II Transposed state, carried across blocks. Zero at
+    /// construction.
+    z1: f32,
+    z2: f32,
+}
+
+impl Biquad {
+    /// Design a second-order Butterworth high-pass at `cutoff_hz` for a stream
+    /// at `sample_rate_hz`, via the RBJ cookbook high-pass formulas with the
+    /// Butterworth quality factor `Q = 1/sqrt(2)` (the maximally-flat damping).
+    /// The cutoff and rate fully determine the coefficients.
+    fn highpass(cutoff_hz: f32, sample_rate_hz: f32) -> Self {
+        use std::f32::consts::{FRAC_1_SQRT_2, PI};
+
+        // Butterworth (maximally-flat) damping.
+        let q = FRAC_1_SQRT_2;
+        let w0 = 2.0 * PI * cutoff_hz / sample_rate_hz;
+        let cos_w0 = w0.cos();
+        let alpha = w0.sin() / (2.0 * q);
+
+        // RBJ cookbook high-pass section, pre-normalisation.
+        let b0 = (1.0 + cos_w0) / 2.0;
+        let b1 = -(1.0 + cos_w0);
+        let b2 = (1.0 + cos_w0) / 2.0;
+        let a0 = 1.0 + alpha;
+        let a1 = -2.0 * cos_w0;
+        let a2 = 1.0 - alpha;
+
+        // Normalise so a0 == 1, then store.
+        Self {
+            b0: b0 / a0,
+            b1: b1 / a0,
+            b2: b2 / a0,
+            a1: a1 / a0,
+            a2: a2 / a0,
+            z1: 0.0,
+            z2: 0.0,
+        }
+    }
+}
+
+impl InPlaceDsp for Biquad {
+    fn process_in_place(&mut self, samples: &mut [f32]) {
+        // Direct Form II Transposed: one multiply-add chain per sample, two
+        // state words carried forward, length preserved.
+        for s in samples.iter_mut() {
+            let x = *s;
+            let y = self.b0 * x + self.z1;
+            self.z1 = self.b1 * x - self.a1 * y + self.z2;
+            self.z2 = self.b2 * x - self.a2 * y;
+            *s = y;
+        }
+    }
+}
+
 /// The capture stage chain: a `normalize` segment (downmix, resample) that
 /// conditions a device to the output format, then an optional `transform`
 /// segment (DC removal, then denoise) applied to the normalized signal. The
@@ -349,8 +428,10 @@ impl CaptureStage {
 /// `Some((model, model_path, ort_library_path))` (and the `denoise` feature is
 /// compiled in), pushes the framed denoise stage immediately after it, loading
 /// the model through the ONNX seam (initialising ORT from `ort_library_path` when
-/// supplied). Both transform stages run after `normalize` on the mono signal at
-/// the target rate.
+/// supplied). When `highpass` names a cutoff, pushes a [`Biquad`] high-pass
+/// immediately after denoise, so the denoise model receives near-full-band
+/// input. All transform stages run after `normalize` on the mono signal at the
+/// target rate.
 /// Returns `Some(chain)` when at least one stage is needed and `None` when no
 /// segment has any (a mono device already at the target rate with no enhancement
 /// enabled), leaving the capture path on its direct, zero-cost reblock.
@@ -365,6 +446,7 @@ pub(crate) fn build_capture_stage(
     target_rate: u32,
     dc_removal: bool,
     denoise: Option<(DenoiseModel, &Path, Option<&Path>)>,
+    highpass: Option<HighpassFilter>,
 ) -> Result<Option<CaptureStage>, DecibriError> {
     let mut normalize: Vec<Box<dyn Stage>> = Vec::new();
 
@@ -405,6 +487,18 @@ pub(crate) fn build_capture_stage(
     #[cfg(not(feature = "denoise"))]
     let _ = denoise;
 
+    // High-pass (user rumble cut) runs immediately AFTER denoise (chain order:
+    // Denoise -> HighPass), so the denoise model receives near-full-band input.
+    // It is a same-length, sample-in-sample-out biquad, so it wraps via `InPlace`
+    // exactly like the DC blocker and adds no latency. The cutoff comes from the
+    // named variant, not a magic number here.
+    if let Some(filter) = highpass {
+        transform.push(Box::new(InPlace(Biquad::highpass(
+            filter.cutoff_hz(),
+            target_rate as f32,
+        ))));
+    }
+
     Ok(if normalize.is_empty() && transform.is_empty() {
         None
     } else {
@@ -430,34 +524,34 @@ mod tests {
         let off = false;
         // Mono, native == target: nothing to normalize.
         assert!(
-            build_capture_stage(1, 1, 16_000, 16_000, off, None)
+            build_capture_stage(1, 1, 16_000, 16_000, off, None, None)
                 .unwrap()
                 .is_none(),
             "mono device at the target rate needs no chain"
         );
         // Multichannel, native == target: downmix only.
         assert!(
-            build_capture_stage(2, 1, 16_000, 16_000, off, None)
+            build_capture_stage(2, 1, 16_000, 16_000, off, None, None)
                 .unwrap()
                 .is_some(),
             "stereo device gets a chain (downmix)"
         );
         assert!(
-            build_capture_stage(6, 1, 16_000, 16_000, off, None)
+            build_capture_stage(6, 1, 16_000, 16_000, off, None, None)
                 .unwrap()
                 .is_some(),
             "5.1 device gets a chain (downmix)"
         );
         // Mono, native != target: resample only.
         assert!(
-            build_capture_stage(1, 1, 48_000, 16_000, off, None)
+            build_capture_stage(1, 1, 48_000, 16_000, off, None, None)
                 .unwrap()
                 .is_some(),
             "mono device above the target rate gets a chain (resample)"
         );
         // Multichannel, native != target: downmix then resample.
         assert!(
-            build_capture_stage(2, 1, 48_000, 16_000, off, None)
+            build_capture_stage(2, 1, 48_000, 16_000, off, None, None)
                 .unwrap()
                 .is_some(),
             "stereo device above the target rate gets a chain (downmix + resample)"
@@ -473,7 +567,7 @@ mod tests {
         let on = true;
 
         // Mono at target, enhancement on: a transform-only chain (no normalize).
-        let chain = build_capture_stage(1, 1, 16_000, 16_000, on, None)
+        let chain = build_capture_stage(1, 1, 16_000, 16_000, on, None, None)
             .unwrap()
             .expect("dc_removal builds a chain even with nothing to normalize");
         assert!(
@@ -487,7 +581,7 @@ mod tests {
         );
 
         // Stereo above target, enhancement on: downmix + resample + DC.
-        let full = build_capture_stage(2, 1, 48_000, 16_000, on, None)
+        let full = build_capture_stage(2, 1, 48_000, 16_000, on, None, None)
             .unwrap()
             .expect("downmix + resample + DC chain");
         assert_eq!(full.normalize.len(), 2, "downmix then resample");
@@ -500,7 +594,7 @@ mod tests {
     /// pure downmix.
     #[test]
     fn downmix_chain_averages_to_mono() {
-        let mut chain = build_capture_stage(2, 1, 16_000, 16_000, false, None)
+        let mut chain = build_capture_stage(2, 1, 16_000, 16_000, false, None, None)
             .unwrap()
             .expect("stereo -> downmix chain");
         // Two stereo frames: (0.5, 0.3) -> 0.4, (0.4, 0.6) -> 0.5.
@@ -517,7 +611,7 @@ mod tests {
     /// filter's startup ramp, since this `process`-only path does not flush).
     #[test]
     fn resample_chain_changes_rate_and_count() {
-        let mut chain = build_capture_stage(1, 1, 48_000, 16_000, false, None)
+        let mut chain = build_capture_stage(1, 1, 48_000, 16_000, false, None, None)
             .unwrap()
             .expect("48k mono -> resample chain");
         let input: Vec<f32> = (0..24_000).map(|n| (n as f32 * 0.01).sin()).collect();
@@ -565,7 +659,7 @@ mod tests {
     /// cap to exercise the `?` bridge end to end.
     #[test]
     fn build_capture_stage_surfaces_unsupported_rate_pair() {
-        let result = build_capture_stage(1, 1, 316_800_000, 16_000, false, None);
+        let result = build_capture_stage(1, 1, 316_800_000, 16_000, false, None, None);
         assert!(
             matches!(result, Err(DecibriError::ResampleConfigInvalid { .. })),
             "an enormous native rate exceeds the resampler's filter cap"
@@ -592,7 +686,7 @@ mod tests {
         reference.flush(&mut expected);
 
         // The chain: process the whole input via run(), then flush() the tail.
-        let mut chain = build_capture_stage(1, 1, 48_000, 16_000, false, None)
+        let mut chain = build_capture_stage(1, 1, 48_000, 16_000, false, None, None)
             .unwrap()
             .expect("48k mono -> resample chain");
         let mut got = chain.run(&input).expect("process runs").to_vec();
@@ -621,7 +715,7 @@ mod tests {
     /// samples (the unchanged downmix-only path).
     #[test]
     fn downmix_only_flush_is_empty() {
-        let mut chain = build_capture_stage(2, 1, 16_000, 16_000, false, None)
+        let mut chain = build_capture_stage(2, 1, 16_000, 16_000, false, None, None)
             .unwrap()
             .expect("stereo -> downmix chain");
         let _ = chain.run(&[0.5, 0.3, 0.4, 0.6]).expect("downmix runs");
@@ -640,7 +734,7 @@ mod tests {
     /// no DC step, and the output is exactly the downmix.
     #[test]
     fn transform_off_leaves_segment_empty_and_output_unchanged() {
-        let mut chain = build_capture_stage(2, 1, 16_000, 16_000, false, None)
+        let mut chain = build_capture_stage(2, 1, 16_000, 16_000, false, None, None)
             .unwrap()
             .expect("stereo -> downmix chain");
         assert!(
@@ -664,7 +758,7 @@ mod tests {
         let on = true;
 
         // Mono at the target rate: a transform-only chain (just the DC step).
-        let mut chain = build_capture_stage(1, 1, 16_000, 16_000, on, None)
+        let mut chain = build_capture_stage(1, 1, 16_000, 16_000, on, None, None)
             .unwrap()
             .expect("dc-only chain");
         let n = 16_000;
@@ -686,7 +780,7 @@ mod tests {
 
         // Continuity: the same input split across two chunks (state carried)
         // yields identical output, so there is no per-chunk discontinuity.
-        let mut split = build_capture_stage(1, 1, 16_000, 16_000, on, None)
+        let mut split = build_capture_stage(1, 1, 16_000, 16_000, on, None, None)
             .unwrap()
             .expect("dc-only chain");
         let mut combined = split.run(&input[..8_000]).expect("first half").to_vec();
@@ -731,7 +825,7 @@ mod tests {
         dc.process_in_place(&mut expected);
 
         // The chain: process the whole input via run(), then flush() the tail.
-        let mut chain = build_capture_stage(2, 1, 48_000, 16_000, on, None)
+        let mut chain = build_capture_stage(2, 1, 48_000, 16_000, on, None, None)
             .unwrap()
             .expect("downmix + resample + DC chain");
         let mut got = chain.run(&input).expect("run").to_vec();
@@ -759,7 +853,7 @@ mod tests {
     /// already is the post-normalize signal), and `has_transform` is false.
     #[test]
     fn run_skips_tap_when_no_transform() {
-        let mut chain = build_capture_stage(2, 1, 16_000, 16_000, false, None)
+        let mut chain = build_capture_stage(2, 1, 16_000, 16_000, false, None, None)
             .unwrap()
             .expect("stereo -> downmix-only chain");
         assert!(
@@ -781,7 +875,7 @@ mod tests {
     #[test]
     fn run_captures_post_normalize_tap() {
         let on = true;
-        let mut chain = build_capture_stage(2, 1, 48_000, 16_000, on, None)
+        let mut chain = build_capture_stage(2, 1, 48_000, 16_000, on, None, None)
             .unwrap()
             .expect("downmix + resample + DC chain");
         assert!(chain.has_transform());
@@ -831,7 +925,7 @@ mod tests {
     #[test]
     fn flush_captures_post_normalize_tail() {
         let on = true;
-        let mut chain = build_capture_stage(1, 1, 48_000, 16_000, on, None)
+        let mut chain = build_capture_stage(1, 1, 48_000, 16_000, on, None, None)
             .unwrap()
             .expect("resample + DC chain");
         let input: Vec<f32> = (0..24_000).map(|n| (n as f32 * 0.01).sin()).collect();
@@ -916,6 +1010,7 @@ mod tests {
             16_000,
             true,
             Some((model, path.as_path(), None)),
+            None,
         )
         .unwrap()
         .expect("dc + denoise builds a transform chain");
@@ -936,6 +1031,7 @@ mod tests {
             16_000,
             false,
             Some((model, path.as_path(), None)),
+            None,
         )
         .unwrap()
         .expect("denoise alone builds a transform chain");
@@ -946,7 +1042,7 @@ mod tests {
         );
 
         assert!(
-            build_capture_stage(1, 1, 16_000, 16_000, false, None)
+            build_capture_stage(1, 1, 16_000, 16_000, false, None, None)
                 .unwrap()
                 .is_none(),
             "denoise off and nothing else: no chain, byte-identical passthrough"
@@ -970,6 +1066,7 @@ mod tests {
             16_000,
             false,
             Some((DenoiseModel::FastEnhancerT, path.as_path(), None)),
+            None,
         )
         .unwrap()
         .expect("denoise chain");
@@ -1017,6 +1114,7 @@ mod tests {
             16_000,
             false,
             Some((DenoiseModel::FastEnhancerT, path.as_path(), None)),
+            None,
         )
         .unwrap()
         .expect("denoise chain");
@@ -1066,7 +1164,7 @@ mod tests {
     /// zero.
     #[test]
     fn transform_latency_is_zero_without_a_framed_stage() {
-        let dc_only = build_capture_stage(1, 1, 16_000, 16_000, true, None)
+        let dc_only = build_capture_stage(1, 1, 16_000, 16_000, true, None, None)
             .unwrap()
             .expect("dc-only chain");
         assert_eq!(
@@ -1075,7 +1173,7 @@ mod tests {
             "the DC blocker is same-length, so it adds no latency"
         );
 
-        let downmix_resample_dc = build_capture_stage(2, 1, 48_000, 16_000, true, None)
+        let downmix_resample_dc = build_capture_stage(2, 1, 48_000, 16_000, true, None, None)
             .unwrap()
             .expect("downmix + resample + DC chain");
         assert_eq!(
@@ -1117,7 +1215,7 @@ mod tests {
 
         // In a chain, that normalize-segment latency stays out of the transform
         // latency.
-        let chain = build_capture_stage(1, 1, 48_000, 16_000, true, None)
+        let chain = build_capture_stage(1, 1, 48_000, 16_000, true, None, None)
             .unwrap()
             .expect("resample + DC chain");
         assert_eq!(
@@ -1142,6 +1240,7 @@ mod tests {
             16_000,
             false,
             Some((DenoiseModel::FastEnhancerT, path.as_path(), None)),
+            None,
         )
         .unwrap()
         .expect("denoise chain");
@@ -1149,6 +1248,292 @@ mod tests {
             chain.transform_latency(),
             256,
             "the framed denoise stage adds one half-window (512 - 256) of latency"
+        );
+    }
+
+    // ── High-pass (same-length biquad transform) ────────────────────────
+    //
+    // The high-pass is a second-order Butterworth biquad: a same-length,
+    // sample-in-sample-out `InPlace` stage (like the DC blocker) that runs after
+    // denoise in the transform segment. These cover its magnitude response, its
+    // cross-block state continuity, that it builds no stage when off, its chain
+    // placement, and its zero latency.
+
+    /// Run a unit sine of `freq_hz` through a high-pass-only chain and return the
+    /// steady-state magnitude (output RMS over the settled second half divided by
+    /// the input RMS). Used to read the filter's response at a single frequency.
+    fn highpass_gain_at(freq_hz: f32) -> f32 {
+        let fs = 16_000.0_f32;
+        let n = 16_000usize;
+        let input: Vec<f32> = (0..n)
+            .map(|i| (2.0 * std::f32::consts::PI * freq_hz * i as f32 / fs).sin())
+            .collect();
+        let mut chain = build_capture_stage(
+            1,
+            1,
+            16_000,
+            16_000,
+            false,
+            None,
+            Some(HighpassFilter::Hz80),
+        )
+        .unwrap()
+        .expect("high-pass-only chain");
+        let out = chain.run(&input).expect("high-pass runs").to_vec();
+        assert_eq!(
+            out.len(),
+            input.len(),
+            "the biquad is same-length: one output sample per input sample"
+        );
+        let rms = |s: &[f32]| (s.iter().map(|v| v * v).sum::<f32>() / s.len() as f32).sqrt();
+        rms(&out[n / 2..]) / rms(&input[n / 2..])
+    }
+
+    /// Filter correctness: the 80 Hz second-order Butterworth high-pass strongly
+    /// attenuates content well below the corner, passes the speech band at near
+    /// unity, and sits near the -3 dB point at the corner itself. A DC offset
+    /// settles to a near-zero mean. This is the one place the coefficient math can
+    /// be wrong, so it is checked at three frequencies plus DC.
+    #[test]
+    fn highpass_attenuates_below_cutoff_and_preserves_passband() {
+        // Well below the 80 Hz corner (two octaves down): a second-order section
+        // rolls off at ~12 dB/octave, so 20 Hz is ~24 dB down (gain ~0.06).
+        let sub = highpass_gain_at(20.0);
+        assert!(
+            sub < 0.15,
+            "20 Hz (well below the 80 Hz corner) is strongly attenuated (gain {sub})"
+        );
+
+        // The speech band passes essentially untouched.
+        let pass = highpass_gain_at(1000.0);
+        assert!(
+            (0.95..=1.05).contains(&pass),
+            "1 kHz (passband) is preserved at near unity (gain {pass})"
+        );
+
+        // At the corner the Butterworth response is the -3 dB point (1/sqrt(2)).
+        let corner = highpass_gain_at(80.0);
+        assert!(
+            (0.60..=0.80).contains(&corner),
+            "80 Hz (the corner) sits near the -3 dB Butterworth point of 0.707 (gain {corner})"
+        );
+
+        // A pure DC offset is removed: the high-pass settles its output to a
+        // near-zero mean.
+        let mut chain = build_capture_stage(
+            1,
+            1,
+            16_000,
+            16_000,
+            false,
+            None,
+            Some(HighpassFilter::Hz80),
+        )
+        .unwrap()
+        .expect("high-pass-only chain");
+        let n = 16_000usize;
+        let out = chain
+            .run(&vec![0.5_f32; n])
+            .expect("high-pass runs")
+            .to_vec();
+        let settled = &out[n - n / 4..];
+        let mean = settled.iter().sum::<f32>() / settled.len() as f32;
+        assert!(
+            mean.abs() < 1e-3,
+            "a DC offset settles to a near-zero-mean output (mean {mean})"
+        );
+    }
+
+    /// State continuity: the biquad carries its two state words across blocks, so
+    /// the same signal processed in one call equals it processed in irregular
+    /// chunks, bit for bit. Without the carry the chunk boundaries would show a
+    /// discontinuity.
+    #[test]
+    fn highpass_state_carries_across_blocks() {
+        let fs = 16_000.0_f32;
+        let n = 4096usize;
+        // A 120 Hz tone over a DC offset, so both the filtered tone and the
+        // settling DC exercise the state carry.
+        let input: Vec<f32> = (0..n)
+            .map(|i| 0.5 * (2.0 * std::f32::consts::PI * 120.0 * i as f32 / fs).sin() + 0.3)
+            .collect();
+
+        let one_shot = {
+            let mut chain = build_capture_stage(
+                1,
+                1,
+                16_000,
+                16_000,
+                false,
+                None,
+                Some(HighpassFilter::Hz80),
+            )
+            .unwrap()
+            .expect("high-pass-only chain");
+            chain.run(&input).expect("one-shot").to_vec()
+        };
+
+        let mut chain = build_capture_stage(
+            1,
+            1,
+            16_000,
+            16_000,
+            false,
+            None,
+            Some(HighpassFilter::Hz80),
+        )
+        .unwrap()
+        .expect("high-pass-only chain");
+        let mut chunked = Vec::with_capacity(n);
+        // Irregular block boundaries, including a single-sample block.
+        for chunk in [
+            &input[..1000],
+            &input[1000..1001],
+            &input[1001..3333],
+            &input[3333..],
+        ] {
+            chunked.extend_from_slice(chain.run(chunk).expect("chunk"));
+        }
+
+        assert_eq!(
+            chunked, one_shot,
+            "biquad state carries across block boundaries: chunked equals one-shot"
+        );
+    }
+
+    /// Off is a true no-op: with `highpass` `None` and nothing else, the chain is
+    /// not built at all (byte-identical passthrough); a downmix-only chain with
+    /// high-pass off has an empty transform segment (no transparent filter); and
+    /// turning it on pushes exactly one transform stage.
+    #[test]
+    fn highpass_off_builds_no_stage() {
+        assert!(
+            build_capture_stage(1, 1, 16_000, 16_000, false, None, None)
+                .unwrap()
+                .is_none(),
+            "high-pass off and nothing else: no chain, byte-identical passthrough"
+        );
+
+        let downmix_only = build_capture_stage(2, 1, 16_000, 16_000, false, None, None)
+            .unwrap()
+            .expect("stereo -> downmix chain");
+        assert!(
+            downmix_only.transform.is_empty(),
+            "high-pass off pushes no transform stage, not a transparent filter"
+        );
+
+        let hp = build_capture_stage(
+            1,
+            1,
+            16_000,
+            16_000,
+            false,
+            None,
+            Some(HighpassFilter::Hz80),
+        )
+        .unwrap()
+        .expect("high-pass-only chain");
+        assert!(
+            hp.normalize.is_empty(),
+            "a mono device at the target rate needs no normalize stage"
+        );
+        assert_eq!(
+            hp.transform.len(),
+            1,
+            "high-pass on pushes exactly one transform stage"
+        );
+    }
+
+    /// Chain placement (feature-independent): with both DC removal and high-pass
+    /// on, the transform segment is [DcBlocker, Biquad], so high-pass runs after
+    /// DC removal. The relative order is pinned by the push order in
+    /// `build_capture_stage` (DC, then denoise, then high-pass).
+    #[test]
+    fn build_orders_highpass_after_dc() {
+        let chain =
+            build_capture_stage(1, 1, 16_000, 16_000, true, None, Some(HighpassFilter::Hz80))
+                .unwrap()
+                .expect("dc + high-pass chain");
+        assert_eq!(
+            chain.transform.len(),
+            2,
+            "dc_removal then high-pass: two transform stages, high-pass last"
+        );
+    }
+
+    /// High-pass adds no transform latency: it is a same-length biquad, so it
+    /// contributes zero to `transform_latency()`, on its own and stacked with the
+    /// (also same-length) DC blocker. The latency seam is unchanged by high-pass.
+    #[test]
+    fn highpass_adds_no_transform_latency() {
+        let hp = build_capture_stage(
+            1,
+            1,
+            16_000,
+            16_000,
+            false,
+            None,
+            Some(HighpassFilter::Hz80),
+        )
+        .unwrap()
+        .expect("high-pass-only chain");
+        assert_eq!(
+            hp.transform_latency(),
+            0,
+            "the high-pass biquad is same-length, so it adds no latency"
+        );
+
+        let dc_and_hp =
+            build_capture_stage(1, 1, 16_000, 16_000, true, None, Some(HighpassFilter::Hz80))
+                .unwrap()
+                .expect("dc + high-pass chain");
+        assert_eq!(
+            dc_and_hp.transform_latency(),
+            0,
+            "DC removal and high-pass are both same-length: zero transform latency"
+        );
+    }
+
+    /// `InPlace<Biquad>` is `Send`, so a chain carrying the high-pass in its
+    /// `transform` segment stays `Send` and can live behind the stream's `Mutex`,
+    /// matching the DC blocker.
+    #[test]
+    fn highpass_stage_is_send() {
+        fn assert_send<T: Send>() {}
+        assert_send::<InPlace<Biquad>>();
+    }
+
+    /// Chain placement with denoise present: DC removal, then the framed denoise
+    /// stage, then high-pass, so the transform segment holds three stages and
+    /// high-pass sits AFTER denoise, so the model receives near-full-band input.
+    /// The total transform latency is the denoise lead alone (256), which
+    /// also proves the same-length high-pass adds none even sitting after the
+    /// framed stage. The relative order is pinned here and by the push order in
+    /// `build_capture_stage`.
+    #[cfg(feature = "denoise")]
+    #[test]
+    fn build_orders_highpass_after_denoise() {
+        let path = denoise_model_path();
+        let chain = build_capture_stage(
+            1,
+            1,
+            16_000,
+            16_000,
+            true,
+            Some((DenoiseModel::FastEnhancerT, path.as_path(), None)),
+            Some(HighpassFilter::Hz80),
+        )
+        .unwrap()
+        .expect("dc + denoise + high-pass chain");
+        assert_eq!(
+            chain.transform.len(),
+            3,
+            "dc_removal, denoise, then high-pass: three transform stages"
+        );
+        assert_eq!(
+            chain.transform_latency(),
+            256,
+            "high-pass after denoise adds no latency: the 256 is the denoise lead alone"
         );
     }
 }
