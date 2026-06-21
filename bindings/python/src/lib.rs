@@ -48,7 +48,7 @@ use decibri::device::{
 };
 use decibri::error::DecibriError as CoreDecibriError;
 use decibri::microphone::{
-    AudioChunk, DenoiseModel, Microphone, MicrophoneConfig, MicrophoneStream,
+    AudioChunk, DenoiseModel, HighpassFilter, Microphone, MicrophoneConfig, MicrophoneStream,
 };
 use decibri::sample::{
     downmix_to_mono, f32_le_bytes_to_f32, f32_to_f32_le_bytes, f32_to_i16_le_bytes,
@@ -889,6 +889,7 @@ impl MicrophoneBridge {
         ort_library_path = None,
         denoise = None,
         denoise_model_path = None,
+        highpass = None,
     ))]
     #[allow(clippy::too_many_arguments)]
     fn new(
@@ -907,6 +908,7 @@ impl MicrophoneBridge {
         ort_library_path: Option<PathBuf>,
         denoise: Option<String>,
         denoise_model_path: Option<PathBuf>,
+        highpass: Option<String>,
     ) -> PyResult<Self> {
         let parsed_format = parse_sample_format(&format).map_err(|e| to_py_err(py, e))?;
         let device_selector = build_device_selector(device.as_ref())?;
@@ -943,6 +945,23 @@ impl MicrophoneBridge {
             // Without it a denoise-only capture could not find the bundled
             // runtime on a default install.
             capture_config.ort_library_path = ort_library_path.clone();
+        }
+
+        // High-pass: map the closed-set cutoff name to the core selector. Absent
+        // leaves the high-pass off and the capture path unchanged. Pure DSP, so
+        // there is no model file or ORT to resolve, only the closed-set check
+        // (the wrapper performs the same check and raises ValueError; this is the
+        // native backstop).
+        if let Some(name) = highpass.as_deref() {
+            let filter = match name {
+                "80hz" => HighpassFilter::Hz80,
+                other => {
+                    return Err(PyValueError::new_err(format!(
+                        "highpass must be '80hz', got '{other}'"
+                    )))
+                }
+            };
+            capture_config.highpass = Some(filter);
         }
 
         // VAD construction gate (Option (b)+(h)). The bridge constructs
@@ -1429,6 +1448,7 @@ impl AsyncMicrophoneBridge {
         ort_library_path = None,
         denoise = None,
         denoise_model_path = None,
+        highpass = None,
     ))]
     #[allow(clippy::too_many_arguments)]
     fn new(
@@ -1447,6 +1467,7 @@ impl AsyncMicrophoneBridge {
         ort_library_path: Option<PathBuf>,
         denoise: Option<String>,
         denoise_model_path: Option<PathBuf>,
+        highpass: Option<String>,
     ) -> PyResult<Self> {
         let inner = MicrophoneBridge::new(
             py,
@@ -1464,6 +1485,7 @@ impl AsyncMicrophoneBridge {
             ort_library_path,
             denoise,
             denoise_model_path,
+            highpass,
         )?;
         Ok(AsyncMicrophoneBridge {
             inner: Arc::new(inner),

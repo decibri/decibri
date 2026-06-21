@@ -52,6 +52,36 @@ pub enum DenoiseModel {
     FastEnhancerT,
 }
 
+/// High-pass filter selector for the capture chain.
+///
+/// A closed, `#[non_exhaustive]` set that is intentionally designed to grow:
+/// today the only value is [`HighpassFilter::Hz80`], an 80 Hz second-order
+/// Butterworth high-pass that removes low-frequency rumble below the voice band.
+/// Naming the cutoff rather than taking a bool or a free integer keeps adding
+/// further cutoffs (a `'100hz'` detent, a `'300hz'` telephony cut) a
+/// non-breaking widening (a new variant), and keeps the caller on record about
+/// which cutoff they selected. The closed named set is deliberate: members are
+/// added without a breaking change, the way [`DenoiseModel`] grows. The filter
+/// is pure DSP, so it bundles no file and loads no runtime.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum HighpassFilter {
+    /// An 80 Hz second-order Butterworth high-pass, the conventional voice
+    /// rumble cutoff.
+    Hz80,
+}
+
+impl HighpassFilter {
+    /// The corner (-3 dB) cutoff frequency in Hz that this variant selects. The
+    /// single source of the cutoff value: the biquad design reads it from here
+    /// rather than carrying a separate magic number.
+    pub(crate) fn cutoff_hz(self) -> f32 {
+        match self {
+            HighpassFilter::Hz80 => 80.0,
+        }
+    }
+}
+
 /// Configuration for a microphone capture session.
 ///
 /// `#[non_exhaustive]`: construct it with [`MicrophoneConfig::default`] and then
@@ -95,6 +125,12 @@ pub struct MicrophoneConfig {
     /// process (first-wins), so when a VAD has already initialised it this is a
     /// no-op. Default: `None`.
     pub ort_library_path: Option<PathBuf>,
+    /// High-pass filter to apply to the captured audio, removing low-frequency
+    /// rumble below the voice band. Runs in the transform chain after denoise,
+    /// on the cleaned mono signal at the target rate. `None` (the default)
+    /// builds no high-pass stage, leaving the captured audio full-range (a true
+    /// byte-identical no-op). Pure DSP: it loads no model and needs no path.
+    pub highpass: Option<HighpassFilter>,
 }
 
 impl Default for MicrophoneConfig {
@@ -108,6 +144,7 @@ impl Default for MicrophoneConfig {
             denoise: None,
             denoise_model_path: None,
             ort_library_path: None,
+            highpass: None,
         }
     }
 }
@@ -749,6 +786,7 @@ impl Microphone {
             target_rate,
             self.config.dc_removal,
             denoise,
+            self.config.highpass,
         )?;
         let output_channels = if channels > target_channels {
             target_channels
@@ -1231,7 +1269,7 @@ mod tests {
     #[test]
     fn test_mono_device_builds_no_chain() {
         assert!(
-            build_capture_stage(1, 1, 16000, 16000, false, None)
+            build_capture_stage(1, 1, 16000, 16000, false, None, None)
                 .unwrap()
                 .is_none(),
             "a mono device at the target rate needs no normalize chain"
@@ -1249,7 +1287,7 @@ mod tests {
     /// tail is delivered.
     #[test]
     fn test_downmix_chain_yields_correct_mono() {
-        let stage = build_capture_stage(2, 1, 16000, 16000, false, None).unwrap();
+        let stage = build_capture_stage(2, 1, 16000, 16000, false, None, None).unwrap();
         assert!(stage.is_some(), "a stereo device gets a downmix chain");
         let (stream, sender, running) = test_stream_with(stage, 1); // output is mono
 
@@ -1297,7 +1335,7 @@ mod tests {
     /// count tracks the 1:3 rate ratio (48 kHz -> 16 kHz).
     #[test]
     fn test_resample_chain_delivers_exact_blocks_at_target_rate() {
-        let stage = build_capture_stage(1, 1, 48_000, 16_000, false, None)
+        let stage = build_capture_stage(1, 1, 48_000, 16_000, false, None, None)
             .unwrap()
             .expect("48k mono -> resample chain");
         // test_stream_with stamps the stream at 16 kHz (the target), mono.
@@ -1376,7 +1414,7 @@ mod tests {
         let mut process_out = Vec::new();
         process_only.process(&input, &mut process_out);
 
-        let stage = build_capture_stage(1, 1, 48_000, 16_000, false, None)
+        let stage = build_capture_stage(1, 1, 48_000, 16_000, false, None, None)
             .unwrap()
             .expect("48k mono -> resample chain");
         let (stream, sender, running) = test_stream_with(Some(stage), 1);
@@ -1445,7 +1483,7 @@ mod tests {
     #[test]
     fn test_enhancement_on_removes_dc_end_to_end() {
         let enhancement = true;
-        let stage = build_capture_stage(1, 1, 16_000, 16_000, enhancement, None)
+        let stage = build_capture_stage(1, 1, 16_000, 16_000, enhancement, None, None)
             .unwrap()
             .expect("dc_removal builds a transform-only chain for a mono device");
         let (stream, sender, running) = test_stream_with(Some(stage), 1);
@@ -1492,7 +1530,7 @@ mod tests {
     /// throughout and a binding feeds VAD the delivered chunk exactly as before.
     #[test]
     fn test_vad_input_none_when_no_transform() {
-        let stage = build_capture_stage(2, 1, 16_000, 16_000, false, None)
+        let stage = build_capture_stage(2, 1, 16_000, 16_000, false, None, None)
             .unwrap()
             .expect("stereo -> downmix-only chain");
         let (stream, sender, running) = test_stream_with(Some(stage), 1);
@@ -1539,7 +1577,7 @@ mod tests {
     #[test]
     fn test_vad_input_returns_pre_transform_signal() {
         let enhancement = true;
-        let stage = build_capture_stage(1, 1, 16_000, 16_000, enhancement, None)
+        let stage = build_capture_stage(1, 1, 16_000, 16_000, enhancement, None, None)
             .unwrap()
             .expect("dc-only chain");
         let (stream, sender, running) = test_stream_with(Some(stage), 1);
@@ -1597,7 +1635,7 @@ mod tests {
         use decibri_resampler::{PolyphaseResampler, Resampler};
 
         let enhancement = true;
-        let stage = build_capture_stage(1, 1, 48_000, 16_000, enhancement, None)
+        let stage = build_capture_stage(1, 1, 48_000, 16_000, enhancement, None, None)
             .unwrap()
             .expect("resample + DC chain");
         let (stream, sender, running) = test_stream_with(Some(stage), 1);

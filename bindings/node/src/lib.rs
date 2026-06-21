@@ -9,7 +9,9 @@ use napi::{Env, Task};
 use napi_derive::napi;
 
 use decibri::device::{self, DeviceSelector};
-use decibri::microphone::{DenoiseModel, Microphone, MicrophoneConfig, MicrophoneStream};
+use decibri::microphone::{
+    DenoiseModel, HighpassFilter, Microphone, MicrophoneConfig, MicrophoneStream,
+};
 use decibri::sample;
 use decibri::speaker::{Speaker, SpeakerConfig, SpeakerSink, SpeakerStream};
 use decibri::vad::{SileroVad, VadConfig};
@@ -67,6 +69,10 @@ pub struct DecibriOptions {
     pub denoise_model_path: Option<String>,
     #[napi(skip_typescript)]
     pub ort_library_path: Option<String>,
+    /// Capture high-pass filter selector. The only accepted value is `'80hz'`,
+    /// an 80 Hz second-order Butterworth high-pass; absent leaves the high-pass
+    /// off. Pure DSP: no bundled file and no model path, unlike `denoise`.
+    pub highpass: Option<String>,
 }
 
 /// Native bridge class exposed to Node.js via napi-rs.
@@ -165,6 +171,24 @@ fn build_microphone_parts(options: Option<DecibriOptions>) -> Result<MicrophoneP
             .ort_library_path
             .as_deref()
             .map(std::path::PathBuf::from);
+    }
+
+    // High-pass: map the closed-set cutoff name to the core selector. Absent
+    // leaves the high-pass off and the capture path unchanged. Pure DSP, so
+    // there is no model file or ORT to resolve, only the closed-set check (the
+    // JS wrapper performs the same check and raises the TypeError; this is the
+    // native backstop).
+    if let Some(name) = opts.highpass.as_deref() {
+        let filter = match name {
+            "80hz" => HighpassFilter::Hz80,
+            other => {
+                return Err(Error::new(
+                    Status::InvalidArg,
+                    format!("highpass must be '80hz', got '{other}'"),
+                ))
+            }
+        };
+        config.highpass = Some(filter);
     }
 
     let capture = Microphone::new(config).map_err(to_napi_error)?;

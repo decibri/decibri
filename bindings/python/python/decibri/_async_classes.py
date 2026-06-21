@@ -61,6 +61,7 @@ from decibri._classes import (
     _VadStateMachine,
     _VALID_DENOISE_MODELS,
     _VALID_FORMATS,
+    _VALID_HIGHPASS,
     _VALID_MODES,
 )
 from decibri._decibri import MicrophoneInfo, SpeakerInfo, VersionInfo
@@ -137,6 +138,7 @@ class AsyncMicrophone:
         as_ndarray: bool = False,
         ort_library_path: str | Path | None = None,
         denoise: Literal["fastenhancer-t"] | None = None,
+        highpass: Literal["80hz"] | None = None,
     ) -> None:
         """Construct an AsyncMicrophone audio capture instance.
 
@@ -270,6 +272,15 @@ class AsyncMicrophone:
                     "during installation."
                 ) from exc
 
+        # Validate high-pass. Same logic as the sync Microphone: a closed-set
+        # cutoff name selects a filter, absence leaves the high-pass off, an
+        # unknown name is a clear ValueError. Pure DSP, so there is nothing to
+        # resolve, only the closed-set check.
+        if highpass is not None and highpass not in _VALID_HIGHPASS:
+            raise ValueError(
+                f"Invalid highpass value: {highpass!r}. Expected '80hz'."
+            )
+
         # Resolve the ORT dylib path via the same four-arm priority order
         # the sync wrapper uses (see _ort_resolver.resolve_ort_dylib_path).
         # Lazy import: only loaded when an ONNX stage (Silero VAD or denoise)
@@ -299,6 +310,7 @@ class AsyncMicrophone:
             ort_library_path=resolved_ort_path,
             denoise=denoise,
             denoise_model_path=resolved_denoise_model_path,
+            highpass=highpass,
         )
 
         self._vad_enabled = vad_enabled
