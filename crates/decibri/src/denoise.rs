@@ -208,6 +208,13 @@ impl Stage for Denoise {
         self.cache2.fill(0.0);
         Ok(())
     }
+
+    fn latency_samples(&self) -> usize {
+        // The output hop lags its input by one analysis half-window: the stream
+        // is left-padded with `WINDOW - HOP` zeros, so each enhanced sample
+        // trails its source by that many samples.
+        WINDOW - HOP
+    }
 }
 
 /// `OrtSession::open` labels every model-file load failure `VadModelLoadFailed`
