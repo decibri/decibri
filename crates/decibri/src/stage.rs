@@ -49,6 +49,19 @@ pub(crate) trait Stage: Send {
         let _ = out;
         Ok(())
     }
+
+    /// The constant algorithmic delay, in samples at this stage's output rate,
+    /// that the stage adds between its input and its output.
+    ///
+    /// Zero by default: a sample-in, sample-out stage (downmix, the DC blocker)
+    /// emits each output sample in step with its input and adds no delay. A
+    /// stage that holds samples back overrides this. The resampler reports its
+    /// anti-alias filter's group delay, and the framed denoise stage reports the
+    /// lead its analysis window introduces. The chain sums these across its
+    /// conditioning stages.
+    fn latency_samples(&self) -> usize {
+        0
+    }
 }
 
 /// Downmix interleaved multichannel audio to mono by averaging channels.
@@ -96,6 +109,13 @@ impl Stage for ResampleStage {
         // infallible, so wrap it as `Ok(())`.
         self.0.flush(out);
         Ok(())
+    }
+
+    fn latency_samples(&self) -> usize {
+        // Forward the resampler's own group delay. It is already expressed at
+        // the output rate, and is zero when the rates match and the resampler is
+        // a passthrough.
+        self.0.latency_samples()
     }
 }
 
@@ -283,6 +303,17 @@ impl CaptureStage {
     /// pre-transform signal.
     pub(crate) fn has_transform(&self) -> bool {
         !self.transform.is_empty()
+    }
+
+    /// The summed algorithmic latency, in samples at the output rate, of the
+    /// `transform` (conditioning) stages: the amount by which the delivered,
+    /// post-conditioning output trails the post-normalize signal the
+    /// [`tap`](Self::tap) holds. The `normalize` stages are excluded on purpose:
+    /// they run before the tap is taken, so their delay (the resampler's group
+    /// delay) reaches the tap and the delivered output alike and does not
+    /// separate them.
+    pub(crate) fn transform_latency(&self) -> usize {
+        self.transform.iter().map(|s| s.latency_samples()).sum()
     }
 
     /// Drain one segment's tail, carrying `work` across its stages. At each stage
@@ -1018,6 +1049,106 @@ mod tests {
         assert!(
             tap.len() - out.len() <= 256,
             "the per-call lead is bounded by one hop"
+        );
+    }
+
+    // ── Latency accounting ──────────────────────────────────────────────
+    //
+    // Each stage declares its constant algorithmic latency; the chain sums the
+    // `transform`-segment declarations. The `normalize` segment (downmix,
+    // resample) is excluded because it runs before the tap is taken, so its
+    // delay reaches the tap and the delivered output alike.
+
+    /// Without a framed transform stage the chain adds no conditioning latency:
+    /// the same-length DC blocker contributes zero, and the resampler's group
+    /// delay is a `normalize` delay that does not count toward the transform
+    /// latency. Both a DC-only chain and a downmix + resample + DC chain report
+    /// zero.
+    #[test]
+    fn transform_latency_is_zero_without_a_framed_stage() {
+        let dc_only = build_capture_stage(1, 1, 16_000, 16_000, true, None)
+            .unwrap()
+            .expect("dc-only chain");
+        assert_eq!(
+            dc_only.transform_latency(),
+            0,
+            "the DC blocker is same-length, so it adds no latency"
+        );
+
+        let downmix_resample_dc = build_capture_stage(2, 1, 48_000, 16_000, true, None)
+            .unwrap()
+            .expect("downmix + resample + DC chain");
+        assert_eq!(
+            downmix_resample_dc.transform_latency(),
+            0,
+            "the resampler's group delay is a normalize delay, excluded from the transform latency"
+        );
+    }
+
+    /// `ResampleStage` forwards the resampler's own group delay (nonzero for a
+    /// rate change, zero for an identity passthrough), but because it lives in
+    /// the `normalize` segment it never enters the chain's transform latency. A
+    /// resample + DC chain therefore carries a resampler latency on the stage yet
+    /// reports zero transform latency.
+    #[test]
+    fn resample_latency_forwards_but_does_not_enter_transform_latency() {
+        // The stage reports exactly the resampler's group delay.
+        let expected = PolyphaseResampler::new(48_000, 16_000)
+            .unwrap()
+            .latency_samples();
+        assert!(
+            expected > 0,
+            "downsampling 48k -> 16k has a nonzero group delay"
+        );
+        let stage = ResampleStage(PolyphaseResampler::new(48_000, 16_000).unwrap());
+        assert_eq!(
+            stage.latency_samples(),
+            expected,
+            "the stage forwards the resampler's group delay unchanged"
+        );
+
+        // An identity resampler forwards zero.
+        let identity = ResampleStage(PolyphaseResampler::new(16_000, 16_000).unwrap());
+        assert_eq!(
+            identity.latency_samples(),
+            0,
+            "an identity resampler adds no delay"
+        );
+
+        // In a chain, that normalize-segment latency stays out of the transform
+        // latency.
+        let chain = build_capture_stage(1, 1, 48_000, 16_000, true, None)
+            .unwrap()
+            .expect("resample + DC chain");
+        assert_eq!(
+            chain.transform_latency(),
+            0,
+            "the resampler's group delay does not enter the transform latency"
+        );
+    }
+
+    /// A chain with the framed denoise stage in its `transform` segment reports
+    /// that stage's algorithmic latency: one analysis half-window, 256 samples at
+    /// the 16 kHz target rate. This is the same lead the per-call tap test
+    /// observes behaviorally; here it is read straight off the chain.
+    #[cfg(feature = "denoise")]
+    #[test]
+    fn transform_latency_reports_denoise_lead() {
+        let path = denoise_model_path();
+        let chain = build_capture_stage(
+            1,
+            1,
+            16_000,
+            16_000,
+            false,
+            Some((DenoiseModel::FastEnhancerT, path.as_path(), None)),
+        )
+        .unwrap()
+        .expect("denoise chain");
+        assert_eq!(
+            chain.transform_latency(),
+            256,
+            "the framed denoise stage adds one half-window (512 - 256) of latency"
         );
     }
 }

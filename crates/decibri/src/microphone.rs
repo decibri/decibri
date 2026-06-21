@@ -817,6 +817,18 @@ impl Microphone {
             _ => None,
         };
         let vad_tap_cap = target_rate as usize * VAD_TAP_BOUND_SECS;
+        // The tap memory bound must sit far above the chain's conditioning
+        // latency, so an actively draining detector never reaches it even when a
+        // length-changing stage leaves the tap leading the delivered output.
+        // Checked once here, not per block, since the latency is fixed when the
+        // chain is built.
+        debug_assert!(
+            capture_stage
+                .as_ref()
+                .map_or(0, CaptureStage::transform_latency)
+                < vad_tap_cap,
+            "the VAD tap memory bound must exceed the chain's transform latency"
+        );
 
         Ok(MicrophoneStream {
             _stream,
