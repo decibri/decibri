@@ -137,6 +137,7 @@ const EXCEPTION_NAMES: &[&str] = &[
     "PermissionDenied",
     "SampleRateOutOfRange",
     "AgcTargetOutOfRange",
+    "LimiterCeilingOutOfRange",
     "StreamOpenFailed",
     "StreamStartFailed",
     "VadSampleRateUnsupported",
@@ -208,7 +209,7 @@ fn to_py_err(py: Python<'_>, err: CoreDecibriError) -> PyErr {
     // and VadModelLoadFailed unpack multi-element tuples into named
     // attributes; other classes accept a single message string.
     let (name, raise): (&'static str, ExceptionRaiser) = match err {
-        // Unit variants (12).
+        // Unit variants (13).
         CoreDecibriError::SampleRateOutOfRange => (
             "SampleRateOutOfRange",
             Box::new(move |cls| PyErr::from_type(cls, (msg,))),
@@ -223,6 +224,10 @@ fn to_py_err(py: Python<'_>, err: CoreDecibriError) -> PyErr {
         ),
         CoreDecibriError::AgcTargetOutOfRange => (
             "AgcTargetOutOfRange",
+            Box::new(move |cls| PyErr::from_type(cls, (msg,))),
+        ),
+        CoreDecibriError::LimiterCeilingOutOfRange => (
+            "LimiterCeilingOutOfRange",
             Box::new(move |cls| PyErr::from_type(cls, (msg,))),
         ),
         CoreDecibriError::InvalidFormat => (
@@ -896,6 +901,7 @@ impl MicrophoneBridge {
         denoise_model_path = None,
         highpass = None,
         agc = None,
+        limiter = None,
     ))]
     #[allow(clippy::too_many_arguments)]
     fn new(
@@ -916,6 +922,7 @@ impl MicrophoneBridge {
         denoise_model_path: Option<PathBuf>,
         highpass: Option<String>,
         agc: Option<i8>,
+        limiter: Option<f32>,
     ) -> PyResult<Self> {
         let parsed_format = parse_sample_format(&format).map_err(|e| to_py_err(py, e))?;
         let device_selector = build_device_selector(device.as_ref())?;
@@ -976,6 +983,12 @@ impl MicrophoneBridge {
         // guards the same range in validate() (the load-bearing backstop, raised
         // as AgcTargetOutOfRange), so no inline check is needed here.
         capture_config.agc = agc;
+
+        // Limiter: thread the dBFS ceiling to the core limiter stage. The wrapper
+        // performs the user-facing range check (a ValueError); the core guards the
+        // same range in validate() (the load-bearing backstop, raised as
+        // LimiterCeilingOutOfRange), so no inline check is needed here.
+        capture_config.limiter = limiter;
 
         // VAD construction gate (Option (b)+(h)). The bridge constructs
         // SileroVad only if vad=True AND vad_mode=="silero". The vad_mode
@@ -1463,6 +1476,7 @@ impl AsyncMicrophoneBridge {
         denoise_model_path = None,
         highpass = None,
         agc = None,
+        limiter = None,
     ))]
     #[allow(clippy::too_many_arguments)]
     fn new(
@@ -1483,6 +1497,7 @@ impl AsyncMicrophoneBridge {
         denoise_model_path: Option<PathBuf>,
         highpass: Option<String>,
         agc: Option<i8>,
+        limiter: Option<f32>,
     ) -> PyResult<Self> {
         let inner = MicrophoneBridge::new(
             py,
@@ -1502,6 +1517,7 @@ impl AsyncMicrophoneBridge {
             denoise_model_path,
             highpass,
             agc,
+            limiter,
         )?;
         Ok(AsyncMicrophoneBridge {
             inner: Arc::new(inner),

@@ -21,6 +21,7 @@ from decibri.exceptions import ModelLoadFailed as ModelLoadFailed
 from decibri.exceptions import ForkAfterOrtInit as ForkAfterOrtInit
 from decibri.exceptions import FramesPerBufferOutOfRange as FramesPerBufferOutOfRange
 from decibri.exceptions import InvalidFormat as InvalidFormat
+from decibri.exceptions import LimiterCeilingOutOfRange as LimiterCeilingOutOfRange
 from decibri.exceptions import MultipleDevicesMatch as MultipleDevicesMatch
 from decibri.exceptions import NoMicrophoneFound as NoMicrophoneFound
 from decibri.exceptions import NoSpeakerFound as NoSpeakerFound

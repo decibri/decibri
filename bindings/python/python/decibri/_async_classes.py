@@ -140,6 +140,7 @@ class AsyncMicrophone:
         denoise: Literal["fastenhancer-t"] | None = None,
         highpass: Literal["80hz"] | None = None,
         agc: int | None = None,
+        limiter: float | None = None,
     ) -> None:
         """Construct an AsyncMicrophone audio capture instance.
 
@@ -288,6 +289,12 @@ class AsyncMicrophone:
         if agc is not None and not -40 <= agc <= -3:
             raise ValueError(f"agc must be in [-40, -3]; got {agc}")
 
+        # Validate the limiter ceiling. Same logic as the sync Microphone: a
+        # sample-peak ceiling in dBFS in [-3.0, 0.0] (typical -1.0); absence
+        # leaves it off. The Rust core guards the same range as a backstop.
+        if limiter is not None and not -3.0 <= limiter <= 0.0:
+            raise ValueError(f"limiter must be in [-3.0, 0.0]; got {limiter}")
+
         # Resolve the ORT dylib path via the same four-arm priority order
         # the sync wrapper uses (see _ort_resolver.resolve_ort_dylib_path).
         # Lazy import: only loaded when an ONNX stage (Silero VAD or denoise)
@@ -319,6 +326,7 @@ class AsyncMicrophone:
             denoise_model_path=resolved_denoise_model_path,
             highpass=highpass,
             agc=agc,
+            limiter=limiter,
         )
 
         self._vad_enabled = vad_enabled

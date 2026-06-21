@@ -519,6 +519,52 @@ try {
 console.log('  Group 8c done\n');
 
 // ═══════════════════════════════════════════════════════════════════════════════
+// Group 8d: limiter option (deterministic, no hardware required)
+// ═══════════════════════════════════════════════════════════════════════════════
+//
+// The limiter is pure DSP (no bundled file, no ONNX, no ORT), so the range
+// validation and the off-by-default path are fully CI-safe. The stage is built
+// at start() like the other transform stages; its absolute-ceiling guarantee is
+// covered by the core Rust tests. The ceiling is a numeric dBFS value, so an
+// out-of-range value is a RangeError (a numeric range violation), not a TypeError.
+
+console.log('--- Group 8d: limiter option ---');
+
+// A valid in-range ceiling constructs.
+try {
+  const m = new Microphone({ sampleRate: 16000, channels: 1, limiter: -1.0 });
+  assert(m instanceof Microphone, 'limiter: -1.0 constructs');
+  m.stop();
+} catch (e) {
+  console.log(`  FAIL: limiter -1.0 construction rejected: ${e.message}`);
+  failed++;
+}
+
+// An out-of-range ceiling is a clear RangeError, below and above the range.
+assertThrows(
+  () => new Microphone({ limiter: -5.0 }),
+  RangeError,
+  'limiter ceiling must be between -3.0 and 0.0'
+);
+assertThrows(
+  () => new Microphone({ limiter: 1.0 }),
+  RangeError,
+  'limiter ceiling must be between -3.0 and 0.0'
+);
+
+// Off by default: no limiter key constructs identically to a plain mic.
+try {
+  const m = new Microphone({ sampleRate: 16000, channels: 1 });
+  assert(m instanceof Microphone, 'no limiter key constructs (off by default)');
+  m.stop();
+} catch (e) {
+  console.log(`  FAIL: no-limiter construction rejected: ${e.message}`);
+  failed++;
+}
+
+console.log('  Group 8d done\n');
+
+// ═══════════════════════════════════════════════════════════════════════════════
 // Group 9: async open() factories (deterministic, no hardware required)
 // ═══════════════════════════════════════════════════════════════════════════════
 //

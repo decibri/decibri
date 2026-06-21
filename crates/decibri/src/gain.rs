@@ -260,6 +260,127 @@ impl InPlaceDsp for LevelControl {
     }
 }
 
+/// A peak limiter: holds the signal at or below a sample-peak ceiling, the
+/// safety net that catches a transient the level control's wound-up gain would
+/// otherwise let exceed full scale.
+///
+/// It is a same-length, sample-in-sample-out stage with no look-ahead, so it
+/// wraps through the chain's `InPlace` adapter exactly like the DC blocker, the
+/// high-pass biquad, and [`LevelControl`], and declares zero latency. It runs
+/// last in the conditioning chain, after [`LevelControl`].
+///
+/// # Two layers
+/// The limiter combines fast feedback gain reduction with a hard-ceiling
+/// backstop:
+/// - **Fast feedback gain reduction.** A smoothed gain (at most unity) is driven
+///   toward the value that would bring the running peak to the ceiling, with a
+///   fast attack (so a loud passage is pulled down promptly) and a slower
+///   release (so the gain recovers gently once the signal drops, without
+///   pumping). This shapes all but the sharpest transients smoothly: a sustained
+///   loud signal is scaled down to the ceiling cleanly rather than clipped.
+/// - **Hard-ceiling backstop.** After the gain is applied, the output sample is
+///   hard-clamped to the linear ceiling. This makes the no-overflow guarantee
+///   ABSOLUTE: even the instantaneous worst case (a full-scale spike on the very
+///   first sample, before the feedback gain has moved at all) cannot exceed the
+///   ceiling, because the clamp is the final per-sample operation regardless of
+///   the gain state. The smooth gain keeps the clamp from acting on most
+///   material; the clamp is the catch for the instantaneous case. A non-finite
+///   (NaN) sample is flushed to silence before the clamp, so the bound holds for
+///   every delivered sample, not only finite ones.
+///
+/// The only cost of the zero-latency design is that the very tip of a sharp
+/// transient is shaped slightly less smoothly than a look-ahead limiter would
+/// (the clamp squares it off), which is inaudible to a speech model and barely
+/// perceptible to a listener. A look-ahead mode could be added later without
+/// changing the ceiling surface.
+///
+/// # State lifecycle
+/// Holds its smoothed gain across blocks; initialised at unity (a signal below
+/// the ceiling passes through untouched). Same-length, so it keeps the default
+/// no-op flush; built fresh per stream open with no reset path.
+pub(crate) struct Limiter {
+    /// The sample-peak ceiling as a linear amplitude (`1.0` = full scale), from
+    /// the requested dBFS ceiling. Both the gain-reduction target and the hard
+    /// clamp bound.
+    ceiling_linear: f32,
+    /// Current gain reduction (linear, at most `1.0`), carried across blocks.
+    /// Unity at construction, so a below-ceiling signal is unaffected.
+    gain: f32,
+    /// Per-sample smoothing coefficient for the downward (attack) gain move, so
+    /// a louder peak pulls the gain down fast.
+    attack_coeff: f32,
+    /// Per-sample smoothing coefficient for the upward (release) gain move, so
+    /// the gain recovers gently once the signal drops back below the ceiling.
+    release_coeff: f32,
+}
+
+impl Limiter {
+    /// Attack time constant in seconds: the gain pulls down toward a louder
+    /// peak's target within this constant. Sub-millisecond so a loud onset is
+    /// caught quickly; the hard clamp covers the samples before it fully engages.
+    const ATTACK_TC_SECS: f32 = 0.0005;
+    /// Release time constant in seconds: the gain recovers toward unity over
+    /// tens of milliseconds once the signal drops below the ceiling, slow enough
+    /// to avoid pumping.
+    const RELEASE_TC_SECS: f32 = 0.050;
+
+    /// Build a limiter with a sample-peak `ceiling_db` (dBFS) for a stream at
+    /// `sample_rate` Hz. The ceiling is the only caller-chosen value; the attack
+    /// and release are fixed internal defaults. The caller is responsible for
+    /// keeping `ceiling_db` in the validated range.
+    pub(crate) fn new(ceiling_db: f32, sample_rate: u32) -> Self {
+        let sr = sample_rate as f32;
+        // Per-sample smoothing coefficient for a one-pole filter at `tc` seconds.
+        let coeff = |tc: f32| 1.0 - (-1.0 / (tc * sr)).exp();
+        Self {
+            ceiling_linear: db_to_linear(ceiling_db),
+            gain: 1.0,
+            attack_coeff: coeff(Self::ATTACK_TC_SECS),
+            release_coeff: coeff(Self::RELEASE_TC_SECS),
+        }
+    }
+}
+
+impl InPlaceDsp for Limiter {
+    fn process_in_place(&mut self, samples: &mut [f32]) {
+        for sample in samples.iter_mut() {
+            let x = *sample;
+            let mag = x.abs();
+            // Feedback gain reduction: the gain that would bring this peak to the
+            // ceiling (unity when the sample already sits below it). `mag` is
+            // strictly above the positive ceiling here, so the divide is safe.
+            let desired = if mag > self.ceiling_linear {
+                self.ceiling_linear / mag
+            } else {
+                1.0
+            };
+            // Pull down fast (attack) when more reduction is needed, recover
+            // slowly (release) otherwise.
+            let coeff = if desired < self.gain {
+                self.attack_coeff
+            } else {
+                self.release_coeff
+            };
+            self.gain += (desired - self.gain) * coeff;
+            // Hard-ceiling backstop: the clamp is the final operation, so no
+            // output sample can exceed the ceiling whatever the gain state, even
+            // on the instantaneous worst case the smoothed gain has not yet
+            // caught. A non-finite (NaN) sample, which the clamp would otherwise
+            // pass through unchanged, is flushed to silence first, so every
+            // delivered sample is finite and within the ceiling: the limiter is
+            // the last conditioning stage, so a glitched device frame must not
+            // reach the consumer or detector. A finite or infinite product is
+            // bounded by the clamp (an infinity clamps to the ceiling).
+            let y = x * self.gain;
+            *sample = if y.is_nan() {
+                0.0
+            } else {
+                y.clamp(-self.ceiling_linear, self.ceiling_linear)
+            };
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -553,5 +674,210 @@ mod tests {
         let input = tone(0.3, 220.0, 0.05);
         let out = run(&mut lc, &input);
         assert_eq!(out[0], input[0], "the empty call did not advance state");
+    }
+
+    // ── Limiter ─────────────────────────────────────────────────────────
+
+    /// Process `block` through a [`Limiter`] and return a copy of the output.
+    fn run_lim(lim: &mut Limiter, block: &[f32]) -> Vec<f32> {
+        let mut buf = block.to_vec();
+        lim.process_in_place(&mut buf);
+        buf
+    }
+
+    /// The absolute-ceiling guarantee: no output sample ever exceeds the linear
+    /// ceiling, for any ceiling, even on the instantaneous
+    /// worst case. Feeds single-sample full-scale and over-full-scale spikes
+    /// (including one on the very first sample, before any gain reduction has
+    /// moved), a step to full scale, and a burst above the ceiling. The
+    /// hard-ceiling backstop, not the feedback gain alone, is what makes this
+    /// hold from sample zero.
+    #[test]
+    fn limiter_absolute_ceiling_holds_for_instantaneous_transients() {
+        for ceiling_db in [-1.0_f32, -3.0, 0.0] {
+            let ceiling = db_to_linear(ceiling_db);
+
+            // (a) A full-scale spike on the VERY FIRST sample: the gain is still
+            // unity, so only the hard clamp can hold this. The rest is quiet.
+            let mut spike_first = vec![0.0_f32; 4_000];
+            spike_first[0] = 1.0;
+            spike_first[1] = -1.0;
+
+            // (b) Over-full-scale spikes scattered through a quiet signal: each is
+            // far above the ceiling and lands before the gain can track it.
+            let mut over = tone(0.1, 220.0, 0.25);
+            for (i, s) in over.iter_mut().enumerate() {
+                if i % 500 == 0 {
+                    *s = if i % 1000 == 0 { 5.0 } else { -5.0 };
+                }
+            }
+
+            // (c) A hard step straight to full scale, held.
+            let step = vec![1.0_f32; 4_000];
+
+            // (d) A sustained burst well above the ceiling.
+            let burst = tone(0.95, 1_000.0, 0.25);
+
+            // (e) A glitch frame carrying NaN and over-full-scale infinities: a
+            // non-finite device frame must be flushed, not propagated, by the
+            // safety backstop (f32::clamp would pass NaN through unchanged).
+            let mut glitch = tone(0.2, 220.0, 0.1);
+            glitch[0] = f32::NAN;
+            glitch[10] = f32::INFINITY;
+            glitch[20] = f32::NEG_INFINITY;
+            glitch[30] = f32::NAN;
+
+            for (label, input) in [
+                ("first-sample spike", spike_first),
+                ("over-full-scale spikes", over),
+                ("full-scale step", step),
+                ("sustained burst", burst),
+                ("non-finite glitch frame", glitch),
+            ] {
+                let mut lim = Limiter::new(ceiling_db, SR);
+                let out = run_lim(&mut lim, &input);
+                // Every delivered sample is finite: a fold over the absolute
+                // value would silently ignore a leaked NaN (max with NaN returns
+                // the other operand), so finiteness is asserted explicitly first.
+                assert!(
+                    out.iter().all(|s| s.is_finite()),
+                    "ceiling {ceiling_db} dBFS ({ceiling}): {label} produced a non-finite output sample"
+                );
+                let worst = out.iter().cloned().fold(0.0_f32, |m, s| m.max(s.abs()));
+                assert!(
+                    worst <= ceiling,
+                    "ceiling {ceiling_db} dBFS ({ceiling}): {label} produced {worst} > ceiling, \
+                     the hard-ceiling backstop must hold absolutely"
+                );
+            }
+        }
+    }
+
+    /// Graceful shaping: a sustained loud signal is pulled to the ceiling by the
+    /// feedback gain reduction, not merely clamped. The settled peak sits at the
+    /// ceiling, and a sample whose input is well BELOW the ceiling is attenuated
+    /// (the global gain reduction scales it), which a naive hard clamp would
+    /// leave untouched. So the limiter output differs from a naive clamp, proving
+    /// the gain-reduction path does the work.
+    #[test]
+    fn limiter_shapes_loud_signal_gracefully() {
+        let ceiling_db = -1.0_f32;
+        let ceiling = db_to_linear(ceiling_db);
+        let mut lim = Limiter::new(ceiling_db, SR);
+        // A 1 kHz sine with peaks at 0.95, above the 0.8913 ceiling.
+        let input = tone(0.95, 1_000.0, 0.3);
+        let out = run_lim(&mut lim, &input);
+
+        // Settle window: the last 50 ms, by when the gain has converged.
+        let win = (0.05 * SR as f32) as usize;
+        let start = out.len() - win;
+        let settled_out = &out[start..];
+        let settled_in = &input[start..];
+
+        // The peak holds at or below the ceiling.
+        let peak = settled_out
+            .iter()
+            .cloned()
+            .fold(0.0_f32, |m, s| m.max(s.abs()));
+        assert!(
+            peak <= ceiling,
+            "settled peak {peak} stays at/below the ceiling {ceiling}"
+        );
+        assert!(
+            peak > ceiling * 0.9,
+            "the loud signal is pulled UP TO the ceiling, not far below ({peak})"
+        );
+
+        // A sub-ceiling sample is scaled down (gain < 1 applied globally), unlike
+        // a naive clamp which leaves below-ceiling samples identical.
+        let idx = settled_in
+            .iter()
+            .position(|&x| x.abs() > 0.2 && x.abs() < ceiling * 0.5)
+            .expect("a clearly sub-ceiling sample exists in a 0.95 sine");
+        let naive_clamp = settled_in[idx].clamp(-ceiling, ceiling);
+        assert_eq!(
+            naive_clamp, settled_in[idx],
+            "a naive clamp leaves a sub-ceiling sample unchanged"
+        );
+        assert!(
+            (settled_out[idx] - settled_in[idx]).abs() > 1e-4,
+            "the limiter attenuates a sub-ceiling sample ({} vs input {}), so it is shaping, \
+             not clamping",
+            settled_out[idx],
+            settled_in[idx]
+        );
+    }
+
+    /// A signal entirely below the ceiling passes through byte-identically: the
+    /// gain never leaves unity and the clamp never fires, so the limiter does not
+    /// alter what it does not need to.
+    #[test]
+    fn limiter_transparent_below_ceiling() {
+        let mut lim = Limiter::new(-1.0, SR);
+        // Peaks at 0.5, well below the 0.8913 ceiling.
+        let input = tone(0.5, 220.0, 0.2);
+        let out = run_lim(&mut lim, &input);
+        assert_eq!(
+            out, input,
+            "a below-ceiling signal is delivered untouched, bit for bit"
+        );
+    }
+
+    /// Release: after a loud passage drives the gain down, a following quiet
+    /// passage is not left suppressed. The gain recovers toward unity, so the
+    /// quiet tail's level tracks its input level rather than staying attenuated.
+    #[test]
+    fn limiter_releases_after_transient() {
+        let ceiling_db = -1.0_f32;
+        let mut lim = Limiter::new(ceiling_db, SR);
+
+        // 60 ms of a loud burst pulls the gain down hard.
+        let loud = tone(0.95, 1_000.0, 0.06);
+        let _ = run_lim(&mut lim, &loud);
+
+        // Then 400 ms of a quiet, below-ceiling signal: the gain should release
+        // back toward unity over the (tens-of-ms) release, so the settled tail is
+        // delivered at essentially its input level.
+        let quiet = tone(0.3, 220.0, 0.4);
+        let out = run_lim(&mut lim, &quiet);
+
+        let win = (0.05 * SR as f32) as usize;
+        let in_rms = rms(&quiet[quiet.len() - win..]);
+        let out_rms = rms(&out[out.len() - win..]);
+        assert!(
+            out_rms > in_rms * 0.95,
+            "the quiet passage recovers to ~unity after the loud transient \
+             (in {in_rms}, out {out_rms})"
+        );
+    }
+
+    /// State continuity: the limiter carries its smoothed gain across blocks, so
+    /// processing one signal in a single call equals processing it in irregular
+    /// chunks, bit for bit. The control is per-sample, so block boundaries never
+    /// change the result.
+    #[test]
+    fn limiter_state_carries_across_blocks() {
+        let input = tone(0.95, 1_000.0, 0.3);
+
+        let one_shot = {
+            let mut lim = Limiter::new(-1.0, SR);
+            run_lim(&mut lim, &input)
+        };
+
+        let mut lim = Limiter::new(-1.0, SR);
+        let mut chunked = Vec::with_capacity(input.len());
+        for chunk in [
+            &input[..1000],
+            &input[1000..1001],
+            &input[1001..4321],
+            &input[4321..],
+        ] {
+            chunked.extend(run_lim(&mut lim, chunk));
+        }
+
+        assert_eq!(
+            chunked, one_shot,
+            "per-sample control: chunked processing equals one-shot, bit for bit"
+        );
     }
 }
