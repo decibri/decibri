@@ -32,7 +32,7 @@ use std::path::PathBuf;
 use crate::device::DeviceSelector;
 use crate::error::DecibriError;
 #[cfg(feature = "capture")]
-use crate::stage::{build_capture_stage, CaptureStage};
+use crate::stage::{build_capture_stage, CaptureStage, Transforms};
 
 /// Single-channel speech-enhancement (denoise) model selector.
 ///
@@ -131,6 +131,13 @@ pub struct MicrophoneConfig {
     /// builds no high-pass stage, leaving the captured audio full-range (a true
     /// byte-identical no-op). Pure DSP: it loads no model and needs no path.
     pub highpass: Option<HighpassFilter>,
+    /// Automatic gain control target level in dBFS, applied to the captured
+    /// audio. Drives the running level toward this target with a smoothed,
+    /// rate-limited gain. Range: -40 to -3 dBFS (typical -18). `None` (the
+    /// default) builds no level-control stage, leaving the level untouched (a
+    /// true byte-identical no-op). Runs after the high-pass step, honoured only
+    /// when the `gain` feature is compiled in. Pure DSP: no model, no path.
+    pub agc: Option<i8>,
 }
 
 impl Default for MicrophoneConfig {
@@ -145,13 +152,14 @@ impl Default for MicrophoneConfig {
             denoise_model_path: None,
             ort_library_path: None,
             highpass: None,
+            agc: None,
         }
     }
 }
 
 impl MicrophoneConfig {
-    /// Validate the configuration: sample rate, channel count, and buffer size
-    /// must fall within the supported ranges.
+    /// Validate the configuration: sample rate, channel count, buffer size, and
+    /// the AGC target (when set) must fall within the supported ranges.
     pub fn validate(&self) -> Result<(), DecibriError> {
         if !(1000..=384000).contains(&self.sample_rate) {
             return Err(DecibriError::SampleRateOutOfRange);
@@ -161,6 +169,15 @@ impl MicrophoneConfig {
         }
         if !(64..=65536).contains(&self.frames_per_buffer) {
             return Err(DecibriError::FramesPerBufferOutOfRange);
+        }
+        // The AGC target is `Option<i8>`, so an out-of-range value can reach the
+        // core directly from a Rust consumer that bypasses the bindings. Guard it
+        // here, the load-bearing backstop, returning an error rather than
+        // clamping (matching `sample_rate`).
+        if let Some(target) = self.agc {
+            if !(-40..=-3).contains(&target) {
+                return Err(DecibriError::AgcTargetOutOfRange);
+            }
         }
         Ok(())
     }
@@ -784,9 +801,12 @@ impl Microphone {
             target_channels,
             native_rate,
             target_rate,
-            self.config.dc_removal,
-            denoise,
-            self.config.highpass,
+            Transforms {
+                dc_removal: self.config.dc_removal,
+                denoise,
+                highpass: self.config.highpass,
+                agc: self.config.agc,
+            },
         )?;
         let output_channels = if channels > target_channels {
             target_channels
@@ -1269,9 +1289,20 @@ mod tests {
     #[test]
     fn test_mono_device_builds_no_chain() {
         assert!(
-            build_capture_stage(1, 1, 16000, 16000, false, None, None)
-                .unwrap()
-                .is_none(),
+            build_capture_stage(
+                1,
+                1,
+                16000,
+                16000,
+                Transforms {
+                    dc_removal: false,
+                    denoise: None,
+                    highpass: None,
+                    agc: None
+                }
+            )
+            .unwrap()
+            .is_none(),
             "a mono device at the target rate needs no normalize chain"
         );
         let (stream, _sender, _running) = test_stream();
@@ -1287,7 +1318,19 @@ mod tests {
     /// tail is delivered.
     #[test]
     fn test_downmix_chain_yields_correct_mono() {
-        let stage = build_capture_stage(2, 1, 16000, 16000, false, None, None).unwrap();
+        let stage = build_capture_stage(
+            2,
+            1,
+            16000,
+            16000,
+            Transforms {
+                dc_removal: false,
+                denoise: None,
+                highpass: None,
+                agc: None,
+            },
+        )
+        .unwrap();
         assert!(stage.is_some(), "a stereo device gets a downmix chain");
         let (stream, sender, running) = test_stream_with(stage, 1); // output is mono
 
@@ -1335,9 +1378,20 @@ mod tests {
     /// count tracks the 1:3 rate ratio (48 kHz -> 16 kHz).
     #[test]
     fn test_resample_chain_delivers_exact_blocks_at_target_rate() {
-        let stage = build_capture_stage(1, 1, 48_000, 16_000, false, None, None)
-            .unwrap()
-            .expect("48k mono -> resample chain");
+        let stage = build_capture_stage(
+            1,
+            1,
+            48_000,
+            16_000,
+            Transforms {
+                dc_removal: false,
+                denoise: None,
+                highpass: None,
+                agc: None,
+            },
+        )
+        .unwrap()
+        .expect("48k mono -> resample chain");
         // test_stream_with stamps the stream at 16 kHz (the target), mono.
         let (stream, sender, running) = test_stream_with(Some(stage), 1);
 
@@ -1414,9 +1468,20 @@ mod tests {
         let mut process_out = Vec::new();
         process_only.process(&input, &mut process_out);
 
-        let stage = build_capture_stage(1, 1, 48_000, 16_000, false, None, None)
-            .unwrap()
-            .expect("48k mono -> resample chain");
+        let stage = build_capture_stage(
+            1,
+            1,
+            48_000,
+            16_000,
+            Transforms {
+                dc_removal: false,
+                denoise: None,
+                highpass: None,
+                agc: None,
+            },
+        )
+        .unwrap()
+        .expect("48k mono -> resample chain");
         let (stream, sender, running) = test_stream_with(Some(stage), 1);
         sender.send(make_native_chunk(input)).unwrap();
         drop(sender);
@@ -1483,9 +1548,20 @@ mod tests {
     #[test]
     fn test_enhancement_on_removes_dc_end_to_end() {
         let enhancement = true;
-        let stage = build_capture_stage(1, 1, 16_000, 16_000, enhancement, None, None)
-            .unwrap()
-            .expect("dc_removal builds a transform-only chain for a mono device");
+        let stage = build_capture_stage(
+            1,
+            1,
+            16_000,
+            16_000,
+            Transforms {
+                dc_removal: enhancement,
+                denoise: None,
+                highpass: None,
+                agc: None,
+            },
+        )
+        .unwrap()
+        .expect("dc_removal builds a transform-only chain for a mono device");
         let (stream, sender, running) = test_stream_with(Some(stage), 1);
 
         // A constant 0.5 offset: pure DC, no audio content.
@@ -1530,9 +1606,20 @@ mod tests {
     /// throughout and a binding feeds VAD the delivered chunk exactly as before.
     #[test]
     fn test_vad_input_none_when_no_transform() {
-        let stage = build_capture_stage(2, 1, 16_000, 16_000, false, None, None)
-            .unwrap()
-            .expect("stereo -> downmix-only chain");
+        let stage = build_capture_stage(
+            2,
+            1,
+            16_000,
+            16_000,
+            Transforms {
+                dc_removal: false,
+                denoise: None,
+                highpass: None,
+                agc: None,
+            },
+        )
+        .unwrap()
+        .expect("stereo -> downmix-only chain");
         let (stream, sender, running) = test_stream_with(Some(stage), 1);
         assert!(
             stream.vad_input(4).is_none(),
@@ -1577,9 +1664,20 @@ mod tests {
     #[test]
     fn test_vad_input_returns_pre_transform_signal() {
         let enhancement = true;
-        let stage = build_capture_stage(1, 1, 16_000, 16_000, enhancement, None, None)
-            .unwrap()
-            .expect("dc-only chain");
+        let stage = build_capture_stage(
+            1,
+            1,
+            16_000,
+            16_000,
+            Transforms {
+                dc_removal: enhancement,
+                denoise: None,
+                highpass: None,
+                agc: None,
+            },
+        )
+        .unwrap()
+        .expect("dc-only chain");
         let (stream, sender, running) = test_stream_with(Some(stage), 1);
 
         let n = 16_000;
@@ -1635,9 +1733,20 @@ mod tests {
         use decibri_resampler::{PolyphaseResampler, Resampler};
 
         let enhancement = true;
-        let stage = build_capture_stage(1, 1, 48_000, 16_000, enhancement, None, None)
-            .unwrap()
-            .expect("resample + DC chain");
+        let stage = build_capture_stage(
+            1,
+            1,
+            48_000,
+            16_000,
+            Transforms {
+                dc_removal: enhancement,
+                denoise: None,
+                highpass: None,
+                agc: None,
+            },
+        )
+        .unwrap()
+        .expect("resample + DC chain");
         let (stream, sender, running) = test_stream_with(Some(stage), 1);
 
         let input: Vec<f32> = (0..24_000).map(|k| (k as f32 * 0.01).sin() + 0.5).collect();
@@ -1770,5 +1879,39 @@ mod tests {
             "stop() leaves the stream slot empty (device released)"
         );
         stream.stop(); // idempotent: an already-empty slot must not panic
+    }
+
+    /// The AGC target is range-checked at the core as a load-bearing backstop: an
+    /// out-of-range `agc` errors with `AgcTargetOutOfRange` rather than clamping,
+    /// while an in-range target and the `None` default both validate. The guard
+    /// runs in `MicrophoneConfig::validate`, the same site that range-checks
+    /// `sample_rate`, so a Rust consumer that bypasses the bindings is protected.
+    #[test]
+    fn agc_target_out_of_range_is_a_core_error() {
+        let mut cfg = MicrophoneConfig::default();
+        assert!(cfg.validate().is_ok(), "the default (agc None) validates");
+
+        cfg.agc = Some(-18);
+        assert!(cfg.validate().is_ok(), "an in-range target validates");
+        cfg.agc = Some(-40);
+        assert!(cfg.validate().is_ok(), "the lower edge validates");
+        cfg.agc = Some(-3);
+        assert!(cfg.validate().is_ok(), "the upper edge validates");
+
+        cfg.agc = Some(-41);
+        assert!(
+            matches!(cfg.validate(), Err(DecibriError::AgcTargetOutOfRange)),
+            "below the range errors, not clamps"
+        );
+        cfg.agc = Some(-2);
+        assert!(
+            matches!(cfg.validate(), Err(DecibriError::AgcTargetOutOfRange)),
+            "above the range errors"
+        );
+        cfg.agc = Some(-100);
+        assert!(
+            matches!(cfg.validate(), Err(DecibriError::AgcTargetOutOfRange)),
+            "well below the range errors"
+        );
     }
 }

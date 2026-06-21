@@ -130,6 +130,16 @@ export interface MicrophoneOptions extends ReadableOptions {
    * @default undefined
    */
   highpass?: '80hz';
+
+  /**
+   * Automatic gain control target level in dBFS applied to the captured audio.
+   * Drives the running level toward this target with a smoothed, rate-limited
+   * gain. An integer in the range -40 to -3 (typical -18); omit to leave AGC
+   * off (the default), which keeps the level untouched. Runs after the
+   * high-pass step. Out-of-range values raise a `RangeError`.
+   * @default undefined
+   */
+  agc?: number;
 }
 
 /**

@@ -41,6 +41,17 @@ pub enum DecibriError {
     #[error("frames per buffer must be between 64 and 65536")]
     FramesPerBufferOutOfRange,
 
+    /// The `agc` target level fell outside the supported dBFS range.
+    ///
+    /// `agc` is `Option<i8>` on [`crate::microphone::MicrophoneConfig`], so a
+    /// representably-invalid target (a value outside `-40..=-3`) can reach the
+    /// core directly from a Rust consumer that bypasses the bindings. This is the
+    /// load-bearing backstop: [`crate::microphone::MicrophoneConfig::validate`]
+    /// returns it rather than clamping, matching how `sample_rate` is range
+    /// checked. Static message to keep the text stable.
+    #[error("agc target level must be between -40 and -3")]
+    AgcTargetOutOfRange,
+
     #[error("format must be 'int16' or 'float32'")]
     InvalidFormat,
 

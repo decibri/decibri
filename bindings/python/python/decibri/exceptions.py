@@ -4,14 +4,14 @@ This module is the public home for the decibri exception hierarchy. All
 classes are also re-exported at ``decibri.<X>`` for convenience; users
 may import from either path.
 
-31 instance classes (one per Rust DecibriError variant) plus 3 intermediate
+32 instance classes (one per Rust DecibriError variant) plus 3 intermediate
 parent classes (DeviceError, OrtError, OrtPathError) for catch ergonomics,
-totaling 34 class definitions. Single-inheritance hierarchy per CPython
+totaling 35 class definitions. Single-inheritance hierarchy per CPython
 convention.
 
 Hierarchy:
     DecibriError
-    + 13 direct subclasses (config + runtime errors that don't involve
+    + 14 direct subclasses (config + runtime errors that don't involve
       device enumeration or ORT, including DeviceFailed and OnnxBackendFailed)
     + DeviceError (intermediate; no instances; catches device-related)
         + 8 direct device subclasses (MicrophoneNotFound, SpeakerNotFound,
@@ -53,6 +53,10 @@ class ChannelsOutOfRange(DecibriError):
 
 class FramesPerBufferOutOfRange(DecibriError):
     """Raised when frames_per_buffer is outside the supported range."""
+
+
+class AgcTargetOutOfRange(DecibriError):
+    """Raised when the agc target level is outside the supported dBFS range."""
 
 
 class InvalidFormat(DecibriError):
