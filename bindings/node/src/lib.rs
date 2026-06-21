@@ -77,6 +77,11 @@ pub struct DecibriOptions {
     /// absent leaves AGC off. Drives the captured level toward the target. Pure
     /// DSP: no bundled file and no model path, like `highpass`.
     pub agc: Option<i32>,
+    /// Capture limiter ceiling in dBFS (sample-peak): a number in `-3.0..=0.0`
+    /// (typical -1.0); absent leaves the limiter off. Holds the captured signal
+    /// at or below the ceiling, catching a peak the AGC would let through. Pure
+    /// DSP: no bundled file and no model path, like `agc`.
+    pub limiter: Option<f64>,
 }
 
 /// Native bridge class exposed to Node.js via napi-rs.
@@ -207,6 +212,20 @@ fn build_microphone_parts(options: Option<DecibriOptions>) -> Result<MicrophoneP
             ));
         }
         config.agc = Some(target as i8);
+    }
+
+    // Limiter: a sample-peak ceiling in dBFS threaded to the core limiter stage.
+    // The JS wrapper performs the user-facing range check (a RangeError); this is
+    // the native backstop, range-checking the JS number before narrowing it to the
+    // core's f32 (the core also guards in validate()).
+    if let Some(ceiling) = opts.limiter {
+        if !(-3.0..=0.0).contains(&ceiling) {
+            return Err(Error::new(
+                Status::InvalidArg,
+                "limiter ceiling must be between -3.0 and 0.0",
+            ));
+        }
+        config.limiter = Some(ceiling as f32);
     }
 
     let capture = Microphone::new(config).map_err(to_napi_error)?;
@@ -578,6 +597,7 @@ fn to_napi_error(e: decibri::error::DecibriError) -> Error {
         | ChannelsOutOfRange
         | FramesPerBufferOutOfRange
         | AgcTargetOutOfRange
+        | LimiterCeilingOutOfRange
         | InvalidFormat
         | VadSampleRateUnsupported(_)
         | VadThresholdOutOfRange(_) => Status::InvalidArg,

@@ -138,6 +138,14 @@ pub struct MicrophoneConfig {
     /// true byte-identical no-op). Runs after the high-pass step, honoured only
     /// when the `gain` feature is compiled in. Pure DSP: no model, no path.
     pub agc: Option<i8>,
+    /// Peak limiter ceiling in dBFS (sample-peak), applied to the captured audio.
+    /// Holds the signal at or below this ceiling, the safety net that catches a
+    /// transient the AGC's gain would let exceed full scale. Range: -3.0 to 0.0
+    /// dBFS (typical -1.0). `None` (the default) builds no limiter stage, leaving
+    /// the level untouched (a true byte-identical no-op). Runs last in the
+    /// transform chain, after the level-control step, honoured only when the
+    /// `gain` feature is compiled in. Pure DSP: no model, no path.
+    pub limiter: Option<f32>,
 }
 
 impl Default for MicrophoneConfig {
@@ -153,13 +161,15 @@ impl Default for MicrophoneConfig {
             ort_library_path: None,
             highpass: None,
             agc: None,
+            limiter: None,
         }
     }
 }
 
 impl MicrophoneConfig {
-    /// Validate the configuration: sample rate, channel count, buffer size, and
-    /// the AGC target (when set) must fall within the supported ranges.
+    /// Validate the configuration: sample rate, channel count, buffer size, the
+    /// AGC target, and the limiter ceiling (each when set) must fall within the
+    /// supported ranges.
     pub fn validate(&self) -> Result<(), DecibriError> {
         if !(1000..=384000).contains(&self.sample_rate) {
             return Err(DecibriError::SampleRateOutOfRange);
@@ -177,6 +187,15 @@ impl MicrophoneConfig {
         if let Some(target) = self.agc {
             if !(-40..=-3).contains(&target) {
                 return Err(DecibriError::AgcTargetOutOfRange);
+            }
+        }
+        // The limiter ceiling is `Option<f32>`, so an out-of-range value can reach
+        // the core directly from a Rust consumer that bypasses the bindings. Guard
+        // it here, the load-bearing backstop, returning an error rather than
+        // clamping (matching `agc`).
+        if let Some(ceiling) = self.limiter {
+            if !(-3.0..=0.0).contains(&ceiling) {
+                return Err(DecibriError::LimiterCeilingOutOfRange);
             }
         }
         Ok(())
@@ -806,6 +825,7 @@ impl Microphone {
                 denoise,
                 highpass: self.config.highpass,
                 agc: self.config.agc,
+                limiter: self.config.limiter,
             },
         )?;
         let output_channels = if channels > target_channels {
@@ -1298,7 +1318,8 @@ mod tests {
                     dc_removal: false,
                     denoise: None,
                     highpass: None,
-                    agc: None
+                    agc: None,
+                    limiter: None,
                 }
             )
             .unwrap()
@@ -1328,6 +1349,7 @@ mod tests {
                 denoise: None,
                 highpass: None,
                 agc: None,
+                limiter: None,
             },
         )
         .unwrap();
@@ -1388,6 +1410,7 @@ mod tests {
                 denoise: None,
                 highpass: None,
                 agc: None,
+                limiter: None,
             },
         )
         .unwrap()
@@ -1478,6 +1501,7 @@ mod tests {
                 denoise: None,
                 highpass: None,
                 agc: None,
+                limiter: None,
             },
         )
         .unwrap()
@@ -1558,6 +1582,7 @@ mod tests {
                 denoise: None,
                 highpass: None,
                 agc: None,
+                limiter: None,
             },
         )
         .unwrap()
@@ -1616,6 +1641,7 @@ mod tests {
                 denoise: None,
                 highpass: None,
                 agc: None,
+                limiter: None,
             },
         )
         .unwrap()
@@ -1674,6 +1700,7 @@ mod tests {
                 denoise: None,
                 highpass: None,
                 agc: None,
+                limiter: None,
             },
         )
         .unwrap()
@@ -1743,6 +1770,7 @@ mod tests {
                 denoise: None,
                 highpass: None,
                 agc: None,
+                limiter: None,
             },
         )
         .unwrap()
@@ -1911,6 +1939,44 @@ mod tests {
         cfg.agc = Some(-100);
         assert!(
             matches!(cfg.validate(), Err(DecibriError::AgcTargetOutOfRange)),
+            "well below the range errors"
+        );
+    }
+
+    /// The limiter ceiling is range-checked at the core as a load-bearing
+    /// backstop: an out-of-range `limiter` errors with `LimiterCeilingOutOfRange`
+    /// rather than clamping, while an in-range ceiling and the `None` default both
+    /// validate. The guard runs in `MicrophoneConfig::validate`, the same site that
+    /// range-checks `sample_rate` and `agc`, so a Rust consumer that bypasses the
+    /// bindings is protected.
+    #[test]
+    fn limiter_ceiling_out_of_range_is_a_core_error() {
+        let mut cfg = MicrophoneConfig::default();
+        assert!(
+            cfg.validate().is_ok(),
+            "the default (limiter None) validates"
+        );
+
+        cfg.limiter = Some(-1.0);
+        assert!(cfg.validate().is_ok(), "an in-range ceiling validates");
+        cfg.limiter = Some(-3.0);
+        assert!(cfg.validate().is_ok(), "the lower edge validates");
+        cfg.limiter = Some(0.0);
+        assert!(cfg.validate().is_ok(), "the upper edge validates");
+
+        cfg.limiter = Some(-3.5);
+        assert!(
+            matches!(cfg.validate(), Err(DecibriError::LimiterCeilingOutOfRange)),
+            "below the range errors, not clamps"
+        );
+        cfg.limiter = Some(0.5);
+        assert!(
+            matches!(cfg.validate(), Err(DecibriError::LimiterCeilingOutOfRange)),
+            "above the range errors"
+        );
+        cfg.limiter = Some(-100.0);
+        assert!(
+            matches!(cfg.validate(), Err(DecibriError::LimiterCeilingOutOfRange)),
             "well below the range errors"
         );
     }

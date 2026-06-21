@@ -433,6 +433,9 @@ pub(crate) struct Transforms<'a> {
     /// AGC target level in dBFS (the [`crate::gain::LevelControl`] engine); `None`
     /// leaves it off. Honoured only with the `gain` feature.
     pub agc: Option<i8>,
+    /// Limiter ceiling in dBFS (the [`crate::gain::Limiter`] stage); `None` leaves
+    /// it off. Honoured only with the `gain` feature.
+    pub limiter: Option<f32>,
 }
 
 /// Build the capture stage chain that normalizes a device to the output format
@@ -450,8 +453,10 @@ pub(crate) struct Transforms<'a> {
 /// immediately after denoise, so the denoise model receives near-full-band
 /// input. When `agc` names a target level, pushes the
 /// [`crate::gain::LevelControl`] engine immediately after high-pass (when the
-/// `gain` feature is compiled in), reserving the level-control slot that sits
-/// before the limiter in the full chain order. All transform stages run after
+/// `gain` feature is compiled in). When `limiter` names a ceiling, pushes the
+/// [`crate::gain::Limiter`] stage last, immediately after the level control
+/// (also when the `gain` feature is compiled in), so it catches any peak the
+/// upstream level control would let through. All transform stages run after
 /// `normalize` on the mono signal at the target rate.
 /// Returns `Some(chain)` when at least one stage is needed and `None` when no
 /// segment has any (a mono device already at the target rate with no enhancement
@@ -474,6 +479,7 @@ pub(crate) fn build_capture_stage(
         denoise,
         highpass,
         agc,
+        limiter,
     } = transforms;
 
     let mut normalize: Vec<Box<dyn Stage>> = Vec::new();
@@ -543,6 +549,22 @@ pub(crate) fn build_capture_stage(
     #[cfg(not(feature = "gain"))]
     let _ = agc;
 
+    // The limiter runs LAST in the transform tier, immediately after the level
+    // control, so it catches any peak the upstream gain would let exceed the
+    // ceiling. It is a same-length, sample-in-sample-out stage, so it wraps via
+    // `InPlace` like the level control and adds no latency. Gated on the same
+    // `gain` feature as the level-control engine (the pair); without the feature
+    // the ceiling is accepted but unused. Nothing runs after it.
+    #[cfg(feature = "gain")]
+    if let Some(ceiling_db) = limiter {
+        transform.push(Box::new(InPlace(crate::gain::Limiter::new(
+            ceiling_db,
+            target_rate,
+        ))));
+    }
+    #[cfg(not(feature = "gain"))]
+    let _ = limiter;
+
     Ok(if normalize.is_empty() && transform.is_empty() {
         None
     } else {
@@ -577,7 +599,8 @@ mod tests {
                     dc_removal: off,
                     denoise: None,
                     highpass: None,
-                    agc: None
+                    agc: None,
+                    limiter: None,
                 }
             )
             .unwrap()
@@ -595,7 +618,8 @@ mod tests {
                     dc_removal: off,
                     denoise: None,
                     highpass: None,
-                    agc: None
+                    agc: None,
+                    limiter: None,
                 }
             )
             .unwrap()
@@ -612,7 +636,8 @@ mod tests {
                     dc_removal: off,
                     denoise: None,
                     highpass: None,
-                    agc: None
+                    agc: None,
+                    limiter: None,
                 }
             )
             .unwrap()
@@ -630,7 +655,8 @@ mod tests {
                     dc_removal: off,
                     denoise: None,
                     highpass: None,
-                    agc: None
+                    agc: None,
+                    limiter: None,
                 }
             )
             .unwrap()
@@ -648,7 +674,8 @@ mod tests {
                     dc_removal: off,
                     denoise: None,
                     highpass: None,
-                    agc: None
+                    agc: None,
+                    limiter: None,
                 }
             )
             .unwrap()
@@ -676,6 +703,7 @@ mod tests {
                 denoise: None,
                 highpass: None,
                 agc: None,
+                limiter: None,
             },
         )
         .unwrap()
@@ -701,6 +729,7 @@ mod tests {
                 denoise: None,
                 highpass: None,
                 agc: None,
+                limiter: None,
             },
         )
         .unwrap()
@@ -725,6 +754,7 @@ mod tests {
                 denoise: None,
                 highpass: None,
                 agc: None,
+                limiter: None,
             },
         )
         .unwrap()
@@ -753,6 +783,7 @@ mod tests {
                 denoise: None,
                 highpass: None,
                 agc: None,
+                limiter: None,
             },
         )
         .unwrap()
@@ -812,6 +843,7 @@ mod tests {
                 denoise: None,
                 highpass: None,
                 agc: None,
+                limiter: None,
             },
         );
         assert!(
@@ -850,6 +882,7 @@ mod tests {
                 denoise: None,
                 highpass: None,
                 agc: None,
+                limiter: None,
             },
         )
         .unwrap()
@@ -890,6 +923,7 @@ mod tests {
                 denoise: None,
                 highpass: None,
                 agc: None,
+                limiter: None,
             },
         )
         .unwrap()
@@ -920,6 +954,7 @@ mod tests {
                 denoise: None,
                 highpass: None,
                 agc: None,
+                limiter: None,
             },
         )
         .unwrap()
@@ -955,6 +990,7 @@ mod tests {
                 denoise: None,
                 highpass: None,
                 agc: None,
+                limiter: None,
             },
         )
         .unwrap()
@@ -988,6 +1024,7 @@ mod tests {
                 denoise: None,
                 highpass: None,
                 agc: None,
+                limiter: None,
             },
         )
         .unwrap()
@@ -1044,6 +1081,7 @@ mod tests {
                 denoise: None,
                 highpass: None,
                 agc: None,
+                limiter: None,
             },
         )
         .unwrap()
@@ -1083,6 +1121,7 @@ mod tests {
                 denoise: None,
                 highpass: None,
                 agc: None,
+                limiter: None,
             },
         )
         .unwrap()
@@ -1116,6 +1155,7 @@ mod tests {
                 denoise: None,
                 highpass: None,
                 agc: None,
+                limiter: None,
             },
         )
         .unwrap()
@@ -1177,6 +1217,7 @@ mod tests {
                 denoise: None,
                 highpass: None,
                 agc: None,
+                limiter: None,
             },
         )
         .unwrap()
@@ -1266,6 +1307,7 @@ mod tests {
                 denoise: Some((model, path.as_path(), None)),
                 highpass: None,
                 agc: None,
+                limiter: None,
             },
         )
         .unwrap()
@@ -1290,6 +1332,7 @@ mod tests {
                 denoise: Some((model, path.as_path(), None)),
                 highpass: None,
                 agc: None,
+                limiter: None,
             },
         )
         .unwrap()
@@ -1310,7 +1353,8 @@ mod tests {
                     dc_removal: false,
                     denoise: None,
                     highpass: None,
-                    agc: None
+                    agc: None,
+                    limiter: None,
                 }
             )
             .unwrap()
@@ -1339,6 +1383,7 @@ mod tests {
                 denoise: Some((DenoiseModel::FastEnhancerT, path.as_path(), None)),
                 highpass: None,
                 agc: None,
+                limiter: None,
             },
         )
         .unwrap()
@@ -1390,6 +1435,7 @@ mod tests {
                 denoise: Some((DenoiseModel::FastEnhancerT, path.as_path(), None)),
                 highpass: None,
                 agc: None,
+                limiter: None,
             },
         )
         .unwrap()
@@ -1450,6 +1496,7 @@ mod tests {
                 denoise: None,
                 highpass: None,
                 agc: None,
+                limiter: None,
             },
         )
         .unwrap()
@@ -1470,6 +1517,7 @@ mod tests {
                 denoise: None,
                 highpass: None,
                 agc: None,
+                limiter: None,
             },
         )
         .unwrap()
@@ -1523,6 +1571,7 @@ mod tests {
                 denoise: None,
                 highpass: None,
                 agc: None,
+                limiter: None,
             },
         )
         .unwrap()
@@ -1552,6 +1601,7 @@ mod tests {
                 denoise: Some((DenoiseModel::FastEnhancerT, path.as_path(), None)),
                 highpass: None,
                 agc: None,
+                limiter: None,
             },
         )
         .unwrap()
@@ -1590,6 +1640,7 @@ mod tests {
                 denoise: None,
                 highpass: Some(HighpassFilter::Hz80),
                 agc: None,
+                limiter: None,
             },
         )
         .unwrap()
@@ -1645,6 +1696,7 @@ mod tests {
                 denoise: None,
                 highpass: Some(HighpassFilter::Hz80),
                 agc: None,
+                limiter: None,
             },
         )
         .unwrap()
@@ -1687,6 +1739,7 @@ mod tests {
                     denoise: None,
                     highpass: Some(HighpassFilter::Hz80),
                     agc: None,
+                    limiter: None,
                 },
             )
             .unwrap()
@@ -1704,6 +1757,7 @@ mod tests {
                 denoise: None,
                 highpass: Some(HighpassFilter::Hz80),
                 agc: None,
+                limiter: None,
             },
         )
         .unwrap()
@@ -1741,7 +1795,8 @@ mod tests {
                     dc_removal: false,
                     denoise: None,
                     highpass: None,
-                    agc: None
+                    agc: None,
+                    limiter: None,
                 }
             )
             .unwrap()
@@ -1759,6 +1814,7 @@ mod tests {
                 denoise: None,
                 highpass: None,
                 agc: None,
+                limiter: None,
             },
         )
         .unwrap()
@@ -1778,6 +1834,7 @@ mod tests {
                 denoise: None,
                 highpass: Some(HighpassFilter::Hz80),
                 agc: None,
+                limiter: None,
             },
         )
         .unwrap()
@@ -1809,6 +1866,7 @@ mod tests {
                 denoise: None,
                 highpass: Some(HighpassFilter::Hz80),
                 agc: None,
+                limiter: None,
             },
         )
         .unwrap()
@@ -1835,6 +1893,7 @@ mod tests {
                 denoise: None,
                 highpass: Some(HighpassFilter::Hz80),
                 agc: None,
+                limiter: None,
             },
         )
         .unwrap()
@@ -1855,6 +1914,7 @@ mod tests {
                 denoise: None,
                 highpass: Some(HighpassFilter::Hz80),
                 agc: None,
+                limiter: None,
             },
         )
         .unwrap()
@@ -1896,6 +1956,7 @@ mod tests {
                 denoise: Some((DenoiseModel::FastEnhancerT, path.as_path(), None)),
                 highpass: Some(HighpassFilter::Hz80),
                 agc: None,
+                limiter: None,
             },
         )
         .unwrap()
@@ -1939,7 +2000,8 @@ mod tests {
                     dc_removal: false,
                     denoise: None,
                     highpass: None,
-                    agc: None
+                    agc: None,
+                    limiter: None,
                 }
             )
             .unwrap()
@@ -1957,6 +2019,7 @@ mod tests {
                 denoise: None,
                 highpass: None,
                 agc: None,
+                limiter: None,
             },
         )
         .unwrap()
@@ -1976,6 +2039,7 @@ mod tests {
                 denoise: None,
                 highpass: None,
                 agc: Some(-18),
+                limiter: None,
             },
         )
         .unwrap()
@@ -2008,6 +2072,7 @@ mod tests {
                 denoise: None,
                 highpass: Some(HighpassFilter::Hz80),
                 agc: Some(-18),
+                limiter: None,
             },
         )
         .unwrap()
@@ -2036,6 +2101,7 @@ mod tests {
                 denoise: None,
                 highpass: None,
                 agc: Some(-18),
+                limiter: None,
             },
         )
         .unwrap()
@@ -2056,6 +2122,7 @@ mod tests {
                 denoise: None,
                 highpass: Some(HighpassFilter::Hz80),
                 agc: Some(-18),
+                limiter: None,
             },
         )
         .unwrap()
@@ -2085,6 +2152,7 @@ mod tests {
                 denoise: None,
                 highpass: None,
                 agc: Some(-18),
+                limiter: None,
             },
         )
         .unwrap()
@@ -2113,5 +2181,218 @@ mod tests {
     fn agc_stage_is_send() {
         fn assert_send<T: Send>() {}
         assert_send::<InPlace<crate::gain::LevelControl>>();
+    }
+
+    // ── Limiter (same-length transform, last in the chain) ──────────────
+    //
+    // The limiter is the Limiter stage driven through `InPlace`, a same-length,
+    // sample-in-sample-out stage like AGC. These cover its chain placement (last,
+    // after AGC), that it builds no stage when off, that it adds no latency, that
+    // it caps delivered audio at the ceiling end to end, and that it builds
+    // standalone (with AGC off). The stage's own guarantees (the absolute ceiling,
+    // graceful shaping, release) are covered by the unit tests in `crate::gain`.
+    // Gated on the `gain` feature, which owns the stage and the chain push.
+
+    /// Off is a true no-op: with `limiter` `None` and nothing else, the chain is
+    /// not built at all (byte-identical passthrough); a downmix-only chain with
+    /// the limiter off has an empty transform segment (no transparent stage);
+    /// turning it on pushes exactly one transform stage.
+    #[cfg(feature = "gain")]
+    #[test]
+    fn limiter_off_builds_no_stage() {
+        assert!(
+            build_capture_stage(
+                1,
+                1,
+                16_000,
+                16_000,
+                Transforms {
+                    dc_removal: false,
+                    denoise: None,
+                    highpass: None,
+                    agc: None,
+                    limiter: None
+                }
+            )
+            .unwrap()
+            .is_none(),
+            "limiter off and nothing else: no chain, byte-identical passthrough"
+        );
+
+        let downmix_only = build_capture_stage(
+            2,
+            1,
+            16_000,
+            16_000,
+            Transforms {
+                dc_removal: false,
+                denoise: None,
+                highpass: None,
+                agc: None,
+                limiter: None,
+            },
+        )
+        .unwrap()
+        .expect("stereo -> downmix chain");
+        assert!(
+            downmix_only.transform.is_empty(),
+            "limiter off pushes no transform stage, not a transparent stage"
+        );
+
+        let limiter = build_capture_stage(
+            1,
+            1,
+            16_000,
+            16_000,
+            Transforms {
+                dc_removal: false,
+                denoise: None,
+                highpass: None,
+                agc: None,
+                limiter: Some(-1.0),
+            },
+        )
+        .unwrap()
+        .expect("limiter-only chain");
+        assert!(
+            limiter.normalize.is_empty(),
+            "a mono device at the target rate needs no normalize stage"
+        );
+        assert_eq!(
+            limiter.transform.len(),
+            1,
+            "limiter on pushes exactly one transform stage, standalone (AGC off)"
+        );
+    }
+
+    /// Chain placement: with DC removal, high-pass, AGC, and the limiter all on,
+    /// the transform segment is [DcBlocker, Biquad, LevelControl, Limiter], so the
+    /// limiter runs LAST, after AGC, with nothing after it. The relative order is
+    /// pinned by the push order in `build_capture_stage`.
+    #[cfg(feature = "gain")]
+    #[test]
+    fn build_orders_limiter_after_agc() {
+        let chain = build_capture_stage(
+            1,
+            1,
+            16_000,
+            16_000,
+            Transforms {
+                dc_removal: true,
+                denoise: None,
+                highpass: Some(HighpassFilter::Hz80),
+                agc: Some(-18),
+                limiter: Some(-1.0),
+            },
+        )
+        .unwrap()
+        .expect("dc + high-pass + AGC + limiter chain");
+        assert_eq!(
+            chain.transform.len(),
+            4,
+            "dc_removal, high-pass, AGC, then limiter: four transform stages, limiter last"
+        );
+    }
+
+    /// The limiter adds no transform latency: it is a same-length, feedback (no
+    /// look-ahead) stage, so it contributes zero to `transform_latency()`, on its
+    /// own and stacked with the same-length DC blocker, high-pass, and AGC. The
+    /// latency seam and the VAD-tap invariant are unchanged by the limiter.
+    #[cfg(feature = "gain")]
+    #[test]
+    fn limiter_adds_no_transform_latency() {
+        let limiter = build_capture_stage(
+            1,
+            1,
+            16_000,
+            16_000,
+            Transforms {
+                dc_removal: false,
+                denoise: None,
+                highpass: None,
+                agc: None,
+                limiter: Some(-1.0),
+            },
+        )
+        .unwrap()
+        .expect("limiter-only chain");
+        assert_eq!(
+            limiter.transform_latency(),
+            0,
+            "the limiter is feedback with no look-ahead: zero latency"
+        );
+
+        let stacked = build_capture_stage(
+            1,
+            1,
+            16_000,
+            16_000,
+            Transforms {
+                dc_removal: true,
+                denoise: None,
+                highpass: Some(HighpassFilter::Hz80),
+                agc: Some(-18),
+                limiter: Some(-1.0),
+            },
+        )
+        .unwrap()
+        .expect("dc + high-pass + AGC + limiter chain");
+        assert_eq!(
+            stacked.transform_latency(),
+            0,
+            "DC, high-pass, AGC, and the limiter are all same-length: zero transform latency"
+        );
+    }
+
+    /// The limiter caps delivered audio at the ceiling end to end through the
+    /// chain's run path: a hot signal with instantaneous full-scale transients run
+    /// through a limiter-only chain produces no output sample above the linear
+    /// ceiling. This is the absolute guarantee observed at the chain level; the
+    /// stage's own per-sample proof is in `crate::gain`.
+    #[cfg(feature = "gain")]
+    #[test]
+    fn limiter_caps_audio_through_the_chain() {
+        let ceiling_db = -1.0_f32;
+        let ceiling = 10.0_f32.powf(ceiling_db / 20.0);
+        let mut chain = build_capture_stage(
+            1,
+            1,
+            16_000,
+            16_000,
+            Transforms {
+                dc_removal: false,
+                denoise: None,
+                highpass: None,
+                agc: None,
+                limiter: Some(ceiling_db),
+            },
+        )
+        .unwrap()
+        .expect("limiter-only chain");
+        // A loud sine with a full-scale spike on the first sample and a burst
+        // above full scale partway through.
+        let mut input: Vec<f32> = (0..8000)
+            .map(|i| 0.95 * (2.0 * std::f32::consts::PI * 1_000.0 * i as f32 / 16_000.0).sin())
+            .collect();
+        input[0] = 1.0;
+        input[4000] = 2.0;
+        input[4001] = -2.0;
+        let out = chain.run(&input).expect("limiter runs").to_vec();
+        assert_eq!(out.len(), input.len(), "the limiter is same-length");
+        let worst = out.iter().cloned().fold(0.0_f32, |m, s| m.max(s.abs()));
+        assert!(
+            worst <= ceiling,
+            "no delivered sample exceeds the ceiling end to end ({worst} > {ceiling})"
+        );
+    }
+
+    /// `InPlace<Limiter>` is `Send`, so a chain carrying the limiter in its
+    /// `transform` segment stays `Send` and can live behind the stream's `Mutex`,
+    /// matching the DC blocker, high-pass, and AGC.
+    #[cfg(feature = "gain")]
+    #[test]
+    fn limiter_stage_is_send() {
+        fn assert_send<T: Send>() {}
+        assert_send::<InPlace<crate::gain::Limiter>>();
     }
 }

@@ -59,6 +59,10 @@ class AgcTargetOutOfRange(DecibriError):
     """Raised when the agc target level is outside the supported dBFS range."""
 
 
+class LimiterCeilingOutOfRange(DecibriError):
+    """Raised when the limiter ceiling is outside the supported dBFS range."""
+
+
 class InvalidFormat(DecibriError):
     """Raised when format string is not recognized."""
 

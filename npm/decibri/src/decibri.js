@@ -281,6 +281,18 @@ class Microphone extends Readable {
       throw new RangeError('agc target level must be between -40 and -3');
     }
 
+    // ── Validate limiter ─────────────────────────────────────────────────────
+
+    // Sample-peak ceiling in dBFS: a number in [-3.0, 0.0] (typical -1.0) holds
+    // the captured signal at or below the ceiling, catching a peak the AGC would
+    // let through; absence leaves it off. Mirrors the agc range check, a
+    // RangeError on an out-of-range numeric value; the native backstop and the
+    // Rust core guard the same range.
+    const limiter = options.limiter;
+    if (limiter !== undefined && (limiter < -3.0 || limiter > 0.0)) {
+      throw new RangeError('limiter ceiling must be between -3.0 and 0.0');
+    }
+
     // Internal plumbing: inject the bundled ORT dylib path into the napi
     // constructor whenever an ONNX stage loads (Silero VAD or denoise). If
     // resolution fails (unknown platform, platform package not installed), this
@@ -310,6 +322,7 @@ class Microphone extends Readable {
         ortLibraryPath,
         highpass,
         agc,
+        limiter,
       },
     };
   }

@@ -52,6 +52,18 @@ pub enum DecibriError {
     #[error("agc target level must be between -40 and -3")]
     AgcTargetOutOfRange,
 
+    /// The `limiter` ceiling fell outside the supported dBFS range.
+    ///
+    /// `limiter` is `Option<f32>` on [`crate::microphone::MicrophoneConfig`], so
+    /// a representably-invalid ceiling (a value outside `-3.0..=0.0`) can reach
+    /// the core directly from a Rust consumer that bypasses the bindings. This is
+    /// the load-bearing backstop: [`crate::microphone::MicrophoneConfig::validate`]
+    /// returns it rather than clamping, matching how `agc` is range checked. A
+    /// distinct variant from [`Self::AgcTargetOutOfRange`] because the parameter,
+    /// range, and message differ. Static message to keep the text stable.
+    #[error("limiter ceiling must be between -3.0 and 0.0")]
+    LimiterCeilingOutOfRange,
+
     #[error("format must be 'int16' or 'float32'")]
     InvalidFormat,
 

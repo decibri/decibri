@@ -33,6 +33,7 @@ from decibri import (
     MicrophoneNotFound,
     FramesPerBufferOutOfRange,
     InvalidFormat,
+    LimiterCeilingOutOfRange,
     ModelLoadFailed,
     MultipleDevicesMatch,
     NoMicrophoneFound,
@@ -69,7 +70,7 @@ import pytest
 
 ALL_DECIBRI_ERROR_CLASSES = (
     DecibriError,
-    # 15 direct DecibriError subclasses (non-device, non-ORT). DeviceFailed
+    # 16 direct DecibriError subclasses (non-device, non-ORT). DeviceFailed
     # is a runtime device/driver failure (distinct from the DeviceError
     # enumeration/selection family); OnnxBackendFailed is the non-ORT ONNX
     # backend catch-all (distinct from the OrtError family).
@@ -78,6 +79,7 @@ ALL_DECIBRI_ERROR_CLASSES = (
     ChannelsOutOfRange,
     FramesPerBufferOutOfRange,
     AgcTargetOutOfRange,
+    LimiterCeilingOutOfRange,
     InvalidFormat,
     SpeakerStreamClosed,
     PermissionDenied,
@@ -115,11 +117,11 @@ ALL_DECIBRI_ERROR_CLASSES = (
 
 
 def test_class_count() -> None:
-    # 37 total: 1 base + 15 direct + DeviceError + 8 device + OrtError
-    # + 8 ORT direct + OrtPathError + 2 path. The addition over the prior 36 is
-    # AgcTargetOutOfRange, the config-validation error for an out-of-range agc
-    # target; like SampleRateOutOfRange, a direct DecibriError subclass.
-    assert len(ALL_DECIBRI_ERROR_CLASSES) == 37
+    # 38 total: 1 base + 16 direct + DeviceError + 8 device + OrtError
+    # + 8 ORT direct + OrtPathError + 2 path. The addition over the prior 37 is
+    # LimiterCeilingOutOfRange, the config-validation error for an out-of-range
+    # limiter ceiling; like AgcTargetOutOfRange, a direct DecibriError subclass.
+    assert len(ALL_DECIBRI_ERROR_CLASSES) == 38
 
 
 def test_all_inherit_from_decibri_error() -> None:

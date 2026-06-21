@@ -282,6 +282,12 @@ class Microphone:
     level toward the target with a smoothed, rate-limited gain applied after the
     high-pass step; omit it (the default ``None``) to leave the level untouched.
 
+    The ``limiter`` parameter sets an optional sample-peak ceiling in dBFS (a
+    float in ``-3.0..0.0``, typical ``-1.0``) that holds the captured signal at
+    or below the ceiling, catching a peak the AGC would let through; it runs last
+    in the chain, after the AGC step; omit it (the default ``None``) to leave the
+    level untouched.
+
     This class is synchronous. For async iteration, use ``AsyncMicrophone``.
 
     Cleanup and disconnect:
@@ -318,6 +324,7 @@ class Microphone:
         denoise: Literal["fastenhancer-t"] | None = None,
         highpass: Literal["80hz"] | None = None,
         agc: int | None = None,
+        limiter: float | None = None,
     ) -> None:
         """Construct a Microphone audio capture instance.
 
@@ -499,6 +506,12 @@ class Microphone:
         if agc is not None and not -40 <= agc <= -3:
             raise ValueError(f"agc must be in [-40, -3]; got {agc}")
 
+        # Validate the limiter ceiling. A sample-peak ceiling in dBFS in
+        # [-3.0, 0.0] (typical -1.0); absence leaves it off. Mirrors the agc range
+        # check; the Rust core guards the same range as a backstop.
+        if limiter is not None and not -3.0 <= limiter <= 0.0:
+            raise ValueError(f"limiter must be in [-3.0, 0.0]; got {limiter}")
+
         # Resolve the ORT dylib path via the four-arm priority order in
         # _ort_resolver. Consulted when an ONNX stage loads (Silero VAD or
         # denoise); energy mode and vad=False with no denoise never load ORT, so
@@ -537,6 +550,7 @@ class Microphone:
             denoise_model_path=resolved_denoise_model_path,
             highpass=highpass,
             agc=agc,
+            limiter=limiter,
         )
 
         self._vad_enabled = vad_enabled

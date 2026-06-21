@@ -26,6 +26,7 @@ from decibri.exceptions import (
     ForkAfterOrtInit,
     FramesPerBufferOutOfRange,
     InvalidFormat,
+    LimiterCeilingOutOfRange,
     MicrophoneNotFound,
     MicrophoneStreamClosed,
     ModelLoadFailed,

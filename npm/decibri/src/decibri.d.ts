@@ -140,6 +140,17 @@ export interface MicrophoneOptions extends ReadableOptions {
    * @default undefined
    */
   agc?: number;
+
+  /**
+   * Peak limiter ceiling in dBFS (sample-peak) applied to the captured audio.
+   * Holds the signal at or below this ceiling, the safety net that catches a
+   * transient the AGC's gain would let exceed full scale. A number in the range
+   * -3.0 to 0.0 (typical -1.0); omit to leave the limiter off (the default),
+   * which keeps the level untouched. Runs last in the chain, after the AGC step.
+   * Out-of-range values raise a `RangeError`.
+   * @default undefined
+   */
+  limiter?: number;
 }
 
 /**
