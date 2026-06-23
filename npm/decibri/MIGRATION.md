@@ -5,6 +5,40 @@ vocabulary that matches the Rust and Python packages, and tidies several option
 and return shapes. This guide lists every breaking change with before and after
 code.
 
+## Breaking in 5.0.0: the vad config object
+
+decibri 5.0.0 replaces the flat `vadThreshold` and `vadHoldoff` options with a
+single `vad` config object that carries the model selector and its policy. The
+`vad: 'silero'` and `vad: 'energy'` shorthand is unchanged and still uses the
+default threshold (0.5 for `'silero'`, 0.01 for `'energy'`) and a 300 ms
+holdoff, so only code that tuned the threshold or holdoff needs to migrate.
+Move those values onto the object.
+
+Before:
+
+```js
+new Microphone({ vad: 'silero', vadThreshold: 0.6, vadHoldoff: 200 });
+new Microphone({ vad: 'energy', vadThreshold: 0.02 });
+```
+
+After:
+
+```js
+new Microphone({ vad: { model: 'silero', threshold: 0.6, holdoffMs: 200 } });
+new Microphone({ vad: { model: 'energy', threshold: 0.02 } });
+```
+
+`vadThreshold` and `vadHoldoff` are no longer accepted; passing either throws a
+`TypeError`. The shorthand without tuning is unchanged:
+
+```js
+new Microphone({ vad: 'silero' }); // unchanged
+new Microphone({ vad: false });    // unchanged; the default
+```
+
+The same realignment applies to the browser build, where the object's `model`
+is `'energy'` (the only browser detector): `vad: { model: 'energy', threshold: 0.02, holdoffMs: 200 }`.
+
 ## New in 4.2.0 (additive, nothing to migrate)
 
 decibri 4.2.0 is a browser-only, additive release. Code written for 4.1.0 keeps

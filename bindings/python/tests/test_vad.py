@@ -1,10 +1,11 @@
 """VAD tests organized in three sections.
 
-Section A: VAD config validation (no markers). Wrapper-layer validation of
-vad / vad_threshold / vad_holdoff_ms. These overlap conceptually with
-test_config.py but live here for cohesion with the rest of the VAD surface.
-test_error_messages.py also covers a subset for byte-identity; this section
-focuses on the validation-pass-through behavior, not message text.
+Section A: VAD config validation (no markers). Wrapper-layer validation of the
+``vad`` shorthand and the ``Vad`` config object (model / threshold / holdoff_ms).
+These overlap conceptually with test_config.py but live here for cohesion with
+the rest of the VAD surface. test_error_messages.py also covers a subset for
+byte-identity; this section focuses on the validation-pass-through behavior, not
+message text.
 
 Section B: pure _VadStateMachine tests (no markers). The wrapper-layer state
 machine applies threshold + holdoff policy to the score the bridge computes
@@ -22,7 +23,7 @@ import time
 
 import pytest
 
-from decibri import Microphone
+from decibri import AsyncMicrophone, Microphone, Vad
 from decibri._classes import _VadStateMachine
 
 
@@ -52,24 +53,24 @@ def test_vad_threshold_default_energy_is_zero_point_zero_one() -> None:
 
 
 def test_vad_threshold_explicit_overrides_default() -> None:
-    """User-supplied vad_threshold wins over the mode-dependent default."""
-    d = Microphone(vad=False, vad_threshold=0.42)
+    """A Vad object's threshold wins over the mode-dependent default."""
+    d = Microphone(vad=Vad(model="energy", threshold=0.42))
     assert d._vad._threshold == 0.42  # type: ignore[attr-defined]
 
 
 def test_vad_threshold_boundary_zero_accepted() -> None:
-    """vad_threshold=0.0 is at the lower boundary; accepted."""
-    Microphone(vad=False, vad_threshold=0.0)
+    """threshold=0.0 is at the lower boundary; accepted."""
+    Microphone(vad=Vad(model="energy", threshold=0.0))
 
 
 def test_vad_threshold_boundary_one_accepted() -> None:
-    """vad_threshold=1.0 is at the upper boundary; accepted."""
-    Microphone(vad=False, vad_threshold=1.0)
+    """threshold=1.0 is at the upper boundary; accepted."""
+    Microphone(vad=Vad(model="energy", threshold=1.0))
 
 
 def test_vad_holdoff_zero_accepted() -> None:
-    """vad_holdoff_ms=0 is at the lower boundary; accepted."""
-    Microphone(vad=False, vad_holdoff_ms=0)
+    """holdoff_ms=0 is at the lower boundary; accepted."""
+    Microphone(vad=Vad(model="energy", holdoff_ms=0))
 
 
 def test_vad_disabled_ignores_vad_kwargs() -> None:
@@ -137,6 +138,94 @@ def test_vad_false_constructs() -> None:
     assert mic_default is not None
     mic_explicit = Microphone(vad=False)
     assert mic_explicit is not None
+
+
+# --- Vad config object ------------------------------------------------------
+
+
+def test_vad_object_energy_constructs() -> None:
+    """vad=Vad(model='energy') constructs cleanly without ORT load."""
+    mic = Microphone(vad=Vad(model="energy"))
+    assert mic is not None
+
+
+def test_vad_object_threshold_reaches_state_machine() -> None:
+    """A Vad object's threshold reaches the wrapper state machine.
+
+    Proves the object form threads the same threshold the flat vad_threshold
+    kwarg used to: a non-default threshold via Vad(...) behaves like a
+    non-default threshold did via the removed kwarg.
+    """
+    d = Microphone(vad=Vad(model="energy", threshold=0.42))
+    assert d._vad._threshold == 0.42  # type: ignore[attr-defined]
+
+
+def test_vad_object_holdoff_reaches_state_machine() -> None:
+    """A Vad object's holdoff_ms reaches the wrapper state machine."""
+    d = Microphone(vad=Vad(model="energy", holdoff_ms=200))
+    assert d._vad._holdoff_seconds == 0.2  # type: ignore[attr-defined]
+
+
+def test_vad_object_energy_uses_default_threshold() -> None:
+    """vad=Vad(model='energy') with threshold unset takes the 0.01 default."""
+    d = Microphone(vad=Vad(model="energy"))
+    assert d._vad._threshold == 0.01  # type: ignore[attr-defined]
+
+
+def test_vad_object_threshold_default_is_none() -> None:
+    """The Vad object leaves threshold None until the mode default resolves."""
+    assert Vad(model="energy").threshold is None
+    assert Vad(model="silero").threshold is None
+
+
+def test_vad_object_default_holdoff_is_300() -> None:
+    """The Vad object defaults holdoff_ms to 300 (unchanged from the kwarg)."""
+    assert Vad(model="silero").holdoff_ms == 300
+
+
+def test_vad_object_invalid_model_raises() -> None:
+    """An unknown model in a Vad object raises a clear ValueError."""
+    with pytest.raises(ValueError, match="Invalid vad model"):
+        Vad(model="bogus")
+
+
+def test_vad_object_threshold_out_of_range_raises() -> None:
+    """An out-of-range threshold in a Vad object raises a clear ValueError."""
+    with pytest.raises(ValueError, match=r"threshold must be in \[0, 1\]"):
+        Vad(model="energy", threshold=1.5)
+    with pytest.raises(ValueError, match=r"threshold must be in \[0, 1\]"):
+        Vad(model="energy", threshold=-0.1)
+
+
+def test_vad_object_holdoff_negative_raises() -> None:
+    """A negative holdoff_ms in a Vad object raises a clear ValueError."""
+    with pytest.raises(ValueError, match="holdoff_ms must be non-negative"):
+        Vad(model="energy", holdoff_ms=-1)
+
+
+def test_vad_threshold_kwarg_removed() -> None:
+    """The flat vad_threshold kwarg is removed; passing it raises TypeError."""
+    with pytest.raises(TypeError, match="vad_threshold"):
+        Microphone(vad_threshold=0.5)  # type: ignore[call-arg]
+
+
+def test_vad_holdoff_ms_kwarg_removed() -> None:
+    """The flat vad_holdoff_ms kwarg is removed; passing it raises TypeError."""
+    with pytest.raises(TypeError, match="vad_holdoff_ms"):
+        Microphone(vad_holdoff_ms=300)  # type: ignore[call-arg]
+
+
+def test_vad_object_async_threshold_reaches_state_machine() -> None:
+    """The Vad object applies identically on AsyncMicrophone (symmetry)."""
+    d = AsyncMicrophone(vad=Vad(model="energy", threshold=0.3))
+    assert d._vad._threshold == 0.3  # type: ignore[attr-defined]
+
+
+@pytest.mark.requires_bundled_ort
+def test_vad_object_silero_constructs() -> None:
+    """vad=Vad(model='silero') constructs when the bundled ORT dylib is present."""
+    mic = Microphone(vad=Vad(model="silero"))
+    assert mic is not None
 
 
 # ===========================================================================
@@ -272,8 +361,7 @@ def test_vad_holdoff_end_to_end() -> None:
         sample_rate=16000,
         channels=1,
         frames_per_buffer=512,
-        vad="silero",
-        vad_holdoff_ms=100,
+        vad=Vad(model="silero", holdoff_ms=100),
     ) as d:
         for _ in range(8):  # ~256ms at 32ms per chunk
             chunk = d.read(timeout_ms=500)
@@ -289,8 +377,7 @@ def test_vad_energy_mode_end_to_end() -> None:
         sample_rate=16000,
         channels=1,
         frames_per_buffer=512,
-        vad="energy",
-        vad_threshold=0.01,
+        vad=Vad(model="energy", threshold=0.01),
     ) as d:
         for _ in range(4):
             chunk = d.read(timeout_ms=500)

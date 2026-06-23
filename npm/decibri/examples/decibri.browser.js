@@ -70,7 +70,7 @@ var decibri = (function() {
 	var require_decibri_browser = /* @__PURE__ */ __commonJSMin(((exports, module) => {
 		const { Emitter } = require_emitter();
 		const { WORKLET_SOURCE } = require_worklet_inline();
-		const VERSION = "4.2.0";
+		const VERSION = "4.4.2";
 		/**
 		* Browser microphone capture.
 		*
@@ -97,13 +97,27 @@ var decibri = (function() {
 				this._started = false;
 				this._starting = null;
 				this._stopRequested = false;
+				if (options.vadThreshold !== void 0 || options.vadHoldoff !== void 0) throw new TypeError("vadThreshold and vadHoldoff are no longer supported. Pass them on the vad config object: vad: { model: 'energy', threshold: 0.01, holdoffMs: 300 }.");
 				const vad = options.vad ?? false;
+				let vadThreshold = .01;
+				let vadHoldoff = 300;
 				if (vad === false) this._vad = false;
 				else if (vad === true) throw new TypeError("vad: true is no longer supported. Specify the mode explicitly: vad: 'energy'.");
 				else if (vad === "energy") this._vad = true;
-				else throw new TypeError(`Invalid vad value: ${JSON.stringify(vad)}. Expected false or 'energy'.`);
-				this._vadThreshold = options.vadThreshold ?? .01;
-				this._vadHoldoff = options.vadHoldoff ?? 300;
+				else if (vad !== null && typeof vad === "object" && !Array.isArray(vad)) {
+					if (vad.model !== "energy") throw new TypeError(`Invalid vad model: ${JSON.stringify(vad.model)}. Expected 'energy'.`);
+					this._vad = true;
+					if (vad.threshold !== void 0) {
+						if (vad.threshold < 0 || vad.threshold > 1) throw new TypeError(`threshold must be between 0 and 1, got ${vad.threshold}`);
+						vadThreshold = vad.threshold;
+					}
+					if (vad.holdoffMs !== void 0) {
+						if (vad.holdoffMs < 0) throw new TypeError(`holdoffMs must be >= 0, got ${vad.holdoffMs}`);
+						vadHoldoff = vad.holdoffMs;
+					}
+				} else throw new TypeError(`Invalid vad value: ${JSON.stringify(vad)}. Expected false, 'energy', or a config object { model, threshold, holdoffMs }.`);
+				this._vadThreshold = vadThreshold;
+				this._vadHoldoff = vadHoldoff;
 				this._vadScore = 0;
 				this._isSpeaking = false;
 				this._silenceTimer = null;
@@ -119,8 +133,6 @@ var decibri = (function() {
 				if (this._channels < 1 || this._channels > 32) throw new TypeError(`channels must be between 1 and 32, got ${this._channels}`);
 				if (this._framesPerBuffer < 64 || this._framesPerBuffer > 65536) throw new TypeError(`frames per buffer must be between 64 and 65536, got ${this._framesPerBuffer}`);
 				if (this._dtype !== "int16" && this._dtype !== "float32") throw new TypeError("dtype must be 'int16' or 'float32'");
-				if (this._vadThreshold < 0 || this._vadThreshold > 1) throw new TypeError(`vadThreshold must be between 0 and 1, got ${this._vadThreshold}`);
-				if (this._vadHoldoff < 0) throw new TypeError(`vadHoldoff must be >= 0, got ${this._vadHoldoff}`);
 			}
 			/**
 			* Start microphone capture.

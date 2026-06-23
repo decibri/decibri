@@ -122,8 +122,7 @@ async function testDenoiseWithVad() {
     sampleRate: 16000,
     channels: 1,
     denoise: 'fastenhancer-t',
-    vad: 'silero',
-    vadThreshold: 0.5,
+    vad: { model: 'silero', threshold: 0.5 },
   });
 
   let chunkCount = 0;

@@ -28,6 +28,7 @@ from decibri import (
     Speaker,
     InvalidFormat,
     SpeakerStreamClosed,
+    Vad,
 )
 
 
@@ -97,32 +98,60 @@ def test_output_drain_before_start_message() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Hard-freeze: VAD-family wrapper messages. The wrapper raises bare ValueError
-# (not VadThresholdOutOfRange / VadSampleRateUnsupported) for these, because
-# wrapper validation runs before any bridge interaction. The decibri-typed
-# VAD exceptions are unreachable from the public Microphone surface; they would
-# fire only if a consumer constructed _decibri.MicrophoneBridge directly.
-# These tests verify the bare ValueError messages so consumers know what to
-# expect from the public surface.
+# Hard-freeze: Vad config-object validation messages. The Vad object raises
+# bare ValueError (not VadThresholdOutOfRange / VadSampleRateUnsupported) for
+# these, at object construction, before any Microphone or bridge interaction.
+# The decibri-typed VAD exceptions are unreachable from the public surface;
+# they would fire only if a consumer constructed _decibri.MicrophoneBridge
+# directly. These tests verify the bare ValueError messages so consumers know
+# what to expect from the public surface.
 # ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "vad_kwargs,expected_msg",
+    [
+        pytest.param(
+            {"model": "energy", "threshold": -0.1},
+            "threshold must be in [0, 1]; got -0.1",
+            id="threshold_negative",
+        ),
+        pytest.param(
+            {"model": "energy", "threshold": 1.5},
+            "threshold must be in [0, 1]; got 1.5",
+            id="threshold_above_one",
+        ),
+        pytest.param(
+            {"model": "bogus"},
+            "Invalid vad model: 'bogus'. Expected 'silero' or 'energy'.",
+            id="model_invalid",
+        ),
+        pytest.param(
+            {"model": "energy", "holdoff_ms": -1},
+            "holdoff_ms must be non-negative milliseconds; got -1",
+            id="holdoff_negative",
+        ),
+        pytest.param(
+            {"model": "energy", "holdoff_ms": -100},
+            "holdoff_ms must be non-negative milliseconds; got -100",
+            id="holdoff_far_negative",
+        ),
+    ],
+)
+def test_vad_object_value_errors(vad_kwargs: dict, expected_msg: str) -> None:
+    """Vad config-object validation raises bare ValueError with composed text."""
+    with pytest.raises(ValueError) as exc_info:
+        Vad(**vad_kwargs)
+    assert str(exc_info.value) == expected_msg
 
 
 @pytest.mark.parametrize(
     "kwargs,expected_msg",
     [
         pytest.param(
-            {"vad_threshold": -0.1},
-            "vad_threshold must be in [0, 1]; got -0.1",
-            id="vad_threshold_negative",
-        ),
-        pytest.param(
-            {"vad_threshold": 1.5},
-            "vad_threshold must be in [0, 1]; got 1.5",
-            id="vad_threshold_above_one",
-        ),
-        pytest.param(
             {"vad": "bogus"},
-            "Invalid vad value: 'bogus'. Expected False, 'silero', or 'energy'.",
+            "Invalid vad value: 'bogus'. "
+            "Expected False, 'silero', 'energy', or a Vad config object.",
             id="vad_invalid_string",
         ),
         pytest.param(
@@ -131,20 +160,10 @@ def test_output_drain_before_start_message() -> None:
             "Specify the mode explicitly: vad='silero' or vad='energy'.",
             id="vad_true_rejected",
         ),
-        pytest.param(
-            {"vad_holdoff_ms": -1},
-            "vad_holdoff_ms must be non-negative milliseconds; got -1",
-            id="vad_holdoff_negative",
-        ),
-        pytest.param(
-            {"vad_holdoff_ms": -100},
-            "vad_holdoff_ms must be non-negative milliseconds; got -100",
-            id="vad_holdoff_far_negative",
-        ),
     ],
 )
 def test_vad_wrapper_value_errors(kwargs: dict, expected_msg: str) -> None:
-    """Wrapper VAD validation raises bare ValueError with composed message text."""
+    """Microphone vad-selector validation raises bare ValueError with composed text."""
     with pytest.raises(ValueError) as exc_info:
         Microphone(**kwargs)
     assert str(exc_info.value) == expected_msg

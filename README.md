@@ -137,7 +137,7 @@ Decibri ships two VAD modes:
 ```python
 import decibri
 
-with decibri.Microphone(sample_rate=16000, vad="silero", vad_threshold=0.5) as mic:
+with decibri.Microphone(sample_rate=16000, vad=decibri.Vad(model="silero", threshold=0.5)) as mic:
     for chunk in mic:
         print(f"VAD score {mic.vad_score}; speaking={mic.is_speaking}")
         break

@@ -114,9 +114,7 @@ describe('Microphone constructor', () => {
       framesPerBuffer: 800,
       device: 'mic2',
       dtype: 'float32',
-      vad: 'energy',
-      vadThreshold: 0.05,
-      vadHoldoff: 500,
+      vad: { model: 'energy', threshold: 0.05, holdoffMs: 500 },
       echoCancellation: false,
       noiseSuppression: false,
       workletUrl: '/worklet.js',
@@ -141,13 +139,22 @@ describe('Microphone constructor validation', () => {
     expect(() => new Microphone({ channels: 33 })).toThrow('channels');
   });
 
-  it('throws on invalid vadThreshold', () => {
-    expect(() => new Microphone({ vadThreshold: -1 })).toThrow('vadThreshold');
-    expect(() => new Microphone({ vadThreshold: 2 })).toThrow('vadThreshold');
+  it('throws on invalid vad threshold', () => {
+    expect(() => new Microphone({ vad: { model: 'energy', threshold: -1 } })).toThrow('threshold');
+    expect(() => new Microphone({ vad: { model: 'energy', threshold: 2 } })).toThrow('threshold');
   });
 
-  it('throws on invalid vadHoldoff', () => {
-    expect(() => new Microphone({ vadHoldoff: -100 })).toThrow('vadHoldoff');
+  it('throws on invalid vad holdoffMs', () => {
+    expect(() => new Microphone({ vad: { model: 'energy', holdoffMs: -100 } })).toThrow('holdoffMs');
+  });
+
+  it('throws on an unknown vad model', () => {
+    expect(() => new Microphone({ vad: { model: 'silero' } })).toThrow('Invalid vad model');
+  });
+
+  it('rejects the removed flat vadThreshold / vadHoldoff options', () => {
+    expect(() => new Microphone({ vadThreshold: 0.05 })).toThrow('no longer supported');
+    expect(() => new Microphone({ vadHoldoff: 500 })).toThrow('no longer supported');
   });
 
   it('rejects the legacy vad: true form', () => {
@@ -426,7 +433,7 @@ describe('Microphone VAD', () => {
   beforeEach(resetMocks);
 
   it('emits speech when RMS crosses threshold', async () => {
-    const mic = new Microphone({ dtype: 'float32', vad: 'energy', vadThreshold: 0.01 });
+    const mic = new Microphone({ dtype: 'float32', vad: { model: 'energy', threshold: 0.01 } });
     await mic.start();
 
     const speechFn = vi.fn();
@@ -440,7 +447,7 @@ describe('Microphone VAD', () => {
   });
 
   it('exposes vadScore as the last RMS in energy mode', async () => {
-    const mic = new Microphone({ dtype: 'float32', vad: 'energy', vadThreshold: 0.01 });
+    const mic = new Microphone({ dtype: 'float32', vad: { model: 'energy', threshold: 0.01 } });
     await mic.start();
 
     expect(mic.vadScore).toBe(0);
@@ -464,7 +471,7 @@ describe('Microphone VAD', () => {
   });
 
   it('does not emit speech when below threshold', async () => {
-    const mic = new Microphone({ dtype: 'float32', vad: 'energy', vadThreshold: 0.5 });
+    const mic = new Microphone({ dtype: 'float32', vad: { model: 'energy', threshold: 0.5 } });
     await mic.start();
 
     const speechFn = vi.fn();
@@ -480,7 +487,7 @@ describe('Microphone VAD', () => {
   it('emits silence after holdoff period', async () => {
     vi.useFakeTimers();
 
-    const mic = new Microphone({ dtype: 'float32', vad: 'energy', vadThreshold: 0.01, vadHoldoff: 300 });
+    const mic = new Microphone({ dtype: 'float32', vad: { model: 'energy', threshold: 0.01, holdoffMs: 300 } });
     await mic.start();
 
     const speechFn = vi.fn();
@@ -518,7 +525,7 @@ describe('Microphone VAD', () => {
   });
 
   it('works with int16 format', async () => {
-    const mic = new Microphone({ dtype: 'int16', vad: 'energy', vadThreshold: 0.01 });
+    const mic = new Microphone({ dtype: 'int16', vad: { model: 'energy', threshold: 0.01 } });
     await mic.start();
 
     const speechFn = vi.fn();

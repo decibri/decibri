@@ -33,6 +33,34 @@ export interface VersionInfo {
   binding: string;
 }
 
+/**
+ * Voice-activity-detection config object, passed on the `vad` option to tune
+ * the detector's threshold and holdoff. The bare `vad: 'silero'` / `vad:
+ * 'energy'` shorthand selects a mode with its default policy; pass this object
+ * to override the threshold or holdoff.
+ */
+export interface VadOptions {
+  /**
+   * Which detector to run.
+   * - `'silero'`: Silero VAD v5 ML model (more accurate, ~1ms inference)
+   * - `'energy'`: RMS energy threshold (lightweight, no model)
+   */
+  model: 'silero' | 'energy';
+
+  /**
+   * Speech-detection threshold for the active mode.
+   * @default 0.5 for `'silero'`, 0.01 for `'energy'`
+   * @range 0–1
+   */
+  threshold?: number;
+
+  /**
+   * Milliseconds of sub-threshold audio before emitting `'silence'`.
+   * @default 300
+   */
+  holdoffMs?: number;
+}
+
 /** Constructor options for `Microphone`. */
 export interface MicrophoneOptions extends ReadableOptions {
   /**
@@ -76,29 +104,21 @@ export interface MicrophoneOptions extends ReadableOptions {
   dtype?: 'int16' | 'float32';
 
   /**
-   * Voice activity detection mode. One of:
+   * Voice activity detection. One of:
    * - `false`: disabled (default)
    * - `'silero'`: Silero VAD v5 ML model (more accurate, ~1ms inference)
    * - `'energy'`: RMS energy threshold (lightweight)
+   * - a `VadOptions` config object `{ model, threshold?, holdoffMs? }` to tune
+   *   the threshold and holdoff for the chosen model
    *
-   * When enabled, emits `'speech'` and `'silence'` events and updates `vadScore`.
-   * The legacy `vad: true` form is rejected; specify the mode explicitly.
+   * The string shorthand uses the mode's default threshold (0.5 for `'silero'`,
+   * 0.01 for `'energy'`) and a 300 ms holdoff; pass a `VadOptions` object to
+   * override them. When enabled, emits `'speech'` and `'silence'` events and
+   * updates `vadScore`. The legacy `vad: true` form is rejected; specify the
+   * mode explicitly.
    * @default false
    */
-  vad?: false | 'silero' | 'energy';
-
-  /**
-   * Speech-detection threshold for the active VAD mode.
-   * @default 0.5 for `'silero'`, 0.01 for `'energy'`
-   * @range 0–1
-   */
-  vadThreshold?: number;
-
-  /**
-   * Milliseconds of sub-threshold audio before emitting `'silence'`.
-   * @default 300
-   */
-  vadHoldoff?: number;
+  vad?: false | 'silero' | 'energy' | VadOptions;
 
   /**
    * Path to the Silero VAD ONNX model file.

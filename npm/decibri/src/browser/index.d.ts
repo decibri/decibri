@@ -15,6 +15,27 @@ export interface VersionInfo {
   decibri: string;
 }
 
+/**
+ * Voice-activity-detection config object (browser), passed on the `vad` option
+ * to tune the detector. The browser runs energy VAD only, so `model` is
+ * `'energy'`; pass this object to override the threshold or holdoff.
+ */
+export interface VadOptions {
+  /** Detector to run. The browser supports only the energy RMS detector. */
+  model: 'energy';
+  /**
+   * RMS energy threshold for speech detection.
+   * @default 0.01
+   * @range 0–1
+   */
+  threshold?: number;
+  /**
+   * Milliseconds of sub-threshold audio before emitting `'silence'`.
+   * @default 300
+   */
+  holdoffMs?: number;
+}
+
 /** Constructor options for the browser `Microphone` class. */
 export interface MicrophoneOptions {
   /**
@@ -53,29 +74,20 @@ export interface MicrophoneOptions {
   dtype?: 'int16' | 'float32';
 
   /**
-   * Voice activity detection mode. One of:
+   * Voice activity detection. One of:
    * - `false`: disabled (default)
    * - `'energy'`: RMS energy threshold
+   * - a `VadOptions` config object `{ model: 'energy', threshold?, holdoffMs? }`
+   *   to tune the threshold and holdoff
    *
-   * The browser runs energy VAD only; Silero is Node-only. When enabled, emits
-   * `'speech'` and `'silence'` events and updates `vadScore`. The legacy
-   * `vad: true` form is rejected; specify the mode explicitly.
+   * The browser runs energy VAD only; Silero is Node-only. The string shorthand
+   * uses a 0.01 threshold and a 300 ms holdoff; pass a `VadOptions` object to
+   * override them. When enabled, emits `'speech'` and `'silence'` events and
+   * updates `vadScore`. The legacy `vad: true` form is rejected; specify the
+   * mode explicitly.
    * @default false
    */
-  vad?: false | 'energy';
-
-  /**
-   * RMS energy threshold for speech detection (VAD mode only).
-   * @default 0.01
-   * @range 0–1
-   */
-  vadThreshold?: number;
-
-  /**
-   * Milliseconds of sub-threshold audio before emitting `'silence'`.
-   * @default 300
-   */
-  vadHoldoff?: number;
+  vad?: false | 'energy' | VadOptions;
 
   /**
    * Enable browser echo cancellation.

@@ -249,6 +249,39 @@ assertThrows(
   'Invalid vad value'
 );
 
+// The flat vadThreshold / vadHoldoff options are removed; passing them is
+// rejected with a migration message (proves the breaking change).
+assertThrows(
+  () => new Microphone({ vad: 'energy', vadThreshold: 0.5 }),
+  TypeError,
+  'no longer supported'
+);
+assertThrows(
+  () => new Microphone({ vad: 'energy', vadHoldoff: 200 }),
+  TypeError,
+  'no longer supported'
+);
+
+// The vad config object: an unknown model is rejected.
+assertThrows(
+  () => new Microphone({ vad: { model: 'loud' } }),
+  TypeError,
+  'Invalid vad model'
+);
+
+// The vad config object: an out-of-range threshold / negative holdoff are
+// rejected with the numeric-range RangeError convention.
+assertThrows(
+  () => new Microphone({ vad: { model: 'energy', threshold: 2 } }),
+  RangeError,
+  'between 0 and 1'
+);
+assertThrows(
+  () => new Microphone({ vad: { model: 'energy', holdoffMs: -1 } }),
+  RangeError,
+  'non-negative'
+);
+
 // Missing model file (silero mode)
 try {
   new Microphone({ vad: 'silero', modelPath: '/nonexistent/model.onnx' });
@@ -267,6 +300,28 @@ try {
   console.log(`  FAIL: energy mode should work: ${e.message}`);
   failed++;
 }
+
+// The vad config object constructs and threads threshold + holdoff through.
+try {
+  const m = new Microphone({
+    sampleRate: 16000,
+    channels: 1,
+    vad: { model: 'energy', threshold: 0.42, holdoffMs: 123 },
+  });
+  assert(m._vadThreshold === 0.42, 'vad object threshold reaches the wrapper');
+  assert(m._vadHoldoff === 123, 'vad object holdoffMs reaches the wrapper');
+  m.stop();
+  passed++;
+} catch (e) {
+  console.log(`  FAIL: vad config object should work: ${e.message}`);
+  failed++;
+}
+
+// The vad config object with the policy unset falls back to the mode defaults.
+const mObjDefault = new Microphone({ sampleRate: 16000, channels: 1, vad: { model: 'energy' } });
+assert(mObjDefault._vadThreshold === 0.01, 'vad object energy threshold default is 0.01');
+assert(mObjDefault._vadHoldoff === 300, 'vad object holdoff default is 300');
+mObjDefault.stop();
 
 // vadScore: 0 when disabled, 0 before any audio in energy mode.
 const mDisabled = new Microphone({ sampleRate: 16000, channels: 1 });

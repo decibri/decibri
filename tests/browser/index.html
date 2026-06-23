@@ -92,9 +92,12 @@
         super();
         this._audioContext = null; this._stream = null; this._sourceNode = null;
         this._workletNode = null; this._started = false; this._starting = null;
-        this._stopRequested = false; this._vad = options.vad ?? false;
-        this._vadThreshold = options.vadThreshold ?? 0.01;
-        this._vadHoldoff = options.vadHoldoff ?? 300;
+        this._stopRequested = false;
+        const vad = options.vad ?? false;
+        this._vad = vad !== false;
+        const vadCfg = (vad !== null && typeof vad === 'object') ? vad : {};
+        this._vadThreshold = vadCfg.threshold ?? 0.01;
+        this._vadHoldoff = vadCfg.holdoffMs ?? 300;
         this._isSpeaking = false; this._silenceTimer = null;
         this._sampleRate = options.sampleRate ?? 16000;
         this._channels = options.channels ?? 1;

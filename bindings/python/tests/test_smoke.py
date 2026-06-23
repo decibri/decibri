@@ -126,7 +126,7 @@ def test_exception_intermediate_parents_importable() -> None:
 
 
 def test_public_surface_count() -> None:
-    """The public ``__all__`` enumerates the top-level surface (18 names).
+    """The public ``__all__`` enumerates the top-level surface (19 names).
 
     Composition: 2 sync wrappers (Microphone, Speaker) + 2 async
     wrappers (AsyncMicrophone, AsyncSpeaker) + 3 module-level
@@ -134,11 +134,12 @@ def test_public_surface_count() -> None:
     2 file convenience functions (record_to_file, async_record_to_file)
     + 3 value types (MicrophoneInfo, SpeakerInfo, VersionInfo)
     + 1 audio chunk dataclass (Chunk)
+    + 1 VAD config object (Vad)
     + 5 exception entries (DecibriError, DeviceError, ForkAfterOrtInit,
       OrtError, OrtPathError)
-    = 2 + 2 + 3 + 2 + 3 + 1 + 5 = 18.
+    = 2 + 2 + 3 + 2 + 3 + 1 + 1 + 5 = 19.
     """
-    assert len(decibri.__all__) == 18
+    assert len(decibri.__all__) == 19
     for name in decibri.__all__:
         assert hasattr(decibri, name), f"__all__ lists {name!r} but it is not exported"
 
