@@ -26,6 +26,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Fixed
 
+- Energy-mode VAD (`vad='energy'`) now reads the signal before the opt-in capture enhancement, so enabling an enhancement step (`denoise`, `highpass`, `agc`, `limiter`) no longer changes `vad_score` or `is_speaking`, matching the guarantee Silero mode already had. The energy RMS is computed natively on the pre-enhancement signal; previously it was computed in the wrapper on the delivered (post-enhancement) audio, so an enhancement step shifted the score (`agc` most of all, since it drives the delivered level toward its target, which could defeat energy endpointing). Energy detection with no enhancement enabled is unchanged.
 - Resampled capture (a device whose native rate differs from the configured `sample_rate`) no longer drops the resampler's group-delay tail at stream close: the final, possibly-shorter chunk now carries it, so `Microphone.read()` and `AsyncMicrophone.read()` deliver the complete resampled signal. A device already at the requested rate (no resample) is unchanged.
 - On macOS, the microphone-permission error message now reads "System Settings > Privacy & Security" (the modern macOS wording) instead of the pre-Ventura "System Preferences > Security & Privacy".
 

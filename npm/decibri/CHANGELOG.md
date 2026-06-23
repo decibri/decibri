@@ -27,6 +27,7 @@ For other decibri packages, see:
 
 ### Fixed
 
+- Energy-mode VAD (`vad: 'energy'`) now reads the signal before the opt-in capture enhancement, so enabling an enhancement step (`denoise`, `highpass`, `agc`, `limiter`) no longer changes `vadScore` or the `speech` / `silence` events, matching the guarantee Silero mode already had. The energy RMS is computed natively on the pre-enhancement signal; previously it was computed on the delivered (post-enhancement) audio, so an enhancement step shifted the score (`agc` most of all, since it drives the delivered level toward its target, which could defeat energy endpointing). Energy detection with no enhancement enabled is unchanged.
 - Resampled capture (a device whose native rate differs from the configured `sampleRate`) no longer drops the resampler's group-delay tail at stream close: the final, possibly-shorter `'data'` chunk(s) before `'end'` now carry it, so the complete resampled signal is delivered. A device already at the requested rate (no resample) is unchanged.
 - On macOS, the microphone-permission error message now reads "System Settings > Privacy & Security" (the modern macOS wording) instead of the pre-Ventura "System Preferences > Security & Privacy".
 

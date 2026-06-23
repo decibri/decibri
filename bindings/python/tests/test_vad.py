@@ -6,22 +6,24 @@ test_config.py but live here for cohesion with the rest of the VAD surface.
 test_error_messages.py also covers a subset for byte-identity; this section
 focuses on the validation-pass-through behavior, not message text.
 
-Section B: pure _VadStateMachine and _compute_rms tests (no markers). The
-wrapper-layer state machine and RMS helper are pure-Python and test-injectable
-without hardware or ORT. This is the bulk of the no-marker VAD coverage.
+Section B: pure _VadStateMachine tests (no markers). The wrapper-layer state
+machine applies threshold + holdoff policy to the score the bridge computes
+for both VAD modes; it is pure-Python and test-injectable without hardware or
+ORT. The energy RMS itself is computed natively (decibri::sample::rms) on the
+pre-enhancement signal, so its correctness and transform-invariance are tested
+in the Rust core, not here.
 
 Section C: end-to-end inference (markers). Full Microphone(vad="silero", ...)
 or Microphone(vad="energy", ...) integration tests using real audio +
 (for Silero) real ORT runtime.
 """
 
-import struct
 import time
 
 import pytest
 
 from decibri import Microphone
-from decibri._classes import _VadStateMachine, _compute_rms
+from decibri._classes import _VadStateMachine
 
 
 # ===========================================================================
@@ -37,9 +39,7 @@ def test_vad_threshold_default_silero_is_zero_point_five() -> None:
     lets you configure silero behavior without enabling silero, which
     would require ORT load and bundled-model resources).
     """
-    sm = _VadStateMachine(
-        mode="silero", threshold=0.5, holdoff_ms=300, sample_format="int16"
-    )
+    sm = _VadStateMachine(threshold=0.5, holdoff_ms=300)
     assert sm._threshold == 0.5  # type: ignore[attr-defined]
 
 
@@ -140,97 +140,49 @@ def test_vad_false_constructs() -> None:
 
 
 # ===========================================================================
-# Section B: pure _VadStateMachine and _compute_rms tests (no markers)
+# Section B: pure _VadStateMachine tests (no markers)
 # ===========================================================================
-
-
-# --- _compute_rms direct tests --------------------------------------------
-
-
-def test_compute_rms_silence_int16() -> None:
-    """RMS of all-zero int16 buffer is exactly 0.0."""
-    silence = b"\x00\x00" * 512
-    assert _compute_rms(silence, "int16") == 0.0
-
-
-def test_compute_rms_silence_float32() -> None:
-    """RMS of all-zero float32 buffer is exactly 0.0."""
-    silence = b"\x00\x00\x00\x00" * 512
-    assert _compute_rms(silence, "float32") == 0.0
-
-
-def test_compute_rms_int16_dc_quarter_amplitude() -> None:
-    """RMS of constant int16 signal at 25% full scale equals 0.25.
-
-    A constant DC signal's RMS equals its absolute amplitude. Sample value
-    8192 (= 32768 / 4), normalized by 32768.0, gives 0.25. The 32768.0 vs
-    32767.0 distinction is below the tolerance: 8192/32767 - 8192/32768
-    is approximately 7.6e-6, well under 0.001.
-    """
-    sample_count = 8192
-    samples = [8192] * sample_count
-    buffer = struct.pack(f"<{sample_count}h", *samples)
-    rms = _compute_rms(buffer, "int16")
-    assert abs(rms - 0.25) < 0.001
-
-
-def test_compute_rms_int16_loose_bound_half_amplitude() -> None:
-    """RMS of int16 buffer with mixed-amplitude samples is in expected range."""
-    # Mix of values around half-amplitude; RMS should be in the [0.4, 0.6] range
-    samples = [16384, -16384] * 256
-    buffer = struct.pack(f"<{len(samples)}h", *samples)
-    rms = _compute_rms(buffer, "int16")
-    assert 0.4 < rms < 0.6
-
-
-def test_compute_rms_float32_known_values() -> None:
-    """RMS of known float32 buffer matches closed-form calculation."""
-    samples = [0.5, -0.5, 0.5, -0.5] * 128
-    buffer = struct.pack(f"<{len(samples)}f", *samples)
-    rms = _compute_rms(buffer, "float32")
-    # All samples have absolute value 0.5, so RMS = sqrt(mean(0.25)) = 0.5
-    assert abs(rms - 0.5) < 1e-6
-
-
-def test_compute_rms_empty_buffer_returns_zero() -> None:
-    """Empty input returns 0.0 cleanly (no DivisionError)."""
-    assert _compute_rms(b"", "int16") == 0.0
-    assert _compute_rms(b"", "float32") == 0.0
+#
+# The state machine applies the threshold + holdoff policy to the bridge score
+# for both VAD modes. The energy RMS is computed natively
+# (decibri::sample::rms) on the pre-enhancement signal; its correctness and
+# transform-invariance are covered by the Rust core tests, not here. These
+# tests cover the wrapper policy: the score feeds straight through to
+# vad_score, and the threshold + holdoff state machine runs on it identically
+# regardless of which mode produced it.
 
 
 # --- _VadStateMachine passthrough tests -----------------------------------
 
 
 def test_state_machine_silero_passthrough() -> None:
-    """Silero mode passes bridge_probability through to vad_score."""
-    sm = _VadStateMachine(
-        mode="silero", threshold=0.5, holdoff_ms=300, sample_format="int16"
-    )
-    sm.process_chunk(b"\x00" * 1024, bridge_probability=0.7)
+    """The bridge score (Silero probability) passes through to vad_score."""
+    sm = _VadStateMachine(threshold=0.5, holdoff_ms=300)
+    sm.process_chunk(0.7)
     assert sm.vad_score == 0.7
     assert sm.is_speaking is True  # 0.7 > 0.5
 
-    sm.process_chunk(b"\x00" * 1024, bridge_probability=0.2)
+    sm.process_chunk(0.2)
     assert sm.vad_score == 0.2
     # Still speaking; below threshold starts holdoff timer but doesn't flip yet
     assert sm.is_speaking is True
 
 
 def test_state_machine_energy_passthrough() -> None:
-    """Energy mode computes RMS via _compute_rms and passes through."""
-    sm = _VadStateMachine(
-        mode="energy", threshold=0.01, holdoff_ms=300, sample_format="int16"
-    )
-    silence = b"\x00\x00" * 512
-    sm.process_chunk(silence, bridge_probability=0.999)  # bridge prob ignored in energy mode
-    assert sm.vad_score == 0.0  # RMS of silence
+    """The bridge score (energy RMS) passes through with the energy threshold.
+
+    Energy mode no longer computes RMS in the wrapper; the bridge computes it
+    natively on the pre-enhancement signal and exposes it as vad_probability.
+    The state machine applies the energy threshold default (0.01) to that
+    score exactly as it applies the silero threshold to a probability.
+    """
+    sm = _VadStateMachine(threshold=0.01, holdoff_ms=300)
+    sm.process_chunk(0.0)  # silence: RMS 0.0
+    assert sm.vad_score == 0.0
     assert sm.is_speaking is False
 
-    # Loud buffer above energy threshold
-    samples = [16384] * 512
-    loud = struct.pack(f"<512h", *samples)
-    sm.process_chunk(loud, bridge_probability=0.0)
-    assert sm.vad_score > 0.4  # RMS of constant 16384 is ~0.5
+    sm.process_chunk(0.5)  # loud: RMS well above the 0.01 threshold
+    assert sm.vad_score == 0.5
     assert sm.is_speaking is True
 
 
@@ -238,28 +190,28 @@ def test_state_machine_energy_passthrough() -> None:
 
 
 def test_state_machine_above_threshold_sets_speaking() -> None:
-    """Probability above threshold flips is_speaking to True."""
-    sm = _VadStateMachine(mode="silero", threshold=0.5, holdoff_ms=300, sample_format="int16")
+    """A score above threshold flips is_speaking to True."""
+    sm = _VadStateMachine(threshold=0.5, holdoff_ms=300)
     assert sm.is_speaking is False
-    sm.process_chunk(b"\x00" * 1024, bridge_probability=0.9)
+    sm.process_chunk(0.9)
     assert sm.is_speaking is True
 
 
 def test_state_machine_above_threshold_clears_silence_timer() -> None:
     """Above-threshold cancels any pending silence timer."""
-    sm = _VadStateMachine(mode="silero", threshold=0.5, holdoff_ms=300, sample_format="int16")
-    sm.process_chunk(b"\x00" * 1024, bridge_probability=0.9)  # speaking
-    sm.process_chunk(b"\x00" * 1024, bridge_probability=0.1)  # below; starts timer
+    sm = _VadStateMachine(threshold=0.5, holdoff_ms=300)
+    sm.process_chunk(0.9)  # speaking
+    sm.process_chunk(0.1)  # below; starts timer
     assert sm._silence_started_at is not None  # type: ignore[attr-defined]
-    sm.process_chunk(b"\x00" * 1024, bridge_probability=0.9)  # above; should cancel
+    sm.process_chunk(0.9)  # above; should cancel
     assert sm._silence_started_at is None  # type: ignore[attr-defined]
     assert sm.is_speaking is True
 
 
 def test_state_machine_below_threshold_while_silent_no_timer() -> None:
     """Below-threshold while not speaking does not start a timer."""
-    sm = _VadStateMachine(mode="silero", threshold=0.5, holdoff_ms=300, sample_format="int16")
-    sm.process_chunk(b"\x00" * 1024, bridge_probability=0.1)  # below; not speaking
+    sm = _VadStateMachine(threshold=0.5, holdoff_ms=300)
+    sm.process_chunk(0.1)  # below; not speaking
     assert sm.is_speaking is False
     assert sm._silence_started_at is None  # type: ignore[attr-defined]
 
@@ -273,12 +225,12 @@ def test_vad_holdoff_state_machine() -> None:
     100ms holdoff + 200ms sleep gives 100ms margin to absorb scheduler jitter
     on Windows / VM / CI runners. Verified on Ross's Windows dev machine.
     """
-    sm = _VadStateMachine(mode="silero", threshold=0.5, holdoff_ms=100, sample_format="int16")
-    sm.process_chunk(b"\x00" * 1024, bridge_probability=0.9)
+    sm = _VadStateMachine(threshold=0.5, holdoff_ms=100)
+    sm.process_chunk(0.9)
     assert sm.is_speaking is True
 
     # Below threshold; starts silence timer.
-    sm.process_chunk(b"\x00" * 1024, bridge_probability=0.1)
+    sm.process_chunk(0.1)
     assert sm.is_speaking is True  # still speaking; holdoff active
 
     # Sleep beyond holdoff window.
@@ -291,8 +243,8 @@ def test_vad_holdoff_state_machine() -> None:
 
 def test_vad_state_machine_reset() -> None:
     """reset() clears speaking + timer + last probability."""
-    sm = _VadStateMachine(mode="silero", threshold=0.5, holdoff_ms=300, sample_format="int16")
-    sm.process_chunk(b"\x00" * 1024, bridge_probability=0.9)
+    sm = _VadStateMachine(threshold=0.5, holdoff_ms=300)
+    sm.process_chunk(0.9)
     assert sm.is_speaking is True
     assert sm.vad_score == 0.9
 

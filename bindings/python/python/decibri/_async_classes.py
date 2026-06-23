@@ -42,7 +42,7 @@ import importlib.resources
 import time
 from pathlib import Path
 from types import TracebackType
-from typing import TYPE_CHECKING, Any, AsyncIterator, Literal, Union, cast
+from typing import TYPE_CHECKING, Any, AsyncIterator, Literal, Union
 
 from typing_extensions import Self
 
@@ -331,10 +331,8 @@ class AsyncMicrophone:
 
         self._vad_enabled = vad_enabled
         self._vad = _VadStateMachine(
-            mode=vad_mode,
             threshold=vad_threshold,
             holdoff_ms=vad_holdoff_ms,
-            sample_format=dtype,
         )
         self._format = dtype
         # Wrapper-only rename; the bridge keeps the original `numpy` name
@@ -424,10 +422,10 @@ class AsyncMicrophone:
         signature for backward compatibility.
 
         VAD state advances as a side effect when VAD is enabled
-        (``vad="silero"`` or ``vad="energy"``). In ndarray
-        mode with VAD enabled, the chunk is converted to bytes once via
-        ``arr.tobytes()`` for the VAD state machine; the original
-        ndarray is returned to the user.
+        (``vad="silero"`` or ``vad="energy"``). The score comes from the
+        bridge (computed natively on the pre-enhancement signal for both
+        modes), so the returned chunk is not inspected for VAD and the
+        return type (bytes vs ndarray) does not affect it.
 
         Cancellation: by the abort-immediately design, cancelling
         this await raises ``CancelledError`` immediately. The spawn_blocking
@@ -449,14 +447,10 @@ class AsyncMicrophone:
         if chunk is None:
             return None
         if self._vad_enabled:
+            # Both modes read the score the bridge computed on the
+            # pre-enhancement signal; the chunk data is not inspected here.
             probability = await self._bridge.vad_probability
-            if self._as_ndarray:
-                # ndarray mode: convert chunk to bytes for the VAD
-                # state machine (struct.unpack-based).
-                vad_input: bytes = chunk.tobytes()  # type: ignore[union-attr]
-            else:
-                vad_input = cast(bytes, chunk)
-            self._vad.process_chunk(vad_input, probability)
+            self._vad.process_chunk(probability)
         self._sequence += 1
         return chunk
 
@@ -537,7 +531,9 @@ class AsyncMicrophone:
 
         In ``vad="silero"`` mode, returns the raw probability from the
         Silero model. In ``vad="energy"`` mode, returns the normalized
-        RMS energy of the most recent chunk. Always 0.0 when
+        RMS energy of the most recent chunk. Both are computed natively on
+        the signal before any opt-in enhancement step, so enabling
+        enhancement does not change the score. Always 0.0 when
         ``vad=False``.
 
         The underlying bridge property is named ``vad_probability`` for

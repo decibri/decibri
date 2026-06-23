@@ -113,10 +113,11 @@ class MicrophoneBridge:
     ``decibri._classes``; consumers should construct ``Microphone``, not
     ``MicrophoneBridge``, directly.
 
-    The bridge is a thin inference primitive. VAD policy (threshold
-    application, holdoff state machine, mode dispatch) lives in the
-    wrapper layer; the bridge exposes the raw Silero probability via
-    ``vad_probability`` and stores ``vad_holdoff_ms`` as inert state.
+    The bridge runs the detector selected by ``vad_mode`` on the
+    pre-enhancement signal (Silero inference for ``"silero"``, an energy
+    RMS for ``"energy"``) and exposes the score via ``vad_probability``.
+    Threshold and holdoff policy live in the wrapper layer; the bridge
+    stores ``vad_holdoff_ms`` as inert state.
     """
 
     def __init__(
