@@ -57,6 +57,12 @@ pub struct DecibriOptions {
     pub device: Option<serde_json::Value>,
     pub vad_mode: Option<String>,
     pub model_path: Option<String>,
+    /// Capture DC-removal toggle. When `true`, removes a constant (DC) offset
+    /// from the captured audio with a one-pole DC-blocking high-pass, applied
+    /// first in the transform chain (before denoise). Absent or `false` leaves
+    /// it off (the default), a byte-identical no-op. Pure DSP: no bundled file
+    /// and no model path, like `highpass`.
+    pub dc_removal: Option<bool>,
     /// Capture denoise model selector. The only accepted value is
     /// `'fastenhancer-t'`; absent leaves denoise off. The JS wrapper resolves
     /// the bundled model file and passes its path through `denoise_model_path`.
@@ -156,6 +162,12 @@ fn build_microphone_parts(options: Option<DecibriOptions>) -> Result<MicrophoneP
     config.channels = channels;
     config.frames_per_buffer = frames_per_buffer;
     config.device = device;
+
+    // DC removal: a same-length one-pole DC-blocking high-pass, the first
+    // transform stage (before denoise). Absent or `false` leaves it off (the
+    // default), a byte-identical no-op. A plain bool toggle, so there is no
+    // range check, only the forward to the core config field.
+    config.dc_removal = opts.dc_removal.unwrap_or(false);
 
     // Denoise: map the closed-set model name to the core selector and attach
     // the bundled model path the JS wrapper resolved. Absent leaves denoise off

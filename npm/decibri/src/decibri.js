@@ -256,6 +256,14 @@ class Microphone extends Readable {
       }
     }
 
+    // ── DC removal ───────────────────────────────────────────────────────────
+
+    // A plain bool toggle for the one-pole DC-blocking high-pass, the first
+    // transform stage (before denoise). Absent or false leaves it off (the
+    // default), a byte-identical no-op. No range or closed-set check (it is just
+    // a bool); the value is threaded straight to the native config.
+    const dcRemoval = options.dcRemoval;
+
     // ── Validate and resolve denoise ─────────────────────────────────────────
 
     // Closed-set selector mirroring the Silero VAD shape: a model name resolves
@@ -342,6 +350,7 @@ class Microphone extends Readable {
         // VAD. Absent means VAD off in native.
         vadMode: vadEnabled ? vadMode : undefined,
         modelPath,
+        dcRemoval,
         denoise,
         denoiseModelPath,
         ortLibraryPath,

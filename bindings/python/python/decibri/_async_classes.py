@@ -141,6 +141,7 @@ class AsyncMicrophone:
         highpass: Literal[80, 100] | None = None,
         agc: int | None = None,
         limiter: float | None = None,
+        dc_removal: bool = False,
     ) -> None:
         """Construct an AsyncMicrophone audio capture instance.
 
@@ -335,6 +336,7 @@ class AsyncMicrophone:
             highpass=highpass,
             agc=agc,
             limiter=limiter,
+            dc_removal=dc_removal,
         )
 
         self._vad_enabled = vad_enabled
