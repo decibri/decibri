@@ -136,7 +136,7 @@ class MicrophoneBridge:
         ort_library_path: str | Path | None = None,
         denoise: str | None = None,
         denoise_model_path: str | Path | None = None,
-        highpass: str | None = None,
+        highpass: int | None = None,
         agc: int | None = None,
         limiter: float | None = None,
     ) -> None: ...
@@ -235,7 +235,7 @@ class AsyncMicrophoneBridge:
         ort_library_path: str | Path | None = None,
         denoise: str | None = None,
         denoise_model_path: str | Path | None = None,
-        highpass: str | None = None,
+        highpass: int | None = None,
         agc: int | None = None,
         limiter: float | None = None,
     ) -> None: ...

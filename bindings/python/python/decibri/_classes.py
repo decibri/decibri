@@ -264,7 +264,7 @@ class _VadStateMachine:
 _VALID_MODES = frozenset({"silero", "energy"})
 _VALID_FORMATS = frozenset({"int16", "float32"})
 _VALID_DENOISE_MODELS = frozenset({"fastenhancer-t"})
-_VALID_HIGHPASS = frozenset({"80hz"})
+_VALID_HIGHPASS = frozenset({80, 100})
 
 
 class Microphone:
@@ -293,10 +293,11 @@ class Microphone:
     audio; omit it (the default ``None``) to leave denoise off, which keeps the
     capture path unchanged.
 
-    The ``highpass`` parameter selects an optional high-pass filter
-    (``"80hz"``, an 80 Hz second-order Butterworth) that removes low-frequency
-    rumble below the voice band, applied after denoise; omit it (the default
-    ``None``) to leave the high-pass off and the capture path full-range.
+    The ``highpass`` parameter selects an optional high-pass filter cutoff in
+    Hz (``80`` or ``100``, a second-order Butterworth) that removes
+    low-frequency rumble below the voice band, applied after denoise; omit it
+    (the default ``None``) to leave the high-pass off and the capture path
+    full-range.
 
     The ``agc`` parameter sets an optional automatic gain control target level
     in dBFS (an integer in ``-40..-3``, typical ``-18``), driving the captured
@@ -341,7 +342,7 @@ class Microphone:
         as_ndarray: bool = False,
         ort_library_path: str | Path | None = None,
         denoise: Literal["fastenhancer-t"] | None = None,
-        highpass: Literal["80hz"] | None = None,
+        highpass: Literal[80, 100] | None = None,
         agc: int | None = None,
         limiter: float | None = None,
     ) -> None:
@@ -517,13 +518,13 @@ class Microphone:
                     "during installation."
                 ) from exc
 
-        # Validate high-pass. Closed growable cutoff-named selector mirroring the
-        # denoise shape: a name selects a filter, absence leaves the high-pass
-        # off, an unknown name is a clear ValueError. Pure DSP, so there is no
-        # bundled file to resolve, only the closed-set check.
+        # Validate high-pass. Closed growable numeric cutoff selector mirroring
+        # the denoise shape: a cutoff in Hz selects a filter, absence leaves the
+        # high-pass off, an out-of-set value is a clear ValueError. Pure DSP, so
+        # there is no bundled file to resolve, only the closed-set check.
         if highpass is not None and highpass not in _VALID_HIGHPASS:
             raise ValueError(
-                f"Invalid highpass value: {highpass!r}. Expected '80hz'."
+                f"highpass must be one of: 80, 100; got {highpass!r}"
             )
 
         # Validate AGC. The target is an integer dBFS level in [-40, -3]

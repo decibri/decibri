@@ -279,16 +279,16 @@ class Microphone extends Readable {
 
     // ── Validate high-pass ───────────────────────────────────────────────────
 
-    // Closed growable cutoff-named selector mirroring the denoise shape: a name
-    // selects a filter, absence leaves the high-pass off. The only accepted
-    // value is '80hz'; anything else is an explicit TypeError rather than a
-    // silent miss. The filter is pure DSP with no bundled file, so there is
-    // nothing to resolve here, only the closed-set check.
+    // Closed growable numeric cutoff selector mirroring the denoise shape: a
+    // cutoff in Hz selects a filter, absence leaves the high-pass off. The
+    // accepted values are 80 and 100; anything else (an out-of-set cutoff or a
+    // non-number) is an explicit RangeError rather than a silent miss, matching
+    // the numeric range checks on agc and limiter. The filter is pure DSP with
+    // no bundled file, so there is nothing to resolve here, only the closed-set
+    // check.
     const highpass = options.highpass;
-    if (highpass !== undefined && highpass !== '80hz') {
-      throw new TypeError(
-        `Invalid highpass value: ${JSON.stringify(highpass)}. Expected '80hz'.`
-      );
+    if (highpass !== undefined && highpass !== 80 && highpass !== 100) {
+      throw new RangeError('highpass must be one of: 80, 100');
     }
 
     // ── Validate AGC ─────────────────────────────────────────────────────────
