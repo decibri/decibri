@@ -86,14 +86,12 @@ Creates a Readable stream that captures from the microphone.
 | `framesPerBuffer` | number | 1600 | Frames per chunk (64 to 65536). At 16kHz mono, 1600 = 100ms = 3200 bytes |
 | `device` | number, string, or `{ id: string }` | system default | Device index, case-insensitive name substring, or stable per-host ID |
 | `dtype` | `'int16'` \| `'float32'` | `'int16'` | Sample encoding |
-| `vad` | `false` \| `'silero'` \| `'energy'` | `false` | Voice activity detection: disabled, the Silero ML model, or an RMS energy threshold |
-| `vadThreshold` | number | 0.5 / 0.01 | Speech threshold. Default is 0.5 for `'silero'`, 0.01 for `'energy'` |
-| `vadHoldoff` | number | 300 | Silence holdoff in ms |
+| `vad` | `false` \| `'silero'` \| `'energy'` \| `VadOptions` | `false` | Voice activity detection: disabled, the Silero ML model, an RMS energy threshold, or a config object `{ model, threshold, holdoffMs }` to tune the policy |
 | `modelPath` | string | bundled model | Path to the Silero model. Only used when `vad` is `'silero'` |
 
 Standard `ReadableOptions` (e.g. `highWaterMark`) are also accepted.
 
-`vad: true` is not accepted; pass the mode explicitly as `vad: 'silero'` or `vad: 'energy'`.
+`vad: true` is not accepted; pass the mode explicitly as `vad: 'silero'` or `vad: 'energy'`. The string shorthand uses the default threshold (0.5 for `'silero'`, 0.01 for `'energy'`) and a 300 ms holdoff; to tune them pass a config object: `vad: { model: 'silero', threshold: 0.6, holdoffMs: 200 }`. The `threshold` (`0`–`1`) and `holdoffMs` fields are optional and fall back to those defaults.
 
 ### Methods
 
@@ -120,7 +118,7 @@ The module-level `inputDevices()` and `version()` free functions are equivalent 
 | `'data'` | Buffer | Audio chunk (Int16 LE or Float32 LE) |
 | `'backpressure'` | - | Internal buffer full, consumer too slow |
 | `'speech'` | - | VAD: audio crosses threshold |
-| `'silence'` | - | VAD: audio below threshold for `vadHoldoff` ms |
+| `'silence'` | - | VAD: audio below threshold for the holdoff period |
 | `'end'` | - | Stream ended |
 | `'error'` | Error | An error occurred |
 
@@ -267,7 +265,7 @@ To verify playback in real browsers, open `examples/browser-speaker-test.html` (
 Lightweight RMS energy threshold. No model required.
 
 ```javascript
-const mic = new Microphone({ vad: 'energy', vadThreshold: 0.01 });
+const mic = new Microphone({ vad: { model: 'energy', threshold: 0.01 } });
 mic.on('speech', () => console.log('speaking'));
 mic.on('silence', () => console.log('silent'));
 ```
@@ -277,7 +275,7 @@ mic.on('silence', () => console.log('silent'));
 ML-based detection using the Silero VAD v5 model. More accurate than energy mode, especially in noisy environments.
 
 ```javascript
-const mic = new Microphone({ vad: 'silero', vadThreshold: 0.5 });
+const mic = new Microphone({ vad: { model: 'silero', threshold: 0.5 } });
 mic.on('speech', () => console.log('speaking'));
 mic.on('silence', () => console.log('silent'));
 ```

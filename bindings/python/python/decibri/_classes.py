@@ -59,7 +59,15 @@ else:
 from decibri import _decibri, exceptions
 from decibri._decibri import MicrophoneInfo, SpeakerInfo, VersionInfo
 
-__all__ = ["Chunk", "Microphone", "Speaker", "MicrophoneInfo", "SpeakerInfo", "VersionInfo"]
+__all__ = [
+    "Chunk",
+    "Vad",
+    "Microphone",
+    "Speaker",
+    "MicrophoneInfo",
+    "SpeakerInfo",
+    "VersionInfo",
+]
 
 
 # ---------------------------------------------------------------------------
@@ -99,6 +107,64 @@ class Chunk:
     sequence: int
     is_speaking: bool
     vad_score: float
+
+
+# ---------------------------------------------------------------------------
+# Vad: named voice-activity-detection config object.
+#
+# Bundles the VAD model selector with its threshold and holdoff policy, the
+# named-config-object shape a multi-parameter capability uses. Pass it as
+# ``Microphone(vad=Vad(model="silero", threshold=0.5, holdoff_ms=300))``; the
+# bare ``Microphone(vad="silero")`` shorthand keeps the disclosed defaults. The
+# wrapper decomposes it into the (mode, threshold, holdoff) the detector policy
+# consumes, exactly as the shorthand resolves to those same values.
+# ---------------------------------------------------------------------------
+
+
+# Shared silence-holdoff default (milliseconds). The shorthand and a Vad object
+# with holdoff_ms left at its default both resolve to this value.
+_DEFAULT_VAD_HOLDOFF_MS = 300
+
+
+@dataclass(frozen=True, slots=True)
+class Vad:
+    """Voice-activity-detection configuration.
+
+    Pass an instance on the ``vad`` parameter of ``Microphone`` /
+    ``AsyncMicrophone`` to tune the detector's threshold and holdoff. The bare
+    ``vad="silero"`` / ``vad="energy"`` shorthand selects a mode with the
+    disclosed defaults; a ``Vad`` object is the way to override them.
+
+    Attributes:
+        model: Which detector to run. ``"silero"`` (the bundled Silero VAD
+            ONNX model) or ``"energy"`` (an RMS energy threshold, no model
+            file). The accepted set is kept open so a future model is an
+            additive choice.
+        threshold: Speech-detection threshold in ``[0, 1]`` applied to the
+            detector score. ``None`` (the default) takes the mode-dependent
+            default: 0.5 for ``"silero"``, 0.01 for ``"energy"``.
+        holdoff_ms: Milliseconds of sub-threshold audio tolerated before the
+            speaking state clears (the silence holdoff). Default 300.
+
+    Example:
+        Microphone(vad=Vad(model="silero", threshold=0.6, holdoff_ms=200))
+    """
+
+    model: str = "silero"
+    threshold: float | None = None
+    holdoff_ms: int = _DEFAULT_VAD_HOLDOFF_MS
+
+    def __post_init__(self) -> None:
+        if self.model not in _VALID_MODES:
+            raise ValueError(
+                f"Invalid vad model: {self.model!r}. Expected 'silero' or 'energy'."
+            )
+        if self.threshold is not None and not 0.0 <= self.threshold <= 1.0:
+            raise ValueError(f"threshold must be in [0, 1]; got {self.threshold}")
+        if self.holdoff_ms < 0:
+            raise ValueError(
+                f"holdoff_ms must be non-negative milliseconds; got {self.holdoff_ms}"
+            )
 
 
 # ---------------------------------------------------------------------------
@@ -214,10 +280,12 @@ class Microphone:
     `start()` explicitly. Iteration without an active capture raises
     `MicrophoneStreamClosed`.
 
-    The VAD parameters (`vad`, `vad_threshold`, `vad_holdoff_ms`,
-    `model_path`, `ort_library_path`) configure both the bridge and the
-    wrapper-layer state machine. ``vad`` accepts ``False`` (disabled),
-    ``"silero"``, or ``"energy"``. With ``vad=False``, ``vad_score``
+    The VAD parameters (`vad`, `model_path`, `ort_library_path`) configure
+    both the bridge and the wrapper-layer state machine. ``vad`` accepts
+    ``False`` (disabled), the ``"silero"`` / ``"energy"`` shorthand (which
+    uses the mode's default threshold and holdoff), or a ``Vad`` config
+    object (``vad=Vad(model="silero", threshold=0.5, holdoff_ms=300)``) to
+    tune the threshold and holdoff. With ``vad=False``, ``vad_score``
     returns 0.0 and ``is_speaking`` returns False unconditionally.
 
     The ``denoise`` parameter selects an optional bundled single-channel
@@ -268,9 +336,7 @@ class Microphone:
         frames_per_buffer: int = 1600,
         dtype: str = "int16",
         device: int | str | None = None,
-        vad: bool | str = False,
-        vad_threshold: float | None = None,
-        vad_holdoff_ms: int = 300,
+        vad: bool | str | Vad = False,
         model_path: str | Path | None = None,
         as_ndarray: bool = False,
         ort_library_path: str | Path | None = None,
@@ -343,42 +409,49 @@ class Microphone:
                 f"dtype must be 'int16' or 'float32'; got {dtype!r}"
             )
 
-        # Collapse the legacy two-flag pattern (vad=True,
-        # vad_mode="silero") into a single union-typed parameter. ``vad``
-        # accepts False (disabled; default), "silero", or "energy".
-        # vad=True is rejected explicitly so existing callers get a
+        # Decompose ``vad`` into the bridge's (enabled, mode) split plus the
+        # threshold/holdoff policy values. ``vad`` accepts False (disabled;
+        # default), the "silero"/"energy" shorthand (disclosed-default policy),
+        # or a Vad config object (to tune threshold/holdoff). vad=True is
+        # rejected explicitly so callers from the two-flag era get a
         # migration-friendly message rather than a silent semantic change.
+        # A Vad object self-validates its model, threshold, and holdoff at
+        # construction; the shorthand/False paths carry no user policy to check.
         vad_enabled: bool
         vad_mode: str
+        vad_threshold: float | None
+        vad_holdoff_ms: int
         if vad is False:
             vad_enabled = False
             vad_mode = "energy"  # inert placeholder; bridge ignores when disabled
+            vad_threshold = None
+            vad_holdoff_ms = _DEFAULT_VAD_HOLDOFF_MS
         elif vad is True:
             raise ValueError(
                 "vad=True is no longer supported. "
                 "Specify the mode explicitly: vad='silero' or vad='energy'."
             )
-        elif vad in _VALID_MODES:
+        elif isinstance(vad, Vad):
+            vad_enabled = True
+            vad_mode = vad.model
+            vad_threshold = vad.threshold
+            vad_holdoff_ms = vad.holdoff_ms
+        elif isinstance(vad, str) and vad in _VALID_MODES:
             vad_enabled = True
             vad_mode = vad
+            vad_threshold = None
+            vad_holdoff_ms = _DEFAULT_VAD_HOLDOFF_MS
         else:
             raise ValueError(
                 f"Invalid vad value: {vad!r}. "
-                "Expected False, 'silero', or 'energy'."
+                "Expected False, 'silero', 'energy', or a Vad config object."
             )
 
-        # Mode-dependent threshold default mirroring Node:
-        # 0.5 for silero, 0.01 for energy.
+        # Mode-dependent threshold default mirroring Node: 0.5 for silero,
+        # 0.01 for energy. A Vad object that left threshold unset (None) takes
+        # the same default as the shorthand does.
         if vad_threshold is None:
             vad_threshold = 0.5 if vad_mode == "silero" else 0.01
-        if not 0.0 <= vad_threshold <= 1.0:
-            raise ValueError(
-                f"vad_threshold must be in [0, 1]; got {vad_threshold}"
-            )
-        if vad_holdoff_ms < 0:
-            raise ValueError(
-                f"vad_holdoff_ms must be non-negative milliseconds; got {vad_holdoff_ms}"
-            )
 
         # Resolve model_path to an absolute string for the bridge.
         # User-supplied path takes precedence. When Silero VAD is requested
@@ -454,7 +527,7 @@ class Microphone:
             )
 
         # Validate AGC. The target is an integer dBFS level in [-40, -3]
-        # (typical -18); absence leaves it off. Mirrors the vad_threshold range
+        # (typical -18); absence leaves it off. Mirrors the Vad threshold range
         # check; the Rust core guards the same range as a backstop.
         if agc is not None and not -40 <= agc <= -3:
             raise ValueError(f"agc must be in [-40, -3]; got {agc}")

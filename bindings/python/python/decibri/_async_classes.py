@@ -58,6 +58,8 @@ else:
 from decibri import _decibri, exceptions
 from decibri._classes import (
     Chunk,
+    Vad,
+    _DEFAULT_VAD_HOLDOFF_MS,
     _VadStateMachine,
     _VALID_DENOISE_MODELS,
     _VALID_FORMATS,
@@ -131,9 +133,7 @@ class AsyncMicrophone:
         frames_per_buffer: int = 1600,
         dtype: str = "int16",
         device: int | str | None = None,
-        vad: bool | str = False,
-        vad_threshold: float | None = None,
-        vad_holdoff_ms: int = 300,
+        vad: bool | str | Vad = False,
         model_path: str | Path | None = None,
         as_ndarray: bool = False,
         ort_library_path: str | Path | None = None,
@@ -185,38 +185,46 @@ class AsyncMicrophone:
                 f"dtype must be 'int16' or 'float32'; got {dtype!r}"
             )
 
-        # Collapse the legacy two-flag pattern (vad=True,
-        # vad_mode="silero") into a single union-typed parameter. Mirrors
-        # Microphone exactly; see _classes.py for the full rationale.
+        # Decompose ``vad`` into the bridge's (enabled, mode) split plus the
+        # threshold/holdoff policy values. Mirrors Microphone exactly; see
+        # _classes.py for the full rationale. ``vad`` accepts False (disabled;
+        # default), the "silero"/"energy" shorthand, or a Vad config object
+        # (which self-validates its model/threshold/holdoff); vad=True is
+        # rejected with a migration message.
         vad_enabled: bool
         vad_mode: str
+        vad_threshold: float | None
+        vad_holdoff_ms: int
         if vad is False:
             vad_enabled = False
             vad_mode = "energy"  # inert placeholder; bridge ignores when disabled
+            vad_threshold = None
+            vad_holdoff_ms = _DEFAULT_VAD_HOLDOFF_MS
         elif vad is True:
             raise ValueError(
                 "vad=True is no longer supported. "
                 "Specify the mode explicitly: vad='silero' or vad='energy'."
             )
-        elif vad in _VALID_MODES:
+        elif isinstance(vad, Vad):
+            vad_enabled = True
+            vad_mode = vad.model
+            vad_threshold = vad.threshold
+            vad_holdoff_ms = vad.holdoff_ms
+        elif isinstance(vad, str) and vad in _VALID_MODES:
             vad_enabled = True
             vad_mode = vad
+            vad_threshold = None
+            vad_holdoff_ms = _DEFAULT_VAD_HOLDOFF_MS
         else:
             raise ValueError(
                 f"Invalid vad value: {vad!r}. "
-                "Expected False, 'silero', or 'energy'."
+                "Expected False, 'silero', 'energy', or a Vad config object."
             )
 
+        # Mode-dependent threshold default mirroring Node: 0.5 for silero,
+        # 0.01 for energy.
         if vad_threshold is None:
             vad_threshold = 0.5 if vad_mode == "silero" else 0.01
-        if not 0.0 <= vad_threshold <= 1.0:
-            raise ValueError(
-                f"vad_threshold must be in [0, 1]; got {vad_threshold}"
-            )
-        if vad_holdoff_ms < 0:
-            raise ValueError(
-                f"vad_holdoff_ms must be non-negative milliseconds; got {vad_holdoff_ms}"
-            )
 
         # Resolve the Silero ONNX model path. Same logic as sync Microphone:
         # user-supplied path wins; otherwise fall back to the bundled model

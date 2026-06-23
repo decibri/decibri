@@ -8,7 +8,7 @@ constructors (``decibri.Microphone(...)`` / ``decibri.Speaker(...)``).
 """
 
 from decibri._async_classes import AsyncMicrophone, AsyncSpeaker
-from decibri._classes import Chunk, Microphone, Speaker
+from decibri._classes import Chunk, Microphone, Speaker, Vad
 from decibri._decibri import (
     MicrophoneInfo,
     SpeakerInfo,
@@ -218,6 +218,8 @@ __all__ = [
     "VersionInfo",
     # Audio chunk with metadata
     "Chunk",
+    # Voice-activity-detection config object
+    "Vad",
     # Exception hierarchy entry points:
     # only the catch-target roots plus ForkAfterOrtInit are surfaced in
     # __all__ to keep `from decibri import *` legible. The full

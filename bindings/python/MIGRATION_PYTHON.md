@@ -2,6 +2,41 @@
 
 decibri 0.2.0 aligns the Python API to decibri's canonical microphone and speaker vocabulary. It is a breaking release. This guide covers every change a 0.1.x consumer needs to make, highest impact first.
 
+## Breaking in 0.5.0: the Vad config object
+
+decibri 0.5.0 replaces the flat `vad_threshold` and `vad_holdoff_ms` constructor
+parameters with a single `Vad` config object (`from decibri import Vad`) that
+carries the model selector and its policy. The `vad="silero"` and `vad="energy"`
+shorthand is unchanged and still uses the default threshold (0.5 for `"silero"`,
+0.01 for `"energy"`) and a 300 ms holdoff, so only code that tuned the threshold
+or holdoff needs to migrate. Move those values onto the object.
+
+Before:
+
+```python
+decibri.Microphone(vad="silero", vad_threshold=0.6, vad_holdoff_ms=200)
+decibri.Microphone(vad="energy", vad_threshold=0.02)
+```
+
+After:
+
+```python
+from decibri import Microphone, Vad
+
+Microphone(vad=Vad(model="silero", threshold=0.6, holdoff_ms=200))
+Microphone(vad=Vad(model="energy", threshold=0.02))
+```
+
+`vad_threshold` and `vad_holdoff_ms` are no longer constructor parameters;
+passing either raises `TypeError` (an unexpected keyword argument). The shorthand
+without tuning is unchanged, and the same `Vad` object applies to
+`AsyncMicrophone`:
+
+```python
+Microphone(vad="silero")  # unchanged
+Microphone(vad=False)     # unchanged; the default
+```
+
 ## Device-enumeration methods (the main change)
 
 The methods that list devices moved to a short, symmetric form:

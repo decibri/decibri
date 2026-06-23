@@ -113,14 +113,14 @@ The full hierarchy lives at `decibri.exceptions`. Top-level catch-targets surfac
 
 ## Voice Activity Detection
 
-Decibri ships with two VAD modes: a lightweight RMS energy threshold (opt-in via `vad="energy"`) and a Silero ONNX model (~2.3 MB, bundled in the wheel; no API keys required).
+Decibri ships with two VAD modes: a lightweight RMS energy threshold (opt-in via `vad="energy"`) and a Silero ONNX model (~2.3 MB, bundled in the wheel; no API keys required). Pass the mode as the `vad="silero"` / `vad="energy"` shorthand (which uses the default threshold and a 300 ms holdoff) or as a `decibri.Vad(model=, threshold=, holdoff_ms=)` config object to tune them.
 
 ```python
 # Energy mode (lightweight, no model)
-mic = decibri.Microphone(vad="energy", vad_threshold=0.01)
+mic = decibri.Microphone(vad=decibri.Vad(model="energy", threshold=0.01))
 
 # Silero mode (ML-based, more accurate in noisy environments)
-mic = decibri.Microphone(vad="silero", vad_threshold=0.5)
+mic = decibri.Microphone(vad=decibri.Vad(model="silero", threshold=0.5))
 ```
 
 Use `mic.vad_score` (a value in `[0, 1]`) to gate downstream processing. `mic.is_speaking` returns the boolean above-threshold view.

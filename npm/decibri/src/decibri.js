@@ -183,13 +183,25 @@ class Microphone extends Readable {
 
     // ── Validate VAD options ─────────────────────────────────────────────────
 
-    // Single vad union: false (disabled, default), 'silero', or 'energy'. The
-    // legacy two-flag form (vad: true plus vadMode) is rejected with a
-    // migration error. Energy and Silero are both computed in this wrapper;
-    // the union only selects which.
+    // vad selects the detector and (optionally) its threshold/holdoff policy.
+    // It accepts false (disabled, default), the 'silero'/'energy' shorthand
+    // (which uses the mode's default threshold and holdoff), or a config object
+    // { model, threshold, holdoffMs } to tune the policy. The legacy two-flag
+    // form (vad: true plus vadMode) and the flat vadThreshold/vadHoldoff
+    // options are rejected with a migration error. The threshold and holdoff
+    // live JS-side (the state machine runs in this wrapper); only the mode is
+    // passed to native.
+    if (options.vadThreshold !== undefined || options.vadHoldoff !== undefined) {
+      throw new TypeError(
+        'vadThreshold and vadHoldoff are no longer supported. ' +
+          "Pass them on the vad config object: vad: { model: 'silero', threshold: 0.5, holdoffMs: 300 }."
+      );
+    }
     const vad = options.vad ?? false;
     let vadEnabled;
     let vadMode;
+    let vadThreshold;
+    let vadHoldoff;
     if (vad === false) {
       vadEnabled = false;
       vadMode = 'energy'; // inert placeholder; ignored while disabled
@@ -200,9 +212,39 @@ class Microphone extends Readable {
     } else if (vad === 'silero' || vad === 'energy') {
       vadEnabled = true;
       vadMode = vad;
+    } else if (vad !== null && typeof vad === 'object' && !Array.isArray(vad)) {
+      // Config object form: { model, threshold?, holdoffMs? }. model is required
+      // and selects the detector; threshold and holdoffMs override the mode
+      // defaults when supplied.
+      const { model, threshold, holdoffMs } = vad;
+      if (model !== 'silero' && model !== 'energy') {
+        throw new TypeError(
+          `Invalid vad model: ${JSON.stringify(model)}. Expected 'silero' or 'energy'.`
+        );
+      }
+      vadEnabled = true;
+      vadMode = model;
+      if (threshold !== undefined) {
+        if (typeof threshold !== 'number' || Number.isNaN(threshold)) {
+          throw new TypeError('vad threshold must be a number');
+        }
+        if (threshold < 0 || threshold > 1) {
+          throw new RangeError('vad threshold must be between 0 and 1');
+        }
+        vadThreshold = threshold;
+      }
+      if (holdoffMs !== undefined) {
+        if (typeof holdoffMs !== 'number' || Number.isNaN(holdoffMs)) {
+          throw new TypeError('vad holdoffMs must be a number');
+        }
+        if (holdoffMs < 0) {
+          throw new RangeError('vad holdoffMs must be non-negative');
+        }
+        vadHoldoff = holdoffMs;
+      }
     } else {
       throw new TypeError(
-        `Invalid vad value: ${JSON.stringify(vad)}. Expected false, 'silero', or 'energy'.`
+        `Invalid vad value: ${JSON.stringify(vad)}. Expected false, 'silero', 'energy', or a config object { model, threshold, holdoffMs }.`
       );
     }
 
@@ -286,8 +328,8 @@ class Microphone extends Readable {
       dtype,
       vadEnabled,
       vadMode,
-      vadThreshold: options.vadThreshold ?? (vadMode === 'silero' ? 0.5 : 0.01),
-      vadHoldoff: options.vadHoldoff ?? 300,
+      vadThreshold: vadThreshold ?? (vadMode === 'silero' ? 0.5 : 0.01),
+      vadHoldoff: vadHoldoff ?? 300,
       nativeOptions: {
         sampleRate,
         channels,

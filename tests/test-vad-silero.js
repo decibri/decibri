@@ -54,8 +54,7 @@ async function testSileroCapture() {
   const mic = new Microphone({
     sampleRate: 16000,
     channels: 1,
-    vad: 'silero',
-    vadThreshold: 0.5,
+    vad: { model: 'silero', threshold: 0.5 },
   });
 
   let chunkCount = 0;
@@ -87,8 +86,7 @@ async function testEnergyRegression() {
   const mic = new Microphone({
     sampleRate: 16000,
     channels: 1,
-    vad: 'energy',
-    vadThreshold: 0.001,
+    vad: { model: 'energy', threshold: 0.001 },
   });
 
   let speechFired = false;
@@ -115,8 +113,7 @@ async function testEnergyVadScore() {
   const mic = new Microphone({
     sampleRate: 16000,
     channels: 1,
-    vad: 'energy',
-    vadThreshold: 0.001,
+    vad: { model: 'energy', threshold: 0.001 },
   });
 
   assert(mic.vadScore === 0, 'vadScore starts at 0 before any audio');
@@ -170,8 +167,7 @@ async function testSileroFloat32() {
     sampleRate: 16000,
     channels: 1,
     dtype: 'float32',
-    vad: 'silero',
-    vadThreshold: 0.5,
+    vad: { model: 'silero', threshold: 0.5 },
   });
 
   let chunkCount = 0;

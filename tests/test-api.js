@@ -292,8 +292,8 @@ async function testVAD() {
   const mic = new Microphone({
     sampleRate: 16000,
     channels: 1,
-    vad: 'energy',
-    vadThreshold: 0.001, // very low, ambient noise should trigger
+    // very low threshold; ambient noise should trigger
+    vad: { model: 'energy', threshold: 0.001 },
   });
 
   let speechFired = false;
