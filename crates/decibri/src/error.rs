@@ -169,10 +169,13 @@ pub enum DecibriError {
 
     // ── ORT and VAD model errors ───────────────────────────────────────
     //
-    // These variants carry a structured `ort::Error` via `#[source]` so
-    // downstream consumers can walk `error.source()` to the underlying
-    // ORT error for programmatic handling. Paths are `PathBuf` (not
-    // `String`) so consumers retain path semantics without re-parsing.
+    // These variants carry the underlying ORT failure boxed as a
+    // `Box<dyn std::error::Error + Send + Sync>` via `#[source]` (the same
+    // pattern as `DeviceFailed` keeps cpal out of its signature), so
+    // downstream consumers can walk `error.source()` to the cause for
+    // programmatic handling with no concrete `ort::Error` type appearing in
+    // this enum's public signature. Paths are `PathBuf` (not `String`) so
+    // consumers retain path semantics without re-parsing.
     #[cfg(any(feature = "vad", feature = "denoise"))]
     #[error(
         "decibri: failed to initialize ONNX Runtime: {source}. \
@@ -182,7 +185,7 @@ pub enum DecibriError {
     )]
     OrtInitFailed {
         #[source]
-        source: ort::Error,
+        source: Box<dyn std::error::Error + Send + Sync>,
     },
 
     #[cfg(any(feature = "vad", feature = "denoise"))]
@@ -196,7 +199,7 @@ pub enum DecibriError {
     OrtLoadFailed {
         path: PathBuf,
         #[source]
-        source: ort::Error,
+        source: Box<dyn std::error::Error + Send + Sync>,
     },
 
     /// The `ort_library_path` in `VadConfig` failed a pre-check before it
@@ -224,18 +227,18 @@ pub enum DecibriError {
 
     #[cfg(any(feature = "vad", feature = "denoise"))]
     #[error("Failed to create ort session builder: {0}")]
-    OrtSessionBuildFailed(#[source] ort::Error),
+    OrtSessionBuildFailed(#[source] Box<dyn std::error::Error + Send + Sync>),
 
     #[cfg(any(feature = "vad", feature = "denoise"))]
     #[error("Failed to set ort threads: {0}")]
-    OrtThreadsConfigFailed(#[source] ort::Error),
+    OrtThreadsConfigFailed(#[source] Box<dyn std::error::Error + Send + Sync>),
 
     #[cfg(any(feature = "vad", feature = "denoise"))]
     #[error("Failed to load Silero VAD model from {}: {source}", path.display())]
     VadModelLoadFailed {
         path: PathBuf,
         #[source]
-        source: ort::Error,
+        source: Box<dyn std::error::Error + Send + Sync>,
     },
 
     /// A bundled model file failed to load through the shared ONNX session seam.
@@ -243,7 +246,7 @@ pub enum DecibriError {
     /// Model-agnostic counterpart to [`Self::VadModelLoadFailed`]: the capture
     /// denoise stage surfaces this when its model file cannot be opened, so a
     /// denoise load failure is not reported as a VAD error. Carries the
-    /// offending path and the underlying `ort::Error` via `#[source]`, matching
+    /// offending path and the underlying error boxed via `#[source]`, matching
     /// the other model-load variants. Additive variant permitted by
     /// `#[non_exhaustive]`.
     #[cfg(any(feature = "vad", feature = "denoise"))]
@@ -251,19 +254,19 @@ pub enum DecibriError {
     ModelLoadFailed {
         path: PathBuf,
         #[source]
-        source: ort::Error,
+        source: Box<dyn std::error::Error + Send + Sync>,
     },
 
     #[cfg(any(feature = "vad", feature = "denoise"))]
     #[error("Silero VAD inference failed: {0}")]
-    OrtInferenceFailed(#[source] ort::Error),
+    OrtInferenceFailed(#[source] Box<dyn std::error::Error + Send + Sync>),
 
     #[cfg(any(feature = "vad", feature = "denoise"))]
     #[error("Failed to create {kind} tensor: {source}")]
     OrtTensorCreateFailed {
         kind: &'static str,
         #[source]
-        source: ort::Error,
+        source: Box<dyn std::error::Error + Send + Sync>,
     },
 
     #[cfg(any(feature = "vad", feature = "denoise"))]
@@ -271,7 +274,7 @@ pub enum DecibriError {
     OrtTensorExtractFailed {
         kind: &'static str,
         #[source]
-        source: ort::Error,
+        source: Box<dyn std::error::Error + Send + Sync>,
     },
 
     /// Raised when ONNX Runtime is used in a child process after being
@@ -306,7 +309,7 @@ pub enum DecibriError {
     /// preceding variants (`OrtSessionBuildFailed`, `OrtThreadsConfigFailed`,
     /// `VadModelLoadFailed`, `OrtInferenceFailed`, `OrtTensorCreateFailed`,
     /// `OrtTensorExtractFailed`, plus `OrtInitFailed` and `OrtLoadFailed`)
-    /// which carry an `ort::Error` source directly.
+    /// which carry the underlying ORT failure boxed via `#[source]`.
     ///
     /// Permitted by `#[non_exhaustive]` on this enum (see line 31). Existing
     /// `is_ort_path_error` returns false on this variant: `OnnxBackendFailed`

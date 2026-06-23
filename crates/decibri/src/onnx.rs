@@ -105,9 +105,11 @@ fn wrap_init_error(path: Option<&Path>, err: ort::Error) -> DecibriError {
     match path {
         Some(p) => DecibriError::OrtLoadFailed {
             path: p.to_path_buf(),
-            source: err,
+            source: Box::new(err),
         },
-        None => DecibriError::OrtInitFailed { source: err },
+        None => DecibriError::OrtInitFailed {
+            source: Box::new(err),
+        },
     }
 }
 
@@ -501,9 +503,15 @@ mod ort_impl {
             let providers = provider_dispatch(execution_provider)?;
 
             let builder = Session::builder()
-                .map_err(DecibriError::OrtSessionBuildFailed)?
+                .map_err(|e| DecibriError::OrtSessionBuildFailed(Box::new(e)))?
                 .with_intra_threads(intra)
-                .map_err(|e| DecibriError::OrtThreadsConfigFailed(e.into()))?;
+                .map_err(|e| {
+                    // `with_intra_threads` yields `ort::Error<SessionBuilder>`;
+                    // the recover payload is not `Send + Sync`, so drop it to the
+                    // plain `ort::Error` (as the prior `.into()` did) before boxing.
+                    let source: ort::Error = e.into();
+                    DecibriError::OrtThreadsConfigFailed(Box::new(source))
+                })?;
 
             // Cpu (the default, and the only provider decibri requests today)
             // resolves to `None` above and keeps ORT's built-in CPU provider
@@ -511,9 +519,13 @@ mod ort_impl {
             // identical to before this seam existed. A non-Cpu provider was
             // resolved as [accelerator, cpu] and is registered here, CPU last.
             let mut builder = match providers {
-                Some(providers) => builder
-                    .with_execution_providers(providers)
-                    .map_err(|e| DecibriError::OrtSessionBuildFailed(e.into()))?,
+                Some(providers) => builder.with_execution_providers(providers).map_err(|e| {
+                    // `with_execution_providers` yields `ort::Error<SessionBuilder>`;
+                    // the recover payload is not `Send + Sync`, so drop it to the
+                    // plain `ort::Error` (as the prior `.into()` did) before boxing.
+                    let source: ort::Error = e.into();
+                    DecibriError::OrtSessionBuildFailed(Box::new(source))
+                })?,
                 None => builder,
             };
 
@@ -522,7 +534,7 @@ mod ort_impl {
                     .commit_from_file(path)
                     .map_err(|e| DecibriError::VadModelLoadFailed {
                         path: path.to_path_buf(),
-                        source: e,
+                        source: Box::new(e),
                     })?;
             Ok(Self { inner: session })
         }
@@ -566,13 +578,21 @@ mod ort_impl {
                 let shape: Vec<i64> = view.shape.to_vec();
                 let value: SessionInputValue<'_> = match &view.data {
                     OnnxTensorData::F32(slice) => {
-                        let tensor = Tensor::from_array((shape, slice.to_vec()))
-                            .map_err(|e| DecibriError::OrtTensorCreateFailed { kind, source: e })?;
+                        let tensor = Tensor::from_array((shape, slice.to_vec())).map_err(|e| {
+                            DecibriError::OrtTensorCreateFailed {
+                                kind,
+                                source: Box::new(e),
+                            }
+                        })?;
                         tensor.into()
                     }
                     OnnxTensorData::I64(slice) => {
-                        let tensor = Tensor::from_array((shape, slice.to_vec()))
-                            .map_err(|e| DecibriError::OrtTensorCreateFailed { kind, source: e })?;
+                        let tensor = Tensor::from_array((shape, slice.to_vec())).map_err(|e| {
+                            DecibriError::OrtTensorCreateFailed {
+                                kind,
+                                source: Box::new(e),
+                            }
+                        })?;
                         tensor.into()
                     }
                 };
@@ -582,7 +602,7 @@ mod ort_impl {
             let outputs = self
                 .inner
                 .run(input_pairs)
-                .map_err(DecibriError::OrtInferenceFailed)?;
+                .map_err(|e| DecibriError::OrtInferenceFailed(Box::new(e)))?;
 
             let names: Vec<String> = outputs.keys().map(|k| k.to_string()).collect();
             let mut tensors: Vec<(String, OnnxOutputTensor)> = Vec::with_capacity(names.len());
@@ -593,7 +613,10 @@ mod ort_impl {
                 let owned = match dtype {
                     Some(TensorElementType::Float32) => {
                         let (shape, data) = value.try_extract_tensor::<f32>().map_err(|e| {
-                            DecibriError::OrtTensorExtractFailed { kind, source: e }
+                            DecibriError::OrtTensorExtractFailed {
+                                kind,
+                                source: Box::new(e),
+                            }
                         })?;
                         OnnxOutputTensor {
                             shape: shape.to_vec(),
@@ -602,7 +625,10 @@ mod ort_impl {
                     }
                     Some(TensorElementType::Int64) => {
                         let (shape, data) = value.try_extract_tensor::<i64>().map_err(|e| {
-                            DecibriError::OrtTensorExtractFailed { kind, source: e }
+                            DecibriError::OrtTensorExtractFailed {
+                                kind,
+                                source: Box::new(e),
+                            }
                         })?;
                         OnnxOutputTensor {
                             shape: shape.to_vec(),

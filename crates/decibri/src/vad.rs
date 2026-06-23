@@ -462,7 +462,7 @@ mod tests {
     fn test_is_ort_path_error() {
         let load_failed = DecibriError::OrtLoadFailed {
             path: PathBuf::from("/tmp/x"),
-            source: ort::Error::new("test"),
+            source: Box::new(ort::Error::new("test")),
         };
         assert!(load_failed.is_ort_path_error());
 
@@ -474,7 +474,7 @@ mod tests {
 
         // Other variants return false.
         let init_failed = DecibriError::OrtInitFailed {
-            source: ort::Error::new("test"),
+            source: Box::new(ort::Error::new("test")),
         };
         assert!(!init_failed.is_ort_path_error());
 
