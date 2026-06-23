@@ -288,6 +288,12 @@ class Microphone:
     tune the threshold and holdoff. With ``vad=False``, ``vad_score``
     returns 0.0 and ``is_speaking`` returns False unconditionally.
 
+    The ``dc_removal`` parameter, when ``True``, removes a constant (DC) offset
+    from the captured audio with a one-pole DC-blocking high-pass, applied first
+    in the chain (before denoise); leave it ``False`` (the default) to keep the
+    capture path byte-identical. It is same-length with no added latency, so
+    ``vad_score`` and ``is_speaking`` are unaffected.
+
     The ``denoise`` parameter selects an optional bundled single-channel
     speech-enhancement model (``"fastenhancer-t"``) applied to the captured
     audio; omit it (the default ``None``) to leave denoise off, which keeps the
@@ -345,6 +351,7 @@ class Microphone:
         highpass: Literal[80, 100] | None = None,
         agc: int | None = None,
         limiter: float | None = None,
+        dc_removal: bool = False,
     ) -> None:
         """Construct a Microphone audio capture instance.
 
@@ -578,6 +585,7 @@ class Microphone:
             highpass=highpass,
             agc=agc,
             limiter=limiter,
+            dc_removal=dc_removal,
         )
 
         self._vad_enabled = vad_enabled

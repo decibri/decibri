@@ -128,6 +128,17 @@ export interface MicrophoneOptions extends ReadableOptions {
   modelPath?: string;
 
   /**
+   * Remove a constant (DC) offset from the captured audio with a one-pole
+   * DC-blocking high-pass. Set `true` to enable it; omit or set `false` to
+   * leave it off (the default), which keeps the capture path byte-identical.
+   * Runs first in the chain, before denoise, and is same-length with no added
+   * latency, so `vadScore` and the `speech` / `silence` events are unaffected.
+   * Pure DSP: no bundled file or download is needed.
+   * @default undefined
+   */
+  dcRemoval?: boolean;
+
+  /**
    * Single-channel speech enhancement (denoise) model applied to the captured
    * audio. The only accepted value is `'fastenhancer-t'`; omit to leave denoise
    * off (the default), which keeps the capture path unchanged. The bundled

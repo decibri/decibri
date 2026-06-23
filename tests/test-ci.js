@@ -625,6 +625,51 @@ try {
 console.log('  Group 8d done\n');
 
 // ═══════════════════════════════════════════════════════════════════════════════
+// Group 8e: DC removal option (deterministic, no hardware required)
+// ═══════════════════════════════════════════════════════════════════════════════
+//
+// DC removal is pure DSP (a one-pole DC-blocking high-pass; no bundled file, no
+// ONNX, no ORT), so construction and the off-by-default path are fully CI-safe.
+// The stage is built at start() like the other transforms; its DSP response (a
+// DC offset removed, length preserved, continuous across chunk boundaries) is
+// covered by the core Rust tests. It is a plain bool toggle, so true turns it on
+// and false or absence leaves it off, a byte-identical no-op.
+
+console.log('--- Group 8e: DC removal option ---');
+
+// dcRemoval: true constructs (the DC stage is built at start()).
+try {
+  const m = new Microphone({ sampleRate: 16000, channels: 1, dcRemoval: true });
+  assert(m instanceof Microphone, 'dcRemoval: true constructs');
+  m.stop();
+} catch (e) {
+  console.log(`  FAIL: dcRemoval: true construction rejected: ${e.message}`);
+  failed++;
+}
+
+// dcRemoval: false is the explicit off form and constructs identically.
+try {
+  const m = new Microphone({ sampleRate: 16000, channels: 1, dcRemoval: false });
+  assert(m instanceof Microphone, 'dcRemoval: false constructs');
+  m.stop();
+} catch (e) {
+  console.log(`  FAIL: dcRemoval: false construction rejected: ${e.message}`);
+  failed++;
+}
+
+// Off by default: no dcRemoval key constructs identically to a plain mic.
+try {
+  const m = new Microphone({ sampleRate: 16000, channels: 1 });
+  assert(m instanceof Microphone, 'no dcRemoval key constructs (off by default)');
+  m.stop();
+} catch (e) {
+  console.log(`  FAIL: no-dcRemoval construction rejected: ${e.message}`);
+  failed++;
+}
+
+console.log('  Group 8e done\n');
+
+// ═══════════════════════════════════════════════════════════════════════════════
 // Group 9: async open() factories (deterministic, no hardware required)
 // ═══════════════════════════════════════════════════════════════════════════════
 //

@@ -921,6 +921,7 @@ impl MicrophoneBridge {
         highpass = None,
         agc = None,
         limiter = None,
+        dc_removal = false,
     ))]
     #[allow(clippy::too_many_arguments)]
     fn new(
@@ -942,6 +943,7 @@ impl MicrophoneBridge {
         highpass: Option<i64>,
         agc: Option<i8>,
         limiter: Option<f32>,
+        dc_removal: bool,
     ) -> PyResult<Self> {
         let parsed_format = parse_sample_format(&format).map_err(|e| to_py_err(py, e))?;
         let device_selector = build_device_selector(device.as_ref())?;
@@ -953,6 +955,12 @@ impl MicrophoneBridge {
         capture_config.channels = channels;
         capture_config.frames_per_buffer = frames_per_buffer;
         capture_config.device = device_selector;
+
+        // DC removal: a same-length one-pole DC-blocking high-pass, the first
+        // transform stage (before denoise). `false` (the default) leaves it off,
+        // a byte-identical no-op. A plain bool toggle, so there is no range check,
+        // only the forward to the core config field.
+        capture_config.dc_removal = dc_removal;
 
         // Denoise: map the closed-set model name to the core selector and attach
         // the bundled model path the wrapper resolved. Absent leaves denoise off
@@ -1503,6 +1511,7 @@ impl AsyncMicrophoneBridge {
         highpass = None,
         agc = None,
         limiter = None,
+        dc_removal = false,
     ))]
     #[allow(clippy::too_many_arguments)]
     fn new(
@@ -1524,6 +1533,7 @@ impl AsyncMicrophoneBridge {
         highpass: Option<i64>,
         agc: Option<i8>,
         limiter: Option<f32>,
+        dc_removal: bool,
     ) -> PyResult<Self> {
         let inner = MicrophoneBridge::new(
             py,
@@ -1544,6 +1554,7 @@ impl AsyncMicrophoneBridge {
             highpass,
             agc,
             limiter,
+            dc_removal,
         )?;
         Ok(AsyncMicrophoneBridge {
             inner: Arc::new(inner),
