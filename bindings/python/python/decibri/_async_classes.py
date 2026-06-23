@@ -138,7 +138,7 @@ class AsyncMicrophone:
         as_ndarray: bool = False,
         ort_library_path: str | Path | None = None,
         denoise: Literal["fastenhancer-t"] | None = None,
-        highpass: Literal["80hz"] | None = None,
+        highpass: Literal[80, 100] | None = None,
         agc: int | None = None,
         limiter: float | None = None,
     ) -> None:
@@ -282,13 +282,13 @@ class AsyncMicrophone:
                     "during installation."
                 ) from exc
 
-        # Validate high-pass. Same logic as the sync Microphone: a closed-set
-        # cutoff name selects a filter, absence leaves the high-pass off, an
-        # unknown name is a clear ValueError. Pure DSP, so there is nothing to
-        # resolve, only the closed-set check.
+        # Validate high-pass. Same logic as the sync Microphone: a numeric cutoff
+        # in Hz selects a filter, absence leaves the high-pass off, an out-of-set
+        # value is a clear ValueError. Pure DSP, so there is nothing to resolve,
+        # only the closed-set check.
         if highpass is not None and highpass not in _VALID_HIGHPASS:
             raise ValueError(
-                f"Invalid highpass value: {highpass!r}. Expected '80hz'."
+                f"highpass must be one of: 80, 100; got {highpass!r}"
             )
 
         # Validate AGC. Same logic as the sync Microphone: an integer dBFS target

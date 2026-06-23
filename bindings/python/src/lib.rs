@@ -939,7 +939,7 @@ impl MicrophoneBridge {
         ort_library_path: Option<PathBuf>,
         denoise: Option<String>,
         denoise_model_path: Option<PathBuf>,
-        highpass: Option<String>,
+        highpass: Option<i64>,
         agc: Option<i8>,
         limiter: Option<f32>,
     ) -> PyResult<Self> {
@@ -980,17 +980,18 @@ impl MicrophoneBridge {
             capture_config.ort_library_path = ort_library_path.clone();
         }
 
-        // High-pass: map the closed-set cutoff name to the core selector. Absent
-        // leaves the high-pass off and the capture path unchanged. Pure DSP, so
-        // there is no model file or ORT to resolve, only the closed-set check
-        // (the wrapper performs the same check and raises ValueError; this is the
-        // native backstop).
-        if let Some(name) = highpass.as_deref() {
-            let filter = match name {
-                "80hz" => HighpassFilter::Hz80,
+        // High-pass: map the closed-set cutoff in Hz to the core selector.
+        // Absent leaves the high-pass off and the capture path unchanged. Pure
+        // DSP, so there is no model file or ORT to resolve, only the closed-set
+        // check (the wrapper performs the same check and raises ValueError; this
+        // is the native backstop).
+        if let Some(hz) = highpass {
+            let filter = match hz {
+                80 => HighpassFilter::Hz80,
+                100 => HighpassFilter::Hz100,
                 other => {
                     return Err(PyValueError::new_err(format!(
-                        "highpass must be '80hz', got '{other}'"
+                        "highpass must be one of: 80, 100; got {other}"
                     )))
                 }
             };
@@ -1520,7 +1521,7 @@ impl AsyncMicrophoneBridge {
         ort_library_path: Option<PathBuf>,
         denoise: Option<String>,
         denoise_model_path: Option<PathBuf>,
-        highpass: Option<String>,
+        highpass: Option<i64>,
         agc: Option<i8>,
         limiter: Option<f32>,
     ) -> PyResult<Self> {

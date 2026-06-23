@@ -69,10 +69,11 @@ pub struct DecibriOptions {
     pub denoise_model_path: Option<String>,
     #[napi(skip_typescript)]
     pub ort_library_path: Option<String>,
-    /// Capture high-pass filter selector. The only accepted value is `'80hz'`,
-    /// an 80 Hz second-order Butterworth high-pass; absent leaves the high-pass
-    /// off. Pure DSP: no bundled file and no model path, unlike `denoise`.
-    pub highpass: Option<String>,
+    /// Capture high-pass filter cutoff in Hz. The accepted values are `80` (an
+    /// 80 Hz second-order Butterworth high-pass) and `100` (a 100 Hz one);
+    /// absent leaves the high-pass off. Pure DSP: no bundled file and no model
+    /// path, unlike `denoise`.
+    pub highpass: Option<i32>,
     /// Capture AGC target level in dBFS: an integer in `-40..=-3` (typical -18);
     /// absent leaves AGC off. Drives the captured level toward the target. Pure
     /// DSP: no bundled file and no model path, like `highpass`.
@@ -188,18 +189,19 @@ fn build_microphone_parts(options: Option<DecibriOptions>) -> Result<MicrophoneP
             .map(std::path::PathBuf::from);
     }
 
-    // High-pass: map the closed-set cutoff name to the core selector. Absent
+    // High-pass: map the closed-set cutoff in Hz to the core selector. Absent
     // leaves the high-pass off and the capture path unchanged. Pure DSP, so
     // there is no model file or ORT to resolve, only the closed-set check (the
-    // JS wrapper performs the same check and raises the TypeError; this is the
+    // JS wrapper performs the same check and raises the RangeError; this is the
     // native backstop).
-    if let Some(name) = opts.highpass.as_deref() {
-        let filter = match name {
-            "80hz" => HighpassFilter::Hz80,
+    if let Some(hz) = opts.highpass {
+        let filter = match hz {
+            80 => HighpassFilter::Hz80,
+            100 => HighpassFilter::Hz100,
             other => {
                 return Err(Error::new(
                     Status::InvalidArg,
-                    format!("highpass must be '80hz', got '{other}'"),
+                    format!("highpass must be one of: 80, 100; got {other}"),
                 ))
             }
         };

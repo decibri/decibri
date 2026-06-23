@@ -1621,10 +1621,11 @@ mod tests {
     // cross-block state continuity, that it builds no stage when off, its chain
     // placement, and its zero latency.
 
-    /// Run a unit sine of `freq_hz` through a high-pass-only chain and return the
-    /// steady-state magnitude (output RMS over the settled second half divided by
-    /// the input RMS). Used to read the filter's response at a single frequency.
-    fn highpass_gain_at(freq_hz: f32) -> f32 {
+    /// Run a unit sine of `freq_hz` through a `filter`-only high-pass chain and
+    /// return the steady-state magnitude (output RMS over the settled second half
+    /// divided by the input RMS). Used to read the filter's response at a single
+    /// frequency for any cutoff variant.
+    fn highpass_gain_at(freq_hz: f32, filter: HighpassFilter) -> f32 {
         let fs = 16_000.0_f32;
         let n = 16_000usize;
         let input: Vec<f32> = (0..n)
@@ -1638,7 +1639,7 @@ mod tests {
             Transforms {
                 dc_removal: false,
                 denoise: None,
-                highpass: Some(HighpassFilter::Hz80),
+                highpass: Some(filter),
                 agc: None,
                 limiter: None,
             },
@@ -1664,21 +1665,21 @@ mod tests {
     fn highpass_attenuates_below_cutoff_and_preserves_passband() {
         // Well below the 80 Hz corner (two octaves down): a second-order section
         // rolls off at ~12 dB/octave, so 20 Hz is ~24 dB down (gain ~0.06).
-        let sub = highpass_gain_at(20.0);
+        let sub = highpass_gain_at(20.0, HighpassFilter::Hz80);
         assert!(
             sub < 0.15,
             "20 Hz (well below the 80 Hz corner) is strongly attenuated (gain {sub})"
         );
 
         // The speech band passes essentially untouched.
-        let pass = highpass_gain_at(1000.0);
+        let pass = highpass_gain_at(1000.0, HighpassFilter::Hz80);
         assert!(
             (0.95..=1.05).contains(&pass),
             "1 kHz (passband) is preserved at near unity (gain {pass})"
         );
 
         // At the corner the Butterworth response is the -3 dB point (1/sqrt(2)).
-        let corner = highpass_gain_at(80.0);
+        let corner = highpass_gain_at(80.0, HighpassFilter::Hz80);
         assert!(
             (0.60..=0.80).contains(&corner),
             "80 Hz (the corner) sits near the -3 dB Butterworth point of 0.707 (gain {corner})"
@@ -1711,6 +1712,48 @@ mod tests {
         assert!(
             mean.abs() < 1e-3,
             "a DC offset settles to a near-zero-mean output (mean {mean})"
+        );
+    }
+
+    /// Filter correctness for the 100 Hz cutoff member: the 100 Hz second-order
+    /// Butterworth high-pass strongly attenuates content well below its corner,
+    /// passes the speech band at near unity, and sits near the -3 dB point at the
+    /// 100 Hz corner itself. Mirrors the 80 Hz test, confirming the second
+    /// cutoff variant routes its own frequency through the shared biquad design.
+    #[test]
+    fn highpass_100hz_attenuates_below_cutoff_and_preserves_passband() {
+        // Well below the 100 Hz corner (two octaves down): the second-order
+        // section rolls off at ~12 dB/octave, so 25 Hz is ~24 dB down (gain
+        // ~0.06).
+        let sub = highpass_gain_at(25.0, HighpassFilter::Hz100);
+        assert!(
+            sub < 0.15,
+            "25 Hz (well below the 100 Hz corner) is strongly attenuated (gain {sub})"
+        );
+
+        // The speech band passes essentially untouched.
+        let pass = highpass_gain_at(1000.0, HighpassFilter::Hz100);
+        assert!(
+            (0.95..=1.05).contains(&pass),
+            "1 kHz (passband) is preserved at near unity (gain {pass})"
+        );
+
+        // At the corner the Butterworth response is the -3 dB point (1/sqrt(2)).
+        let corner = highpass_gain_at(100.0, HighpassFilter::Hz100);
+        assert!(
+            (0.60..=0.80).contains(&corner),
+            "100 Hz (the corner) sits near the -3 dB Butterworth point of 0.707 (gain {corner})"
+        );
+
+        // The 100 Hz cut is more aggressive than the 80 Hz cut at the same
+        // sub-band frequency: at 80 Hz, the 100 Hz filter (still below its own
+        // corner) attenuates more than the 80 Hz filter (at its corner).
+        let at_80_with_100 = highpass_gain_at(80.0, HighpassFilter::Hz100);
+        let at_80_with_80 = highpass_gain_at(80.0, HighpassFilter::Hz80);
+        assert!(
+            at_80_with_100 < at_80_with_80,
+            "the 100 Hz cutoff attenuates 80 Hz more than the 80 Hz cutoff does \
+             ({at_80_with_100} < {at_80_with_80})"
         );
     }
 

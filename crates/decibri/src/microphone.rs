@@ -55,20 +55,25 @@ pub enum DenoiseModel {
 /// High-pass filter selector for the capture chain.
 ///
 /// A closed, `#[non_exhaustive]` set that is intentionally designed to grow:
-/// today the only value is [`HighpassFilter::Hz80`], an 80 Hz second-order
-/// Butterworth high-pass that removes low-frequency rumble below the voice band.
-/// Naming the cutoff rather than taking a bool or a free integer keeps adding
-/// further cutoffs (a `'100hz'` detent, a `'300hz'` telephony cut) a
-/// non-breaking widening (a new variant), and keeps the caller on record about
-/// which cutoff they selected. The closed named set is deliberate: members are
-/// added without a breaking change, the way [`DenoiseModel`] grows. The filter
-/// is pure DSP, so it bundles no file and loads no runtime.
+/// today the values are [`HighpassFilter::Hz80`] (an 80 Hz second-order
+/// Butterworth high-pass, the conventional voice rumble cutoff) and
+/// [`HighpassFilter::Hz100`] (a 100 Hz second-order Butterworth, the more
+/// aggressive rumble cut). Both remove low-frequency rumble below the voice
+/// band. Naming the cutoff rather than taking a bool or a free integer keeps
+/// adding further cutoffs (a `300` Hz telephony cut, say) a non-breaking
+/// widening (a new variant), and keeps the caller on record about which cutoff
+/// they selected. The closed named set is deliberate: members are added without
+/// a breaking change, the way [`DenoiseModel`] grows. The filter is pure DSP, so
+/// it bundles no file and loads no runtime.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum HighpassFilter {
     /// An 80 Hz second-order Butterworth high-pass, the conventional voice
     /// rumble cutoff.
     Hz80,
+    /// A 100 Hz second-order Butterworth high-pass, a more aggressive rumble
+    /// cut than [`HighpassFilter::Hz80`].
+    Hz100,
 }
 
 impl HighpassFilter {
@@ -78,6 +83,7 @@ impl HighpassFilter {
     pub(crate) fn cutoff_hz(self) -> f32 {
         match self {
             HighpassFilter::Hz80 => 80.0,
+            HighpassFilter::Hz100 => 100.0,
         }
     }
 }
