@@ -32,6 +32,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - Resampled capture (a device whose native rate differs from the configured `sample_rate`) no longer drops the resampler's group-delay tail at stream close: the final, possibly-shorter chunk now carries it, so `Microphone.read()` and `AsyncMicrophone.read()` deliver the complete resampled signal. A device already at the requested rate (no resample) is unchanged.
 - On macOS, the microphone-permission error message now reads "System Settings > Privacy & Security" (the modern macOS wording) instead of the pre-Ventura "System Preferences > Security & Privacy".
 
+### Security
+
+- The `pyo3` binding stack moves from 0.28 to 0.29 (with `numpy` and `pyo3-async-runtimes`), resolving RUSTSEC-2026-0176 (an out-of-bounds read in `PyList` and `PyTuple` iterator `nth` / `nth_back`) and RUSTSEC-2026-0177 (a missing `Sync` bound on `PyCFunction::new_closure`), the two advisories that matched the previous 0.28 line. No public API change: the `abi3-py310` wheel floor and the supported Python versions are unchanged.
+
 ## [0.4.3] - 2026-06-12
 
 ### Fixed
