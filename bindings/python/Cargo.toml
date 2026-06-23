@@ -30,8 +30,10 @@ crate-type = ["cdylib"]
 # default features (capture, playback, vad, denoise, gain, ort-load-dynamic).
 decibri = { version = "4.3", path = "../../crates/decibri" }
 
-# PyO3 0.28 is the first MSRV-1.83 release line with the attach / detach /
-# initialize API renames; aligns with workspace MSRV 1.88 (headroom preserved).
+# PyO3 0.29 line (MSRV 1.83, below the workspace 1.88 floor, so headroom is
+# preserved). Bumped from 0.28 to take the RUSTSEC-2026-0176 and -0177 fixes,
+# which land only in >=0.29.0 (no 0.28 backport); the bump is internal-only
+# (abi3-py310 floor and the public surface are unchanged).
 #
 # Feature choices (all three required for cross-platform abi3 extension crates):
 #
@@ -58,28 +60,28 @@ decibri = { version = "4.3", path = "../../crates/decibri" }
 # skip pyo3's Python interpreter probe. On Windows that setting prevents
 # pyo3-build-config from emitting the `cargo:rustc-link-search` directive
 # that the PE linker needs, and the build fails with LNK1181.
-pyo3 = { version = "0.28", features = [
+pyo3 = { version = "0.29", features = [
     "abi3-py310",
     "extension-module",
     "generate-import-lib",
 ] }
 
 # rust-numpy powers the optional numpy=True ndarray return paths on
-# Decibri.read and AsyncDecibri.read. Pinned exactly to 0.28.0
-# (released 2026-02-08) because the crate's release cadence tracks PyO3
-# minor versions; any version bump should be a deliberate cross-workflow
-# action paired with a pyo3 bump.
-numpy = "=0.28.0"
+# Decibri.read and AsyncDecibri.read. Pinned exactly to 0.29.0 because the
+# crate's release cadence tracks PyO3 minor versions; this bump is the
+# deliberate cross-workflow action paired with the pyo3 0.29 bump (numpy 0.29.0
+# depends on pyo3 ^0.29, so the two move together).
+numpy = "=0.29.0"
 
 # pyo3-async-runtimes powers the AsyncDecibri / AsyncDecibriOutput surfaces.
-# Pinned exactly to 0.28.0 because the crate is brand new (released
-# 2026-02-04) and version drift in the absence of a long stability track record
-# is a real risk; any minor-version bump should be a deliberate cross-workflow
-# action. The `tokio-runtime` feature selects the Tokio backend; `attributes`
+# Pinned exactly to 0.29.0 because the crate is young and version drift in the
+# absence of a long stability track record is a real risk; this bump is the
+# deliberate cross-workflow action paired with the pyo3 0.29 bump (it depends
+# on pyo3 ^0.29). The `tokio-runtime` feature selects the Tokio backend; `attributes`
 # enables the `#[pyo3_async_runtimes::tokio::main]` macro (we do not currently
 # use the macro from a cdylib context, but it is part of the standard feature
 # set and inert when unused).
-pyo3-async-runtimes = { version = "=0.28.0", features = ["tokio-runtime", "attributes"] }
+pyo3-async-runtimes = { version = "=0.29.0", features = ["tokio-runtime", "attributes"] }
 
 # tokio is the async runtime that pyo3-async-runtimes drives. Features:
 #   - `rt`: the runtime itself (required by pyo3-async-runtimes).
