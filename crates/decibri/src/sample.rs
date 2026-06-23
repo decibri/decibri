@@ -6,8 +6,9 @@ pub fn f32_to_i16_le_bytes(samples: &[f32]) -> Vec<u8> {
     let mut out = Vec::with_capacity(samples.len() * 2);
     for &s in samples {
         let clamped = s.clamp(-1.0, 1.0);
-        // Scale to i16 range. Use 32768.0 (not 32767.0) to match the JS convention
-        // where computeRMS divides by 32768.
+        // Scale to i16 range. Use 32768.0 (not 32767.0) so the i16 normalization
+        // is the exact inverse of the `/ 32768.0` in `i16_le_bytes_to_f32`, the
+        // same `[0, 1]` scale `rms` reports on.
         let scaled = (clamped * 32768.0) as i32;
         // Clamp to valid i16 range [-32768, 32767]
         let val = scaled.clamp(-32768, 32767) as i16;
@@ -99,6 +100,28 @@ pub fn downmix_to_mono(samples: &[f32], channels: u16) -> Vec<f32> {
         .chunks_exact(channels)
         .map(|frame| frame.iter().sum::<f32>() / channels as f32)
         .collect()
+}
+
+/// Root-mean-square level of f32 samples, returned in `[0.0, 1.0]`.
+///
+/// Computes `sqrt(mean(x^2))` over `samples`, the energy-VAD score. Returns
+/// `0.0` for an empty slice (no division by zero). Accumulates the sum of
+/// squares in `f64` so a long block does not lose precision, then narrows the
+/// result to `f32`.
+///
+/// The samples are expected in the normalized `[-1.0, 1.0]` domain (decibri's
+/// internal representation), so the result shares the same `/32768` `[0, 1]`
+/// scale as the i16 path (see [`f32_to_i16_le_bytes`]): a quarter-full-scale
+/// signal returns about `0.25`, matching what the i16-normalized RMS would
+/// give within quantization. Feed it the mono signal (downmix first when the
+/// frame is interleaved, as [`downmix_to_mono`] does), so the score reflects
+/// one channel's level.
+pub fn rms(samples: &[f32]) -> f32 {
+    if samples.is_empty() {
+        return 0.0;
+    }
+    let sum_sq: f64 = samples.iter().map(|&s| (s as f64) * (s as f64)).sum();
+    (sum_sq / samples.len() as f64).sqrt() as f32
 }
 
 #[cfg(test)]
@@ -303,5 +326,67 @@ mod tests {
     fn test_downmix_empty() {
         let empty: Vec<f32> = vec![];
         assert!(downmix_to_mono(&empty, 2).is_empty());
+    }
+
+    // ── rms (energy-VAD score) ────────────────────────────────────────────
+
+    #[test]
+    fn test_rms_silence_is_zero() {
+        assert_eq!(rms(&[0.0; 512]), 0.0);
+    }
+
+    #[test]
+    fn test_rms_empty_is_zero() {
+        // No samples: 0.0, not a division by zero.
+        assert_eq!(rms(&[]), 0.0);
+    }
+
+    #[test]
+    fn test_rms_constant_equals_amplitude() {
+        // A constant signal's RMS equals its absolute amplitude. 0.25 full scale
+        // returns 0.25, the same [0, 1] scale the i16-normalized path produces.
+        let rms_val = rms(&[0.25; 1000]);
+        assert!((rms_val - 0.25).abs() < 1e-6, "rms {rms_val}");
+    }
+
+    #[test]
+    fn test_rms_sine_is_amplitude_over_root_two() {
+        // RMS of a sine of amplitude A is A / sqrt(2).
+        let amplitude = 0.5_f32;
+        let samples: Vec<f32> = (0..4000)
+            .map(|k| amplitude * (k as f32 * 0.05).sin())
+            .collect();
+        let rms_val = rms(&samples);
+        let expected = amplitude / 2.0_f32.sqrt();
+        assert!(
+            (rms_val - expected).abs() < 1e-2,
+            "rms {rms_val} vs {expected}"
+        );
+    }
+
+    /// The f32 RMS sits on the same `[0, 1]` scale as the legacy i16-normalized
+    /// RMS (quantize by `* 32768`, normalize by `/ 32768`) within quantization,
+    /// so the `0.01` energy-threshold default keeps its meaning when the score
+    /// is computed on the f32 signal rather than the quantized i16 samples.
+    #[test]
+    fn test_rms_matches_i16_normalized_convention() {
+        let samples: Vec<f32> = (0..2000).map(|k| 0.1 * (k as f32 * 0.05).sin()).collect();
+        let f32_rms = rms(&samples);
+        // Legacy convention: quantize to i16 (matching f32_to_i16_le_bytes),
+        // then compute RMS on i16 / 32768.
+        let i16_norm: Vec<f64> = samples
+            .iter()
+            .map(|&s| {
+                let q = (s.clamp(-1.0, 1.0) * 32768.0) as i32;
+                let v = q.clamp(-32768, 32767) as i16;
+                v as f64 / 32768.0
+            })
+            .collect();
+        let legacy_rms =
+            (i16_norm.iter().map(|x| x * x).sum::<f64>() / i16_norm.len() as f64).sqrt() as f32;
+        assert!(
+            (f32_rms - legacy_rms).abs() < 1e-3,
+            "f32 rms {f32_rms} vs legacy i16-normalized rms {legacy_rms}"
+        );
     }
 }

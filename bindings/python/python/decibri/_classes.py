@@ -2,15 +2,17 @@
 
 This module ships the consumer-facing `Microphone` class. The class wraps the
 native `_decibri.MicrophoneBridge` pyclass and adds wrapper-layer VAD policy:
-threshold application, holdoff state
-machine, and mode dispatch (Silero passthrough vs energy RMS computation).
+threshold application and the holdoff state machine, over the score the bridge
+computes for both VAD modes.
 
 Architectural notes:
 
-- The Rust bridge is a thin inference primitive. It exposes raw Silero
-  probability via `vad_probability` and stores `vad_holdoff_ms` as inert
-  state. All policy (threshold comparison, holdoff timing, mode dispatch,
-  energy RMS) lives here. This mirrors the Node binding's JS-side pattern.
+- The Rust bridge runs the detector. It exposes the score (the Silero
+  probability in silero mode, the energy RMS in energy mode) via
+  `vad_probability`, computed on the signal before any opt-in enhancement
+  step, and stores `vad_holdoff_ms` as inert state. The wrapper applies
+  threshold and holdoff policy on top of that scalar, the same for both
+  modes. This mirrors the Node binding's pattern.
 
 - `is_speaking` reflects time-based holdoff semantics. Above-threshold
   chunks set the speaking state and clear any pending silence timer.
@@ -20,11 +22,12 @@ Architectural notes:
   access using `time.monotonic()`, so consumers who pause iteration still
   observe correct state when they next read the property.
 
-- `vad_score` is mode-aware. In Silero mode it passes through the
-  bridge's raw probability. In energy mode it returns the most recent
-  chunk's RMS, computed inside `read()` and cached. The bridge keeps
-  the raw `vad_probability` name for cross-binding consistency; the
-  wrapper exposes the mode-agnostic `vad_score` view.
+- `vad_score` reads the bridge score for both modes: the Silero
+  probability in silero mode, the energy RMS in energy mode, both computed
+  natively on the pre-enhancement signal so enabling enhancement does not
+  change detection. The bridge keeps the raw `vad_probability` name for
+  cross-binding consistency; the wrapper exposes the mode-agnostic
+  `vad_score` view.
 
 - This module's classes are synchronous. The async equivalents live in
   `decibri._async_classes` (`AsyncMicrophone`, `AsyncSpeaker`).
@@ -33,13 +36,11 @@ Architectural notes:
 from __future__ import annotations
 
 import importlib.resources
-import math
-import struct
 import time
 from dataclasses import dataclass
 from pathlib import Path
 from types import TracebackType
-from typing import TYPE_CHECKING, Any, Iterator, Literal, Union, cast
+from typing import TYPE_CHECKING, Any, Iterator, Literal, Union
 
 from typing_extensions import Self
 
@@ -103,16 +104,14 @@ class Chunk:
 # ---------------------------------------------------------------------------
 # VAD policy state machine.
 #
-# Encapsulates the threshold + holdoff + mode-dispatch logic that the Rust
-# bridge does NOT do. Three responsibilities:
+# Encapsulates the threshold + holdoff logic that the Rust bridge does NOT do.
+# Two responsibilities, mode-agnostic (the bridge computes the score for both
+# Silero and energy modes on the pre-enhancement signal and exposes it via
+# `vad_probability`):
 #
-#   1. Compute or pass through the per-chunk probability value.
-#      - Silero mode: passthrough from bridge.
-#      - Energy mode: wrapper-computed RMS over the chunk.
+#   1. Apply the user's threshold to the bridge score.
 #
-#   2. Apply the user's threshold to that value.
-#
-#   3. Run a holdoff state machine on the threshold result, with time-based
+#   2. Run a holdoff state machine on the threshold result, with time-based
 #      expiry of the silence timer.
 #
 # Construction is driven by Microphone.__init__; consumers don't touch this
@@ -124,10 +123,8 @@ class _VadStateMachine:
     """Wrapper-layer VAD policy. Pure Python; no native interaction."""
 
     __slots__ = (
-        "_mode",
         "_threshold",
         "_holdoff_seconds",
-        "_format",
         "_is_speaking",
         "_silence_started_at",
         "_last_probability",
@@ -135,15 +132,11 @@ class _VadStateMachine:
 
     def __init__(
         self,
-        mode: str,
         threshold: float,
         holdoff_ms: int,
-        sample_format: str,
     ) -> None:
-        self._mode = mode
         self._threshold = float(threshold)
         self._holdoff_seconds = holdoff_ms / 1000.0
-        self._format = sample_format
         self._is_speaking = False
         self._silence_started_at: float | None = None
         self._last_probability = 0.0
@@ -154,16 +147,13 @@ class _VadStateMachine:
         self._silence_started_at = None
         self._last_probability = 0.0
 
-    def process_chunk(self, chunk_bytes: bytes, bridge_probability: float) -> None:
-        """Update VAD state from one chunk. Called inside Microphone.read()."""
-        if self._mode == "silero":
-            probability = bridge_probability
-        elif self._mode == "energy":
-            probability = _compute_rms(chunk_bytes, self._format)
-        else:
-            # Should be unreachable; constructor validates mode.
-            probability = 0.0
+    def process_chunk(self, probability: float) -> None:
+        """Update VAD state from one chunk's bridge score.
 
+        Called inside Microphone.read() with the bridge's `vad_probability`:
+        the Silero probability in silero mode or the energy RMS in energy mode,
+        both computed natively on the pre-enhancement signal.
+        """
         self._last_probability = probability
 
         above_threshold = probability >= self._threshold
@@ -198,43 +188,6 @@ class _VadStateMachine:
     @property
     def vad_score(self) -> float:
         return self._last_probability
-
-
-# ---------------------------------------------------------------------------
-# RMS computation for energy VAD.
-#
-# Mirrors Node's _processVadEnergy: int16 samples normalized to [-1, 1] before
-# squaring; float32 used as-is. Computed in pure Python via struct.unpack;
-# could be optimized with NumPy if the hot path warrants it.
-# ---------------------------------------------------------------------------
-
-
-def _compute_rms(chunk_bytes: bytes, sample_format: str) -> float:
-    """Compute RMS over a chunk. Returns a value in [0, 1] for normalized formats."""
-    if not chunk_bytes:
-        return 0.0
-
-    if sample_format == "int16":
-        sample_count = len(chunk_bytes) // 2
-        if sample_count == 0:
-            return 0.0
-        samples = struct.unpack(f"<{sample_count}h", chunk_bytes)
-        sum_sq = 0.0
-        for s in samples:
-            normalized = s / 32768.0
-            sum_sq += normalized * normalized
-        return math.sqrt(sum_sq / sample_count)
-
-    if sample_format == "float32":
-        sample_count = len(chunk_bytes) // 4
-        if sample_count == 0:
-            return 0.0
-        samples = struct.unpack(f"<{sample_count}f", chunk_bytes)
-        sum_sq = sum(s * s for s in samples)
-        return math.sqrt(sum_sq / sample_count)
-
-    # Unreachable; format is validated at Microphone construction time.
-    return 0.0
 
 
 # ---------------------------------------------------------------------------
@@ -555,10 +508,8 @@ class Microphone:
 
         self._vad_enabled = vad_enabled
         self._vad = _VadStateMachine(
-            mode=vad_mode,
             threshold=vad_threshold,
             holdoff_ms=vad_holdoff_ms,
-            sample_format=dtype,
         )
         self._format = dtype
         # Store the as_ndarray flag (bridge-level: numpy=) so read() can
@@ -656,13 +607,11 @@ class Microphone:
         signature for backward compatibility.
 
         VAD state advances as a side effect when VAD is enabled
-        (``vad="silero"`` or ``vad="energy"``). Consumers
-        should check ``is_speaking`` after each read. In ndarray mode
-        with VAD enabled, the chunk is converted to bytes once via
-        ``arr.tobytes()`` for the VAD state machine (the existing RMS
-        helper expects bytes); the original ndarray is returned to the
-        user. The conversion cost is microseconds for typical chunk
-        sizes.
+        (``vad="silero"`` or ``vad="energy"``). Consumers should check
+        ``is_speaking`` after each read. The score comes from the bridge
+        (computed natively on the pre-enhancement signal for both modes),
+        so the returned chunk is not inspected for VAD and the return type
+        (bytes vs ndarray) does not affect it.
 
         Raises ``ImportError`` with a clear actionable message if
         ``as_ndarray=True`` is set but the optional ``numpy`` extra is
@@ -680,18 +629,9 @@ class Microphone:
         if chunk is None:
             return None
         if self._vad_enabled:
-            # The VAD state machine's _compute_rms uses struct.unpack on
-            # bytes. In ndarray mode, the bridge already returned an
-            # ndarray; convert to bytes once for the VAD pass via
-            # arr.tobytes(). Cheap (~microseconds) for typical chunk
-            # sizes; cleaner than rewriting _compute_rms to handle both
-            # input types. The cast to bytes is for mypy; at runtime the
-            # branch matches the actual type.
-            if self._as_ndarray:
-                vad_input: bytes = chunk.tobytes()  # type: ignore[union-attr]
-            else:
-                vad_input = cast(bytes, chunk)
-            self._vad.process_chunk(vad_input, self._bridge.vad_probability)
+            # Both modes read the score the bridge computed on the
+            # pre-enhancement signal; the chunk data is not inspected here.
+            self._vad.process_chunk(self._bridge.vad_probability)
         self._sequence += 1
         return chunk
 
@@ -779,7 +719,9 @@ class Microphone:
 
         In ``vad="silero"`` mode, returns the raw probability from the
         Silero model. In ``vad="energy"`` mode, returns the normalized
-        RMS energy of the most recent chunk. Always 0.0 when
+        RMS energy of the most recent chunk. Both are computed natively on
+        the signal before any opt-in enhancement step, so enabling
+        enhancement does not change the score. Always 0.0 when
         ``vad=False``.
 
         The underlying bridge property is named ``vad_probability`` for

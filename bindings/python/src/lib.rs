@@ -17,11 +17,12 @@
 //! `"int16"` and `"float32"` strings from Python and uses
 //! `decibri::sample::*` helpers for byte-level conversion at the boundary.
 //!
-//! VAD architecture: the `vad_mode` and `vad_holdoff` parameters accepted by
-//! `MicrophoneBridge.__init__` are stored as inert state on the bridge or used
-//! only as construction gates; the wrapper layer (`_classes.py`) implements
-//! mode/holdoff/threshold policy on top of the raw Silero probability that
-//! the bridge exposes via `vad_probability`.
+//! VAD architecture: `vad_mode` selects the detector the bridge runs on the
+//! pre-enhancement signal (Silero inference for "silero", an energy RMS for
+//! "energy"), exposed as a scalar via `vad_probability`; `vad_holdoff` is
+//! stored as inert state. The wrapper layer (`_classes.py`) implements the
+//! holdoff and threshold policy on top of that scalar, the same way for both
+//! modes.
 
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
@@ -52,7 +53,7 @@ use decibri::microphone::{
 };
 use decibri::sample::{
     downmix_to_mono, f32_le_bytes_to_f32, f32_to_f32_le_bytes, f32_to_i16_le_bytes,
-    i16_le_bytes_to_f32,
+    i16_le_bytes_to_f32, rms,
 };
 use decibri::speaker::{Speaker, SpeakerConfig, SpeakerStream};
 use decibri::vad::{SileroVad, VadConfig};
@@ -735,8 +736,11 @@ fn numpy_smoke(py: Python<'_>) -> Bound<'_, PyArray1<i16>> {
 //     Arc<MicrophoneStream>; None until start(), cleared by stop())
 //   - vad: Mutex<Option<SileroVad>> (None unless constructor's vad=True AND
 //     vad_mode=="silero"; per VAD Option (b)+(h) decision)
-//   - last_vad_probability: AtomicU32 (most recent Silero raw probability as
-//     f32 bits; updated on each read() that runs Silero inference)
+//   - energy_vad: bool (vad=True AND vad_mode=="energy"; mutually exclusive
+//     with `vad`. read() computes the energy RMS on the pre-enhancement tap)
+//   - last_vad_probability: AtomicU32 (most recent score as f32 bits: the
+//     Silero probability in silero mode or the energy RMS in energy mode;
+//     updated on each read() that runs a detector)
 //
 // The mutable state lives behind interior-mutability primitives so read() and
 // stop() are both `&self`. read() takes only a transient lock to clone the
@@ -774,6 +778,11 @@ struct MicrophoneBridge {
     vad_holdoff_ms: u32,
     active: StdMutex<Option<ActiveCapture>>,
     vad: StdMutex<Option<SileroVad>>,
+    // Energy VAD active (vad=True and vad_mode=="energy"). Mutually exclusive
+    // with `vad` (Silero): read() computes the energy score (RMS of the
+    // pre-enhancement tap) into `last_vad_probability` instead of a Silero
+    // probability. Set once at construction; the read path never mutates it.
+    energy_vad: bool,
     last_vad_probability: AtomicU32,
     /// When true, `read()` returns a numpy.ndarray instead of
     /// a bytes object. Constructor flag; per-instance commitment for
@@ -837,21 +846,22 @@ impl MicrophoneBridge {
             return Ok(None);
         };
 
-        // Run Silero VAD inference if configured. Only read() touches `vad`, so
-        // this lock never contends with stop().
+        // Run VAD on the signal BEFORE the opt-in enhancement step. Only read()
+        // touches `vad`, so this lock never contends with stop(). Drain the
+        // pre-enhancement tap once (when a transform is active); otherwise the
+        // delivered chunk already is that signal. Reading the pre-enhancement
+        // signal means enabling enhancement does not change detection in either
+        // mode. Called once per delivered chunk so the tap drains in lockstep.
+        // `chunk.data` stays untouched and is what the caller receives below.
         {
             let mut vad_guard = lock_recover(&self.vad);
-            if let Some(vad) = vad_guard.as_mut() {
-                // Feed VAD the signal BEFORE the opt-in enhancement step when the
-                // tap is active; otherwise the delivered chunk already is that
-                // signal. Called once per delivered chunk so the tap drains in
-                // lockstep. `chunk.data` stays untouched and is what the caller
-                // receives below.
+            let silero = vad_guard.as_mut();
+            if self.energy_vad || silero.is_some() {
                 let pre_enh = stream.vad_input(chunk.data.len());
                 let vad_frame: &[f32] = pre_enh.as_deref().unwrap_or(&chunk.data);
-                // Silero VAD models a single channel. Downmix interleaved
-                // multichannel audio to mono first so consecutive channels are
-                // not misread as successive mono samples.
+                // VAD models a single channel. Downmix interleaved multichannel
+                // audio to mono first so consecutive channels are not misread as
+                // successive mono samples.
                 let downmixed;
                 let vad_input: &[f32] = if chunk.channels > 1 {
                     downmixed = downmix_to_mono(vad_frame, chunk.channels);
@@ -859,11 +869,20 @@ impl MicrophoneBridge {
                 } else {
                     vad_frame
                 };
-                let result = py
-                    .detach(|| vad.process(vad_input))
-                    .map_err(|e| to_py_err(py, e))?;
-                self.last_vad_probability
-                    .store(result.probability.to_bits(), Ordering::Relaxed);
+                if let Some(vad) = silero {
+                    let result = py
+                        .detach(|| vad.process(vad_input))
+                        .map_err(|e| to_py_err(py, e))?;
+                    self.last_vad_probability
+                        .store(result.probability.to_bits(), Ordering::Relaxed);
+                } else {
+                    // Energy mode: the score is the RMS of the pre-enhancement
+                    // signal, on the same [0, 1] scale the energy threshold
+                    // compares against.
+                    let score = rms(vad_input);
+                    self.last_vad_probability
+                        .store(score.to_bits(), Ordering::Relaxed);
+                }
             }
         }
 
@@ -1009,12 +1028,18 @@ impl MicrophoneBridge {
             None
         };
 
+        // Energy VAD: enabled when vad=True and the mode is "energy" (mutually
+        // exclusive with the Silero branch above, which constructs vad_instance).
+        // The read path computes its RMS score on the pre-enhancement tap.
+        let energy_vad = vad && vad_mode == "energy";
+
         Ok(MicrophoneBridge {
             capture_config,
             format: parsed_format,
             vad_holdoff_ms: vad_holdoff,
             active: StdMutex::new(None),
             vad: StdMutex::new(vad_instance),
+            energy_vad,
             last_vad_probability: AtomicU32::new(0),
             numpy,
         })

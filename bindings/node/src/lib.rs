@@ -94,6 +94,11 @@ pub struct DecibriBridge {
     running: Arc<AtomicBool>,
     pump_handle: Option<thread::JoinHandle<Option<SileroVad>>>,
     vad: Option<SileroVad>,
+    // Energy VAD active (vadMode == "energy"). Mutually exclusive with `vad`
+    // (Silero): the pump computes the energy score (RMS of the pre-enhancement
+    // tap) into `vad_probability` instead of a Silero probability. A `Copy`
+    // flag, so the pump captures it by value (no hand-back like `vad`).
+    energy_vad: bool,
     vad_probability: Arc<AtomicU32>,
 }
 
@@ -110,6 +115,7 @@ pub struct MicrophoneParts {
     format: SampleFormat,
     frames_per_buffer: u32,
     vad: Option<SileroVad>,
+    energy_vad: bool,
 }
 
 /// Resolve the device and load the Silero model. This is the blocking open work
@@ -230,9 +236,13 @@ fn build_microphone_parts(options: Option<DecibriOptions>) -> Result<MicrophoneP
 
     let capture = Microphone::new(config).map_err(to_napi_error)?;
 
-    // Silero VAD: load model if vadMode is 'silero'
-    let vad_mode = opts.vad_mode.as_deref().unwrap_or("energy");
-    let vad = if vad_mode == "silero" {
+    // VAD mode selector. The JS wrapper passes 'silero' or 'energy' only when VAD
+    // is enabled, and omits it otherwise, so an absent value means VAD is off.
+    // 'silero' loads the Silero model below; 'energy' runs the wrapper-free RMS
+    // path in the pump (no model, no native object), keyed by `energy_vad`.
+    let vad_mode = opts.vad_mode.as_deref();
+    let energy_vad = vad_mode == Some("energy");
+    let vad = if vad_mode == Some("silero") {
         let model_path = opts.model_path.ok_or_else(|| {
             Error::new(
                 Status::InvalidArg,
@@ -262,6 +272,7 @@ fn build_microphone_parts(options: Option<DecibriOptions>) -> Result<MicrophoneP
         format,
         frames_per_buffer,
         vad,
+        energy_vad,
     })
 }
 
@@ -278,6 +289,7 @@ impl MicrophoneParts {
             running: Arc::new(AtomicBool::new(false)),
             pump_handle: None,
             vad: self.vad,
+            energy_vad: self.energy_vad,
             vad_probability: Arc::new(AtomicU32::new(0)),
         }
     }
@@ -367,8 +379,10 @@ impl DecibriBridge {
         let vad_probability = self.vad_probability.clone();
 
         // Move VAD into the pump thread (SileroVad is Send); it is handed back
-        // when the pump exits so a later start() can reuse it.
+        // when the pump exits so a later start() can reuse it. `energy_vad` is a
+        // Copy flag, captured by value (nothing to hand back).
         let mut vad = self.vad.take();
+        let energy_vad = self.energy_vad;
 
         // Create a threadsafe function to call back into JS from the pump thread.
         let tsfn = callback
@@ -393,18 +407,20 @@ impl DecibriBridge {
                     Ok(Some(chunk)) => {
                         let frame = chunk.data;
 
-                        // Run Silero VAD on the f32 frame (before format
-                        // conversion). Silero models a single channel, so
-                        // downmix interleaved multichannel frames to mono first:
-                        // feeding interleaved samples makes the VAD read
-                        // consecutive channels as successive mono samples and
-                        // score garbled input. The interleaved `frame` is
+                        // Run VAD on the f32 frame (before format conversion).
+                        // Both modes read the signal BEFORE the opt-in
+                        // enhancement step: when the tap is active, drain it;
+                        // otherwise the delivered frame already is that signal.
+                        // Reading the pre-enhancement signal means enabling an
+                        // enhancement step does not change detection, the same
+                        // guarantee for Silero and energy alike. Called once per
+                        // delivered chunk so the tap drains in lockstep. VAD
+                        // models a single channel, so downmix interleaved
+                        // multichannel frames to mono first: feeding interleaved
+                        // samples makes the score read consecutive channels as
+                        // successive mono samples. The interleaved `frame` is
                         // untouched and is still what gets emitted to JS below.
-                        if let Some(ref mut v) = vad {
-                            // Feed VAD the signal BEFORE the opt-in enhancement
-                            // step when the tap is active; otherwise the delivered
-                            // frame already is that signal. Called once per
-                            // delivered chunk so the tap drains in lockstep.
+                        if vad.is_some() || energy_vad {
                             let pre_enh = pump_stream.vad_input(frame.len());
                             let vad_frame: &[f32] = pre_enh.as_deref().unwrap_or(&frame);
                             let downmixed;
@@ -414,9 +430,17 @@ impl DecibriBridge {
                             } else {
                                 vad_frame
                             };
-                            if let Ok(result) = v.process(vad_input) {
-                                vad_probability
-                                    .store(result.probability.to_bits(), Ordering::Relaxed);
+                            if let Some(ref mut v) = vad {
+                                if let Ok(result) = v.process(vad_input) {
+                                    vad_probability
+                                        .store(result.probability.to_bits(), Ordering::Relaxed);
+                                }
+                            } else {
+                                // Energy mode: the score is the RMS of the
+                                // pre-enhancement signal, on the same [0, 1]
+                                // scale the energy threshold compares against.
+                                let score = sample::rms(vad_input);
+                                vad_probability.store(score.to_bits(), Ordering::Relaxed);
                             }
                         }
 

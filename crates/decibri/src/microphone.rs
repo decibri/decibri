@@ -1820,6 +1820,118 @@ mod tests {
         );
     }
 
+    /// Energy-VAD invariance to enhancement: the energy score (the RMS the
+    /// bindings compute on the pre-enhancement `vad_input` tap) is the SAME
+    /// whether or not a transform is enabled, because both read the post-
+    /// normalize, pre-transform signal. AGC is the worst trigger: it drives the
+    /// DELIVERED level toward its target, so a score computed on the delivered
+    /// chunk (the pre-fix wrapper behaviour) would shift sharply, while the score
+    /// on the tap does not. This is the energy-mode analogue of
+    /// `test_vad_input_returns_pre_transform_signal`, asserted through the RMS
+    /// the bindings now compute in native.
+    #[test]
+    fn test_energy_score_invariant_to_transform() {
+        // A quiet sine: AGC boosts it well above its input level, so the
+        // delivered RMS differs sharply from the pre-transform RMS.
+        let input: Vec<f32> = (0..16_000)
+            .map(|k| 0.03 * (k as f32 * 0.05).sin())
+            .collect();
+
+        // Run the chain over the input, returning (energy score on the
+        // pre-transform tap, RMS of the delivered output) exactly as a binding
+        // would: feed the `vad_input` tap when present, else the delivered chunk.
+        let run = |transforms: Transforms<'_>| -> (f32, f32) {
+            let stage = build_capture_stage(1, 1, 16_000, 16_000, transforms).unwrap();
+            let (stream, sender, running) = test_stream_with(stage, 1);
+            sender.send(make_native_chunk(input.clone())).unwrap();
+            drop(sender);
+            running.store(false, Ordering::Relaxed);
+
+            let samples = 320;
+            let mut pre: Vec<f32> = Vec::new();
+            let mut delivered: Vec<f32> = Vec::new();
+            loop {
+                match stream.next_chunk(samples, Some(Duration::from_millis(100))) {
+                    Ok(Some(c)) => {
+                        match stream.vad_input(c.data.len()) {
+                            Some(v) => pre.extend_from_slice(&v),
+                            None => pre.extend_from_slice(&c.data),
+                        }
+                        delivered.extend_from_slice(&c.data);
+                    }
+                    Ok(None) => panic!("unexpected timeout"),
+                    Err(DecibriError::MicrophoneStreamClosed) => break,
+                    Err(e) => panic!("unexpected error: {e}"),
+                }
+            }
+            (crate::sample::rms(&pre), crate::sample::rms(&delivered))
+        };
+
+        let off = Transforms {
+            dc_removal: false,
+            denoise: None,
+            highpass: None,
+            agc: None,
+            limiter: None,
+        };
+        let (baseline, baseline_delivered) = run(off);
+        // No transform: the tap is inactive, so the pre feed IS the delivered
+        // chunk and the two scores coincide.
+        assert!(
+            (baseline - baseline_delivered).abs() < 1e-6,
+            "no-transform baseline is self-consistent ({baseline} vs {baseline_delivered})"
+        );
+
+        // AGC active (the worst trigger): the pre-transform score is unchanged,
+        // while the delivered RMS shifts sharply (the pre-fix delivered-chunk
+        // path would have diverged, since AGC boosts the quiet input).
+        let agc = Transforms {
+            dc_removal: false,
+            denoise: None,
+            highpass: None,
+            agc: Some(-18),
+            limiter: None,
+        };
+        let (agc_pre, agc_delivered) = run(agc);
+        assert!(
+            (agc_pre - baseline).abs() < 1e-4,
+            "energy score is unchanged by AGC: {agc_pre} vs baseline {baseline}"
+        );
+        assert!(
+            agc_delivered > agc_pre * 1.5,
+            "AGC raises the delivered level well above the input, so a delivered-chunk \
+             score would diverge ({agc_delivered} vs pre-transform {agc_pre})"
+        );
+
+        // High-pass active: same invariance on the tap.
+        let hp = Transforms {
+            dc_removal: false,
+            denoise: None,
+            highpass: Some(HighpassFilter::Hz80),
+            agc: None,
+            limiter: None,
+        };
+        let (hp_pre, _) = run(hp);
+        assert!(
+            (hp_pre - baseline).abs() < 1e-4,
+            "energy score is unchanged by the high-pass: {hp_pre} vs baseline {baseline}"
+        );
+
+        // DC removal active: same invariance on the tap.
+        let dc = Transforms {
+            dc_removal: true,
+            denoise: None,
+            highpass: None,
+            agc: None,
+            limiter: None,
+        };
+        let (dc_pre, _) = run(dc);
+        assert!(
+            (dc_pre - baseline).abs() < 1e-4,
+            "energy score is unchanged by DC removal: {dc_pre} vs baseline {baseline}"
+        );
+    }
+
     /// Compile-time assertion that `Arc<Mutex<MicrophoneStream>>` is `Send + Sync`,
     /// which requires `MicrophoneStream: Send`. This is the wrapping strategy the
     /// bindings document for consumers needing shared access from multiple

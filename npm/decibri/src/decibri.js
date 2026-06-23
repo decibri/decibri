@@ -72,25 +72,6 @@ function resolveBundledOrtPath() {
   }
 }
 
-// ─── RMS helper ──────────────────────────────────────────────────────────────
-
-function computeRMS(chunk, dtype) {
-  let sum = 0, n;
-  if (dtype === 'float32') {
-    const samples = new Float32Array(chunk.buffer, chunk.byteOffset, chunk.length / 4);
-    n = samples.length;
-    for (let i = 0; i < n; i++) sum += samples[i] * samples[i];
-  } else {
-    const samples = new Int16Array(chunk.buffer, chunk.byteOffset, chunk.length / 2);
-    n = samples.length;
-    for (let i = 0; i < n; i++) {
-      const s = samples[i] / 32768;
-      sum += s * s;
-    }
-  }
-  return n > 0 ? Math.sqrt(sum / n) : 0;
-}
-
 // ─── Microphone (Readable) ──────────────────────────────────────────────────
 
 class Microphone extends Readable {
@@ -111,9 +92,7 @@ class Microphone extends Readable {
 
     // ── Store config ───────────────────────────────────────────────────────
 
-    this._dtype = prepared.dtype;
     this._vad = prepared.vadEnabled;
-    this._vadMode = prepared.vadMode;
     this._vadThreshold = prepared.vadThreshold;
     this._vadHoldoff = prepared.vadHoldoff;
     this._vadScore = 0;
@@ -315,7 +294,11 @@ class Microphone extends Readable {
         framesPerBuffer,
         format: dtype,
         device: resolvedDevice,
-        vadMode,
+        // Pass the mode to native only when VAD is enabled. When disabled the
+        // local vadMode is an inert 'energy' placeholder; sending it would make
+        // native compute the energy score for a microphone that did not ask for
+        // VAD. Absent means VAD off in native.
+        vadMode: vadEnabled ? vadMode : undefined,
         modelPath,
         denoise,
         denoiseModelPath,
@@ -392,25 +375,13 @@ class Microphone extends Readable {
       }
 
       if (this._vad) {
-        if (this._vadMode === 'silero') {
-          const prob = this._native.vadProbability;
-          this._processVadSilero(prob);
-        } else {
-          this._processVadEnergy(chunk);
-        }
+        // Both modes read the score from native: the Silero speech probability
+        // or, in energy mode, the RMS of the pre-enhancement signal. The native
+        // pump computes both on the signal before the opt-in enhancement step,
+        // so enabling enhancement does not change detection in either mode.
+        this._processVadValue(this._native.vadProbability);
       }
     });
-  }
-
-  /** @internal Energy-based VAD (RMS threshold) */
-  _processVadEnergy(chunk) {
-    const rms = computeRMS(chunk, this._dtype);
-    this._processVadValue(rms);
-  }
-
-  /** @internal Silero ML-based VAD (reads probability from native) */
-  _processVadSilero(probability) {
-    this._processVadValue(probability);
   }
 
   /** @internal Common speech/silence state machine */
@@ -467,7 +438,9 @@ class Microphone extends Readable {
 
   /**
    * Most recent VAD score for the active mode: the Silero speech probability
-   * in 'silero' mode, the normalized RMS of the last chunk in 'energy' mode.
+   * in 'silero' mode, the normalized RMS of the pre-enhancement signal in
+   * 'energy' mode. Both are computed natively on the signal before any opt-in
+   * enhancement step, so enabling enhancement does not change the score.
    * 0 when VAD is disabled or before the first chunk is processed.
    * @returns {number}
    */
