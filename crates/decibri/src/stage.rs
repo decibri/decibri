@@ -305,14 +305,31 @@ pub(crate) struct CaptureStage {
 impl CaptureStage {
     /// Run the chain on one native block, returning the conditioned output.
     ///
-    /// Seeds `work` with `input`, then ping-pongs `work` <-> `scratch` first
-    /// across the `normalize` stages and then across the `transform` stages,
-    /// leaving the final output in `work`. When `transform` is non-empty, snapshots
-    /// the post-`normalize`, pre-`transform` `work` into `tap` first, so the caller
-    /// can read the signal as it stood before the transform step.
+    /// Seeds `work` with `input` and sanitizes any non-finite sample to silence,
+    /// then ping-pongs `work` <-> `scratch` first across the `normalize` stages and
+    /// then across the `transform` stages, leaving the final output in `work`. When
+    /// `transform` is non-empty, snapshots the post-`normalize`, pre-`transform`
+    /// `work` into `tap` first, so the caller can read the signal as it stood before
+    /// the transform step.
+    ///
+    /// The sanitize pass runs before any stage so a non-finite (NaN or infinity)
+    /// sample in a glitched capture buffer cannot poison the recursive state the
+    /// conditioning stages carry across blocks (the DC blocker's and high-pass
+    /// biquad's filter memory, the denoise caches, the level-control estimate).
+    /// Without it, one non-finite sample would leave that feedback state non-finite
+    /// and corrupt every later sample for the rest of the stream. Replacing each
+    /// non-finite sample with `0.0` keeps the state finite and bounds the damage to
+    /// the single offending sample. It is exact on finite input (it changes
+    /// nothing), and only the conditioned path pays for it: an unconditioned capture
+    /// has no chain, so it keeps its zero-cost direct delivery.
     pub(crate) fn run(&mut self, input: &[f32]) -> Result<&[f32], DecibriError> {
         self.work.clear();
         self.work.extend_from_slice(input);
+        for sample in self.work.iter_mut() {
+            if !sample.is_finite() {
+                *sample = 0.0;
+            }
+        }
         Self::run_segment(&mut self.work, &mut self.scratch, &mut self.normalize)?;
         self.capture_tap();
         Self::run_segment(&mut self.work, &mut self.scratch, &mut self.transform)?;
@@ -2437,5 +2454,182 @@ mod tests {
     fn limiter_stage_is_send() {
         fn assert_send<T: Send>() {}
         assert_send::<InPlace<crate::gain::Limiter>>();
+    }
+
+    // ── Non-finite input guard ──────────────────────────────────────────
+    //
+    // `run` sanitizes non-finite (NaN/infinity) input to silence before any stage,
+    // so a glitched capture sample cannot poison the recursive state the
+    // conditioning stages carry across blocks. These pin that the output stays
+    // finite and the stream keeps carrying signal after the glitch, and that the
+    // guard is exact on finite input.
+
+    /// A non-finite input sample is sanitized at the chain entry before any stage
+    /// runs, so it never reaches the recursive state of the conditioning stages.
+    /// Every conditioned config delivers only finite output and keeps carrying real
+    /// signal after the glitch (the state recovered because it never saw the
+    /// non-finite sample). Without the guard the DC blocker, the high-pass biquad,
+    /// and the level control would hold the non-finite value in their feedback and
+    /// corrupt every later sample for the rest of the stream.
+    #[test]
+    fn non_finite_input_does_not_poison_the_chain() {
+        // A tone above the noise floor, so the level control is active (it would
+        // otherwise poison its gain on the non-finite sample rather than freeze).
+        // The glitches sit early so a poisoned stream would be corrupt or silent by
+        // the time the second half is checked.
+        fn run_glitched(
+            dc: bool,
+            highpass: Option<HighpassFilter>,
+            agc: Option<i8>,
+            limiter: Option<f32>,
+        ) -> Vec<f32> {
+            let sr = 16_000u32;
+            let mut input: Vec<f32> = (0..8_000)
+                .map(|i| 0.3 * (2.0 * std::f32::consts::PI * 220.0 * i as f32 / sr as f32).sin())
+                .collect();
+            input[100] = f32::NAN;
+            input[200] = f32::INFINITY;
+            input[300] = f32::NEG_INFINITY;
+            let mut chain = build_capture_stage(
+                1,
+                1,
+                sr,
+                sr,
+                Transforms {
+                    dc_removal: dc,
+                    denoise: None,
+                    highpass,
+                    agc,
+                    limiter,
+                },
+            )
+            .unwrap()
+            .expect("a conditioned config builds a chain");
+            let mut out = chain.run(&input).expect("run").to_vec();
+            let mut tail = Vec::new();
+            chain.flush(&mut tail).expect("flush");
+            out.extend_from_slice(&tail);
+            out
+        }
+
+        fn assert_clean(label: &str, out: &[f32]) {
+            assert!(
+                out.iter().all(|s| s.is_finite()),
+                "{label}: a non-finite input sample leaked into the output"
+            );
+            // The second half still carries energy: the recursive state recovered
+            // rather than collapsing the rest of the stream to silence.
+            let energy_after: f32 = out[4_000..].iter().map(|s| s * s).sum();
+            assert!(
+                energy_after > 0.0,
+                "{label}: the stream was silenced after the glitch"
+            );
+        }
+
+        assert_clean("dc-only", &run_glitched(true, None, None, None));
+        assert_clean(
+            "highpass-only",
+            &run_glitched(false, Some(HighpassFilter::Hz80), None, None),
+        );
+        #[cfg(feature = "gain")]
+        {
+            assert_clean(
+                "agc-only (no limiter)",
+                &run_glitched(false, None, Some(-18), None),
+            );
+            assert_clean(
+                "dc+hp+agc (no limiter)",
+                &run_glitched(true, Some(HighpassFilter::Hz80), Some(-18), None),
+            );
+            assert_clean(
+                "full chain",
+                &run_glitched(true, Some(HighpassFilter::Hz80), Some(-18), Some(-1.0)),
+            );
+        }
+    }
+
+    /// The non-finite guard is exact on finite input: a full conditioning chain
+    /// (DC, high-pass, level control, limiter) reproduces, bit for bit, the same
+    /// same-length stages applied directly with no chain, so the guard changes
+    /// nothing for conforming audio.
+    #[cfg(feature = "gain")]
+    #[test]
+    fn non_finite_guard_is_exact_on_finite_input() {
+        let sr = 16_000u32;
+        // A finite signal with a DC offset and a present level, exercising every
+        // same-length stage.
+        let input: Vec<f32> = (0..4_000)
+            .map(|i| 0.2 * (2.0 * std::f32::consts::PI * 200.0 * i as f32 / sr as f32).sin() + 0.05)
+            .collect();
+
+        let mut chain = build_capture_stage(
+            1,
+            1,
+            sr,
+            sr,
+            Transforms {
+                dc_removal: true,
+                denoise: None,
+                highpass: Some(HighpassFilter::Hz80),
+                agc: Some(-18),
+                limiter: Some(-1.0),
+            },
+        )
+        .unwrap()
+        .expect("conditioned chain");
+        let got = chain.run(&input).expect("run").to_vec();
+
+        // The same same-length stages in chain order, applied directly (no guard).
+        let mut reference = input.clone();
+        DcBlocker::new().process_in_place(&mut reference);
+        Biquad::highpass(HighpassFilter::Hz80.cutoff_hz(), sr as f32)
+            .process_in_place(&mut reference);
+        crate::gain::LevelControl::agc(-18, sr).process_in_place(&mut reference);
+        crate::gain::Limiter::new(-1.0, sr).process_in_place(&mut reference);
+
+        assert_eq!(
+            got, reference,
+            "the guard must not alter finite input (bit-for-bit identity)"
+        );
+    }
+
+    /// The guard also protects the denoise stage: a non-finite input does not reach
+    /// the model caches, so the enhanced output stays finite and the stream is not
+    /// silenced after the glitch.
+    #[cfg(feature = "denoise")]
+    #[test]
+    fn non_finite_input_does_not_poison_denoise() {
+        let path = denoise_model_path();
+        let mut chain = build_capture_stage(
+            1,
+            1,
+            16_000,
+            16_000,
+            Transforms {
+                dc_removal: false,
+                denoise: Some((DenoiseModel::FastEnhancerT, path.as_path(), None)),
+                highpass: None,
+                agc: None,
+                limiter: None,
+            },
+        )
+        .unwrap()
+        .expect("denoise chain");
+        let mut input = mono_signal(8_000);
+        input[100] = f32::NAN;
+        input[200] = f32::INFINITY;
+        input[300] = f32::NEG_INFINITY;
+        let mut out = chain.run(&input).expect("run").to_vec();
+        let mut tail = Vec::new();
+        chain.flush(&mut tail).expect("flush");
+        out.extend_from_slice(&tail);
+        assert!(
+            out.iter().all(|s| s.is_finite()),
+            "denoise leaked a non-finite output sample"
+        );
+        assert!(
+            out.iter().map(|s| s * s).sum::<f32>() > 0.0,
+            "the denoise stream was silenced after the glitch"
+        );
     }
 }
