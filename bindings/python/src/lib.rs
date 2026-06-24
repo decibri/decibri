@@ -194,11 +194,11 @@ fn exception_class<'py>(py: Python<'py>, name: &'static str) -> PyResult<Bound<'
 // Error mapping: DecibriError -> PyErr.
 //
 // Covers all 34 variants explicitly. Catch-all `_ =>` arm at end is required
-// because DecibriError is #[non_exhaustive] (per F10).
+// because DecibriError is #[non_exhaustive].
 //
 // For variants with a `path` field (OrtLoadFailed, OrtPathInvalid,
 // VadModelLoadFailed, ModelLoadFailed), the mapper passes a tuple as the args
-// so the Python __init__ override can store named attributes per F11.
+// so the Python __init__ override can store named attributes.
 // ---------------------------------------------------------------------------
 
 type ExceptionRaiser = Box<dyn FnOnce(Bound<'_, PyType>) -> PyErr>;
@@ -399,7 +399,7 @@ fn to_py_err(py: Python<'_>, err: CoreDecibriError) -> PyErr {
             Box::new(move |cls| PyErr::from_type(cls, (msg,))),
         ),
 
-        // #[non_exhaustive] catch-all per F10. Fall through to the base class.
+        // #[non_exhaustive] catch-all. Fall through to the base class.
         _ => (
             "DecibriError",
             Box::new(move |cls| PyErr::from_type(cls, (msg,))),
@@ -424,7 +424,7 @@ fn path_to_string(path: &std::path::Path) -> String {
 // Format parsing helper.
 //
 // Accepts only "int16" and "float32". Returns DecibriError::InvalidFormat
-// (unit variant per F9) for any other string. The to_py_err mapper translates
+// (a unit variant) for any other string. The to_py_err mapper translates
 // that to the InvalidFormat Python exception with the canonical Display
 // message ("format must be 'int16' or 'float32'").
 // ---------------------------------------------------------------------------
@@ -1207,7 +1207,7 @@ impl MicrophoneBridge {
 // removing the module-level assertion.
 //
 // Owns:
-//   - output_config: SpeakerConfig (no frames_per_buffer per F2)
+//   - output_config: SpeakerConfig (no frames_per_buffer)
 //   - format: BindingSampleFormat
 //   - output: Option<Speaker>
 //   - stream: Option<SpeakerStream>
@@ -1712,8 +1712,8 @@ impl AsyncMicrophoneBridge {
 // drain on Python cancellation, so the audio finishes playing even after
 // the Python coroutine is cancelled. The Python coroutine sees
 // CancelledError immediately; the audio finishes asynchronously to the
-// caller's logic. Document this in the AsyncSpeaker.drain docstring
-// in the Python wrapper (next relay).
+// caller's logic. This is documented in the AsyncSpeaker.drain docstring
+// in the Python wrapper.
 // ---------------------------------------------------------------------------
 
 /// Owned bundle of (data, format, channels, numpy_flag) extracted from

@@ -1,12 +1,11 @@
-"""Soak / leak detection tests for the Microphone lifecycle (0.1.3 Tier 1).
+"""Soak / leak detection tests for the Microphone lifecycle.
 
 Bounded soak loops with tracemalloc + psutil RSS sampling. Catches leaks
 in the binding's wrapper layer (Python-allocated; tracemalloc) and in
 native allocations underneath cpal / pyo3 / ort (RSS via psutil).
 
-Tier classification: Tier 1 ("ship pre-0.2.0"; cheap; high-leverage) per
-prerelease-decibri-additional-testing-reqs.md Test 4. Bounded suite ships
-in 0.1.3; multi-hour soaks (Tier 3) defer past 0.2.0.
+Scope: this is the bounded, low-cost soak suite suitable for routine CI.
+Longer multi-hour soaks are out of scope here and run separately.
 
 Test design:
 
@@ -31,7 +30,7 @@ Runtime budget:
 - test_silero_vad_construct_destroy: ~10 seconds (ORT init dominates)
 
 Combined target: under 30 seconds. Combined with test_microphone_properties.py
-the 0.1.3 Tier 1 testing addition stays under the relay's 90-second budget.
+the two files stay comfortably within the suite's CI time budget.
 
 Threshold rationale:
 
