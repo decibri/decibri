@@ -4,14 +4,14 @@ This module is the public home for the decibri exception hierarchy. All
 classes are also re-exported at ``decibri.<X>`` for convenience; users
 may import from either path.
 
-32 instance classes (one per Rust DecibriError variant) plus 3 intermediate
+33 instance classes (one per Rust DecibriError variant) plus 3 intermediate
 parent classes (DeviceError, OrtError, OrtPathError) for catch ergonomics,
-totaling 35 class definitions. Single-inheritance hierarchy per CPython
+totaling 36 class definitions. Single-inheritance hierarchy per CPython
 convention.
 
 Hierarchy:
     DecibriError
-    + 14 direct subclasses (config + runtime errors that don't involve
+    + 15 direct subclasses (config + runtime errors that don't involve
       device enumeration or ORT, including DeviceFailed and OnnxBackendFailed)
     + DeviceError (intermediate; no instances; catches device-related)
         + 8 direct device subclasses (MicrophoneNotFound, SpeakerNotFound,
@@ -49,6 +49,18 @@ class SampleRateOutOfRange(DecibriError):
 
 class ChannelsOutOfRange(DecibriError):
     """Raised when channels is outside the supported range."""
+
+
+class MultichannelNotSupported(DecibriError):
+    """Raised when a microphone is asked to capture more than one channel.
+
+    Microphone capture is mono only: the only accepted ``channels`` value is
+    1. A value greater than 1 raises this exception rather than being silently
+    downmixed to mono. The ``channels`` parameter is kept for forward
+    compatibility (a future release may accept a value greater than 1 by
+    delivering true interleaved multichannel). A zero channel count raises the
+    plain ``ChannelsOutOfRange`` instead.
+    """
 
 
 class FramesPerBufferOutOfRange(DecibriError):

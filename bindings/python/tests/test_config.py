@@ -34,6 +34,7 @@ from decibri import (
     Microphone,
     FramesPerBufferOutOfRange,
     InvalidFormat,
+    MultichannelNotSupported,
     SampleRateOutOfRange,
 )
 
@@ -106,20 +107,33 @@ def test_invalid_sample_rate(sample_rate: int) -> None:
     assert str(exc_info.value) == "sample rate must be between 1000 and 384000"
 
 
-@pytest.mark.parametrize(
-    "channels",
-    [
-        pytest.param(0, id="channels_zero"),
-        pytest.param(33, id="channels_above_maximum"),
-        pytest.param(100, id="channels_far_above"),
-    ],
-)
-def test_invalid_channels(channels: int) -> None:
-    """Out-of-range channels raises with the canonical Rust Display message at start()."""
-    d = Microphone(channels=channels)
+def test_zero_channels_is_out_of_range() -> None:
+    """A zero channel count raises the plain ChannelsOutOfRange at start()."""
+    d = Microphone(channels=0)
     with pytest.raises(ChannelsOutOfRange) as exc_info:
         d.start()
     assert str(exc_info.value) == "channels must be between 1 and 32"
+
+
+@pytest.mark.parametrize(
+    "channels",
+    [
+        pytest.param(2, id="channels_stereo"),
+        pytest.param(33, id="channels_above_former_maximum"),
+        pytest.param(100, id="channels_far_above"),
+    ],
+)
+def test_multichannel_request_is_rejected(channels: int) -> None:
+    """Capture is mono only: more than one channel raises MultichannelNotSupported
+    at start() (rejected, not silently downmixed) with the canonical Rust message.
+    """
+    d = Microphone(channels=channels)
+    with pytest.raises(MultichannelNotSupported) as exc_info:
+        d.start()
+    assert (
+        str(exc_info.value)
+        == "multichannel capture is not supported; channels must be 1 (mono)"
+    )
 
 
 @pytest.mark.parametrize(
@@ -152,8 +166,7 @@ def test_invalid_frames_per_buffer(frames_per_buffer: int) -> None:
     [
         pytest.param({"sample_rate": 1000}, id="sample_rate_minimum"),
         pytest.param({"sample_rate": 384000}, id="sample_rate_maximum"),
-        pytest.param({"channels": 1}, id="channels_minimum"),
-        pytest.param({"channels": 32}, id="channels_maximum"),
+        pytest.param({"channels": 1}, id="channels_mono"),
         pytest.param({"frames_per_buffer": 64}, id="fpb_minimum"),
         pytest.param({"frames_per_buffer": 65536}, id="fpb_maximum"),
     ],

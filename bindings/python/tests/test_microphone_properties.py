@@ -46,6 +46,7 @@ from decibri import (
     FramesPerBufferOutOfRange,
     InvalidFormat,
     Microphone,
+    MultichannelNotSupported,
     SampleRateOutOfRange,
 )
 
@@ -66,12 +67,11 @@ _invalid_sample_rate = st.one_of(
     st.integers(min_value=384_001, max_value=10_000_000),
 )
 
-# Valid channels range is [1, 32]. Invalid: 0 or above 32. Upper bound
-# 65000 stays inside u16.
-_invalid_channels = st.one_of(
-    st.just(0),
-    st.integers(min_value=33, max_value=65_000),
-)
+# Capture is mono only: the sole valid channel count is 1. A zero channel
+# count is a plain range error (ChannelsOutOfRange); any value above 1 is a
+# multichannel request (MultichannelNotSupported). Upper bound 65000 stays
+# inside u16.
+_multichannel_channels = st.integers(min_value=2, max_value=65_000)
 
 # Valid frames_per_buffer range is [64, 65536]. Invalid: below 64 or above
 # 65536. Same u32 headroom rationale as sample_rate.
@@ -111,11 +111,20 @@ def test_invalid_sample_rate_property(sample_rate: int) -> None:
         mic.start()
 
 
-@given(channels=_invalid_channels)
+@given(channels=_multichannel_channels)
 @settings(max_examples=20, deadline=None)
-def test_invalid_channels_property(channels: int) -> None:
-    """Any out-of-range channels raises ChannelsOutOfRange at start()."""
+def test_multichannel_channels_property(channels: int) -> None:
+    """Any channel count above 1 raises MultichannelNotSupported at start()
+    (capture is mono only: the request is rejected, not silently downmixed).
+    """
     mic = Microphone(channels=channels)
+    with pytest.raises(MultichannelNotSupported):
+        mic.start()
+
+
+def test_zero_channels_is_out_of_range() -> None:
+    """A zero channel count raises the plain ChannelsOutOfRange at start()."""
+    mic = Microphone(channels=0)
     with pytest.raises(ChannelsOutOfRange):
         mic.start()
 
@@ -148,7 +157,8 @@ def test_invalid_dtype_property(dtype: str) -> None:
 
 @given(
     sample_rate=st.integers(min_value=1000, max_value=384_000),
-    channels=st.integers(min_value=1, max_value=32),
+    # Capture is mono only, so the only valid channel count is 1.
+    channels=st.just(1),
     frames_per_buffer=st.integers(min_value=64, max_value=65_536),
     dtype=st.sampled_from(["int16", "float32"]),
 )

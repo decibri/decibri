@@ -18,11 +18,15 @@ fn microphone_config_default_then_mutate() {
 
     let mut config = MicrophoneConfig::default();
     config.sample_rate = 48_000;
-    config.channels = 2;
+    // Capture is mono only, so a config that validates keeps `channels` at 1;
+    // the assignment still pins that the public field is writable after the
+    // sealed `default()` construction. The other two fields, mutated to
+    // non-defaults below, demonstrate the mutation took effect.
+    config.channels = 1;
     config.frames_per_buffer = 480;
 
     assert_eq!(config.sample_rate, 48_000);
-    assert_eq!(config.channels, 2);
+    assert_eq!(config.channels, 1);
     assert_eq!(config.frames_per_buffer, 480);
     assert!(config.validate().is_ok());
 }

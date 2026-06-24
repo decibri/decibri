@@ -71,9 +71,12 @@ export interface MicrophoneOptions extends ReadableOptions {
   sampleRate?: number;
 
   /**
-   * Number of input channels.
+   * Number of input channels. Mono only: the only accepted value is `1`, and a
+   * value greater than `1` throws a `RangeError` (multichannel capture is not
+   * supported) rather than being silently downmixed. The option is kept for
+   * forward compatibility: a future release may accept a value greater than `1`
+   * by delivering true interleaved multichannel.
    * @default 1
-   * @range 1–32
    */
   channels?: number;
 
