@@ -125,6 +125,38 @@ mic = decibri.Microphone(vad=decibri.Vad(model="silero", threshold=0.5))
 
 Use `mic.vad_score` (a value in `[0, 1]`) to gate downstream processing. `mic.is_speaking` returns the boolean above-threshold view.
 
+## decibri ACE (audio conditioning)
+
+decibri ACE (Audio Capture Engine) is decibri's opt-in audio front-end for speech: a conditioning chain applied to the captured audio before it is delivered. Every stage is off by default, runs on-device, and needs no API key. Leave the options unset and the capture path is unchanged.
+
+The stages run in this order. Pass any subset on the `Microphone` constructor:
+
+| Stage | Keyword | Value |
+| --- | --- | --- |
+| DC removal | `dc_removal=True` | bool, default `False` |
+| Denoise | `denoise="fastenhancer-t"` | the one bundled model |
+| High-pass | `highpass=80` or `100` | Hz, second-order Butterworth |
+| AGC | `agc=-18` | int dBFS, -40 to -3 |
+| Limiter | `limiter=-1.0` | float dBFS, -3.0 to 0.0 |
+
+```python
+import decibri
+
+with decibri.Microphone(
+    sample_rate=16000,
+    denoise="fastenhancer-t",  # bundled speech-enhancement model
+    highpass=80,               # remove low-frequency rumble
+    agc=-18,                   # target level in dBFS
+    limiter=-1.0,              # peak ceiling in dBFS
+    vad=decibri.Vad(model="silero", threshold=0.5),
+) as mic:
+    for chunk in mic:
+        if mic.is_speaking:
+            handle(chunk)      # conditioned int16 PCM bytes
+```
+
+The denoise model is bundled in the wheel (the same way the Silero VAD model is), so `denoise="fastenhancer-t"` needs no download. VAD reads the signal before the chain, so `mic.vad_score` and `mic.is_speaking` are unaffected by which conditioning stages you enable. The same options are available on `AsyncMicrophone`.
+
 ## Compatibility
 
 | Python                       | Platforms                                                |

@@ -32,6 +32,34 @@ Key features:
 
 To learn more, visit [decibri.com/docs/](https://decibri.com/docs/).
 
+## decibri ACE
+
+Audio Capture Engine for Speech.
+
+decibri ACE (Audio Capture Engine) is decibri's opt-in audio front-end for speech: it conditions microphone audio before it reaches your recognizer. Every stage is off by default, so a plain `Microphone(...)` is byte-identical to capture without ACE, and you turn on only the stages you want.
+
+What makes it useful is not the individual filters, it is the package they come in:
+
+- **Keyless and local.** No API key, no account, no network call. The chain runs on-device. The denoise model and the Silero VAD model ship inside the package.
+- **Opt-in and zero-cost when off.** Nothing in the chain runs until you ask for it. With every stage left at its default, the capture path is unchanged.
+- **One surface across the bindings.** The same conditioning options, with the same names and ranges, are available from Python, Node.js, and Rust.
+
+ACE is a practical capture pipeline, not a claim to state-of-the-art signal processing. The stages are conventional and described plainly:
+
+| Stage | Option | What it does |
+| :--- | :--- | :--- |
+| DC removal | `dc_removal` (bool) | Removes a constant (DC) offset with a one-pole DC-blocking high-pass. |
+| Denoise | `denoise="fastenhancer-t"` | Optional bundled single-channel speech-enhancement model. |
+| High-pass | `highpass=80` or `100` | A second-order Butterworth high-pass (80 or 100 Hz) that removes low-frequency rumble below the voice band. |
+| AGC | `agc=-18` (dBFS, -40 to -3) | Drives the running level toward a target with a smoothed, rate-limited gain. |
+| Limiter | `limiter=-1.0` (dBFS, -3.0 to 0.0) | A sample-peak ceiling that catches a transient the AGC would let exceed full scale. |
+
+The stages run in that order: DC removal, denoise, high-pass, AGC, then limiter.
+
+Voice activity detection reads the signal before the chain, so turning on enhancement does not change what counts as speech.
+
+See the [Quick Start](#quick-start) below for a runnable example. The same options are available in Node.js (`dcRemoval`, `denoise`, `highpass`, `agc`, `limiter`) and Rust (`MicrophoneConfig` fields); per-language detail lives in each binding's README.
+
 ## Installation
 
 **Python** (recommended with [uv](https://docs.astral.sh/uv/)):
@@ -75,6 +103,23 @@ with decibri.Microphone(sample_rate=16000) as mic:
     for chunk in mic:
         print(f"Got {len(chunk)} bytes")
         break
+```
+
+With decibri ACE conditioning and Silero VAD in front (every stage is opt-in):
+
+```python
+import decibri
+
+# Denoise and a high-pass in front of Silero VAD. Both are opt-in.
+with decibri.Microphone(
+    sample_rate=16000,
+    denoise="fastenhancer-t",
+    highpass=80,
+    vad=decibri.Vad(model="silero", threshold=0.5),
+) as mic:
+    for chunk in mic:
+        if mic.is_speaking:
+            handle(chunk)  # conditioned audio, ready for your recognizer
 ```
 
 Full Python guide: [here](bindings/python/README.md).

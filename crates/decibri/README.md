@@ -21,7 +21,7 @@ Or directly:
 decibri = "4"
 ```
 
-The default feature set (`capture`, `playback`, `vad`, `ort-load-dynamic`) covers most use cases. See [Feature flags](#feature-flags) below for opt-in or trimmed configurations.
+The default feature set (`capture`, `playback`, `vad`, `denoise`, `gain`, `ort-load-dynamic`) covers most use cases. See [Feature flags](#feature-flags) below for opt-in or trimmed configurations.
 
 ## Quick start
 
@@ -88,6 +88,27 @@ for device in Microphone::devices()? {
 
 `Speaker::devices()` is the playback equivalent. The free functions `decibri::input_devices()` and `decibri::output_devices()` return the same lists.
 
+### decibri ACE: capture conditioning
+
+decibri ACE (Audio Capture Engine) is the opt-in conditioning chain on the capture path. `MicrophoneConfig` carries one field per stage; each defaults to off, so `MicrophoneConfig::default()` captures with no conditioning. The stages run in a fixed order after the device is normalized to the target mono rate: DC removal, denoise, high-pass, AGC, then limiter.
+
+```rust
+use decibri::{Microphone, MicrophoneConfig, DenoiseModel, HighpassFilter};
+
+let mut config = MicrophoneConfig::default();
+config.dc_removal = true;                            // 1. DC-blocking high-pass
+config.denoise = Some(DenoiseModel::FastEnhancerT);  // 2. speech-enhancement model
+config.denoise_model_path = Some("/path/to/fastenhancer_t.onnx".into()); // required for denoise to run
+config.highpass = Some(HighpassFilter::Hz80);        // 3. 80 Hz high-pass
+config.agc = Some(-18);                              // 4. AGC target, dBFS (-40..=-3)
+config.limiter = Some(-1.0);                         // 5. limiter ceiling, dBFS (-3.0..=0.0)
+
+let microphone = Microphone::new(config)?;
+let stream = microphone.start()?;
+```
+
+The denoise stage needs the `denoise` feature and an explicit `denoise_model_path`: the crate ships no model bytes, and with the model named but no path the denoise stage stays off. This is the one place the crate asks for more than the bindings do. The Python and Node.js packages bundle the denoise model and resolve its path for you, so there you pass only the model selector. `agc` and `limiter` need the `gain` feature (pure DSP, no model); `dc_removal` and `highpass` need no extra feature. The AGC target and limiter ceiling are validated in `MicrophoneConfig::validate`, so an out-of-range value is a typed error, not a silent clamp. The high-pass cutoff and the denoise model are named enums (`HighpassFilter`, `DenoiseModel`) so adding further cutoffs or models stays a non-breaking widening.
+
 ### Without ONNX Runtime
 
 If you do not need Silero VAD, disable the `vad` feature to drop the ONNX Runtime dependency entirely.
@@ -99,6 +120,8 @@ If you do not need Silero VAD, disable the `vad` feature to drop the ONNX Runtim
 | `capture` | on | Microphone input stream support |
 | `playback` | on | Speaker output stream support |
 | `vad` | on | Silero voice-activity detection (pulls in ONNX Runtime) |
+| `denoise` | on | Capture-path single-channel speech enhancement (pulls in ONNX Runtime; runs only alongside `capture`) |
+| `gain` | on | Capture-path AGC and peak limiter (pure DSP, no extra dependency) |
 | `ort-load-dynamic` | on | ONNX Runtime loaded at runtime from a path you control |
 | `ort-download-binaries` | off | ONNX Runtime downloaded at build time and embedded |
 
