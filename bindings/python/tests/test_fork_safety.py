@@ -134,7 +134,7 @@ def test_fork_before_silero_init_works() -> None:
 
     The child does its own ORT init from scratch in its own address
     space; no inherited state to corrupt; no fork detection trips.
-    Sanity check that the C7 detection isn't over-eager.
+    Sanity check that the fork detection isn't over-eager.
     """
     ctx = mp.get_context("fork")
     queue: "mp.Queue[tuple[str, str]]" = ctx.Queue()

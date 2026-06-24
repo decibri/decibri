@@ -314,7 +314,7 @@ pub struct MicrophoneStream {
     reblock_buffer: Mutex<VecDeque<f32>>,
     // The capture stage chain, applied to each native block before it lands in
     // `reblock_buffer`. `None` when no conditioning is needed (an already-mono
-    // device), keeping the drain on the direct, zero-cost A0b path. When `Some`,
+    // device), keeping the drain on the direct, zero-cost no-chain path. When `Some`,
     // the chain runs behind its own `Mutex` so the stage buffers mutate under a
     // shared `&self` while the type stays `Send + Sync` (a `CaptureStage` is
     // `Send`, so `Mutex<CaptureStage>` is `Send + Sync`).
@@ -597,7 +597,7 @@ impl MicrophoneStream {
     /// capture stage chain first when one is present.
     ///
     /// `None` chain: the block's samples are appended directly, byte-identical to
-    /// the A0b path, with no lock, allocation, or copy beyond the existing
+    /// the direct no-chain path, with no lock, allocation, or copy beyond the existing
     /// reblock. `Some` chain: the chain runs behind its `Mutex` and its
     /// conditioned output is appended instead.
     ///
@@ -989,7 +989,7 @@ mod tests {
         (stream, sender, running)
     }
 
-    /// Mono stream with no stage chain (the `None`, A0b-identical path).
+    /// Mono stream with no stage chain (the `None`, no-chain path).
     fn test_stream() -> (MicrophoneStream, Sender<AudioChunk>, Arc<AtomicBool>) {
         test_stream_with(None, 1)
     }
@@ -1300,7 +1300,7 @@ mod tests {
 
     /// Empty-chain no-op (the `None` path): with no stage chain (a mono device),
     /// `next_chunk` delivers the raw reblocked samples byte-identically to the
-    /// A0b path, exact size and final-tail behaviour included.
+    /// direct no-chain path, exact size and final-tail behaviour included.
     #[test]
     fn test_empty_chain_is_byte_identical_noop() {
         let (stream, sender, running) = test_stream(); // mono, capture_stage = None
@@ -1324,7 +1324,7 @@ mod tests {
                 Err(e) => panic!("unexpected error: {e}"),
             }
         }
-        // None path == A0b reblock: 9 samples -> two blocks of 4 then a 1-sample
+        // None path (direct reblock): 9 samples -> two blocks of 4 then a 1-sample
         // tail, every value passed through untransformed and in order.
         assert_eq!(collected, (0..9).map(|n| n as f32).collect::<Vec<f32>>());
     }
@@ -1332,7 +1332,7 @@ mod tests {
     /// Cost no-op (the `None` path): a mono device builds no chain, so the drain
     /// stays on the direct reblock. The `None` arm of `ingest` is a plain
     /// `buf.extend(chunk.data)` with no chain lock, allocation, or copy,
-    /// structurally identical to A0b.
+    /// structurally identical to the direct no-chain path.
     #[test]
     fn test_mono_device_builds_no_chain() {
         assert!(

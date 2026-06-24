@@ -1,4 +1,4 @@
-"""Property-based tests for the Microphone constructor (0.1.3 Tier 1 testing).
+"""Property-based tests for the Microphone constructor.
 
 Hypothesis-driven coverage for Microphone constructor argument validation.
 The existing test_config.py uses pytest.parametrize for hand-curated cases
@@ -7,10 +7,9 @@ by generating random inputs against typed strategies and asserting that
 validation always lands on a typed decibri exception, never a panic / abort
 / untyped exception.
 
-Tier classification: Tier 1 ("ship pre-0.2.0"; cheap; high-leverage) per
-prerelease-decibri-additional-testing-reqs.md Test 3. The bounded variant
-ships in 0.1.3; broader VAD / format-conversion property tests defer to
-0.2.0 where synthetic-waveform fixtures land.
+Scope: this is the bounded, hardware-free property suite. Broader VAD and
+format-conversion property tests that need synthetic-waveform fixtures are
+out of scope here and covered separately.
 
 Validation layers (mirrors test_config.py docstring):
 
@@ -24,8 +23,8 @@ Validation layers (mirrors test_config.py docstring):
 
 Hypothesis settings: max_examples=20, deadline=None per test. Total file
 runtime is bounded under 30 seconds on a typical CI runner; combined with
-test_lifecycle_leak.py the 0.1.3 Tier 1 testing addition stays under the
-relay's 90-second total CI budget.
+test_lifecycle_leak.py the two files stay comfortably within the suite's CI
+time budget.
 
 PyO3 boundary note (carried from test_config.py): sample_rate /
 frames_per_buffer are u32; channels is u16. Negative Python ints would

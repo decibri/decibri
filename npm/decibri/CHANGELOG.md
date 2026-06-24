@@ -159,7 +159,7 @@ Error message wording on shipped `DecibriError` variants has historically been s
 
 ## [3.3.0] - 2026-04-23
 
-Groundwork release for upcoming P3 Python bindings. Adds a stable-ID form for audio device selection (`DeviceSelector::Id`), fixes a long-standing direction bug in `DecibriError::DeviceNotFound` when resolving output devices, exposes both in the Node binding, and extends the reference documentation with a Cargo feature flag guide plus additional crate-level rustdoc. No Node.js or browser API break. Direct Rust crate consumers pattern-matching on `DeviceSelector` or struct-literal-constructing `DeviceInfo` / `OutputDeviceInfo` need to update for the new `#[non_exhaustive]` attributes (see Migration notes below).
+Groundwork release for upcoming Python bindings. Adds a stable-ID form for audio device selection (`DeviceSelector::Id`), fixes a long-standing direction bug in `DecibriError::DeviceNotFound` when resolving output devices, exposes both in the Node binding, and extends the reference documentation with a Cargo feature flag guide plus additional crate-level rustdoc. No Node.js or browser API break. Direct Rust crate consumers pattern-matching on `DeviceSelector` or struct-literal-constructing `DeviceInfo` / `OutputDeviceInfo` need to update for the new `#[non_exhaustive]` attributes (see Migration notes below).
 
 ### Changed
 
@@ -182,7 +182,7 @@ Groundwork release for upcoming P3 Python bindings. Adds a stable-ID form for au
 ### Internal
 
 - `DeviceDirection` trait gains a `not_found_error(String) -> DecibriError` method so `resolve_device_generic`'s `Name` and `Id` arms produce direction-correct errors via the `Input` / `Output` impls.
-- Unit tests for `Arc<Mutex<CaptureStream>>` confirming the wrapping is `Send + Sync` (compile-time assertion) and serializes concurrent access across two threads (runtime test with `Barrier`). Documents the wrapping strategy the P3 Python binding will apply to share `!Sync` capture streams across Python threads.
+- Unit tests for `Arc<Mutex<CaptureStream>>` confirming the wrapping is `Send + Sync` (compile-time assertion) and serializes concurrent access across two threads (runtime test with `Barrier`). Documents the wrapping strategy the Python binding will apply to share `!Sync` capture streams across Python threads.
 - Crate-level rustdoc additions in `lib.rs`: a section on ORT error construction FFI side effects (the `ortsys![CreateStatus]` dylib-load trigger that motivates the `OrtPathInvalid` split from `OrtLoadFailed`) and a section on fork safety (guidance for Python `multiprocessing` consumers to use `spawn` start method).
 - `lib.rs` rustdoc "Feature flags" section cross-references `docs/features.md` for consumers wanting the deep-dive reference.
 - Em-dash cleanup across 19 code locations in `lib.rs`, `capture.rs`, `output.rs`, `vad.rs`, `error.rs`, `vad_integration.rs`, and `vad_ort_load_failure.rs`. Per CLAUDE.md, the codebase forbids em dashes; these were pre-existing violations.

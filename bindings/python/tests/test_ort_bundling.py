@@ -62,7 +62,7 @@ def clean_env(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
 
 
 # ---------------------------------------------------------------------------
-# Tier 1: Resolver unit tests
+# Resolver unit tests
 # ---------------------------------------------------------------------------
 
 
@@ -192,7 +192,7 @@ def test_resolver_bundled_handles_hash_suffix(
 
 
 # ---------------------------------------------------------------------------
-# Tier 2: Wheel-content integration tests
+# Wheel-content integration tests
 # ---------------------------------------------------------------------------
 
 
@@ -249,7 +249,7 @@ def test_resolver_bundled_default(
 
 
 # ---------------------------------------------------------------------------
-# Tier 3: End-to-end construction smoke
+# End-to-end construction smoke
 # ---------------------------------------------------------------------------
 
 

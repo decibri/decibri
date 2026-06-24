@@ -71,9 +71,10 @@ npx localtunnel --port 8080
 ### Regenerating the browser bundle
 
 `decibri.browser.js` is generated from the package's browser entry
-(`../src/browser/index.js`). Regenerate it after changing the browser source
-with any bundler that resolves the package's `browser` entry, for example:
+(`../src/browser/index.js`) with rolldown, the bundler used to produce the
+checked-in build. Regenerate it after changing the browser source so the
+bundle stays in sync:
 
 ```bash
-npx esbuild ../src/browser/index.js --bundle --format=iife --global-name=decibri --outfile=decibri.browser.js
+npx rolldown ../src/browser/index.js --format iife --name decibri --file decibri.browser.js
 ```

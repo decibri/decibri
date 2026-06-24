@@ -347,7 +347,7 @@ mod tests {
     use crate::onnx::{OnnxOutputTensor, OnnxOutputs};
     use std::path::Path;
 
-    // ---- F7: malformed model output must surface a typed error, not panic ----
+    // ---- malformed model output must surface a typed error, not panic ----
 
     /// A mock session returning caller-specified `output`/`stateN` tensors, to
     /// exercise `infer_window`'s malformed-output paths without ORT.
