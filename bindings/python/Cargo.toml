@@ -28,7 +28,7 @@ crate-type = ["cdylib"]
 # features across both bindings silently; diverging overrides produce a build
 # that neither binding tests in isolation. Both bindings inherit decibri's
 # default features (capture, playback, vad, denoise, gain, ort-load-dynamic).
-decibri = { version = "4.3", path = "../../crates/decibri" }
+decibri = { version = "5.0", path = "../../crates/decibri" }
 
 # PyO3 0.29 line (MSRV 1.83, below the workspace 1.88 floor, so headroom is
 # preserved). Bumped from 0.28 to take the RUSTSEC-2026-0176 and -0177 fixes,
