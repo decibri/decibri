@@ -231,7 +231,12 @@ impl MicrophoneConfig {
 #[derive(Debug, Clone)]
 #[non_exhaustive]
 pub struct AudioChunk {
-    /// Interleaved f32 samples in range [-1.0, 1.0].
+    /// Interleaved f32 samples, normally in the range [-1.0, 1.0]. The conditioning
+    /// chain sanitizes non-finite input, so a conditioned capture always delivers
+    /// finite samples. The range is guaranteed when the limiter is enabled, which
+    /// bounds the output to its ceiling; automatic gain control without the limiter
+    /// can drive loud passages above full scale, so enable the limiter to keep every
+    /// sample within range.
     pub data: Vec<f32>,
     /// Sample rate of this chunk.
     pub sample_rate: u32,
