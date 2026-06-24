@@ -36,6 +36,12 @@ __pycache__/
 *.pyc
 *.pyo
 
+# Python test/lint tool caches
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.hypothesis/
+
 # Python virtual environments (uv defaults to .venv/)
 .venv/
 venv/

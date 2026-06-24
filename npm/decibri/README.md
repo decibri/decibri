@@ -82,12 +82,17 @@ Creates a Readable stream that captures from the microphone.
 | Option | Type | Default | Description |
 | --- | --- | --- | --- |
 | `sampleRate` | number | 16000 | Samples per second (1000 to 384000) |
-| `channels` | number | 1 | Input channels (1 to 32) |
+| `channels` | number | 1 | Mono only: the only accepted value is `1`; a value greater than `1` throws a `RangeError` |
 | `framesPerBuffer` | number | 1600 | Frames per chunk (64 to 65536). At 16kHz mono, 1600 = 100ms = 3200 bytes |
 | `device` | number, string, or `{ id: string }` | system default | Device index, case-insensitive name substring, or stable per-host ID |
 | `dtype` | `'int16'` \| `'float32'` | `'int16'` | Sample encoding |
 | `vad` | `false` \| `'silero'` \| `'energy'` \| `VadOptions` | `false` | Voice activity detection: disabled, the Silero ML model, an RMS energy threshold, or a config object `{ model, threshold, holdoffMs }` to tune the policy |
 | `modelPath` | string | bundled model | Path to the Silero model. Only used when `vad` is `'silero'` |
+| `dcRemoval` | boolean | off | Remove a constant (DC) offset with a one-pole DC-blocking high-pass. Runs first in the chain; same-length, no added latency |
+| `denoise` | `'fastenhancer-t'` | off | Single-channel speech-enhancement (denoise) model. The model ships in the package; no path or download needed |
+| `highpass` | `80` \| `100` | off | High-pass cutoff in Hz (second-order Butterworth) that removes low-frequency rumble. Runs after denoise. Out-of-set values throw a `RangeError` |
+| `agc` | number | off | AGC target level in dBFS, an integer in -40 to -3 (typical -18). Runs after the high-pass. Out-of-range throws a `RangeError` |
+| `limiter` | number | off | Peak limiter ceiling in dBFS, a number in -3.0 to 0.0 (typical -1.0). Runs last. Out-of-range throws a `RangeError` |
 
 Standard `ReadableOptions` (e.g. `highWaterMark`) are also accepted.
 
@@ -281,6 +286,40 @@ mic.on('silence', () => console.log('silent'));
 ```
 
 The Silero model (~2MB) ships inside the npm package. No downloads or API keys required. Silero mode is Node.js only.
+
+## decibri ACE (audio conditioning)
+
+decibri ACE (Audio Capture Engine) is decibri's opt-in audio front-end for speech. It is a conditioning chain that runs on the captured audio before it reaches your `'data'` handler. Every stage is off by default, runs on-device, and needs no API key. With nothing enabled the capture path is byte-identical to plain capture.
+
+The stages run in a fixed order. Enable any subset:
+
+| Stage | Option | Range |
+| --- | --- | --- |
+| DC removal | `dcRemoval: true` | boolean |
+| Denoise | `denoise: 'fastenhancer-t'` | the one bundled model |
+| High-pass | `highpass: 80` or `100` | Hz |
+| AGC | `agc: -18` | dBFS, -40 to -3 |
+| Limiter | `limiter: -1.0` | dBFS, -3.0 to 0.0 |
+
+```javascript
+const { Microphone } = require('decibri');
+
+const mic = new Microphone({
+  sampleRate: 16000,
+  denoise: 'fastenhancer-t',   // bundled speech-enhancement model
+  highpass: 80,                // remove low-frequency rumble
+  agc: -18,                    // target level in dBFS
+  limiter: -1.0,               // peak ceiling in dBFS
+  vad: { model: 'silero', threshold: 0.5 },
+});
+
+mic.on('data', (chunk) => { /* Buffer of conditioned Int16 PCM */ });
+mic.on('speech', () => console.log('speech'));
+mic.on('silence', () => console.log('silence'));
+setTimeout(() => mic.stop(), 5000);
+```
+
+VAD reads the signal before the chain, so `vadScore` and the `'speech'` / `'silence'` events are unaffected by which conditioning stages you enable. The conditioning chain runs in the native Node.js capture path; the browser build does not include it.
 
 ## Device Selection
 
