@@ -1,7 +1,7 @@
 """Exception hierarchy tests.
 
-Covers all 37 exception classes shipped in the public ``decibri`` namespace:
-1 base (DecibriError) + 15 direct subclasses + DeviceError intermediate
+Covers all 38 exception classes shipped in the public ``decibri`` namespace:
+1 base (DecibriError) + 16 direct subclasses + DeviceError intermediate
 + 8 direct DeviceError subclasses + OrtError intermediate + 8 direct
 OrtError subclasses + OrtPathError intermediate + 2 direct OrtPathError
 subclasses.
@@ -25,6 +25,7 @@ from decibri import (
     AlreadyRunning,
     MicrophoneStreamClosed,
     ChannelsOutOfRange,
+    MultichannelNotSupported,
     DecibriError,
     DeviceEnumerationFailed,
     DeviceError,
@@ -70,13 +71,14 @@ import pytest
 
 ALL_DECIBRI_ERROR_CLASSES = (
     DecibriError,
-    # 16 direct DecibriError subclasses (non-device, non-ORT). DeviceFailed
+    # 17 direct DecibriError subclasses (non-device, non-ORT). DeviceFailed
     # is a runtime device/driver failure (distinct from the DeviceError
     # enumeration/selection family); OnnxBackendFailed is the non-ORT ONNX
     # backend catch-all (distinct from the OrtError family).
     AlreadyRunning,
     MicrophoneStreamClosed,
     ChannelsOutOfRange,
+    MultichannelNotSupported,
     FramesPerBufferOutOfRange,
     AgcTargetOutOfRange,
     LimiterCeilingOutOfRange,
@@ -117,11 +119,12 @@ ALL_DECIBRI_ERROR_CLASSES = (
 
 
 def test_class_count() -> None:
-    # 38 total: 1 base + 16 direct + DeviceError + 8 device + OrtError
-    # + 8 ORT direct + OrtPathError + 2 path. The addition over the prior 37 is
-    # LimiterCeilingOutOfRange, the config-validation error for an out-of-range
-    # limiter ceiling; like AgcTargetOutOfRange, a direct DecibriError subclass.
-    assert len(ALL_DECIBRI_ERROR_CLASSES) == 38
+    # 39 total: 1 base + 17 direct + DeviceError + 8 device + OrtError
+    # + 8 ORT direct + OrtPathError + 2 path. The addition over the prior 38 is
+    # MultichannelNotSupported, the config-validation error raised when a
+    # microphone is asked to capture more than one channel; a direct
+    # DecibriError subclass.
+    assert len(ALL_DECIBRI_ERROR_CLASSES) == 39
 
 
 def test_all_inherit_from_decibri_error() -> None:

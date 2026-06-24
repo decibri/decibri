@@ -39,6 +39,42 @@ new Microphone({ vad: false });    // unchanged; the default
 The same realignment applies to the browser build, where the object's `model`
 is `'energy'` (the only browser detector): `vad: { model: 'energy', threshold: 0.02, holdoffMs: 200 }`.
 
+## Breaking in 5.0.0: mono-only capture
+
+decibri 4.x delivered interleaved multichannel audio when a microphone was
+opened with `channels` greater than `1`. decibri 5.0.0 narrows capture to mono:
+the `channels` option accepts only `1` (the default), and a value greater than
+`1` throws a `RangeError` instead of being captured. If your code opened a
+microphone with more than one channel, pass `channels: 1` (or omit it).
+
+Before:
+
+```js
+new Microphone({ channels: 2 }); // 4.x: interleaved stereo capture
+```
+
+After:
+
+```js
+new Microphone({ channels: 1 }); // 5.0: mono (or omit channels entirely)
+new Microphone();                // unchanged; mono is the default
+```
+
+A value greater than `1` now throws:
+
+```js
+new Microphone({ channels: 2 });
+// RangeError: multichannel capture is not supported; channels must be 1 (mono)
+```
+
+The `channels` option and the channel-general `'data'` chunk shape are kept, so
+multichannel may return later as an additive change (a future release accepting
+a value greater than `1` by delivering true interleaved multichannel) rather
+than a further break. The intended longer-term multichannel direction is array
+ingest (consuming several channels internally for processing such as
+beamforming or array noise reduction while still delivering one conditioned
+stream), which is distinct from raw multichannel delivery.
+
 ## New in 4.2.0 (additive, nothing to migrate)
 
 decibri 4.2.0 is a browser-only, additive release. Code written for 4.1.0 keeps

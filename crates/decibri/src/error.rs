@@ -38,6 +38,23 @@ pub enum DecibriError {
     #[error("channels must be between 1 and 32")]
     ChannelsOutOfRange,
 
+    /// A microphone capture configuration requested more than one channel.
+    ///
+    /// Microphone capture is mono only:
+    /// [`crate::microphone::MicrophoneConfig::validate`] rejects `channels > 1`
+    /// rather than silently downmixing it to mono. The `channels` field is
+    /// retained, so honouring `channels > 1` later (by delivering true
+    /// interleaved multichannel) stays an additive change: the accepted set
+    /// widens from `{1}` outward, breaking no caller. A dedicated variant
+    /// rather than reusing [`Self::ChannelsOutOfRange`] reads more
+    /// intentionally and signals the mono-only constraint explicitly; a zero
+    /// channel count remains [`Self::ChannelsOutOfRange`]. The speaker path is
+    /// unaffected (output may be multichannel) and keeps using
+    /// [`Self::ChannelsOutOfRange`] for its `1..=32` range. Static message to
+    /// keep the text stable.
+    #[error("multichannel capture is not supported; channels must be 1 (mono)")]
+    MultichannelNotSupported,
+
     #[error("frames per buffer must be between 64 and 65536")]
     FramesPerBufferOutOfRange,
 

@@ -68,9 +68,11 @@ async function testErrors() {
   assertThrows(() => new Microphone({ sampleRate: 999 }), RangeError, 'sample rate must be between 1000 and 384000');
   assertThrows(() => new Microphone({ sampleRate: 384001 }), RangeError, 'sample rate must be between 1000 and 384000');
 
-  // channels
+  // channels: mono only. A value below 1 is a plain range error; a value above
+  // 1 is rejected as multichannel (not silently downmixed to mono).
   assertThrows(() => new Microphone({ channels: 0 }), RangeError, 'channels must be between 1 and 32');
-  assertThrows(() => new Microphone({ channels: 33 }), RangeError, 'channels must be between 1 and 32');
+  assertThrows(() => new Microphone({ channels: 2 }), RangeError, 'multichannel capture is not supported; channels must be 1 (mono)');
+  assertThrows(() => new Microphone({ channels: 33 }), RangeError, 'multichannel capture is not supported; channels must be 1 (mono)');
 
   // framesPerBuffer
   assertThrows(() => new Microphone({ framesPerBuffer: 63 }), RangeError, 'frames per buffer must be between 64 and 65536');

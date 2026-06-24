@@ -633,6 +633,7 @@ fn to_napi_error(e: decibri::error::DecibriError) -> Error {
         // Config validation (bad caller input)
         SampleRateOutOfRange
         | ChannelsOutOfRange
+        | MultichannelNotSupported
         | FramesPerBufferOutOfRange
         | AgcTargetOutOfRange
         | LimiterCeilingOutOfRange

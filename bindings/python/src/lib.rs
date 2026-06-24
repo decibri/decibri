@@ -123,6 +123,7 @@ const EXCEPTION_NAMES: &[&str] = &[
     "DeviceFailed",
     "OnnxBackendFailed",
     "ChannelsOutOfRange",
+    "MultichannelNotSupported",
     "DeviceEnumerationFailed",
     "DeviceIndexOutOfRange",
     "MicrophoneNotFound",
@@ -217,6 +218,10 @@ fn to_py_err(py: Python<'_>, err: CoreDecibriError) -> PyErr {
         ),
         CoreDecibriError::ChannelsOutOfRange => (
             "ChannelsOutOfRange",
+            Box::new(move |cls| PyErr::from_type(cls, (msg,))),
+        ),
+        CoreDecibriError::MultichannelNotSupported => (
+            "MultichannelNotSupported",
             Box::new(move |cls| PyErr::from_type(cls, (msg,))),
         ),
         CoreDecibriError::FramesPerBufferOutOfRange => (

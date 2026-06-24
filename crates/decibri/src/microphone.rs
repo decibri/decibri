@@ -99,7 +99,13 @@ impl HighpassFilter {
 pub struct MicrophoneConfig {
     /// Sample rate in Hz. Range: 1000–384000. Default: 16000.
     pub sample_rate: u32,
-    /// Number of input channels. Range: 1–32. Default: 1.
+    /// Number of input channels. Mono only: the only accepted value is 1
+    /// (the default), and a value greater than 1 is rejected by
+    /// [`validate`](Self::validate) with
+    /// [`DecibriError::MultichannelNotSupported`]. The field is kept (rather
+    /// than removed) for forward compatibility: a future release may honour a
+    /// value greater than 1 by delivering true interleaved multichannel, which
+    /// widens the accepted set without breaking callers. Default: 1.
     pub channels: u16,
     /// Frames per audio callback buffer. Range: 64–65536. Default: 1600.
     pub frames_per_buffer: u32,
@@ -180,8 +186,18 @@ impl MicrophoneConfig {
         if !(1000..=384000).contains(&self.sample_rate) {
             return Err(DecibriError::SampleRateOutOfRange);
         }
-        if !(1..=32).contains(&self.channels) {
+        if self.channels == 0 {
             return Err(DecibriError::ChannelsOutOfRange);
+        }
+        // Mono only: a request for more than one channel is rejected rather
+        // than silently downmixed to mono. Retaining the `channels` field at
+        // `1` keeps a later move to true interleaved multichannel an additive
+        // change (a widening of the accepted set, not a breaking
+        // redefinition). The device-side downmix that averages a multichannel
+        // capture to the mono target is unchanged; only the user-facing
+        // request for `channels > 1` is rejected here.
+        if self.channels > 1 {
+            return Err(DecibriError::MultichannelNotSupported);
         }
         if !(64..=65536).contains(&self.frames_per_buffer) {
             return Err(DecibriError::FramesPerBufferOutOfRange);
@@ -2096,6 +2112,46 @@ mod tests {
         assert!(
             matches!(cfg.validate(), Err(DecibriError::LimiterCeilingOutOfRange)),
             "well below the range errors"
+        );
+    }
+
+    /// Microphone capture is mono only. `MicrophoneConfig::validate` accepts a
+    /// channel count of exactly 1 (the default) and rejects any value greater
+    /// than 1 with `MultichannelNotSupported` rather than silently downmixing
+    /// it, so a later move to true interleaved multichannel is a clean additive
+    /// widening. A zero channel count keeps the plain `ChannelsOutOfRange`. The
+    /// device-side downmix that averages a multichannel capture to the mono
+    /// target is a separate concern, exercised by
+    /// `test_downmix_chain_yields_correct_mono`, and is unaffected.
+    #[test]
+    fn multichannel_request_is_rejected_mono_only() {
+        let mut cfg = MicrophoneConfig::default();
+        assert_eq!(cfg.channels, 1, "the default channel count is mono");
+        assert!(cfg.validate().is_ok(), "the default (channels 1) validates");
+
+        cfg.channels = 1;
+        assert!(cfg.validate().is_ok(), "an explicit channels 1 validates");
+
+        cfg.channels = 2;
+        assert!(
+            matches!(cfg.validate(), Err(DecibriError::MultichannelNotSupported)),
+            "stereo is rejected as multichannel, not downmixed"
+        );
+        cfg.channels = 32;
+        assert!(
+            matches!(cfg.validate(), Err(DecibriError::MultichannelNotSupported)),
+            "the formerly-accepted upper edge is now rejected"
+        );
+        cfg.channels = 100;
+        assert!(
+            matches!(cfg.validate(), Err(DecibriError::MultichannelNotSupported)),
+            "a large channel count is rejected as multichannel"
+        );
+
+        cfg.channels = 0;
+        assert!(
+            matches!(cfg.validate(), Err(DecibriError::ChannelsOutOfRange)),
+            "zero channels stays a plain range error, not a multichannel one"
         );
     }
 }
