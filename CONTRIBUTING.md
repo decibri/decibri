@@ -147,10 +147,20 @@ Every pull request runs an automated CI pipeline covering lint, format, security
 
 We appreciate your contributions and thank you for your time in submitting a pull request.
 
+## Contributor License Agreement
+
+Before your first contribution can be merged, we ask you to agree to the decibri Contributor License Agreement. It is a one-time step that lets the project include your work under its current and future licenses, with clear provenance, and it does not take away your copyright in what you contribute. You are welcome to read the full agreements first: the [Individual CLA](https://github.com/decibri/decibri-cla-action/blob/main/agreements/Individual-CLA-v1.md) and, for contributions made on behalf of a company, the [Corporate CLA](https://github.com/decibri/decibri-cla-action/blob/main/agreements/Corporate-CLA-v1.md).
+
+When you open a pull request, an automated check looks at whether you are already covered. If you are not, it leaves a comment with a short sentence to agree to. Reply with that exact sentence as a comment on your own pull request, and the check turns green. That is the whole process, and once you have done it you are covered for your future contributions too. Until the check passes, the pull request cannot be merged.
+
+If you are contributing as part of your work, your employer may need a Corporate CLA on file instead of an individual one. If that applies to you, or the check asks about it, contact the maintainers and we will sort it out.
+
+The record we keep is deliberately minimal: your GitHub username and account ID, which version of the agreement you agreed to, and the date. How we handle that information, and how to request its removal, is set out in our [Privacy Policy](https://decibri.com/privacy).
+
+The CLA covers your contributions across the decibri organisation's repositories, so you only need to agree once.
+
 ## License
 
-By contributing to this repository, you agree to license your contributions under the [Apache License 2.0](https://github.com/decibri/decibri/blob/main/LICENSE).
+The decibri source is released under the [Apache License 2.0](https://github.com/decibri/decibri/blob/main/LICENSE).
 
-Any contributed code or content must be your original work, and you warrant that you have the right to license it under the terms of the Apache License 2.0.
-
-By contributing, you also acknowledge that your contribution will be included in the project under the same license as the rest of the repository.
+Contributions are governed by the Contributor License Agreement described above. Under the CLA you keep your copyright in what you contribute and grant the project the rights it needs to include and license your work, including under future licenses. Contributed code or content must be your own work, and you confirm that you have the right to grant those rights.
