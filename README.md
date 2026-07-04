@@ -32,7 +32,7 @@ Key features:
 
 To learn more, visit [decibri.com/docs/](https://decibri.com/docs/).
 
-## decibri ACE
+## Decibri ACE
 
 Audio Capture Engine for Speech.
 
