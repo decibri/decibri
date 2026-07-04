@@ -1,0 +1,19 @@
+name: CLA
+on:
+  pull_request_target:
+    types: [opened, synchronize, closed]
+  issue_comment:
+    types: [created]
+
+permissions:
+  checks: write
+  pull-requests: write
+  contents: read
+
+jobs:
+  cla:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: decibri/decibri-cla-action@v1
+        with:
+          store-token: ${{ secrets.CLA_STORE_TOKEN }}
