@@ -1,8 +1,18 @@
 <!-- markdownlint-disable MD033 MD041 MD059 -->
-<div align="center">
-  <img width="100" height="100" alt="decibri" src="https://github.com/user-attachments/assets/a1a7aa23-6954-4cac-9490-76354f0865ee" />
 
-# decibri
+<p align="center">
+  <a href="https://decibri.com">
+    <img
+      src="https://github.com/user-attachments/assets/2d4aadca-a8fa-44d0-ad01-b15929d67c9f"
+      alt="Decibri"
+      width="100%">
+  </a>
+</p>
+
+<div align="left">
+  
+
+# Decibri
 
 Cross-platform audio capture, playback, and voice activity detection for Python, Rust, and Node.js.
 
