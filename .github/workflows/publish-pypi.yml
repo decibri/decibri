@@ -6,9 +6,10 @@ name: Publish to PyPI
 #
 # Tag namespacing per LD-10-11 (Option 1, approved 2026-05-02):
 #   python-v0.1.0a1, python-v0.1.0     -> this workflow
-#   v3.4.0, v3.5.0                     -> release.yml (npm + crates.io)
-# release.yml's tag filter excludes 'python-v*' so the two workflows
-# never fire on the same tag.
+#   npm-v5.0.0                         -> publish-npm.yml (npm)
+#   crate-v5.0.0                       -> publish-crates.yml (crates.io)
+# Every publish workflow's tag filter is prefix-namespaced, so no two
+# publish workflows ever fire on the same tag.
 #
 # Design adjudication: Option D from phase-10-design-adjudication.md.
 # Tag-routed publish workflow that mirrors python-ci.yml's existing
@@ -46,10 +47,10 @@ permissions:
 
 env:
   # Single source of truth for the bundled ONNX Runtime version.
-  # MUST stay in sync with .github/workflows/python-ci.yml (line 52)
-  # and .github/workflows/release.yml (line 20). Updating ORT requires
-  # bumping all three workflows in lockstep per the workspace Cargo.toml
-  # maintainer comment.
+  # MUST stay in sync with .github/workflows/python-ci.yml and
+  # .github/workflows/publish-npm.yml (their workflow-level env blocks).
+  # Updating ORT requires bumping all three workflows in lockstep per
+  # the workspace Cargo.toml maintainer comment.
   ORT_VERSION: 1.24.4
   # Required for maturin abi3 builds on Python 3.14 hosts targeting py310
   # abi3. See PyO3 issue #5505. Workflow-level setting applies to every

@@ -43,12 +43,12 @@ env:
   # hosts and only takes effect for the 3.14 entries.
   PYO3_USE_ABI3_FORWARD_COMPATIBILITY: "1"
   # Single source of truth for the bundled ONNX Runtime version, mirroring
-  # release.yml's pattern (release.yml line 20). Read by the per-platform
-  # preflight + download steps below. Also parsed by check-upstream.yml's
-  # ONNX Runtime drift check (the workflow greps release.yml for
-  # ORT_VERSION; the Python wheel pipeline pins to the same value here).
-  # Update in lockstep with release.yml at every ort-crate upgrade per the
-  # workspace Cargo.toml maintainer comment (steps 2 and 3 of that comment).
+  # publish-npm.yml's pattern (its workflow-level env block). Read by the
+  # per-platform preflight + download steps below. Also parsed by
+  # check-upstream.yml's ONNX Runtime drift check (the workflow greps
+  # publish-npm.yml for ORT_VERSION; the wheel pipeline pins to the same
+  # value here). Update in lockstep with publish-npm.yml at every ort-crate
+  # upgrade per the workspace Cargo.toml maintainer comment (steps 2 and 3).
   ORT_VERSION: 1.24.4
   # Phase 7 wheel size thresholds. Soft warning continues the Phase 3
   # alarm (150 MB; today's bundled wheel is ~30 to 50 MB). Hard fail at
