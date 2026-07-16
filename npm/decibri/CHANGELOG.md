@@ -9,7 +9,7 @@ For other decibri packages, see:
 - Rust crate: [crates/decibri/CHANGELOG.md](../../crates/decibri/CHANGELOG.md)
 - Python wheel: [bindings/python/CHANGELOG.md](../../bindings/python/CHANGELOG.md)
 
-## [5.1.0] - Unreleased
+## [5.1.0] - 2026-07-17
 
 ### Added
 
