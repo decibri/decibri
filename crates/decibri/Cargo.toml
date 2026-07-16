@@ -45,7 +45,7 @@ gain = []
 
 # ORT distribution mode (mutually exclusive; pick exactly one).
 # A compile_error! guard in src/lib.rs enforces the exclusivity.
-ort-load-dynamic = ["ort?/load-dynamic"]
+ort-load-dynamic = ["ort?/load-dynamic", "dep:libloading"]
 ort-download-binaries = ["ort?/download-binaries", "ort?/tls-native"]
 
 # Execution-provider passthrough features. Off by default.
@@ -63,6 +63,11 @@ ort = { workspace = true, optional = true }
 # Capture-path resampler: converts a device's native sample rate to the
 # requested target rate. Optional, pulled by the `capture` feature only.
 decibri-resampler = { version = "0.2", optional = true }
+# System-loader probe for the ORT pre-check under `ort-load-dynamic`: verifies
+# the runtime library is resolvable before `ort::init()` runs, turning a
+# potential hang into a clean typed error. Already in the tree via `ort`
+# (which loads through the same crate), so this adds no new build input.
+libloading = { version = "0.9", optional = true }
 
 # Auto-discovered example targets that use a feature-gated module must declare
 # the feature they need, so cargo skips them when that feature is off instead of

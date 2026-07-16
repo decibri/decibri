@@ -226,6 +226,7 @@ dependencies = [
  "cpal",
  "crossbeam-channel",
  "decibri-resampler",
+ "libloading",
  "ort",
  "thiserror 2.0.18",
 ]

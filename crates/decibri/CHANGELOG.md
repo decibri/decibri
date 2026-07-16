@@ -11,6 +11,10 @@ For other decibri packages, see:
 
 ## [5.1.0] - 2026-07-17
 
+### Fixed
+
+- Guard the ONNX Runtime load when no library path is configured, so a missing or unresolvable runtime fails with a clear error instead of hanging inside the load.
+
 ### Added
 
 - `File`, an offline source: conditions a WAV recording (`File::open`, with the `File::new` alias) or in-memory samples (`File::buffer`) through the same chain as live capture, delivered as a finite iterator of conditioned chunks that ends after the chain's end-of-stream tail. WAV support covers 16-bit PCM and 32-bit float; no decode dependency is added.
