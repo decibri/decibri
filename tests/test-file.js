@@ -266,9 +266,12 @@ async function fileTests(h) {
     );
 
     // A File is a single pass: a second analysis on the same object rejects.
+    // A consumed source is a lifecycle error, so it surfaces as the decibri
+    // error (like a closed stream), not the RangeError reserved for argument
+    // validation.
     const oneShot = await File.open(GOLDEN_WAV, { vad: 'silero' });
     await oneShot.analyze();
-    await assertRejects(() => oneShot.analyze(), RangeError, 'File already consumed');
+    await assertRejects(() => oneShot.analyze(), DecibriError, 'File already consumed');
   }
 
   console.log('Microphone: wall-clock VAD state machine characterization');
