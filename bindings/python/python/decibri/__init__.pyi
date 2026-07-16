@@ -1,10 +1,15 @@
 """Type stubs for the decibri Python package."""
 
+from decibri._async_classes import AsyncFile as AsyncFile
 from decibri._async_classes import AsyncMicrophone as AsyncMicrophone
 from decibri._async_classes import AsyncSpeaker as AsyncSpeaker
 from decibri._classes import Chunk as Chunk
+from decibri._classes import File as File
 from decibri._classes import Microphone as Microphone
+from decibri._classes import Segment as Segment
 from decibri._classes import Speaker as Speaker
+from decibri._classes import VadReport as VadReport
+from decibri._classes import VadWindow as VadWindow
 from decibri._decibri import MicrophoneInfo as MicrophoneInfo
 from decibri._decibri import SpeakerInfo as SpeakerInfo
 from decibri._decibri import VersionInfo as VersionInfo
@@ -43,9 +48,12 @@ from decibri.exceptions import PermissionDenied as PermissionDenied
 from decibri.exceptions import SampleRateOutOfRange as SampleRateOutOfRange
 from decibri.exceptions import StreamOpenFailed as StreamOpenFailed
 from decibri.exceptions import StreamStartFailed as StreamStartFailed
+from decibri.exceptions import FileReadFailed as FileReadFailed
 from decibri.exceptions import VadModelLoadFailed as VadModelLoadFailed
+from decibri.exceptions import VadNotConfigured as VadNotConfigured
 from decibri.exceptions import VadSampleRateUnsupported as VadSampleRateUnsupported
 from decibri.exceptions import VadThresholdOutOfRange as VadThresholdOutOfRange
+from decibri.exceptions import WavInvalid as WavInvalid
 
 __version__: str
 __all__: list[str]

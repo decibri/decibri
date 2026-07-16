@@ -802,6 +802,11 @@ async function asyncWriteDrainTests() {
 
 asyncOpenTests()
   .then(asyncWriteDrainTests)
+  .then(() =>
+    // The offline File source cases (conditioning, per-chunk VAD in file
+    // time, whole-file analysis), sharing this run's counters.
+    require('./test-file.js').fileTests({ assert, assertThrows, assertRejects })
+  )
   .then(() => {
     console.log('═══════════════════════════════════════');
     console.log(`  Passed:  ${passed}`);

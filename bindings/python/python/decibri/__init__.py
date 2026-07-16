@@ -7,8 +7,17 @@ and ``AsyncSpeaker`` (async). Construct directly via the class
 constructors (``decibri.Microphone(...)`` / ``decibri.Speaker(...)``).
 """
 
-from decibri._async_classes import AsyncMicrophone, AsyncSpeaker
-from decibri._classes import Chunk, Microphone, Speaker, Vad
+from decibri._async_classes import AsyncFile, AsyncMicrophone, AsyncSpeaker
+from decibri._classes import (
+    Chunk,
+    File,
+    Microphone,
+    Segment,
+    Speaker,
+    Vad,
+    VadReport,
+    VadWindow,
+)
 from decibri._decibri import (
     MicrophoneInfo,
     SpeakerInfo,
@@ -23,6 +32,7 @@ from decibri.exceptions import (
     DeviceError,
     DeviceFailed,
     DeviceIndexOutOfRange,
+    FileReadFailed,
     ForkAfterOrtInit,
     FramesPerBufferOutOfRange,
     InvalidFormat,
@@ -53,8 +63,10 @@ from decibri.exceptions import (
     StreamOpenFailed,
     StreamStartFailed,
     VadModelLoadFailed,
+    VadNotConfigured,
     VadSampleRateUnsupported,
     VadThresholdOutOfRange,
+    WavInvalid,
 )
 
 __version__ = "0.5.0"
@@ -203,9 +215,11 @@ __all__ = [
     # Public Python wrapper classes (sync)
     "Microphone",
     "Speaker",
+    "File",
     # Public Python wrapper classes (async)
     "AsyncMicrophone",
     "AsyncSpeaker",
+    "AsyncFile",
     # Module-level convenience functions
     "input_devices",
     "output_devices",
@@ -221,6 +235,10 @@ __all__ = [
     "Chunk",
     # Voice-activity-detection config object
     "Vad",
+    # Whole-recording analysis report types
+    "VadReport",
+    "VadWindow",
+    "Segment",
     # Exception hierarchy entry points:
     # only the catch-target roots plus ForkAfterOrtInit are surfaced in
     # __all__ to keep `from decibri import *` legible. The full

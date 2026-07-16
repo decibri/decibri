@@ -48,6 +48,7 @@ use decibri::device::{
     SpeakerInfo as CoreOutputDeviceInfo,
 };
 use decibri::error::DecibriError as CoreDecibriError;
+use decibri::file::{File as CoreFile, FileConfig};
 use decibri::microphone::{
     AudioChunk, DenoiseModel, HighpassFilter, Microphone, MicrophoneConfig, MicrophoneStream,
 };
@@ -144,6 +145,9 @@ const EXCEPTION_NAMES: &[&str] = &[
     "StreamStartFailed",
     "VadSampleRateUnsupported",
     "VadThresholdOutOfRange",
+    "FileReadFailed",
+    "WavInvalid",
+    "VadNotConfigured",
     "VadModelLoadFailed",
     "ModelLoadFailed",
     "OrtError",
@@ -193,7 +197,7 @@ fn exception_class<'py>(py: Python<'py>, name: &'static str) -> PyResult<Bound<'
 // ---------------------------------------------------------------------------
 // Error mapping: DecibriError -> PyErr.
 //
-// Covers all 34 variants explicitly. Catch-all `_ =>` arm at end is required
+// Covers all 37 variants explicitly. Catch-all `_ =>` arm at end is required
 // because DecibriError is #[non_exhaustive].
 //
 // For variants with a `path` field (OrtLoadFailed, OrtPathInvalid,
@@ -302,6 +306,20 @@ fn to_py_err(py: Python<'_>, err: CoreDecibriError) -> PyErr {
         ),
         CoreDecibriError::VadThresholdOutOfRange(_) => (
             "VadThresholdOutOfRange",
+            Box::new(move |cls| PyErr::from_type(cls, (msg,))),
+        ),
+
+        // Offline file source variants (3).
+        CoreDecibriError::FileReadFailed { .. } => (
+            "FileReadFailed",
+            Box::new(move |cls| PyErr::from_type(cls, (msg,))),
+        ),
+        CoreDecibriError::WavInvalid { .. } => (
+            "WavInvalid",
+            Box::new(move |cls| PyErr::from_type(cls, (msg,))),
+        ),
+        CoreDecibriError::VadNotConfigured => (
+            "VadNotConfigured",
             Box::new(move |cls| PyErr::from_type(cls, (msg,))),
         ),
 
@@ -1923,6 +1941,438 @@ impl AsyncSpeakerBridge {
 }
 
 // ---------------------------------------------------------------------------
+// FileBridge: offline source pyclass.
+//
+// Wraps the core offline File: constructed from a WAV path or in-memory
+// samples, iterated for conditioned chunks (read), or consumed by a
+// whole-recording analysis (analyze). Mirrors MicrophoneBridge's split of
+// responsibilities: the bridge computes the per-chunk VAD score natively on
+// the pre-conditioning feed and exposes it via `vad_probability`; the Python
+// wrapper applies the threshold + holdoff policy, in FILE time.
+//
+// The per-chunk detector is constructed lazily on the first read, so an
+// analysis-only File does not load the Silero model twice (analysis drives
+// the core's own detector).
+// ---------------------------------------------------------------------------
+
+#[pyclass]
+struct FileBridge {
+    /// The core offline source. `None` once consumed by analysis, closed, or
+    /// fully iterated: a File is a single pass.
+    inner: StdMutex<Option<CoreFile>>,
+    format: BindingSampleFormat,
+    numpy: bool,
+    vad_enabled: bool,
+    /// Energy mode: the per-chunk score is the RMS of the pre-conditioning
+    /// feed, no model. Mutually exclusive with the Silero detector below.
+    energy_vad: bool,
+    /// Lazily constructed per-chunk Silero detector (silero mode only).
+    vad: StdMutex<Option<SileroVad>>,
+    vad_model_path: Option<PathBuf>,
+    vad_threshold: f32,
+    ort_library_path: Option<PathBuf>,
+    /// Most recent per-chunk score as f32 bits, exposed via the
+    /// `vad_probability` getter exactly as MicrophoneBridge exposes its own.
+    last_vad_probability: AtomicU32,
+    sample_rate: u32,
+}
+
+/// Build the core [`FileConfig`] from the bridge keyword arguments, mapping
+/// each selector exactly as `MicrophoneBridge::new` maps the same names.
+#[allow(clippy::too_many_arguments)]
+fn build_file_config(
+    sample_rate: u32,
+    vad: bool,
+    vad_threshold: f32,
+    vad_mode: &str,
+    vad_holdoff: u32,
+    model_path: Option<&PathBuf>,
+    ort_library_path: Option<&PathBuf>,
+    denoise: Option<&str>,
+    denoise_model_path: Option<PathBuf>,
+    highpass: Option<i64>,
+    agc: Option<i8>,
+    limiter: Option<f32>,
+    dc_removal: bool,
+) -> PyResult<FileConfig> {
+    // `FileConfig` is `#[non_exhaustive]`: default-construct then assign the
+    // public fields rather than using a struct literal.
+    let mut config = FileConfig::default();
+    config.sample_rate = sample_rate;
+    config.dc_removal = dc_removal;
+
+    if let Some(name) = denoise {
+        let model = match name {
+            "fastenhancer-t" => DenoiseModel::FastEnhancerT,
+            other => {
+                return Err(PyValueError::new_err(format!(
+                    "denoise must be 'fastenhancer-t', got '{other}'"
+                )))
+            }
+        };
+        let mp = denoise_model_path.ok_or_else(|| {
+            PyValueError::new_err("denoise_model_path is required when denoise is set")
+        })?;
+        config.denoise = Some(model);
+        config.denoise_model_path = Some(mp);
+        config.ort_library_path = ort_library_path.cloned();
+    }
+
+    if let Some(hz) = highpass {
+        let filter = match hz {
+            80 => HighpassFilter::Hz80,
+            100 => HighpassFilter::Hz100,
+            other => {
+                return Err(PyValueError::new_err(format!(
+                    "highpass must be one of: 80, 100; got {other}"
+                )))
+            }
+        };
+        config.highpass = Some(filter);
+    }
+
+    config.agc = agc;
+    config.limiter = limiter;
+
+    // Whole-recording analysis runs the core's own detector; wire the
+    // detector configuration only for the silero mode (energy mode has no
+    // whole-recording analysis and its per-chunk score needs no model).
+    if vad && vad_mode == "silero" {
+        let mp = model_path.ok_or_else(|| {
+            PyValueError::new_err("model_path is required when vad=True and vad_mode='silero'")
+        })?;
+        // `VadConfig` is `#[non_exhaustive]`: default-construct then assign.
+        let mut vad_config = VadConfig::default();
+        vad_config.model_path = mp.clone();
+        vad_config.threshold = vad_threshold;
+        vad_config.ort_library_path = ort_library_path.cloned();
+        config.vad = Some(vad_config);
+        config.vad_holdoff_ms = vad_holdoff;
+    }
+
+    Ok(config)
+}
+
+/// Extract the in-memory samples argument for `FileBridge::buffer`: a list of
+/// floats extracts directly; the wrapper transports numpy arrays as raw f32
+/// little-endian bytes to avoid a per-sample boundary cost.
+fn extract_buffer_samples(samples: &Bound<'_, PyAny>) -> PyResult<Vec<f32>> {
+    if let Ok(bytes) = samples.cast::<PyBytes>() {
+        return Ok(f32_le_bytes_to_f32(bytes.as_bytes()));
+    }
+    if let Ok(vec) = samples.extract::<Vec<f32>>() {
+        return Ok(vec);
+    }
+    Err(PyTypeError::new_err(
+        "samples must be a list of floats or f32 little-endian bytes",
+    ))
+}
+
+#[pymethods]
+impl FileBridge {
+    /// Open a WAV path as an offline source.
+    #[staticmethod]
+    #[pyo3(signature = (
+        path,
+        sample_rate = 16000,
+        format = "int16".to_string(),
+        vad = false,
+        vad_threshold = 0.5_f32,
+        vad_mode = "silero".to_string(),
+        vad_holdoff = 300_u32,
+        model_path = None,
+        numpy = false,
+        ort_library_path = None,
+        denoise = None,
+        denoise_model_path = None,
+        highpass = None,
+        agc = None,
+        limiter = None,
+        dc_removal = false,
+    ))]
+    #[allow(clippy::too_many_arguments)]
+    fn open(
+        py: Python<'_>,
+        path: PathBuf,
+        sample_rate: u32,
+        format: String,
+        vad: bool,
+        vad_threshold: f32,
+        vad_mode: String,
+        vad_holdoff: u32,
+        model_path: Option<PathBuf>,
+        numpy: bool,
+        ort_library_path: Option<PathBuf>,
+        denoise: Option<String>,
+        denoise_model_path: Option<PathBuf>,
+        highpass: Option<i64>,
+        agc: Option<i8>,
+        limiter: Option<f32>,
+        dc_removal: bool,
+    ) -> PyResult<Self> {
+        let parsed_format = parse_sample_format(&format).map_err(|e| to_py_err(py, e))?;
+        let config = build_file_config(
+            sample_rate,
+            vad,
+            vad_threshold,
+            &vad_mode,
+            vad_holdoff,
+            model_path.as_ref(),
+            ort_library_path.as_ref(),
+            denoise.as_deref(),
+            denoise_model_path,
+            highpass,
+            agc,
+            limiter,
+            dc_removal,
+        )?;
+        let file = CoreFile::open(&path, config).map_err(|e| to_py_err(py, e))?;
+        Ok(Self::from_core(
+            file,
+            parsed_format,
+            numpy,
+            vad,
+            &vad_mode,
+            vad_threshold,
+            model_path,
+            ort_library_path,
+            sample_rate,
+        ))
+    }
+
+    /// Wrap in-memory samples as an offline source. `samples` is a list of
+    /// floats or raw f32 little-endian bytes; `input_rate` is their native
+    /// rate (raw samples carry no header).
+    #[staticmethod]
+    #[pyo3(signature = (
+        samples,
+        input_rate,
+        sample_rate = 16000,
+        format = "int16".to_string(),
+        vad = false,
+        vad_threshold = 0.5_f32,
+        vad_mode = "silero".to_string(),
+        vad_holdoff = 300_u32,
+        model_path = None,
+        numpy = false,
+        ort_library_path = None,
+        denoise = None,
+        denoise_model_path = None,
+        highpass = None,
+        agc = None,
+        limiter = None,
+        dc_removal = false,
+    ))]
+    #[allow(clippy::too_many_arguments)]
+    fn buffer(
+        py: Python<'_>,
+        samples: Bound<'_, PyAny>,
+        input_rate: u32,
+        sample_rate: u32,
+        format: String,
+        vad: bool,
+        vad_threshold: f32,
+        vad_mode: String,
+        vad_holdoff: u32,
+        model_path: Option<PathBuf>,
+        numpy: bool,
+        ort_library_path: Option<PathBuf>,
+        denoise: Option<String>,
+        denoise_model_path: Option<PathBuf>,
+        highpass: Option<i64>,
+        agc: Option<i8>,
+        limiter: Option<f32>,
+        dc_removal: bool,
+    ) -> PyResult<Self> {
+        let parsed_format = parse_sample_format(&format).map_err(|e| to_py_err(py, e))?;
+        let data = extract_buffer_samples(&samples)?;
+        let config = build_file_config(
+            sample_rate,
+            vad,
+            vad_threshold,
+            &vad_mode,
+            vad_holdoff,
+            model_path.as_ref(),
+            ort_library_path.as_ref(),
+            denoise.as_deref(),
+            denoise_model_path,
+            highpass,
+            agc,
+            limiter,
+            dc_removal,
+        )?;
+        let file = CoreFile::buffer(data, input_rate, config).map_err(|e| to_py_err(py, e))?;
+        Ok(Self::from_core(
+            file,
+            parsed_format,
+            numpy,
+            vad,
+            &vad_mode,
+            vad_threshold,
+            model_path,
+            ort_library_path,
+            sample_rate,
+        ))
+    }
+
+    /// Read the next conditioned chunk, advancing the per-chunk VAD score on
+    /// the pre-conditioning feed. Returns `None` once the source is fully
+    /// delivered (after the end-of-stream tail) or already consumed.
+    fn read<'py>(&self, py: Python<'py>) -> PyResult<Option<Bound<'py, PyAny>>> {
+        let (data, channels) = {
+            let mut guard = lock_recover(&self.inner);
+            let Some(file) = guard.as_mut() else {
+                return Ok(None);
+            };
+            let next = py.detach(|| file.next());
+            let chunk = match next {
+                None => {
+                    // Fully delivered: drop the source so held memory is
+                    // released as soon as the pass ends.
+                    *guard = None;
+                    return Ok(None);
+                }
+                Some(Err(e)) => return Err(to_py_err(py, e)),
+                Some(Ok(chunk)) => chunk,
+            };
+
+            if self.vad_enabled {
+                // The core hands out the pre-conditioning feed when it is
+                // maintained (VAD configured, or a transform makes the
+                // delivered output differ); on `None` the delivered chunk
+                // already is that signal, the same fallback the live pump
+                // applies.
+                let feed = file.vad_input();
+                if self.energy_vad {
+                    // Energy mode: the score is the RMS of the
+                    // pre-conditioning signal, on the same [0, 1] scale the
+                    // energy threshold compares against.
+                    let frame: &[f32] = match feed.as_deref() {
+                        Some(f) => f,
+                        None => &chunk.data,
+                    };
+                    if !frame.is_empty() {
+                        let score = rms(frame);
+                        self.last_vad_probability
+                            .store(score.to_bits(), Ordering::Relaxed);
+                    }
+                } else if let Some(feed) = feed {
+                    // Silero mode always configures the core detector feed.
+                    if !feed.is_empty() {
+                        let mut vad_guard = lock_recover(&self.vad);
+                        if vad_guard.is_none() {
+                            *vad_guard = Some(self.build_detector(py, file.vad_rate())?);
+                        }
+                        if let Some(vad) = vad_guard.as_mut() {
+                            let result = py
+                                .detach(|| vad.process(&feed))
+                                .map_err(|e| to_py_err(py, e))?;
+                            self.last_vad_probability
+                                .store(result.probability.to_bits(), Ordering::Relaxed);
+                        }
+                    }
+                }
+            }
+            (chunk.data, chunk.channels)
+        };
+
+        let obj = if self.numpy {
+            encode_chunk_numpy(py, data, self.format, channels)?
+        } else {
+            encode_chunk_bytes(py, &data, self.format)
+        };
+        Ok(Some(obj))
+    }
+
+    /// Consume the source with the core's whole-recording analysis. Returns
+    /// the per-window scores as `(start, end, probability, is_speech)` tuples
+    /// and the merged segments as `(start, end)` tuples; the wrapper shapes
+    /// them into the public report types.
+    #[allow(clippy::type_complexity)]
+    fn analyze(&self, py: Python<'_>) -> PyResult<(Vec<(f64, f64, f32, bool)>, Vec<(f64, f64)>)> {
+        let file = lock_recover(&self.inner).take();
+        let Some(file) = file else {
+            return Err(PyValueError::new_err(
+                "File already consumed; construct a new File for another pass",
+            ));
+        };
+        let report = py.detach(|| file.analyze()).map_err(|e| to_py_err(py, e))?;
+        Ok((
+            report
+                .scores
+                .iter()
+                .map(|w| (w.start, w.end, w.probability, w.is_speech))
+                .collect(),
+            report.segments.iter().map(|s| (s.start, s.end)).collect(),
+        ))
+    }
+
+    /// Release the source. Idempotent; a closed File reads as ended.
+    fn close(&self) {
+        *lock_recover(&self.inner) = None;
+    }
+
+    /// Most recent per-chunk VAD score (0.0 to 1.0), computed on the
+    /// pre-conditioning feed. 0.0 before the first chunk or with VAD off.
+    #[getter]
+    fn vad_probability(&self) -> f32 {
+        f32::from_bits(self.last_vad_probability.load(Ordering::Relaxed))
+    }
+
+    /// The target output rate every delivered chunk carries.
+    #[getter]
+    fn sample_rate(&self) -> u32 {
+        self.sample_rate
+    }
+}
+
+impl FileBridge {
+    /// Shared constructor tail for the two source forms.
+    #[allow(clippy::too_many_arguments)]
+    fn from_core(
+        file: CoreFile,
+        format: BindingSampleFormat,
+        numpy: bool,
+        vad: bool,
+        vad_mode: &str,
+        vad_threshold: f32,
+        model_path: Option<PathBuf>,
+        ort_library_path: Option<PathBuf>,
+        sample_rate: u32,
+    ) -> Self {
+        Self {
+            inner: StdMutex::new(Some(file)),
+            format,
+            numpy,
+            vad_enabled: vad,
+            energy_vad: vad && vad_mode == "energy",
+            vad: StdMutex::new(None),
+            vad_model_path: model_path,
+            vad_threshold,
+            ort_library_path,
+            last_vad_probability: AtomicU32::new(0),
+            sample_rate,
+        }
+    }
+
+    /// Construct the lazily-built per-chunk Silero detector at the rate the
+    /// core File runs detection at (which already accounts for the internal
+    /// feed resample).
+    fn build_detector(&self, py: Python<'_>, vad_rate: Option<u32>) -> PyResult<SileroVad> {
+        let mp = self.vad_model_path.clone().ok_or_else(|| {
+            PyValueError::new_err("model_path is required when vad=True and vad_mode='silero'")
+        })?;
+        // `VadConfig` is `#[non_exhaustive]`: default-construct then assign.
+        let mut vad_config = VadConfig::default();
+        vad_config.model_path = mp;
+        vad_config.sample_rate = vad_rate.unwrap_or(16000);
+        vad_config.threshold = self.vad_threshold;
+        vad_config.ort_library_path = self.ort_library_path.clone();
+        SileroVad::new(vad_config).map_err(|e| to_py_err(py, e))
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Module entry point.
 //
 // Exception classes are not registered as module attributes here. They live
@@ -1937,6 +2387,7 @@ fn _decibri(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<OutputDeviceInfo>()?;
     m.add_class::<MicrophoneBridge>()?;
     m.add_class::<SpeakerBridge>()?;
+    m.add_class::<FileBridge>()?;
 
     // Async pyclasses. The Python wrappers (AsyncMicrophone,
     // AsyncSpeaker) live in python/decibri/_async_classes.py and

@@ -99,7 +99,8 @@ function wrapNativeError(err) {
     msg.startsWith('frames per buffer must be between') ||
     msg.startsWith('Silero VAD only supports') ||
     msg.startsWith('VAD threshold must be between') ||
-    msg.startsWith('device index out of range')
+    msg.startsWith('device index out of range') ||
+    msg.startsWith('analysis requires VAD')
   ) {
     return new RangeError(msg);
   }

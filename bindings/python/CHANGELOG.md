@@ -8,6 +8,14 @@ For Rust core (`crates/decibri`) and npm binding (`bindings/node`) changes, see 
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.6.0] - Unreleased
+
+### Added
+
+- `File` and `AsyncFile`, offline sources: the same conditioning options as `Microphone` over a WAV file (`File("clip.wav")`, or the identical `File.open("clip.wav")`) or in-memory samples (`File.buffer(samples, input_rate=...)`), iterated for conditioned chunks exactly as the microphone is. Metadata iteration (`iter_with_metadata()` / `aiter_with_metadata()`) carries per-chunk `vad_score` and `is_speaking`, with the speaking holdoff and `Chunk.timestamp` measured in file time (seconds of audio position) rather than wall-clock time.
+- Whole-recording speech analysis: `File.analyze()` (also spelled `analyse()`) returns a `VadReport` with per-window `VadWindow` scores and merged speech `Segment`s, all in seconds of file time. Requires `vad=`; a `File` built without it raises `VadNotConfigured`.
+- New exception classes: `FileReadFailed`, `WavInvalid`, and `VadNotConfigured`.
+
 ## [0.5.0] - 2026-06-24
 
 ### Added

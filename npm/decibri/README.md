@@ -30,6 +30,22 @@ mic.on('data', (chunk) => { /* Buffer of Int16 PCM samples */ });
 setTimeout(() => mic.stop(), 5000);
 ```
 
+### Condition and analyze a file
+
+```javascript
+const { File } = require('decibri');
+
+// The same conditioning chain as the live microphone, over a WAV file.
+const file = await File.open('clip.wav', { denoise: 'fastenhancer-t', highpass: 80 });
+file.on('data', (chunk) => { /* Buffer of conditioned Int16 PCM */ });
+file.on('end', () => console.log('done'));
+
+// Whole-file speech analysis (a live stream cannot do this).
+const f = await File.open('clip.wav', { vad: 'silero' });
+const report = await f.analyze();
+for (const s of report.segments) console.log(s.start, s.end); // seconds
+```
+
 ### Play audio
 
 ```javascript
@@ -320,6 +336,18 @@ setTimeout(() => mic.stop(), 5000);
 ```
 
 VAD reads the signal before the chain, so `vadScore` and the `'speech'` / `'silence'` events are unaffected by which conditioning stages you enable. The conditioning chain runs in the native Node.js capture path; the browser build does not include it.
+
+## API: File (offline source)
+
+Everything a `Microphone` does to live audio, `File` does to audio you already have: the same conditioning options, the same Readable stream of conditioned chunks (finite: it ends at EOF), and the same opt-in `vad`. Because a `File` is a complete recording, it can also analyze the whole recording for speech.
+
+- `await File.open(path, options?)`: read a WAV off the event loop (recommended, like `Microphone.open`).
+- `new File(path, options?)`: the same result, synchronous (blocks on disk I/O; fine for scripts).
+- `File.buffer(samples, options)`: wrap a `Float32Array` of samples you already hold. `options.inputRate` is required (raw samples carry no header); a raw `Buffer` of bytes is rejected as ambiguous.
+- `await file.analyze()` (also spelled `analyse()`): consume the source and resolve to a `VadReport` of per-window `scores` (`{ start, end, vadScore, isSpeech }`) and merged speech `segments` (`{ start, end }`), in seconds of file time. Requires `vad: 'silero'`; a `File` opened without `vad` rejects with `analysis requires VAD`.
+- `file.vadScore`, `'speech'` / `'silence'` events: per-chunk VAD alongside the stream, with the holdoff measured in FILE time (sample positions), never wall-clock time, so processing speed does not change the reported events.
+
+Options mirror `Microphone` (`sampleRate`, `dtype`, `vad`, `dcRemoval`, `denoise`, `highpass`, `agc`, `limiter`); the live-capture options (`device`, `channels`, `framesPerBuffer`) do not apply. Iteration and analysis are separate single passes: construct one `File` per operation. Note: Node also has a global `File` (the web File API); import decibri's explicitly to avoid shadowing surprises.
 
 ## Device Selection
 

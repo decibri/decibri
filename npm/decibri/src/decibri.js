@@ -3,7 +3,7 @@
 const { Readable } = require('stream');
 const path = require('path');
 const fs = require('fs');
-const { DecibriBridge } = require('../index.js');
+const { DecibriBridge, FileHandle } = require('../index.js');
 const {
   wrapNativeError,
   DecibriError,
@@ -560,9 +560,394 @@ function version() {
   return Microphone.version();
 }
 
+// ─── File (Readable): offline source ─────────────────────────────────────────
+
+class File extends Readable {
+  /**
+   * Open a WAV file as an offline source, synchronously. Everything a
+   * `Microphone` does to live audio, a `File` does to audio you already
+   * have: the same conditioning options, the same stream of conditioned
+   * chunks, and (with `vad` set) the same per-chunk speech events, plus the
+   * whole-file `analyze()` a live stream cannot offer.
+   *
+   * The bare constructor reads the WAV inline, blocking the event loop on
+   * disk I/O; prefer `await File.open(path, options)` in servers and other
+   * latency-sensitive code, exactly as `Microphone.open` is preferred over
+   * `new Microphone`. Iteration and analysis are separate single passes:
+   * each consumes the source once, so use one `File` per operation.
+   *
+   * @param {string} filePath Path to a WAV file (16-bit PCM or 32-bit float).
+   * @param {import('./decibri').FileOptions} [options]
+   * @param {{ prepared: object, native: object }} [_internal] Internal: a
+   *   pre-resolved options bundle and an already-constructed native handle,
+   *   passed by the async `File.open()` factory and by `File.buffer()`. Not
+   *   part of the public API.
+   */
+  constructor(filePath, options = {}, _internal = undefined) {
+    super({ highWaterMark: options.highWaterMark, objectMode: false });
+
+    const prepared = _internal ? _internal.prepared : File._prepareOptions(options);
+
+    // ── Store config ───────────────────────────────────────────────────────
+
+    this._vad = prepared.vadEnabled;
+    this._vadMode = prepared.vadMode;
+    this._vadThreshold = prepared.vadThreshold;
+    // The speaking holdoff on a File is measured in FILE time (sample
+    // positions converted to seconds), never wall-clock time: a file
+    // processes faster than real time, so a wall-clock timer would collapse
+    // the reported speech timing. Positions advance as chunks are pulled.
+    this._vadHoldoffSeconds = prepared.vadHoldoff / 1000;
+    this._vadScore = 0;
+    this._isSpeaking = false;
+    this._silenceStartPos = null;
+    this._position = 0;
+    this._sampleRate = prepared.nativeOptions.sampleRate;
+    this._bytesPerSample = prepared.dtype === 'int16' ? 2 : 4;
+    this._ended = false;
+
+    // ── Create or adopt native handle ───────────────────────────────────────
+
+    if (_internal) {
+      this._native = _internal.native;
+    } else {
+      if (typeof filePath !== 'string') {
+        throw new TypeError('path must be a string');
+      }
+      try {
+        this._native = FileHandle.open(filePath, prepared.nativeOptions);
+      } catch (err) {
+        throw wrapNativeError(err);
+      }
+    }
+  }
+
+  /**
+   * Validate the constructor options and resolve them into the native options
+   * object plus the wrapper-side state. The checks and messages mirror
+   * `Microphone._prepareOptions` exactly for every shared option; the
+   * live-capture-only options (device, channels, framesPerBuffer) do not
+   * apply to an offline source.
+   * @internal
+   * @param {import('./decibri').FileOptions} options
+   */
+  static _prepareOptions(options) {
+    const sampleRate = options.sampleRate ?? 16000;
+    if (sampleRate < 1000 || sampleRate > 384000) {
+      throw new RangeError('sample rate must be between 1000 and 384000');
+    }
+
+    const dtype = options.dtype ?? 'int16';
+    if (dtype !== 'int16' && dtype !== 'float32') {
+      throw new TypeError("dtype must be 'int16' or 'float32'");
+    }
+
+    // ── Validate VAD options (same acceptance as Microphone) ────────────────
+
+    const vad = options.vad ?? false;
+    let vadEnabled;
+    let vadMode;
+    let vadThreshold;
+    let vadHoldoff;
+    if (vad === false) {
+      vadEnabled = false;
+      vadMode = 'energy'; // inert placeholder; ignored while disabled
+    } else if (vad === true) {
+      throw new TypeError(
+        "vad: true is no longer supported. Specify the mode explicitly: vad: 'silero' or vad: 'energy'."
+      );
+    } else if (vad === 'silero' || vad === 'energy') {
+      vadEnabled = true;
+      vadMode = vad;
+    } else if (vad !== null && typeof vad === 'object' && !Array.isArray(vad)) {
+      const { model, threshold, holdoffMs } = vad;
+      if (model !== 'silero' && model !== 'energy') {
+        throw new TypeError(
+          `Invalid vad model: ${JSON.stringify(model)}. Expected 'silero' or 'energy'.`
+        );
+      }
+      vadEnabled = true;
+      vadMode = model;
+      if (threshold !== undefined) {
+        if (typeof threshold !== 'number' || Number.isNaN(threshold)) {
+          throw new TypeError('vad threshold must be a number');
+        }
+        if (threshold < 0 || threshold > 1) {
+          throw new RangeError('vad threshold must be between 0 and 1');
+        }
+        vadThreshold = threshold;
+      }
+      if (holdoffMs !== undefined) {
+        if (typeof holdoffMs !== 'number' || Number.isNaN(holdoffMs)) {
+          throw new TypeError('vad holdoffMs must be a number');
+        }
+        if (holdoffMs < 0) {
+          throw new RangeError('vad holdoffMs must be non-negative');
+        }
+        vadHoldoff = holdoffMs;
+      }
+    } else {
+      throw new TypeError(
+        `Invalid vad value: ${JSON.stringify(vad)}. Expected false, 'silero', 'energy', or a config object { model, threshold, holdoffMs }.`
+      );
+    }
+
+    let modelPath = undefined;
+    if (vadEnabled && vadMode === 'silero') {
+      modelPath = options.modelPath || path.join(__dirname, '..', 'models', 'silero_vad.onnx');
+      if (!fs.existsSync(modelPath)) {
+        throw new Error(`Silero VAD model not found at ${modelPath}. Ensure the models/ directory is included in your installation.`);
+      }
+    }
+
+    // ── Conditioning options (identical checks to Microphone) ───────────────
+
+    const dcRemoval = options.dcRemoval;
+
+    const denoise = options.denoise;
+    let denoiseModelPath = undefined;
+    if (denoise !== undefined) {
+      if (denoise !== 'fastenhancer-t') {
+        throw new TypeError(
+          `Invalid denoise value: ${JSON.stringify(denoise)}. Expected 'fastenhancer-t'.`
+        );
+      }
+      denoiseModelPath = path.join(__dirname, '..', 'models', 'fastenhancer_t.onnx');
+      if (!fs.existsSync(denoiseModelPath)) {
+        throw new Error(`Denoise model not found at ${denoiseModelPath}. Ensure the models/ directory is included in your installation.`);
+      }
+    }
+
+    const highpass = options.highpass;
+    if (highpass !== undefined && highpass !== 80 && highpass !== 100) {
+      throw new RangeError('highpass must be one of: 80, 100');
+    }
+
+    const agc = options.agc;
+    if (agc !== undefined && (agc < -40 || agc > -3)) {
+      throw new RangeError('agc target level must be between -40 and -3');
+    }
+
+    const limiter = options.limiter;
+    if (limiter !== undefined && (limiter < -3.0 || limiter > 0.0)) {
+      throw new RangeError('limiter ceiling must be between -3.0 and 0.0');
+    }
+
+    let ortLibraryPath = undefined;
+    if ((vadEnabled && vadMode === 'silero') || denoise !== undefined) {
+      ortLibraryPath = resolveBundledOrtPath();
+    }
+
+    return {
+      dtype,
+      vadEnabled,
+      vadMode,
+      vadThreshold: vadThreshold ?? (vadMode === 'silero' ? 0.5 : 0.01),
+      vadHoldoff: vadHoldoff ?? 300,
+      nativeOptions: {
+        sampleRate,
+        format: dtype,
+        // Pass the mode to native only when VAD is enabled, exactly as the
+        // Microphone options do; absent means VAD off in native.
+        vadMode: vadEnabled ? vadMode : undefined,
+        // The whole-file analysis applies threshold and holdoff in the core
+        // (segment merging in file time), so both cross the boundary here,
+        // unlike the live path where the policy is wrapper-only.
+        vadThreshold: vadThreshold ?? (vadMode === 'silero' ? 0.5 : 0.01),
+        vadHoldoffMs: vadHoldoff ?? 300,
+        modelPath,
+        dcRemoval,
+        denoise,
+        denoiseModelPath,
+        ortLibraryPath,
+        highpass,
+        agc,
+        limiter,
+      },
+    };
+  }
+
+  /**
+   * Open a WAV file without blocking the event loop: the disk read, WAV
+   * parse, and chain construction run on the native thread pool. The
+   * recommended form in Node, mirroring `Microphone.open`. The synchronous
+   * `new File(path)` remains available for scripts.
+   *
+   * @param {string} filePath
+   * @param {import('./decibri').FileOptions} [options]
+   * @returns {Promise<File>}
+   */
+  static async open(filePath, options = {}) {
+    if (typeof filePath !== 'string') {
+      throw new TypeError('path must be a string');
+    }
+    const prepared = File._prepareOptions(options);
+    let native;
+    try {
+      native = await FileHandle.openAsync(filePath, prepared.nativeOptions);
+    } catch (err) {
+      throw wrapNativeError(err);
+    }
+    return new File(filePath, options, { prepared, native });
+  }
+
+  /**
+   * Wrap in-memory samples as an offline source. `samples` must be a
+   * `Float32Array` of mono samples in [-1.0, 1.0]; a raw `Buffer` of PCM
+   * bytes is rejected as ambiguous (encoded bytes, int16 PCM, and f32
+   * samples are indistinguishable, and decibri's own capture output is a
+   * `Buffer`). Raw samples carry no header, so `inputRate` (their native
+   * rate) is required; `sampleRate` stays the target output rate. No I/O,
+   * so construction is synchronous.
+   *
+   * @param {Float32Array} samples
+   * @param {import('./decibri').FileBufferOptions} [options]
+   * @returns {File}
+   */
+  static buffer(samples, options = {}) {
+    if (Buffer.isBuffer(samples)) {
+      throw new TypeError(
+        'File.buffer requires a Float32Array of samples, not a Buffer of bytes'
+      );
+    }
+    if (!(samples instanceof Float32Array)) {
+      throw new TypeError('File.buffer requires a Float32Array of samples');
+    }
+    const inputRate = options.inputRate;
+    if (typeof inputRate !== 'number' || Number.isNaN(inputRate)) {
+      throw new TypeError('inputRate is required for File.buffer (samples carry no header)');
+    }
+    if (inputRate < 1000 || inputRate > 384000) {
+      throw new RangeError('inputRate must be between 1000 and 384000');
+    }
+    const prepared = File._prepareOptions(options);
+    let native;
+    try {
+      native = FileHandle.buffer(samples, inputRate, prepared.nativeOptions);
+    } catch (err) {
+      throw wrapNativeError(err);
+    }
+    return new File(null, options, { prepared, native });
+  }
+
+  /** @internal */
+  _read() {
+    if (this._ended) {
+      return;
+    }
+    let chunk;
+    try {
+      // One chunk per pull: the conditioning compute runs synchronously
+      // here, so pulling one chunk at a time keeps the event loop breathing
+      // between chunks while the stream machinery re-calls _read on demand.
+      chunk = this._native.readChunk();
+    } catch (err) {
+      this.destroy(wrapNativeError(err));
+      return;
+    }
+    if (chunk === null || chunk === undefined) {
+      this._ended = true;
+      this.push(null); // finite source: the stream ends at EOF
+      return;
+    }
+    if (this._vad) {
+      // Both modes read the score from native, computed on the signal
+      // before the opt-in conditioning step, exactly as the live pump does.
+      this._processVadValue(this._native.vadProbability, chunk.length);
+    } else {
+      this._position += chunk.length / this._bytesPerSample / this._sampleRate;
+    }
+    this.push(chunk);
+  }
+
+  /**
+   * @internal Speech/silence state machine in FILE time. The same policy as
+   * the Microphone's wall-clock machine, with the holdoff measured in
+   * seconds of audio position instead of a timer: state flips only as the
+   * file's own timeline passes the holdoff, so processing speed never
+   * changes the reported events.
+   */
+  _processVadValue(value, chunkBytes) {
+    const chunkStart = this._position;
+    const chunkEnd = chunkStart + chunkBytes / this._bytesPerSample / this._sampleRate;
+    this._position = chunkEnd;
+    this._vadScore = value;
+    if (value >= this._vadThreshold) {
+      this._silenceStartPos = null;
+      if (!this._isSpeaking) {
+        this._isSpeaking = true;
+        this.emit('speech');
+      }
+    } else if (this._isSpeaking) {
+      if (this._silenceStartPos === null) {
+        this._silenceStartPos = chunkStart;
+      }
+      if (chunkEnd - this._silenceStartPos >= this._vadHoldoffSeconds) {
+        this._isSpeaking = false;
+        this._silenceStartPos = null;
+        this.emit('silence');
+      }
+    }
+  }
+
+  /**
+   * Most recent per-chunk VAD score for the active mode: the Silero speech
+   * probability in 'silero' mode, the normalized RMS of the pre-conditioning
+   * signal in 'energy' mode. 0 when VAD is disabled or before the first
+   * chunk. The same quantity the live `Microphone.vadScore` reports.
+   * @returns {number}
+   */
+  get vadScore() {
+    return this._vadScore;
+  }
+
+  /**
+   * Analyze the whole recording for speech. Runs the recording once through
+   * the conditioning pass off the event loop and resolves to a `VadReport`:
+   * per-window `scores` (`{ start, end, vadScore, isSpeech }`) and merged
+   * speech `segments` (`{ start, end }`), all in seconds of file time.
+   * Consumes the source: analysis and iteration are separate single passes.
+   *
+   * Requires VAD: a `File` opened without `vad` rejects with the core's
+   * "analysis requires VAD" error (a `RangeError`); the energy mode has no
+   * whole-file analysis and rejects likewise. Never constructs a detector
+   * silently.
+   *
+   * @returns {Promise<import('./decibri').VadReport>}
+   */
+  async analyze() {
+    if (this._vad && this._vadMode === 'energy') {
+      throw new RangeError(
+        "analyze() requires vad: 'silero'; energy mode does not support whole-file analysis"
+      );
+    }
+    try {
+      return await this._native.analyze();
+    } catch (err) {
+      throw wrapNativeError(err);
+    }
+  }
+
+  /**
+   * The same whole-recording analysis under the international spelling.
+   * @returns {Promise<import('./decibri').VadReport>}
+   */
+  analyse() {
+    return this.analyze();
+  }
+
+  /**
+   * Release the source. Idempotent; a closed File reads as ended.
+   */
+  close() {
+    this._native.close();
+  }
+}
+
 module.exports = {
   Microphone,
   Speaker,
+  File,
   inputDevices,
   outputDevices,
   version,
