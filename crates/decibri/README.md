@@ -109,6 +109,41 @@ let stream = microphone.start()?;
 
 The denoise stage needs the `denoise` feature and an explicit `denoise_model_path`: the crate ships no model bytes, and with the model named but no path the denoise stage stays off. This is the one place the crate asks for more than the bindings do. The Python and Node.js packages bundle the denoise model and resolve its path for you, so there you pass only the model selector. `agc` and `limiter` need the `gain` feature (pure DSP, no model); `dc_removal` and `highpass` need no extra feature. The AGC target and limiter ceiling are validated in `MicrophoneConfig::validate`, so an out-of-range value is a typed error, not a silent clamp. The high-pass cutoff and the denoise model are named enums (`HighpassFilter`, `DenoiseModel`) so adding further cutoffs or models stays a non-breaking widening.
 
+### Condition and analyze a file
+
+Everything a `Microphone` does to live audio, `File` does to audio you already have, through the same chain. A `File` is a finite `Iterator` over conditioned chunks; `File::open` mirrors `std::fs::File::open`, and `File::buffer` wraps in-memory samples with an explicit input rate.
+
+```rust
+use decibri::{File, FileConfig, VadConfig};
+
+let mut config = FileConfig::default();
+config.sample_rate = 16_000;   // target output rate; input rate read from the WAV header
+config.dc_removal = true;
+
+for chunk in File::open("clip.wav", config.clone())? {
+    let chunk = chunk?;        // ends with the chain's flushed tail, then None
+    process(&chunk.data);      // conditioned samples
+}
+
+// Whole-file speech analysis. VAD in the core needs a VadConfig with an
+// explicit model path (the core ships no model bytes; the Python and
+// Node.js packages bundle it and resolve this for you).
+let mut config = FileConfig::default();
+config.vad = Some(VadConfig {
+    model_path: "/path/to/silero_vad.onnx".into(),
+    ..VadConfig::default()
+});
+let report = File::open("clip.wav", config)?.analyze()?;   // or .analyse()
+for w in &report.scores {
+    println!("{:.2}-{:.2}s p={:.2} speech={}", w.start, w.end, w.probability, w.is_speech);
+}
+for s in &report.segments {
+    println!("speech {:.2}-{:.2}s", s.start, s.end);
+}
+```
+
+`analyze()` consumes the `File` and returns a `VadReport`; a `File` built without `FileConfig::vad` returns `DecibriError::VadNotConfigured`. All times are seconds of file time. When the target `sample_rate` is not a detector rate (8000 or 16000), the detector feed is resampled internally to 16 kHz; the conditioned output stays at the target rate.
+
 ### Without ONNX Runtime
 
 If you do not need Silero VAD, disable the `vad` feature to drop the ONNX Runtime dependency entirely.
@@ -170,6 +205,7 @@ The stable 4.x surface includes:
 - [`microphone::Microphone`](https://docs.rs/decibri/latest/decibri/microphone/struct.Microphone.html), [`microphone::MicrophoneConfig`](https://docs.rs/decibri/latest/decibri/microphone/struct.MicrophoneConfig.html), [`microphone::MicrophoneStream`](https://docs.rs/decibri/latest/decibri/microphone/struct.MicrophoneStream.html) (`try_next_chunk`, `next_chunk`, `is_open`, `stop`)
 - [`speaker::Speaker`](https://docs.rs/decibri/latest/decibri/speaker/struct.Speaker.html), [`speaker::SpeakerConfig`](https://docs.rs/decibri/latest/decibri/speaker/struct.SpeakerConfig.html), [`speaker::SpeakerStream`](https://docs.rs/decibri/latest/decibri/speaker/struct.SpeakerStream.html) (`send`, `drain`, `is_playing`, `stop`)
 - [`vad::SileroVad`](https://docs.rs/decibri/latest/decibri/vad/struct.SileroVad.html), [`vad::VadConfig`](https://docs.rs/decibri/latest/decibri/vad/struct.VadConfig.html), [`vad::VadResult`](https://docs.rs/decibri/latest/decibri/vad/struct.VadResult.html)
+- [`file::File`](https://docs.rs/decibri/latest/decibri/file/struct.File.html), [`file::FileConfig`](https://docs.rs/decibri/latest/decibri/file/struct.FileConfig.html), [`file::VadReport`](https://docs.rs/decibri/latest/decibri/file/struct.VadReport.html), [`file::VadWindow`](https://docs.rs/decibri/latest/decibri/file/struct.VadWindow.html), [`file::Segment`](https://docs.rs/decibri/latest/decibri/file/struct.Segment.html)
 - [`device`](https://docs.rs/decibri/latest/decibri/device/index.html) module: `input_devices()` / `output_devices()`, `MicrophoneInfo` / `SpeakerInfo`, and selection by index, case-insensitive name substring, or stable per-host ID
 - [`error::DecibriError`](https://docs.rs/decibri/latest/decibri/error/enum.DecibriError.html): `#[non_exhaustive]` enum covering capture, playback, device, ONNX Runtime, and fork-detection error variants
 

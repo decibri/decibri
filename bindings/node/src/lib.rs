@@ -9,6 +9,7 @@ use napi::{Env, Task};
 use napi_derive::napi;
 
 use decibri::device::{self, DeviceSelector};
+use decibri::file::{File as CoreFile, FileConfig, VadReport as CoreVadReport};
 use decibri::microphone::{
     DenoiseModel, HighpassFilter, Microphone, MicrophoneConfig, MicrophoneStream,
 };
@@ -639,7 +640,12 @@ fn to_napi_error(e: decibri::error::DecibriError) -> Error {
         | LimiterCeilingOutOfRange
         | InvalidFormat
         | VadSampleRateUnsupported(_)
-        | VadThresholdOutOfRange(_) => Status::InvalidArg,
+        | VadThresholdOutOfRange(_)
+        | WavInvalid { .. }
+        | VadNotConfigured => Status::InvalidArg,
+
+        // Offline file read failure (I/O)
+        FileReadFailed { .. } => Status::GenericFailure,
 
         // Device selection (bad caller input)
         MicrophoneNotFound(_)
@@ -998,5 +1004,470 @@ impl DecibriOutputBridge {
             decibri: env!("CARGO_PKG_VERSION").to_string(),
             audio_backend: format!("cpal {}", CPAL_VERSION),
         }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// FileHandle: offline source class.
+//
+// Wraps the core offline File: constructed from a WAV path or in-memory
+// samples, pulled for conditioned chunks (readChunk), or consumed by a
+// whole-recording analysis (analyze). Mirrors DecibriBridge's split of
+// responsibilities: the native side computes the per-chunk VAD score on the
+// pre-conditioning feed and exposes it via `vadProbability`; the JS wrapper
+// applies the threshold + holdoff policy, in FILE time.
+// ---------------------------------------------------------------------------
+
+/// Options passed from the JS `File` wrapper. The conditioning fields mirror
+/// `DecibriOptions` exactly; the live-capture-only fields (device, channels,
+/// framesPerBuffer) do not apply to an offline source. `vadThreshold` and
+/// `vadHoldoffMs` are internal plumbing (the user passes them on the `vad`
+/// config object; the wrapper resolves them), hidden from the generated
+/// TypeScript like `ortLibraryPath`.
+#[napi(object)]
+#[derive(Default)]
+pub struct FileOptions {
+    pub sample_rate: Option<u32>,
+    pub format: Option<String>,
+    pub vad_mode: Option<String>,
+    #[napi(skip_typescript)]
+    pub vad_threshold: Option<f64>,
+    #[napi(skip_typescript)]
+    pub vad_holdoff_ms: Option<u32>,
+    pub model_path: Option<String>,
+    pub dc_removal: Option<bool>,
+    pub denoise: Option<String>,
+    #[napi(skip_typescript)]
+    pub denoise_model_path: Option<String>,
+    #[napi(skip_typescript)]
+    pub ort_library_path: Option<String>,
+    pub highpass: Option<i32>,
+    pub agc: Option<i32>,
+    pub limiter: Option<f64>,
+}
+
+/// One scored voice-activity window of a recording: `start` / `end` in
+/// seconds of file time, the speech probability, and the raw threshold test.
+#[napi(object)]
+pub struct VadWindow {
+    pub start: f64,
+    pub end: f64,
+    pub vad_score: f64,
+    pub is_speech: bool,
+}
+
+/// One merged speech region of a recording, in seconds of file time.
+#[napi(object)]
+pub struct Segment {
+    pub start: f64,
+    pub end: f64,
+}
+
+/// The whole-recording analysis `File.analyze()` resolves to: per-window
+/// scores and merged speech segments, in file order.
+#[napi(object)]
+pub struct VadReport {
+    pub scores: Vec<VadWindow>,
+    pub segments: Vec<Segment>,
+}
+
+fn convert_report(report: CoreVadReport) -> VadReport {
+    VadReport {
+        scores: report
+            .scores
+            .iter()
+            .map(|w| VadWindow {
+                start: w.start,
+                end: w.end,
+                vad_score: f64::from(w.probability),
+                is_speech: w.is_speech,
+            })
+            .collect(),
+        segments: report
+            .segments
+            .iter()
+            .map(|s| Segment {
+                start: s.start,
+                end: s.end,
+            })
+            .collect(),
+    }
+}
+
+/// Build the core [`FileConfig`] from the JS options, mapping each selector
+/// exactly as `build_microphone_parts` maps the same names for live capture.
+fn build_file_config(opts: &FileOptions) -> Result<FileConfig> {
+    let sample_rate = opts.sample_rate.unwrap_or(16000);
+
+    // `FileConfig` is `#[non_exhaustive]`: default-construct then assign the
+    // public fields rather than using a struct literal.
+    let mut config = FileConfig::default();
+    config.sample_rate = sample_rate;
+    config.dc_removal = opts.dc_removal.unwrap_or(false);
+
+    if let Some(name) = opts.denoise.as_deref() {
+        let model = match name {
+            "fastenhancer-t" => DenoiseModel::FastEnhancerT,
+            other => {
+                return Err(Error::new(
+                    Status::InvalidArg,
+                    format!("denoise must be 'fastenhancer-t', got '{other}'"),
+                ))
+            }
+        };
+        let model_path = opts.denoise_model_path.as_deref().ok_or_else(|| {
+            Error::new(
+                Status::InvalidArg,
+                "denoiseModelPath is required when denoise is set",
+            )
+        })?;
+        config.denoise = Some(model);
+        config.denoise_model_path = Some(std::path::PathBuf::from(model_path));
+        config.ort_library_path = opts
+            .ort_library_path
+            .as_deref()
+            .map(std::path::PathBuf::from);
+    }
+
+    if let Some(hz) = opts.highpass {
+        let filter = match hz {
+            80 => HighpassFilter::Hz80,
+            100 => HighpassFilter::Hz100,
+            other => {
+                return Err(Error::new(
+                    Status::InvalidArg,
+                    format!("highpass must be one of: 80, 100; got {other}"),
+                ))
+            }
+        };
+        config.highpass = Some(filter);
+    }
+
+    if let Some(target) = opts.agc {
+        if !(-40..=-3).contains(&target) {
+            return Err(Error::new(
+                Status::InvalidArg,
+                "agc target level must be between -40 and -3",
+            ));
+        }
+        config.agc = Some(target as i8);
+    }
+
+    if let Some(ceiling) = opts.limiter {
+        if !(-3.0..=0.0).contains(&ceiling) {
+            return Err(Error::new(
+                Status::InvalidArg,
+                "limiter ceiling must be between -3.0 and 0.0",
+            ));
+        }
+        config.limiter = Some(ceiling as f32);
+    }
+
+    // Whole-recording analysis runs the core's own detector; wire it only for
+    // the silero mode (energy mode has no whole-recording analysis and its
+    // per-chunk score needs no model).
+    if opts.vad_mode.as_deref() == Some("silero") {
+        let model_path = opts.model_path.as_deref().ok_or_else(|| {
+            Error::new(
+                Status::InvalidArg,
+                "modelPath is required when vadMode is 'silero'",
+            )
+        })?;
+        // `VadConfig` is `#[non_exhaustive]`: default-construct then assign.
+        let mut vad_config = VadConfig::default();
+        vad_config.model_path = std::path::PathBuf::from(model_path);
+        vad_config.threshold = opts.vad_threshold.unwrap_or(0.5) as f32;
+        vad_config.ort_library_path = opts
+            .ort_library_path
+            .as_deref()
+            .map(std::path::PathBuf::from);
+        config.vad = Some(vad_config);
+        config.vad_holdoff_ms = opts.vad_holdoff_ms.unwrap_or(300);
+    }
+
+    Ok(config)
+}
+
+/// The `Send` pieces of an opened offline source, assembled into a
+/// [`FileHandle`] on the JS thread (by the synchronous factory or in the
+/// async open task's `resolve`).
+pub struct FileParts {
+    file: CoreFile,
+    format: SampleFormat,
+    vad_enabled: bool,
+    energy_vad: bool,
+    vad_model_path: Option<String>,
+    vad_threshold: f32,
+    ort_library_path: Option<String>,
+    sample_rate: u32,
+}
+
+/// Open a WAV path as the core offline source: the blocking work (file read,
+/// WAV parse, chain construction) shared by the synchronous factory and the
+/// async open task. Touches no napi/JS state, so it can run off the JS thread.
+fn build_file_parts(path: &str, options: Option<&FileOptions>) -> Result<FileParts> {
+    let default_opts = FileOptions::default();
+    let opts = options.unwrap_or(&default_opts);
+    let format = match opts.format.as_deref().unwrap_or("int16") {
+        "int16" => SampleFormat::Int16,
+        "float32" => SampleFormat::Float32,
+        _ => {
+            return Err(Error::new(
+                Status::InvalidArg,
+                "format must be 'int16' or 'float32'",
+            ))
+        }
+    };
+    let config = build_file_config(opts)?;
+    let file = CoreFile::open(path, config).map_err(to_napi_error)?;
+    Ok(FileParts {
+        file,
+        format,
+        vad_enabled: opts.vad_mode.is_some(),
+        energy_vad: opts.vad_mode.as_deref() == Some("energy"),
+        vad_model_path: opts.model_path.clone(),
+        vad_threshold: opts.vad_threshold.unwrap_or(0.5) as f32,
+        ort_library_path: opts.ort_library_path.clone(),
+        sample_rate: opts.sample_rate.unwrap_or(16000),
+    })
+}
+
+impl FileParts {
+    fn into_handle(self) -> FileHandle {
+        FileHandle {
+            inner: Some(self.file),
+            format: self.format,
+            vad_enabled: self.vad_enabled,
+            energy_vad: self.energy_vad,
+            vad: None,
+            vad_model_path: self.vad_model_path,
+            vad_threshold: self.vad_threshold,
+            ort_library_path: self.ort_library_path,
+            vad_probability: 0.0,
+            sample_rate: self.sample_rate,
+        }
+    }
+}
+
+/// Background task that performs the blocking file open work (disk read, WAV
+/// parse, chain construction) on the libuv thread pool, off the JS event
+/// loop, then resolves to a constructed handle on the JS thread.
+pub struct OpenFileTask {
+    path: String,
+    options: Option<FileOptions>,
+}
+
+impl Task for OpenFileTask {
+    type Output = FileParts;
+    type JsValue = FileHandle;
+
+    fn compute(&mut self) -> Result<Self::Output> {
+        build_file_parts(&self.path, self.options.as_ref())
+    }
+
+    fn resolve(&mut self, _env: Env, output: Self::Output) -> Result<Self::JsValue> {
+        Ok(output.into_handle())
+    }
+}
+
+/// Background task that consumes the source with the core's whole-recording
+/// analysis on the libuv thread pool. A `File` already consumed (analyzed,
+/// closed, or fully read) rejects rather than silently re-reading.
+pub struct AnalyzeFileTask {
+    file: Option<CoreFile>,
+}
+
+impl Task for AnalyzeFileTask {
+    type Output = CoreVadReport;
+    type JsValue = VadReport;
+
+    fn compute(&mut self) -> Result<Self::Output> {
+        let file = self.file.take().ok_or_else(|| {
+            Error::new(
+                Status::InvalidArg,
+                "File already consumed; construct a new File for another pass",
+            )
+        })?;
+        file.analyze().map_err(to_napi_error)
+    }
+
+    fn resolve(&mut self, _env: Env, output: Self::Output) -> Result<Self::JsValue> {
+        Ok(convert_report(output))
+    }
+}
+
+/// Native offline-source handle exposed to Node.js via napi-rs. The public
+/// `File` Readable lives in the JS wrapper; consumers construct that, not
+/// this handle, directly.
+#[napi]
+pub struct FileHandle {
+    /// The core offline source. `None` once consumed by analysis, closed, or
+    /// fully read: a File is a single pass.
+    inner: Option<CoreFile>,
+    format: SampleFormat,
+    vad_enabled: bool,
+    energy_vad: bool,
+    /// Lazily constructed per-chunk Silero detector (silero mode only), so an
+    /// analysis-only File does not load the model twice.
+    vad: Option<SileroVad>,
+    vad_model_path: Option<String>,
+    vad_threshold: f32,
+    ort_library_path: Option<String>,
+    /// Most recent per-chunk score, exposed via the `vadProbability` getter
+    /// exactly as DecibriBridge exposes its own.
+    vad_probability: f32,
+    sample_rate: u32,
+}
+
+#[napi]
+impl FileHandle {
+    /// Open a WAV path as an offline source, synchronously (blocks on disk
+    /// I/O; the JS wrapper's async `File.open` uses `openAsync` instead).
+    #[napi(factory)]
+    pub fn open(path: String, options: Option<FileOptions>) -> Result<FileHandle> {
+        Ok(build_file_parts(&path, options.as_ref())?.into_handle())
+    }
+
+    /// Open a WAV path without blocking the JS event loop: the disk read,
+    /// WAV parse, and chain construction run on the libuv thread pool.
+    #[napi]
+    pub fn open_async(path: String, options: Option<FileOptions>) -> AsyncTask<OpenFileTask> {
+        AsyncTask::new(OpenFileTask { path, options })
+    }
+
+    /// Wrap in-memory samples as an offline source. `samples` are mono f32 in
+    /// [-1.0, 1.0]; `inputRate` is their native rate (raw samples carry no
+    /// header). No I/O, so construction is synchronous.
+    #[napi(factory)]
+    pub fn buffer(
+        samples: Float32Array,
+        input_rate: u32,
+        options: Option<FileOptions>,
+    ) -> Result<FileHandle> {
+        let default_opts = FileOptions::default();
+        let opts = options.as_ref().unwrap_or(&default_opts);
+        let format = match opts.format.as_deref().unwrap_or("int16") {
+            "int16" => SampleFormat::Int16,
+            "float32" => SampleFormat::Float32,
+            _ => {
+                return Err(Error::new(
+                    Status::InvalidArg,
+                    "format must be 'int16' or 'float32'",
+                ))
+            }
+        };
+        let config = build_file_config(opts)?;
+        let file = CoreFile::buffer(samples.to_vec(), input_rate, config).map_err(to_napi_error)?;
+        Ok(FileParts {
+            file,
+            format,
+            vad_enabled: opts.vad_mode.is_some(),
+            energy_vad: opts.vad_mode.as_deref() == Some("energy"),
+            vad_model_path: opts.model_path.clone(),
+            vad_threshold: opts.vad_threshold.unwrap_or(0.5) as f32,
+            ort_library_path: opts.ort_library_path.clone(),
+            sample_rate: opts.sample_rate.unwrap_or(16000),
+        }
+        .into_handle())
+    }
+
+    /// Pull the next conditioned chunk, advancing the per-chunk VAD score on
+    /// the pre-conditioning feed. Returns `null` once the source is fully
+    /// delivered (after the end-of-stream tail) or already consumed.
+    #[napi]
+    pub fn read_chunk(&mut self) -> Result<Option<Buffer>> {
+        let Some(file) = self.inner.as_mut() else {
+            return Ok(None);
+        };
+        let chunk = match file.next() {
+            None => {
+                // Fully delivered: drop the source so held memory is released
+                // as soon as the pass ends.
+                self.inner = None;
+                return Ok(None);
+            }
+            Some(Err(e)) => return Err(to_napi_error(e)),
+            Some(Ok(chunk)) => chunk,
+        };
+
+        if self.vad_enabled {
+            // The core hands out the pre-conditioning feed when it is
+            // maintained (VAD configured, or a transform makes the delivered
+            // output differ); on `None` the delivered chunk already is that
+            // signal, the same fallback the live pump applies.
+            let feed = file.vad_input();
+            if self.energy_vad {
+                let frame: &[f32] = match feed.as_deref() {
+                    Some(f) => f,
+                    None => &chunk.data,
+                };
+                if !frame.is_empty() {
+                    self.vad_probability = sample::rms(frame);
+                }
+            } else if let Some(feed) = feed {
+                if !feed.is_empty() {
+                    if self.vad.is_none() {
+                        let model_path = self.vad_model_path.as_deref().ok_or_else(|| {
+                            Error::new(
+                                Status::InvalidArg,
+                                "modelPath is required when vadMode is 'silero'",
+                            )
+                        })?;
+                        // `VadConfig` is `#[non_exhaustive]`: default-construct
+                        // then assign. The rate the core runs detection at
+                        // already accounts for the internal feed resample.
+                        let mut vad_config = VadConfig::default();
+                        vad_config.model_path = std::path::PathBuf::from(model_path);
+                        vad_config.sample_rate = file.vad_rate().unwrap_or(16000);
+                        vad_config.threshold = self.vad_threshold;
+                        vad_config.ort_library_path = self
+                            .ort_library_path
+                            .as_deref()
+                            .map(std::path::PathBuf::from);
+                        self.vad = Some(SileroVad::new(vad_config).map_err(to_napi_error)?);
+                    }
+                    if let Some(vad) = self.vad.as_mut() {
+                        let result = vad.process(&feed).map_err(to_napi_error)?;
+                        self.vad_probability = result.probability;
+                    }
+                }
+            }
+        }
+
+        let bytes = match self.format {
+            SampleFormat::Int16 => sample::f32_to_i16_le_bytes(&chunk.data),
+            SampleFormat::Float32 => sample::f32_to_f32_le_bytes(&chunk.data),
+        };
+        Ok(Some(bytes.into()))
+    }
+
+    /// Consume the source with the core's whole-recording analysis, off the
+    /// JS event loop. Resolves to the `VadReport`; a `File` built without VAD
+    /// rejects with the core's typed error, never a silently constructed
+    /// detector.
+    #[napi]
+    pub fn analyze(&mut self) -> AsyncTask<AnalyzeFileTask> {
+        AsyncTask::new(AnalyzeFileTask {
+            file: self.inner.take(),
+        })
+    }
+
+    /// Release the source. Idempotent; a closed File reads as ended.
+    #[napi]
+    pub fn close(&mut self) {
+        self.inner = None;
+    }
+
+    /// Most recent per-chunk VAD score (0.0 to 1.0), computed on the
+    /// pre-conditioning feed. 0.0 before the first chunk or with VAD off.
+    #[napi(getter)]
+    pub fn vad_probability(&self) -> f64 {
+        f64::from(self.vad_probability)
+    }
+
+    /// The target output rate every delivered chunk carries.
+    #[napi(getter)]
+    pub fn sample_rate(&self) -> u32 {
+        self.sample_rate
     }
 }

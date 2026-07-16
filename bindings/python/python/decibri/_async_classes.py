@@ -58,7 +58,9 @@ else:
 from decibri import _decibri, exceptions
 from decibri._classes import (
     Chunk,
+    File,
     Vad,
+    VadReport,
     _DEFAULT_VAD_HOLDOFF_MS,
     _VadStateMachine,
     _VALID_DENOISE_MODELS,
@@ -68,7 +70,7 @@ from decibri._classes import (
 )
 from decibri._decibri import MicrophoneInfo, SpeakerInfo, VersionInfo
 
-__all__ = ["AsyncMicrophone", "AsyncSpeaker"]
+__all__ = ["AsyncMicrophone", "AsyncSpeaker", "AsyncFile"]
 
 
 # ---------------------------------------------------------------------------
@@ -842,3 +844,178 @@ class AsyncSpeaker:
     async def devices() -> list[SpeakerInfo]:
         """List available audio output devices."""
         return await _decibri.AsyncSpeakerBridge.devices()
+
+
+# ---------------------------------------------------------------------------
+# AsyncFile: async offline source; mirror of decibri.File.
+# ---------------------------------------------------------------------------
+
+
+class AsyncFile:
+    """Async offline source; mirror of ``decibri.File``.
+
+    The same surface as the sync ``File`` with ``async def`` semantics:
+    ``async with`` for the context manager, ``async for`` for iteration,
+    ``aiter_with_metadata()`` for per-chunk VAD metadata, and awaitable
+    ``analyze()`` / ``analyse()``. Each blocking step (file read, the
+    conditioning pass, detection) runs in the default ThreadPoolExecutor
+    so the event loop stays responsive.
+
+    Example::
+
+        f = await AsyncFile.open("clip.wav", denoise="fastenhancer-t")
+        async with f:
+            async for chunk in f:
+                await handle(chunk)
+
+        report = await (await AsyncFile.open("clip.wav", vad="silero")).analyze()
+    """
+
+    _file: File
+
+    def __init__(self, path: str | Path, **kwargs: Any) -> None:
+        """Open a WAV file as an async offline source.
+
+        The synchronous constructor reads the WAV inline; prefer
+        ``await AsyncFile.open(path, ...)`` inside a running event loop,
+        exactly as ``AsyncMicrophone.open`` is preferred over its bare
+        constructor. Parameters mirror ``File`` exactly.
+        """
+        self._file = File(path, **kwargs)
+
+    @classmethod
+    async def open(cls, path: str | Path, **kwargs: Any) -> "AsyncFile":
+        """Open a WAV file without blocking the event loop.
+
+        Identical result to ``AsyncFile(path, ...)``; the file read and
+        source construction run in the default ThreadPoolExecutor.
+        """
+        loop = asyncio.get_running_loop()
+        return await loop.run_in_executor(None, lambda: cls(path, **kwargs))
+
+    @classmethod
+    async def buffer(
+        cls,
+        samples: "list[float] | np.ndarray[Any, Any]",
+        *,
+        input_rate: int,
+        **kwargs: Any,
+    ) -> "AsyncFile":
+        """Wrap in-memory samples as an async offline source.
+
+        Mirrors ``File.buffer``: ``input_rate`` is the samples' native
+        rate; ``sample_rate`` stays the target output rate.
+        """
+
+        def make() -> "AsyncFile":
+            self = object.__new__(cls)
+            self._file = File.buffer(samples, input_rate=input_rate, **kwargs)
+            return self
+
+        loop = asyncio.get_running_loop()
+        return await loop.run_in_executor(None, make)
+
+    # -----------------------------------------------------------------------
+    # Lifecycle
+    # -----------------------------------------------------------------------
+
+    async def close(self) -> None:
+        """Release the source. Idempotent; a closed file reads as ended."""
+        loop = asyncio.get_running_loop()
+        await loop.run_in_executor(None, self._file.close)
+
+    async def __aenter__(self) -> Self:
+        return self
+
+    async def __aexit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc_value: BaseException | None,
+        traceback: TracebackType | None,
+    ) -> None:
+        await self.close()
+
+    # -----------------------------------------------------------------------
+    # Read surface
+    # -----------------------------------------------------------------------
+
+    async def read(self) -> SampleData | None:
+        """Read one conditioned chunk. Returns ``None`` at end of file.
+
+        Async parallel of ``File.read``: the conditioning step runs off
+        the event loop; VAD state advances in file time exactly as on the
+        sync ``File``.
+        """
+        loop = asyncio.get_running_loop()
+        return await loop.run_in_executor(None, self._file.read)
+
+    async def read_with_metadata(self) -> Chunk | None:
+        """Async parallel of ``File.read_with_metadata``.
+
+        Returns a frozen ``Chunk`` whose ``timestamp`` is the chunk's
+        position in seconds of file time; see
+        ``File.read_with_metadata`` for the full contract.
+        """
+        loop = asyncio.get_running_loop()
+        return await loop.run_in_executor(None, self._file.read_with_metadata)
+
+    async def aiter_with_metadata(self) -> AsyncIterator[Chunk]:
+        """Yield ``Chunk`` objects until the end of the file.
+
+        Async-generator wrapping ``await read_with_metadata()``: the async
+        parallel of ``File.iter_with_metadata``.
+        """
+        while True:
+            chunk = await self.read_with_metadata()
+            if chunk is None:
+                return
+            yield chunk
+
+    def __aiter__(self) -> AsyncIterator[SampleData]:
+        return self
+
+    async def __anext__(self) -> SampleData:
+        chunk = await self.read()
+        if chunk is None:
+            raise StopAsyncIteration
+        return chunk
+
+    # -----------------------------------------------------------------------
+    # Whole-recording analysis
+    # -----------------------------------------------------------------------
+
+    async def analyze(self) -> VadReport:
+        """Analyze the whole recording for speech; returns a ``VadReport``.
+
+        Async parallel of ``File.analyze``: the single conditioning and
+        detection pass runs off the event loop. Requires VAD exactly as
+        the sync method does.
+        """
+        loop = asyncio.get_running_loop()
+        return await loop.run_in_executor(None, self._file.analyze)
+
+    async def analyse(self) -> VadReport:
+        """The same analysis under the international spelling."""
+        return await self.analyze()
+
+    # -----------------------------------------------------------------------
+    # State properties (synchronous; they read wrapper-side state)
+    # -----------------------------------------------------------------------
+
+    @property
+    def is_speaking(self) -> bool:
+        """True if per-chunk VAD currently considers speech present."""
+        return self._file.is_speaking
+
+    @property
+    def vad_score(self) -> float:
+        """Most recent per-chunk VAD score in ``[0, 1]``."""
+        return self._file.vad_score
+
+    @property
+    def sample_rate(self) -> int:
+        """The target output rate every delivered chunk carries."""
+        return self._file.sample_rate
+
+    def __repr__(self) -> str:
+        return f"Async{self._file!r}"

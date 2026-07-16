@@ -46,12 +46,78 @@ else:
 __all__ = [
     "AsyncMicrophoneBridge",
     "AsyncSpeakerBridge",
+    "FileBridge",
     "MicrophoneBridge",
     "SpeakerBridge",
     "MicrophoneInfo",
     "SpeakerInfo",
     "VersionInfo",
 ]
+
+
+class FileBridge:
+    """Internal offline-source bridge. Public ``File`` wrapper lives in
+    ``decibri._classes``; consumers should construct ``File``, not
+    ``FileBridge``, directly.
+
+    The bridge runs the per-chunk detector on the pre-conditioning feed
+    and exposes the score via ``vad_probability``; threshold and holdoff
+    policy live in the wrapper layer, measured in file time. Whole-recording
+    analysis consumes the source and returns raw score and segment tuples
+    the wrapper shapes into the public report types.
+    """
+
+    @staticmethod
+    def open(
+        path: str | Path,
+        sample_rate: int = 16000,
+        format: str = "int16",
+        vad: bool = False,
+        vad_threshold: float = 0.5,
+        vad_mode: str = "silero",
+        vad_holdoff: int = 300,
+        model_path: str | Path | None = None,
+        numpy: bool = False,
+        ort_library_path: str | Path | None = None,
+        denoise: str | None = None,
+        denoise_model_path: str | Path | None = None,
+        highpass: int | None = None,
+        agc: int | None = None,
+        limiter: float | None = None,
+        dc_removal: bool = False,
+    ) -> FileBridge: ...
+    @staticmethod
+    def buffer(
+        samples: list[float] | bytes,
+        input_rate: int,
+        sample_rate: int = 16000,
+        format: str = "int16",
+        vad: bool = False,
+        vad_threshold: float = 0.5,
+        vad_mode: str = "silero",
+        vad_holdoff: int = 300,
+        model_path: str | Path | None = None,
+        numpy: bool = False,
+        ort_library_path: str | Path | None = None,
+        denoise: str | None = None,
+        denoise_model_path: str | Path | None = None,
+        highpass: int | None = None,
+        agc: int | None = None,
+        limiter: float | None = None,
+        dc_removal: bool = False,
+    ) -> FileBridge: ...
+    def read(self) -> SampleData | None: ...
+    def analyze(
+        self,
+    ) -> tuple[
+        list[tuple[float, float, float, bool]],
+        list[tuple[float, float]],
+    ]: ...
+    def close(self) -> None: ...
+    @property
+    def vad_probability(self) -> float: ...
+    @property
+    def sample_rate(self) -> int: ...
 
 
 class VersionInfo:

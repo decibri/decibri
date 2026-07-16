@@ -171,6 +171,28 @@ Full Rust guide: [here](crates/decibri/README.md).
 
 <br/>
 
+## Files
+
+Everything a `Microphone` does to live audio, `File` does to audio you already have: the same conditioning options, the same iteration, the same conditioned chunks out. And because a `File` is a complete recording, it can analyze the whole recording for speech, which a live stream cannot do.
+
+```python
+import decibri
+
+# Condition a recording through the same chain as the live microphone.
+with decibri.File("clip.wav", denoise="fastenhancer-t", highpass=80) as file:
+    for chunk in file:
+        handle(chunk)  # conditioned int16 PCM bytes
+
+# Where is the speech?
+report = decibri.File("clip.wav", vad="silero").analyze()
+for segment in report.segments:
+    print(segment.start, segment.end)  # seconds of file time
+```
+
+`File` reads WAV files (`File("clip.wav")` / `File.open("clip.wav")`, both identical) and in-memory samples (`File.buffer(samples, input_rate=48000)`). The whole-file analysis, `analyze()` (also spelled `analyse()`), returns per-window scores and merged speech segments, timed in seconds of file time so processing speed never changes the reported timing. The same surface ships in Node.js (`await File.open('clip.wav')`) and Rust (`File::open("clip.wav", config)?`).
+
+<br/>
+
 ## Platform Support
 
 Supports:

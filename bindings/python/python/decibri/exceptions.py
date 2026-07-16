@@ -4,14 +4,14 @@ This module is the public home for the decibri exception hierarchy. All
 classes are also re-exported at ``decibri.<X>`` for convenience; users
 may import from either path.
 
-33 instance classes (one per Rust DecibriError variant) plus 3 intermediate
+36 instance classes (one per Rust DecibriError variant) plus 3 intermediate
 parent classes (DeviceError, OrtError, OrtPathError) for catch ergonomics,
-totaling 36 class definitions. Single-inheritance hierarchy per CPython
+totaling 39 class definitions. Single-inheritance hierarchy per CPython
 convention.
 
 Hierarchy:
     DecibriError
-    + 15 direct subclasses (config + runtime errors that don't involve
+    + 18 direct subclasses (config + runtime errors that don't involve
       device enumeration or ORT, including DeviceFailed and OnnxBackendFailed)
     + DeviceError (intermediate; no instances; catches device-related)
         + 8 direct device subclasses (MicrophoneNotFound, SpeakerNotFound,
@@ -179,6 +179,18 @@ class VadSampleRateUnsupported(DecibriError):
 
 class VadThresholdOutOfRange(DecibriError):
     """Raised when vad_threshold is not in the [0.0, 1.0] range."""
+
+
+class FileReadFailed(DecibriError):
+    """Raised when an offline audio file cannot be read from disk."""
+
+
+class WavInvalid(DecibriError):
+    """Raised when an offline audio file is not a supported WAV."""
+
+
+class VadNotConfigured(DecibriError):
+    """Raised when whole-recording analysis is requested without VAD."""
 
 
 # OrtError intermediate parent

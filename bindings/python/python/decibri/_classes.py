@@ -64,6 +64,10 @@ __all__ = [
     "Vad",
     "Microphone",
     "Speaker",
+    "File",
+    "VadReport",
+    "VadWindow",
+    "Segment",
     "MicrophoneInfo",
     "SpeakerInfo",
     "VersionInfo",
@@ -1036,4 +1040,639 @@ class Speaker:
             f"dtype={self._format!r}, "
             f"device={self._device!r}, "
             f"is_playing={is_playing})"
+        )
+
+
+# ---------------------------------------------------------------------------
+# Whole-recording VAD report types.
+#
+# Frozen dataclasses returned from File.analyze() / File.analyse(). Times are
+# seconds of FILE time (sample positions over the rate), never wall-clock.
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True, slots=True)
+class VadWindow:
+    """One scored voice-activity window of a recording.
+
+    Produced by ``File.analyze()``. Windows tile the recording from the
+    start in fixed steps (512 samples at 16 kHz, 32 ms per window); a
+    trailing remainder shorter than one window is not scored, exactly as
+    live detection leaves a sub-window remainder unscored.
+
+    Attributes:
+        start: Window start, in seconds of file time.
+        end: Window end, in seconds of file time.
+        vad_score: Speech probability for this window in ``[0, 1]``. The
+            same quantity the live per-chunk ``vad_score`` reports, here
+            per window across the whole recording.
+        is_speech: Whether ``vad_score`` meets the configured threshold.
+            The raw per-window test, not the debounced ``is_speaking``.
+    """
+
+    start: float
+    end: float
+    vad_score: float
+    is_speech: bool
+
+
+@dataclass(frozen=True, slots=True)
+class Segment:
+    """One merged speech region of a recording.
+
+    Produced by ``File.analyze()``: consecutive speech windows whose
+    silence gaps are within the configured holdoff collapse into one
+    segment. The segment ends at the last speech window, not at the
+    holdoff expiry.
+
+    Attributes:
+        start: Region start, in seconds of file time.
+        end: Region end, in seconds of file time.
+    """
+
+    start: float
+    end: float
+
+
+@dataclass(frozen=True, slots=True)
+class VadReport:
+    """The whole-recording voice-activity analysis ``File.analyze()`` returns.
+
+    Attributes:
+        scores: Per-window speech scores across the whole recording, in
+            file order.
+        segments: Merged speech regions across the whole recording, in
+            file order.
+    """
+
+    scores: list[VadWindow]
+    segments: list[Segment]
+
+
+# ---------------------------------------------------------------------------
+# File-time VAD policy state machine.
+#
+# The live Microphone's state machine (above) measures its holdoff in
+# wall-clock time because capture is real time. A File processes faster than
+# real time, so the same policy here is measured in FILE time: sample
+# positions converted to seconds. State advances only as chunks are read;
+# there is no wall-clock timer to expire, and processing speed never changes
+# the reported speech timing.
+# ---------------------------------------------------------------------------
+
+
+class _FileVadStateMachine:
+    """Wrapper-layer VAD policy in file time. Pure Python; no native calls."""
+
+    __slots__ = (
+        "_threshold",
+        "_holdoff_seconds",
+        "_is_speaking",
+        "_silence_started_pos",
+        "_last_probability",
+    )
+
+    def __init__(self, threshold: float, holdoff_ms: int) -> None:
+        self._threshold = float(threshold)
+        self._holdoff_seconds = holdoff_ms / 1000.0
+        self._is_speaking = False
+        self._silence_started_pos: float | None = None
+        self._last_probability = 0.0
+
+    def reset(self) -> None:
+        """Clear all transient state."""
+        self._is_speaking = False
+        self._silence_started_pos = None
+        self._last_probability = 0.0
+
+    def process_chunk(
+        self, probability: float, chunk_start: float, chunk_end: float
+    ) -> None:
+        """Update VAD state from one chunk's bridge score.
+
+        ``chunk_start`` / ``chunk_end`` are the chunk's position in seconds
+        of file time. Above-threshold chunks set the speaking state; a
+        below-threshold run flips it off once ``holdoff_ms`` of file time
+        has elapsed since the silence began.
+        """
+        self._last_probability = probability
+
+        if probability >= self._threshold:
+            self._is_speaking = True
+            self._silence_started_pos = None
+        elif self._is_speaking:
+            if self._silence_started_pos is None:
+                self._silence_started_pos = chunk_start
+            if chunk_end - self._silence_started_pos >= self._holdoff_seconds:
+                self._is_speaking = False
+                self._silence_started_pos = None
+
+    @property
+    def is_speaking(self) -> bool:
+        return self._is_speaking
+
+    @property
+    def vad_score(self) -> float:
+        return self._last_probability
+
+
+# ---------------------------------------------------------------------------
+# File: consumer-facing offline source class.
+# ---------------------------------------------------------------------------
+
+
+class File:
+    """Offline audio source: conditions a recording or in-memory samples.
+
+    Everything a ``Microphone`` does to live audio, ``File`` does to audio
+    you already have: the same conditioning options, the same iteration,
+    the same conditioned chunks out. Because a ``File`` is a complete
+    recording, it can also analyze the whole recording for speech with
+    ``analyze()`` / ``analyse()``, which a live stream cannot do.
+
+    Example:
+        with File("clip.wav", denoise="fastenhancer-t", agc=-18) as file:
+            for chunk in file:
+                handle(chunk)      # conditioned int16 PCM bytes
+
+        report = File("clip.wav", vad="silero").analyze()
+        for segment in report.segments:
+            print(segment.start, segment.end)
+
+    Construction reads the whole WAV (``File(path)`` / ``File.open(path)``,
+    both identical) or wraps in-memory samples (``File.buffer(samples,
+    input_rate=...)``). Iteration and analysis are separate single passes:
+    each consumes the source once, so use one ``File`` per operation.
+
+    VAD is opt-in via ``vad=`` exactly as on ``Microphone``. With VAD on,
+    metadata iteration carries per-chunk ``vad_score`` / ``is_speaking``
+    (the speaking holdoff measured in file time, not wall-clock time), and
+    ``analyze()`` returns a ``VadReport``. Without ``vad=`` the File simply
+    conditions audio and ``analyze()`` raises ``VadNotConfigured``.
+    """
+
+    def __init__(
+        self,
+        path: str | Path,
+        *,
+        sample_rate: int = 16000,
+        dtype: str = "int16",
+        vad: bool | str | Vad = False,
+        model_path: str | Path | None = None,
+        as_ndarray: bool = False,
+        ort_library_path: str | Path | None = None,
+        denoise: Literal["fastenhancer-t"] | None = None,
+        highpass: Literal[80, 100] | None = None,
+        agc: int | None = None,
+        limiter: float | None = None,
+        dc_removal: bool = False,
+    ) -> None:
+        """Open a WAV file as an offline source.
+
+        The input rate and channel count come from the WAV header;
+        ``sample_rate`` is the target output rate, the same meaning it has
+        on ``Microphone``. Supports 16-bit PCM and 32-bit float WAV files;
+        other formats are handled elsewhere, keeping this path
+        dependency-free.
+        """
+        self._init_common(
+            ("path", str(Path(path))),
+            sample_rate=sample_rate,
+            dtype=dtype,
+            vad=vad,
+            model_path=model_path,
+            as_ndarray=as_ndarray,
+            ort_library_path=ort_library_path,
+            denoise=denoise,
+            highpass=highpass,
+            agc=agc,
+            limiter=limiter,
+            dc_removal=dc_removal,
+        )
+
+    @classmethod
+    def open(
+        cls,
+        path: str | Path,
+        **kwargs: Any,
+    ) -> "File":
+        """Open a WAV file as an offline source; identical to ``File(path)``.
+
+        The explicit spelling of the bare constructor: both produce the
+        same ``File``. Accepts the same keyword arguments.
+        """
+        return cls(path, **kwargs)
+
+    @classmethod
+    def buffer(
+        cls,
+        samples: "list[float] | np.ndarray[Any, Any]",
+        *,
+        input_rate: int,
+        sample_rate: int = 16000,
+        dtype: str = "int16",
+        vad: bool | str | Vad = False,
+        model_path: str | Path | None = None,
+        as_ndarray: bool = False,
+        ort_library_path: str | Path | None = None,
+        denoise: Literal["fastenhancer-t"] | None = None,
+        highpass: Literal[80, 100] | None = None,
+        agc: int | None = None,
+        limiter: float | None = None,
+        dc_removal: bool = False,
+    ) -> "File":
+        """Wrap in-memory samples as an offline source.
+
+        ``samples`` is a list of floats or a numpy ndarray of f32 mono
+        samples in ``[-1.0, 1.0]``. Raw samples carry no header, so
+        ``input_rate`` (their native rate) is required; ``sample_rate``
+        stays the target output rate.
+        """
+        self = object.__new__(cls)
+        self._init_common(
+            ("buffer", samples, input_rate),
+            sample_rate=sample_rate,
+            dtype=dtype,
+            vad=vad,
+            model_path=model_path,
+            as_ndarray=as_ndarray,
+            ort_library_path=ort_library_path,
+            denoise=denoise,
+            highpass=highpass,
+            agc=agc,
+            limiter=limiter,
+            dc_removal=dc_removal,
+        )
+        return self
+
+    def _init_common(
+        self,
+        source: tuple[Any, ...],
+        *,
+        sample_rate: int,
+        dtype: str,
+        vad: bool | str | Vad,
+        model_path: str | Path | None,
+        as_ndarray: bool,
+        ort_library_path: str | Path | None,
+        denoise: "Literal['fastenhancer-t'] | None",
+        highpass: "Literal[80, 100] | None",
+        agc: int | None,
+        limiter: float | None,
+        dc_removal: bool,
+    ) -> None:
+        # The validation and resolution below mirror Microphone.__init__
+        # exactly (same checks, same messages), so the two sources reject
+        # and resolve identically.
+        if dtype not in _VALID_FORMATS:
+            raise exceptions.InvalidFormat(
+                f"dtype must be 'int16' or 'float32'; got {dtype!r}"
+            )
+
+        vad_enabled: bool
+        vad_mode: str
+        vad_threshold: float | None
+        vad_holdoff_ms: int
+        if vad is False:
+            vad_enabled = False
+            vad_mode = "energy"  # inert placeholder; bridge ignores when disabled
+            vad_threshold = None
+            vad_holdoff_ms = _DEFAULT_VAD_HOLDOFF_MS
+        elif vad is True:
+            raise ValueError(
+                "vad=True is no longer supported. "
+                "Specify the mode explicitly: vad='silero' or vad='energy'."
+            )
+        elif isinstance(vad, Vad):
+            vad_enabled = True
+            vad_mode = vad.model
+            vad_threshold = vad.threshold
+            vad_holdoff_ms = vad.holdoff_ms
+        elif isinstance(vad, str) and vad in _VALID_MODES:
+            vad_enabled = True
+            vad_mode = vad
+            vad_threshold = None
+            vad_holdoff_ms = _DEFAULT_VAD_HOLDOFF_MS
+        else:
+            raise ValueError(
+                f"Invalid vad value: {vad!r}. "
+                "Expected False, 'silero', 'energy', or a Vad config object."
+            )
+
+        if vad_threshold is None:
+            vad_threshold = 0.5 if vad_mode == "silero" else 0.01
+
+        resolved_model_path: str | None = None
+        if model_path is not None:
+            resolved_model_path = str(Path(model_path))
+        elif vad_enabled and vad_mode == "silero":
+            try:
+                model_resource = (
+                    importlib.resources.files("decibri")
+                    / "models"
+                    / "silero_vad.onnx"
+                )
+                if not model_resource.is_file():
+                    raise FileNotFoundError(
+                        f"Bundled Silero model resource exists but is not a "
+                        f"file: {model_resource}"
+                    )
+                resolved_model_path = str(model_resource)
+            except (FileNotFoundError, ModuleNotFoundError, AttributeError) as exc:
+                raise ValueError(
+                    "model_path was not provided and the bundled Silero "
+                    "model could not be located in the installed wheel. "
+                    "Ensure the models/ directory was included during "
+                    "installation, or pass model_path explicitly."
+                ) from exc
+
+        resolved_denoise_model_path: str | None = None
+        if denoise is not None:
+            if denoise not in _VALID_DENOISE_MODELS:
+                raise ValueError(
+                    f"Invalid denoise value: {denoise!r}. Expected 'fastenhancer-t'."
+                )
+            try:
+                denoise_resource = (
+                    importlib.resources.files("decibri")
+                    / "models"
+                    / "fastenhancer_t.onnx"
+                )
+                if not denoise_resource.is_file():
+                    raise FileNotFoundError(
+                        f"Bundled denoise model resource exists but is not a "
+                        f"file: {denoise_resource}"
+                    )
+                resolved_denoise_model_path = str(denoise_resource)
+            except (FileNotFoundError, ModuleNotFoundError, AttributeError) as exc:
+                raise ValueError(
+                    "the bundled denoise model could not be located in the "
+                    "installed wheel. Ensure the models/ directory was included "
+                    "during installation."
+                ) from exc
+
+        if highpass is not None and highpass not in _VALID_HIGHPASS:
+            raise ValueError(
+                f"highpass must be one of: 80, 100; got {highpass!r}"
+            )
+
+        if agc is not None and not -40 <= agc <= -3:
+            raise ValueError(f"agc must be in [-40, -3]; got {agc}")
+
+        if limiter is not None and not -3.0 <= limiter <= 0.0:
+            raise ValueError(f"limiter must be in [-3.0, 0.0]; got {limiter}")
+
+        resolved_ort_path: str | None = None
+        if (vad_enabled and vad_mode == "silero") or denoise is not None:
+            from decibri._ort_resolver import resolve_ort_dylib_path
+
+            resolved_ort_path = resolve_ort_dylib_path(ort_library_path)
+        elif ort_library_path is not None:
+            resolved_ort_path = str(Path(ort_library_path))
+
+        bridge_kwargs: dict[str, Any] = {
+            "sample_rate": sample_rate,
+            "format": dtype,
+            "vad": vad_enabled,
+            "vad_threshold": vad_threshold,
+            "vad_mode": vad_mode,
+            "vad_holdoff": vad_holdoff_ms,
+            "model_path": resolved_model_path,
+            "numpy": as_ndarray,
+            "ort_library_path": resolved_ort_path,
+            "denoise": denoise,
+            "denoise_model_path": resolved_denoise_model_path,
+            "highpass": highpass,
+            "agc": agc,
+            "limiter": limiter,
+            "dc_removal": dc_removal,
+        }
+
+        if source[0] == "path":
+            self._bridge = _decibri.FileBridge.open(source[1], **bridge_kwargs)
+        else:
+            samples = source[1]
+            # Lists pass through directly; numpy arrays are transported as
+            # raw f32 little-endian bytes to avoid a per-sample boundary
+            # cost. Anything else is rejected before it can be misread.
+            if isinstance(samples, (list, tuple)):
+                samples = list(samples)
+            else:
+                try:
+                    import numpy as np
+                except ImportError:
+                    raise TypeError(
+                        "samples must be a list of floats or a numpy ndarray"
+                    ) from None
+                if not isinstance(samples, np.ndarray):
+                    raise TypeError(
+                        "samples must be a list of floats or a numpy ndarray"
+                    )
+                samples = np.ascontiguousarray(samples, dtype=np.float32).tobytes()
+            self._bridge = _decibri.FileBridge.buffer(
+                samples, source[2], **bridge_kwargs
+            )
+
+        self._vad_enabled = vad_enabled
+        self._vad_mode = vad_mode
+        self._vad = _FileVadStateMachine(
+            threshold=vad_threshold,
+            holdoff_ms=vad_holdoff_ms,
+        )
+        self._format = dtype
+        self._as_ndarray = as_ndarray
+        self._sequence = 0
+        # File-time position in seconds, advanced by each delivered chunk.
+        self._position = 0.0
+        self._sample_rate = sample_rate
+        self._vad_arg = vad
+
+    # -----------------------------------------------------------------------
+    # Lifecycle
+    # -----------------------------------------------------------------------
+
+    def close(self) -> None:
+        """Release the source. Idempotent; a closed ``File`` reads as ended."""
+        self._bridge.close()
+
+    def __enter__(self) -> Self:
+        return self
+
+    def __exit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc_value: BaseException | None,
+        traceback: TracebackType | None,
+    ) -> None:
+        self.close()
+
+    # -----------------------------------------------------------------------
+    # Read surface
+    # -----------------------------------------------------------------------
+
+    def read(self) -> SampleData | None:
+        """Read one conditioned chunk. Returns ``None`` at end of file.
+
+        The final chunk may be shorter once the chain's end-of-stream tail
+        has been drained. Return type mirrors ``Microphone.read()``:
+        ``bytes`` by default, ``numpy.ndarray`` when ``as_ndarray=True``.
+
+        VAD state advances as a side effect when VAD is enabled, with the
+        speaking holdoff measured in FILE time (sample positions), so
+        processing speed never changes the reported state.
+        """
+        try:
+            chunk = self._bridge.read()
+        except ImportError as exc:
+            if self._as_ndarray:
+                raise ImportError(
+                    "numpy is not installed. Install with: pip install decibri[numpy]"
+                ) from exc
+            raise
+        if chunk is None:
+            return None
+        chunk_start = self._position
+        chunk_end = chunk_start + self._chunk_samples(chunk) / self._sample_rate
+        self._position = chunk_end
+        if self._vad_enabled:
+            self._vad.process_chunk(
+                self._bridge.vad_probability, chunk_start, chunk_end
+            )
+        self._sequence += 1
+        return chunk
+
+    def _chunk_samples(self, chunk: SampleData) -> int:
+        """Number of mono samples in one delivered chunk."""
+        if isinstance(chunk, bytes):
+            return len(chunk) // (2 if self._format == "int16" else 4)
+        # numpy path: mono 1-D array; its length is the sample count.
+        return int(len(chunk))
+
+    def read_with_metadata(self) -> Chunk | None:
+        """Read one chunk and return it as a typed ``Chunk`` with metadata.
+
+        Returns ``None`` at end of file; otherwise a frozen ``Chunk`` with
+        the same fields the live ``Microphone`` produces. On a ``File`` the
+        ``timestamp`` is the chunk's position in seconds of FILE time
+        (from the start of the recording), and ``is_speaking`` applies the
+        holdoff in file time, so the metadata describes the recording
+        rather than the processing run.
+        """
+        chunk_start = self._position
+        data = self.read()
+        if data is None:
+            return None
+        return Chunk(
+            data=data,
+            timestamp=chunk_start,
+            sequence=self._sequence - 1,
+            is_speaking=self.is_speaking,
+            vad_score=self.vad_score,
+        )
+
+    def iter_with_metadata(self) -> Iterator[Chunk]:
+        """Yield ``Chunk`` objects until the end of the file.
+
+        Generator wrapping ``read_with_metadata()``, exactly as the live
+        ``Microphone`` offers: conditioned audio and per-chunk VAD state
+        from the one pass.
+        """
+        while True:
+            chunk = self.read_with_metadata()
+            if chunk is None:
+                return
+            yield chunk
+
+    def __iter__(self) -> Iterator[SampleData]:
+        return self
+
+    def __next__(self) -> SampleData:
+        chunk = self.read()
+        if chunk is None:
+            raise StopIteration
+        return chunk
+
+    # -----------------------------------------------------------------------
+    # Whole-recording analysis
+    # -----------------------------------------------------------------------
+
+    def analyze(self) -> VadReport:
+        """Analyze the whole recording for speech and return a ``VadReport``.
+
+        Runs the recording once through the conditioning pass, scoring the
+        pre-conditioning signal window by window, and returns the
+        per-window ``scores`` plus the merged speech ``segments``, all in
+        seconds of file time. Consumes the source: analysis and iteration
+        are separate single passes.
+
+        Requires VAD: a ``File`` built without ``vad=`` raises
+        ``VadNotConfigured``; the energy mode has no whole-recording
+        analysis and raises ``ValueError``. Never constructs a detector
+        silently.
+        """
+        if self._vad_enabled and self._vad_mode == "energy":
+            raise ValueError(
+                "analyze() requires vad='silero'; "
+                "energy mode does not support whole-file analysis"
+            )
+        raw_scores, raw_segments = self._bridge.analyze()
+        scores = [
+            VadWindow(start=s, end=e, vad_score=p, is_speech=sp)
+            for (s, e, p, sp) in raw_scores
+        ]
+        segments = [Segment(start=s, end=e) for (s, e) in raw_segments]
+        return VadReport(scores=scores, segments=segments)
+
+    # The same analysis under the international spelling; both are public.
+    analyse = analyze
+
+    # -----------------------------------------------------------------------
+    # State properties
+    # -----------------------------------------------------------------------
+
+    @property
+    def is_speaking(self) -> bool:
+        """True if per-chunk VAD currently considers speech present.
+
+        The holdoff is measured in FILE time (sample positions), so a file
+        processed faster than real time reports the same state sequence a
+        live stream of the identical audio would. Always False when
+        ``vad=False``.
+        """
+        if not self._vad_enabled:
+            return False
+        return self._vad.is_speaking
+
+    @property
+    def vad_score(self) -> float:
+        """Most recent per-chunk VAD score in ``[0, 1]``. Mode-agnostic.
+
+        The same quantity the live ``Microphone.vad_score`` reports,
+        computed on the pre-conditioning signal. Always 0.0 when
+        ``vad=False``.
+        """
+        if not self._vad_enabled:
+            return 0.0
+        return self._vad.vad_score
+
+    @property
+    def sample_rate(self) -> int:
+        """The target output rate every delivered chunk carries."""
+        return self._sample_rate
+
+    def __del__(self) -> None:
+        # Defensive finalizer; same shape as Microphone.__del__.
+        bridge = getattr(self, "_bridge", None)
+        if bridge is None:
+            return
+        try:
+            bridge.close()
+        except BaseException:  # noqa: BLE001
+            pass
+
+    def __repr__(self) -> str:
+        return (
+            f"File(sample_rate={self._sample_rate}, "
+            f"dtype={self._format!r}, "
+            f"vad={self._vad_arg!r})"
         )

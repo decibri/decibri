@@ -9,6 +9,14 @@ For other decibri packages, see:
 - Rust crate: [crates/decibri/CHANGELOG.md](../../crates/decibri/CHANGELOG.md)
 - Python wheel: [bindings/python/CHANGELOG.md](../../bindings/python/CHANGELOG.md)
 
+## [5.1.0] - Unreleased
+
+### Added
+
+- `File`, an offline source: the same conditioning options as `Microphone` over a WAV file (`new File(path)` synchronously, `await File.open(path)` off the event loop) or a `Float32Array` of samples (`File.buffer(samples, { inputRate })`; a raw `Buffer` of bytes is rejected as ambiguous), delivered as a finite Readable stream of conditioned chunks.
+- Whole-file speech analysis: `file.analyze()` (also spelled `file.analyse()`) resolves to a `VadReport` with per-window `scores` (`{ start, end, vadScore, isSpeech }`) and merged speech `segments` (`{ start, end }`), all in seconds of file time. Requires `vad: 'silero'`; a `File` opened without `vad` rejects with `analysis requires VAD`.
+- Per-chunk VAD on files: `vadScore` and the `speech` / `silence` events alongside the stream, with the speaking holdoff measured in file time (sample positions) rather than wall-clock time, so processing speed never changes the reported events.
+
 ## [5.0.0] - 2026-06-24
 
 ### Added

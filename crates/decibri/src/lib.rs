@@ -217,6 +217,9 @@ mod stage;
 #[cfg(feature = "capture")]
 pub mod microphone;
 
+#[cfg(feature = "capture")]
+pub mod file;
+
 #[cfg(feature = "playback")]
 pub mod speaker;
 
@@ -235,6 +238,12 @@ pub mod gain;
 pub use microphone::{
     AudioChunk, DenoiseModel, HighpassFilter, Microphone, MicrophoneConfig, MicrophoneStream,
 };
+
+#[cfg(feature = "capture")]
+pub use file::{File, FileConfig};
+
+#[cfg(all(feature = "capture", feature = "vad"))]
+pub use file::{Segment, VadReport, VadWindow};
 
 #[cfg(feature = "playback")]
 pub use speaker::{Speaker, SpeakerConfig, SpeakerSink, SpeakerStream};

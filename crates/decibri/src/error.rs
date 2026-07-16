@@ -1,4 +1,4 @@
-#[cfg(any(feature = "vad", feature = "denoise"))]
+#[cfg(any(feature = "vad", feature = "denoise", feature = "capture"))]
 use std::path::PathBuf;
 
 use thiserror::Error;
@@ -183,6 +183,40 @@ pub enum DecibriError {
     /// Display string to keep the message text stable.
     #[error("VAD threshold must be between 0.0 and 1.0")]
     VadThresholdOutOfRange(f32),
+
+    // ── Offline file source errors ─────────────────────────────────────
+    /// An offline audio file could not be read from disk.
+    ///
+    /// Carries the offending path and the underlying I/O failure boxed via
+    /// `#[source]`, so a consumer can distinguish a missing file from a
+    /// permission failure by walking `error.source()`. Additive variant
+    /// permitted by `#[non_exhaustive]`.
+    #[cfg(feature = "capture")]
+    #[error("Failed to read audio file {}: {source}", path.display())]
+    FileReadFailed {
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
+
+    /// The bytes of an offline audio file are not a supported WAV.
+    ///
+    /// The reason is a static description of the malformed or unsupported
+    /// element (a missing chunk, a truncated body, an encoding other than
+    /// 16-bit PCM or 32-bit float), formatted into the message. Additive
+    /// variant permitted by `#[non_exhaustive]`.
+    #[cfg(feature = "capture")]
+    #[error("invalid WAV file: {reason}")]
+    WavInvalid { reason: &'static str },
+
+    /// Whole-recording analysis was requested on a source built without a
+    /// voice-activity detection configuration.
+    ///
+    /// Analysis never constructs a default detector silently; the caller
+    /// opts in at construction. Static message to keep the text stable.
+    /// Additive variant permitted by `#[non_exhaustive]`.
+    #[error("analysis requires VAD; construct the File with a vad configuration")]
+    VadNotConfigured,
 
     // ── ORT and VAD model errors ───────────────────────────────────────
     //

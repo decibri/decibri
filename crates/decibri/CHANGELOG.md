@@ -9,6 +9,15 @@ For other decibri packages, see:
 - npm package: [npm/decibri/CHANGELOG.md](../../npm/decibri/CHANGELOG.md)
 - Python package: [bindings/python/CHANGELOG.md](../../bindings/python/CHANGELOG.md)
 
+## [5.1.0] - Unreleased
+
+### Added
+
+- `File`, an offline source: conditions a WAV recording (`File::open`, with the `File::new` alias) or in-memory samples (`File::buffer`) through the same chain as live capture, delivered as a finite iterator of conditioned chunks that ends after the chain's end-of-stream tail. WAV support covers 16-bit PCM and 32-bit float; no decode dependency is added.
+- Whole-recording voice-activity analysis: `File::analyze` (also spelled `File::analyse`) consumes the source and returns a `VadReport` with per-window `VadWindow` scores and merged speech `Segment`s, timed in seconds of file time. Segment merging applies `FileConfig::vad_holdoff_ms` in file time, and when the target rate is not a detector rate the detector feed is resampled internally to 16 kHz.
+- `FileConfig`, mirroring the conditioning surface of `MicrophoneConfig`, plus the `vad` and `vad_holdoff_ms` fields for analysis.
+- New `DecibriError` variants: `FileReadFailed`, `WavInvalid`, and `VadNotConfigured`.
+
 ## [5.0.0] - 2026-06-24
 
 ### Added

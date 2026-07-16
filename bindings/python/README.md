@@ -43,6 +43,22 @@ import decibri
 decibri.record_to_file("output.wav", duration_seconds=1.0, sample_rate=16000)
 ```
 
+### Condition and analyze a recording
+
+```python
+import decibri
+
+# The same conditioning chain as the live microphone, over a WAV file.
+with decibri.File("clip.wav", denoise="fastenhancer-t", highpass=80) as file:
+    for chunk in file:
+        handle(chunk)          # conditioned int16 PCM bytes
+
+# Whole-file speech analysis (a live stream cannot do this).
+report = decibri.File("clip.wav", vad="silero").analyze()
+for segment in report.segments:
+    print(segment.start, segment.end)   # seconds of file time
+```
+
 ### Capture with Silero VAD
 
 ```python
@@ -86,8 +102,10 @@ with decibri.Speaker(sample_rate=24000, channels=1) as spk:
 
 - `Microphone`: synchronous audio capture
 - `Speaker`: synchronous audio output
+- `File`: offline source; conditions a recording or in-memory samples and analyzes it for speech
 - `AsyncMicrophone`: async-await audio capture
 - `AsyncSpeaker`: async-await audio output
+- `AsyncFile`: async-await offline source
 
 ### Module-level functions
 
@@ -99,7 +117,7 @@ with decibri.Speaker(sample_rate=24000, channels=1) as spk:
 
 ### Value types
 
-`MicrophoneInfo`, `SpeakerInfo`, `VersionInfo`, `Chunk`.
+`MicrophoneInfo`, `SpeakerInfo`, `VersionInfo`, `Chunk`, `VadReport`, `VadWindow`, `Segment`.
 
 ### Exceptions
 
@@ -156,6 +174,22 @@ with decibri.Microphone(
 ```
 
 The denoise model is bundled in the wheel (the same way the Silero VAD model is), so `denoise="fastenhancer-t"` needs no download. VAD reads the signal before the chain, so `mic.vad_score` and `mic.is_speaking` are unaffected by which conditioning stages you enable. The same options are available on `AsyncMicrophone`.
+
+## Files
+
+Everything a `Microphone` does to live audio, `File` does to audio you already have: the same conditioning options (`dc_removal`, `denoise`, `highpass`, `agc`, `limiter`), the same iteration, the same conditioned chunks out, and the same opt-in `vad=`. A `File` reads a WAV (`File("clip.wav")`, or the identical `File.open("clip.wav")`) or wraps in-memory samples (`File.buffer(samples, input_rate=48000)`; raw samples carry no header, so their native rate is explicit). `sample_rate` stays the target output rate, the same meaning it has on `Microphone`, so a 44.1 kHz recording comes out at 16 kHz unless you set it.
+
+Because a `File` is a complete recording, it can analyze the whole recording for speech:
+
+```python
+report = decibri.File("clip.wav", vad="silero").analyze()   # or .analyse()
+for w in report.scores:
+    print(w.start, w.end, w.vad_score, w.is_speech)   # per 32 ms window
+for segment in report.segments:
+    print(segment.start, segment.end)                 # merged speech regions
+```
+
+`analyze()` requires VAD: a `File` built without `vad=` raises `VadNotConfigured` rather than constructing a detector silently. With `vad=` set, metadata iteration (`iter_with_metadata()`) carries per-chunk `vad_score` and `is_speaking` exactly as the microphone does, with one deliberate difference: on a `File`, the speaking holdoff and the `Chunk.timestamp` are measured in FILE time (sample positions in seconds), never wall-clock time, so a file processed faster than real time still reports correct speech timing. Iteration and analysis are separate single passes; construct one `File` per operation. `AsyncFile` mirrors the whole surface with `async` semantics.
 
 ## Compatibility
 

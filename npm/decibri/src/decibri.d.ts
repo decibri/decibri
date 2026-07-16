@@ -276,6 +276,235 @@ export declare class Microphone extends Readable {
 }
 
 /** Information about an available audio output device. */
+/** Constructor options for `File`. */
+export interface FileOptions extends ReadableOptions {
+  /**
+   * Target output rate in Hz: the rate every delivered chunk carries. The
+   * source's input rate (from the WAV header, or `inputRate` for
+   * `File.buffer`) is resampled to this rate, so a 44.1 kHz recording comes
+   * out at 16 kHz unless you set `sampleRate`. The same meaning the option
+   * has on `Microphone`.
+   * @default 16000
+   * @range 1000–384000
+   */
+  sampleRate?: number;
+
+  /**
+   * Sample encoding data type of the delivered chunks.
+   * - `'int16'`: 16-bit signed integer, little-endian (2 bytes per sample)
+   * - `'float32'`: 32-bit IEEE 754 float, little-endian (4 bytes per sample)
+   * @default 'int16'
+   */
+  dtype?: 'int16' | 'float32';
+
+  /**
+   * Voice activity detection, opt-in exactly as on `Microphone`: `false`
+   * (default), `'silero'`, `'energy'`, or a `VadOptions` config object.
+   * When enabled, per-chunk detection runs alongside the stream (the
+   * `'speech'` / `'silence'` events and `vadScore`, with the holdoff
+   * measured in FILE time rather than wall-clock time) and `'silero'`
+   * additionally enables the whole-file `analyze()`. With no `vad` set the
+   * File simply conditions audio: no scores, no segments, no speech events.
+   * @default false
+   */
+  vad?: false | 'silero' | 'energy' | VadOptions;
+
+  /**
+   * Path to the Silero VAD ONNX model file.
+   * Only used when `vad` is `'silero'`.
+   * Defaults to `models/silero_vad.onnx` relative to the package.
+   */
+  modelPath?: string;
+
+  /**
+   * Remove a constant (DC) offset with a one-pole DC-blocking high-pass,
+   * exactly as on `Microphone`.
+   * @default undefined
+   */
+  dcRemoval?: boolean;
+
+  /**
+   * Single-channel speech enhancement (denoise) model, exactly as on
+   * `Microphone`. The only accepted value is `'fastenhancer-t'`.
+   * @default undefined
+   */
+  denoise?: 'fastenhancer-t';
+
+  /**
+   * High-pass filter cutoff in Hz (`80` or `100`), exactly as on
+   * `Microphone`.
+   * @default undefined
+   */
+  highpass?: 80 | 100;
+
+  /**
+   * Automatic gain control target level in dBFS, exactly as on `Microphone`.
+   * @default undefined
+   * @range -40 to -3
+   */
+  agc?: number;
+
+  /**
+   * Peak limiter ceiling in dBFS (sample-peak), exactly as on `Microphone`.
+   * @default undefined
+   * @range -3.0 to 0.0
+   */
+  limiter?: number;
+}
+
+/** Options for `File.buffer`: `FileOptions` plus the samples' native rate. */
+export interface FileBufferOptions extends FileOptions {
+  /**
+   * The native rate of the in-memory samples in Hz. Required: raw samples
+   * carry no header to read a rate from. The samples are resampled from this
+   * rate to `sampleRate`.
+   * @range 1000–384000
+   */
+  inputRate: number;
+}
+
+/**
+ * One scored voice-activity window of a recording, produced by
+ * `File.analyze()`. Windows tile the recording from the start in fixed steps
+ * (512 samples at 16 kHz, 32 ms per window); a trailing remainder shorter
+ * than one window is not scored, exactly as live detection leaves a
+ * sub-window remainder unscored.
+ */
+export interface VadWindow {
+  /** Window start, in seconds of file time. */
+  start: number;
+  /** Window end, in seconds of file time. */
+  end: number;
+  /**
+   * Speech probability for this window (0 to 1). The same quantity the live
+   * per-chunk `vadScore` reports, here per window across the whole recording.
+   */
+  vadScore: number;
+  /**
+   * Whether `vadScore` meets the configured threshold. The raw per-window
+   * test, not the debounced speaking state.
+   */
+  isSpeech: boolean;
+}
+
+/**
+ * One merged speech region of a recording, produced by `File.analyze()`:
+ * consecutive speech windows whose silence gaps are within the configured
+ * holdoff collapse into one segment. The segment ends at the last speech
+ * window, not at the holdoff expiry.
+ */
+export interface Segment {
+  /** Region start, in seconds of file time. */
+  start: number;
+  /** Region end, in seconds of file time. */
+  end: number;
+}
+
+/** The whole-recording voice-activity analysis `File.analyze()` resolves to. */
+export interface VadReport {
+  /** Per-window speech scores across the whole recording, in file order. */
+  scores: VadWindow[];
+  /** Merged speech regions across the whole recording, in file order. */
+  segments: Segment[];
+}
+
+/**
+ * Offline audio source: conditions a recording or in-memory samples through
+ * the same chain as the live `Microphone`, delivered as a finite Readable
+ * stream of conditioned chunks that ends at EOF (after the chain's
+ * end-of-stream tail). Because a `File` is a complete recording, it can also
+ * analyze the whole recording for speech with `analyze()` / `analyse()`,
+ * which a live stream cannot do.
+ *
+ * Construction: `new File(path)` reads the WAV synchronously (fine for a
+ * script; it blocks the event loop on disk I/O), `await File.open(path)` reads
+ * it off the event loop (the recommended form, mirroring `Microphone.open`),
+ * and `File.buffer(samples, { inputRate })` wraps a `Float32Array` of samples
+ * you already hold (a raw `Buffer` of bytes is rejected as ambiguous).
+ *
+ * Iteration and analysis are separate single passes: each consumes the source
+ * once, so construct one `File` per operation.
+ *
+ * Note: Node also has a global `File` (the web File API). Import decibri's
+ * explicitly (`const { File } = require('decibri')`) or reference it as
+ * `decibri.File` to avoid shadowing surprises.
+ *
+ * @example
+ * const { File } = require('decibri');
+ * const file = await File.open('clip.wav', { denoise: 'fastenhancer-t' });
+ * file.on('data', (chunk) => { /* Buffer of conditioned Int16 PCM *\/ });
+ * file.on('end', () => console.log('done'));
+ *
+ * @example
+ * // Where is the speech?
+ * const f = await File.open('clip.wav', { vad: 'silero' });
+ * const report = await f.analyze();
+ * for (const s of report.segments) console.log(s.start, s.end);
+ */
+export declare class File extends Readable {
+  /**
+   * Open a WAV file synchronously (blocks on disk I/O; prefer `File.open`
+   * in servers). Supports 16-bit PCM and 32-bit float WAV files; the input
+   * rate and channel count come from the header.
+   */
+  constructor(path: string, options?: FileOptions);
+
+  /**
+   * Open a WAV file without blocking the event loop: the disk read, WAV
+   * parse, and chain construction run on the native thread pool. The
+   * recommended form, mirroring `Microphone.open`.
+   */
+  static open(path: string, options?: FileOptions): Promise<File>;
+
+  /**
+   * Wrap in-memory samples as an offline source. `samples` must be a
+   * `Float32Array` of mono samples in [-1.0, 1.0]; a raw `Buffer` of PCM
+   * bytes is rejected as ambiguous. `inputRate` is required (raw samples
+   * carry no header). Synchronous: no I/O is involved.
+   */
+  static buffer(samples: Float32Array, options: FileBufferOptions): File;
+
+  /**
+   * Most recent per-chunk VAD score for the active mode: the Silero speech
+   * probability in `'silero'` mode, the normalized RMS of the
+   * pre-conditioning signal in `'energy'` mode. 0 when VAD is disabled or
+   * before the first chunk.
+   */
+  readonly vadScore: number;
+
+  /**
+   * Analyze the whole recording for speech, off the event loop. Resolves to
+   * a `VadReport` with per-window `scores` and merged speech `segments`,
+   * all in seconds of file time. Consumes the source (a `File` is a single
+   * pass). Requires `vad: 'silero'`: a File opened without `vad` rejects
+   * with the core's "analysis requires VAD" error, and the energy mode has
+   * no whole-file analysis.
+   */
+  analyze(): Promise<VadReport>;
+
+  /** The same whole-recording analysis under the international spelling. */
+  analyse(): Promise<VadReport>;
+
+  /** Release the source. Idempotent; a closed File reads as ended. */
+  close(): void;
+
+  on(event: 'data', listener: (chunk: Buffer) => void): this;
+  on(event: 'end', listener: () => void): this;
+  on(event: 'error', listener: (err: Error) => void): this;
+  /** Speech detected (VAD enabled), at a FILE-time boundary. */
+  on(event: 'speech', listener: () => void): this;
+  /** Silence holdoff elapsed (VAD enabled), in FILE time. */
+  on(event: 'silence', listener: () => void): this;
+  on(event: string | symbol, listener: (...args: any[]) => void): this;
+
+  once(event: 'data', listener: (chunk: Buffer) => void): this;
+  once(event: 'end', listener: () => void): this;
+  once(event: 'error', listener: (err: Error) => void): this;
+  once(event: 'speech', listener: () => void): this;
+  once(event: 'silence', listener: () => void): this;
+  once(event: string | symbol, listener: (...args: any[]) => void): this;
+}
+
 export interface SpeakerInfo {
   /** Device index (pass to constructor as `device`). */
   index: number;
