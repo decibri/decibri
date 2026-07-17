@@ -344,14 +344,22 @@ jobs:
             for arg in "$@"; do
               case "$arg" in
                 :*) required+=("${arg#:}") ;;
-                ~*) forbidden+=("${arg#~}") ;;
+                # The backslash stops tilde expansion: an unquoted ${arg#~}
+                # expands ~ to $HOME, strips nothing, and leaves the leading
+                # ~ on the grep pattern so it can never match a packed path.
+                ~*) forbidden+=("${arg#\~}") ;;
               esac
             done
 
             echo ""
             echo "=== $label ($pkg_dir) ==="
             local files
-            files=$(cd "$pkg_dir" && npm pack --dry-run --json | jq -r '.[0].files[].path')
+            # npm 11 and earlier emit a top-level ARRAY of pack results;
+            # npm 12 emits a top-level OBJECT keyed by package name. The
+            # "Upgrade npm for trusted publishing" step above installs
+            # npm@latest, so normalize either shape to an array before
+            # extracting the packed file paths.
+            files=$(cd "$pkg_dir" && npm pack --dry-run --json | jq -r 'if type == "array" then . else [.[]] end | .[0].files[].path')
             echo "Would pack:"
             echo "$files" | sort | sed 's/^/  * /'
 
