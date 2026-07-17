@@ -75,6 +75,84 @@ pub(crate) enum ExecutionProvider {
 // the process-global state. This is a relocation of the machinery that
 // previously lived in `vad.rs`; the first-wins semantics are unchanged.
 
+/// The platform library name ONNX Runtime's default loader resolves when no
+/// explicit path is configured, used by the pre-check in [`init_ort_once`] to
+/// probe the system loader before `ort::init()` runs. Matches the names the
+/// packages bundle per platform.
+#[cfg(all(feature = "ort-load-dynamic", target_os = "windows"))]
+const ORT_DEFAULT_LIBRARY: &str = "onnxruntime.dll";
+
+#[cfg(all(feature = "ort-load-dynamic", target_os = "macos"))]
+const ORT_DEFAULT_LIBRARY: &str = "libonnxruntime.dylib";
+
+#[cfg(all(
+    feature = "ort-load-dynamic",
+    not(any(target_os = "windows", target_os = "macos"))
+))]
+const ORT_DEFAULT_LIBRARY: &str = "libonnxruntime.so";
+
+/// The candidate `path` resolved against the executable's directory,
+/// mirroring ort's own resolution, which tries that placement before the
+/// bare path. `None` when the executable's location is unavailable.
+#[cfg(feature = "ort-load-dynamic")]
+fn exe_sibling(path: &Path) -> Option<PathBuf> {
+    Some(std::env::current_exe().ok()?.parent()?.join(path))
+}
+
+/// The on-disk location of an already-loaded module, by its load name.
+/// Queries the loader directly (`GetModuleHandleW` does not change the
+/// module's reference count), so the probe's `Library` handle stays intact.
+#[cfg(all(feature = "ort-load-dynamic", target_os = "windows"))]
+fn windows_module_path(name: &str) -> Option<PathBuf> {
+    use std::os::windows::ffi::OsStringExt;
+
+    #[link(name = "kernel32")]
+    extern "system" {
+        fn GetModuleHandleW(name: *const u16) -> *mut core::ffi::c_void;
+        fn GetModuleFileNameW(module: *mut core::ffi::c_void, filename: *mut u16, size: u32)
+            -> u32;
+    }
+
+    let wide: Vec<u16> = name.encode_utf16().chain(std::iter::once(0)).collect();
+    // SAFETY: both calls take only the pointers passed here; `wide` is a
+    // valid NUL-terminated wide string and `buf` a writable buffer whose
+    // length is passed alongside it.
+    unsafe {
+        let module = GetModuleHandleW(wide.as_ptr());
+        if module.is_null() {
+            return None;
+        }
+        let mut buf = [0u16; 1024];
+        let len = GetModuleFileNameW(module, buf.as_mut_ptr(), buf.len() as u32);
+        if len == 0 || len as usize >= buf.len() {
+            return None;
+        }
+        Some(PathBuf::from(std::ffi::OsString::from_wide(
+            &buf[..len as usize],
+        )))
+    }
+}
+
+/// Whether a resolved module path is the Windows in-box ONNX Runtime (the
+/// Windows ML copy under System32 or SysWOW64), which is not the API version
+/// `ort` requires and hangs the load if used.
+#[cfg(all(feature = "ort-load-dynamic", target_os = "windows"))]
+fn windows_in_box_runtime(resolved: &Path) -> bool {
+    let Some(system_root) = std::env::var_os("SystemRoot") else {
+        return false;
+    };
+    let resolved = resolved.as_os_str().to_string_lossy().to_lowercase();
+    let root = PathBuf::from(system_root)
+        .as_os_str()
+        .to_string_lossy()
+        .to_lowercase();
+    // Trim any trailing separator so a root-drive SystemRoot ("C:\") does
+    // not produce a doubled backslash that would never match.
+    let root = root.trim_end_matches('\\');
+    resolved.starts_with(&format!("{root}\\system32\\"))
+        || resolved.starts_with(&format!("{root}\\syswow64\\"))
+}
+
 /// Process-global ORT init tracker. Stores the library path used on first
 /// successful init (None if init used `ort::init()` with env-var fallback).
 /// Subsequent `init_ort_once` calls see this as populated and return immediately.
@@ -162,30 +240,116 @@ pub(crate) fn init_ort_once(path: Option<&Path>) -> Result<(), DecibriError> {
         return Ok(());
     }
 
-    // Defensive pre-check (load-dynamic only): verify the path points at a
-    // regular file before handing it to `ort::init_from`. A nonexistent path
-    // or a path that points at a directory causes `ort::init_from` on Windows
-    // to hang indefinitely (reproduced 2026-04-22 against pyke/ort
-    // 2.0.0-rc.12 + onnxruntime 1.24.4). Failing fast here turns that hang
-    // into a clean typed error that Node, Python, and mobile consumers can
-    // surface to users.
+    // Defensive pre-check (load-dynamic only): verify the runtime ORT would
+    // load is actually there before handing control to ORT. A failing ORT
+    // load hangs indefinitely on Windows instead of erroring (reproduced
+    // 2026-04-22 against pyke/ort 2.0.0-rc.12 + onnxruntime 1.24.4 for an
+    // invalid `ort::init_from` path, and 2026-07-17 for `ort::init()` with
+    // no resolvable runtime at all), because constructing the failure's
+    // `ort::Error` itself re-triggers the dylib load. Failing fast here
+    // turns that hang into a clean typed error that Node, Python, and
+    // mobile consumers can surface to users.
+    //
+    // Both branches are covered:
+    // - `Some(path)`: the path must be a regular file before it reaches
+    //   `ort::init_from`.
+    // - `None`: `ort::init()` resolves the runtime itself, from the
+    //   `ORT_DYLIB_PATH` environment variable when set, otherwise from the
+    //   platform library name through the system loader. Pre-validate the
+    //   same resolution: a set `ORT_DYLIB_PATH` must point at a regular
+    //   file, and with the variable unset the system loader must actually
+    //   resolve the platform library (probed through `libloading`, the same
+    //   loader `ort` itself uses, which returns an error rather than
+    //   hanging). A successful probe keeps the library resident, the state
+    //   `ort::init()` produces anyway.
     //
     // The check is intentionally scoped to `load-dynamic`: under
-    // `download-binaries`, ORT is statically linked and the path argument
-    // is ignored, so there is nothing to pre-validate.
+    // `download-binaries`, ORT is statically linked and there is nothing to
+    // pre-validate.
     #[cfg(feature = "ort-load-dynamic")]
-    if let Some(p) = path {
-        if !p.is_file() {
-            // Use `OrtPathInvalid`, not `OrtLoadFailed`, precisely because
-            // constructing an `ort::Error` here would call `ortsys![
-            // CreateStatus]`, which triggers the ORT dylib load that this
-            // pre-check is designed to prevent. `OrtPathInvalid` is
-            // string-only and never touches ORT symbols.
-            return Err(DecibriError::OrtPathInvalid {
-                path: p.to_path_buf(),
-                reason: "path does not exist or is not a regular file",
-            });
+    match path {
+        Some(p) => {
+            if !p.is_file() {
+                // Use `OrtPathInvalid`, not `OrtLoadFailed`, precisely because
+                // constructing an `ort::Error` here would call `ortsys![
+                // CreateStatus]`, which triggers the ORT dylib load that this
+                // pre-check is designed to prevent. `OrtPathInvalid` is
+                // string-only and never touches ORT symbols.
+                return Err(DecibriError::OrtPathInvalid {
+                    path: p.to_path_buf(),
+                    reason: "path does not exist or is not a regular file",
+                });
+            }
         }
+        // Mirror ort's own resolution for the no-path case so this
+        // pre-check never rejects a configuration ort would load: a
+        // set-but-empty or non-Unicode ORT_DYLIB_PATH counts as unset
+        // (exactly as ort treats it), and every candidate is also resolved
+        // against the executable's directory (ort checks that placement
+        // first; the system loader does not search it on Linux or macOS).
+        None => match std::env::var("ORT_DYLIB_PATH")
+            .ok()
+            .filter(|value| !value.is_empty())
+        {
+            Some(env_path) => {
+                let env_path = PathBuf::from(env_path);
+                let exe_relative = exe_sibling(&env_path);
+                if !env_path.is_file() && !exe_relative.as_deref().is_some_and(Path::is_file) {
+                    return Err(DecibriError::OrtPathInvalid {
+                        path: env_path,
+                        reason: "ORT_DYLIB_PATH does not point to a regular file",
+                    });
+                }
+            }
+            None => match unsafe { libloading::Library::new(ORT_DEFAULT_LIBRARY) } {
+                Ok(library) => {
+                    // Windows ships an in-box `onnxruntime.dll` in System32
+                    // (the Windows ML copy). The loader searches System32
+                    // before PATH, so a bare-name load resolves that copy on
+                    // any host without a runtime earlier in the search order,
+                    // and its API version is not the one `ort` requires:
+                    // proceeding hangs exactly like a missing runtime does.
+                    // decibri's documented resolution (the bundled library or
+                    // ORT_DYLIB_PATH) never means the in-box copy, so reject
+                    // it as unusable rather than letting `ort::init()` hang
+                    // on it.
+                    #[cfg(target_os = "windows")]
+                    if let Some(resolved) = windows_module_path(ORT_DEFAULT_LIBRARY) {
+                        if windows_in_box_runtime(&resolved) {
+                            drop(library);
+                            return Err(DecibriError::OrtPathInvalid {
+                                path: resolved,
+                                reason: "no usable ONNX Runtime found: \
+                                         ORT_DYLIB_PATH is not set and the \
+                                         system loader resolves only the \
+                                         Windows in-box runtime, which is not \
+                                         compatible",
+                            });
+                        }
+                    }
+                    // Keep the runtime resident rather than unloading it:
+                    // `ort::init()` loads the same library next, so this
+                    // avoids a pointless unload/reload cycle and matches the
+                    // process state a successful init produces.
+                    std::mem::forget(library);
+                }
+                Err(_) => {
+                    // ort also resolves the bare library name against the
+                    // executable's directory, which the system loader does
+                    // not search on Linux and macOS; accept that placement
+                    // and leave the load to `ort::init()` itself.
+                    let beside_exe = exe_sibling(Path::new(ORT_DEFAULT_LIBRARY));
+                    if !beside_exe.as_deref().is_some_and(Path::is_file) {
+                        return Err(DecibriError::OrtPathInvalid {
+                            path: PathBuf::from(ORT_DEFAULT_LIBRARY),
+                            reason: "no ONNX Runtime is resolvable: ORT_DYLIB_PATH \
+                                     is not set and the system loader cannot find \
+                                     the runtime library",
+                        });
+                    }
+                }
+            },
+        },
     }
 
     match do_ort_init(path) {

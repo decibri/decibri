@@ -36,9 +36,16 @@
 #![cfg(all(feature = "vad", feature = "ort-load-dynamic"))]
 
 use std::path::{Path, PathBuf};
+use std::sync::{Mutex, PoisonError};
 
 use decibri::error::DecibriError;
 use decibri::vad::{SileroVad, VadConfig};
+
+/// Serializes the tests in this binary. One test mutates `ORT_DYLIB_PATH`
+/// while the others read the environment (`temp_dir` consults it), and
+/// concurrent environment mutation and reads are unsound on some platforms;
+/// taking this lock first makes each test's environment access exclusive.
+static ENV_LOCK: Mutex<()> = Mutex::new(());
 
 fn bundled_model_path() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -55,6 +62,7 @@ fn bundled_model_path() -> PathBuf {
 /// short-circuits that case without constructing an `ort::Error`.
 #[test]
 fn test_ort_load_fails_with_nonexistent_path() {
+    let _env = ENV_LOCK.lock().unwrap_or_else(PoisonError::into_inner);
     let bogus = std::env::temp_dir().join("does-not-exist-onnxruntime-dylib-xyz");
 
     // `VadConfig` is `#[non_exhaustive]`: default-construct then assign the
@@ -90,6 +98,47 @@ fn test_ort_load_fails_with_nonexistent_path() {
     );
 }
 
+/// With NO `ort_library_path` at all, the pre-check must still protect the
+/// load: `ort::init()` resolves the runtime from `ORT_DYLIB_PATH` (or the
+/// system loader), and a bogus `ORT_DYLIB_PATH` previously reached the
+/// unguarded `ort::init()`, which hangs instead of erroring when the
+/// resolution fails. The extended pre-check validates the environment
+/// variable exactly as it validates an explicit path.
+///
+/// Environment note: this test sets `ORT_DYLIB_PATH` for its own scope. The
+/// other tests in this binary pass an explicit `ort_library_path`, which
+/// never consults the environment, so the mutation cannot race them.
+#[test]
+fn test_ort_load_fails_with_bogus_env_var_and_no_path() {
+    let _env = ENV_LOCK.lock().unwrap_or_else(PoisonError::into_inner);
+    let bogus = std::env::temp_dir().join("does-not-exist-onnxruntime-env-xyz");
+    std::env::set_var("ORT_DYLIB_PATH", &bogus);
+
+    let mut config = VadConfig::default();
+    config.model_path = bundled_model_path();
+    config.ort_library_path = None;
+    let result = SileroVad::new(config);
+    std::env::remove_var("ORT_DYLIB_PATH");
+
+    let err = result
+        .err()
+        .expect("expected OrtPathInvalid for a bogus ORT_DYLIB_PATH");
+    match &err {
+        DecibriError::OrtPathInvalid { path, reason } => {
+            assert!(
+                path.ends_with("does-not-exist-onnxruntime-env-xyz"),
+                "OrtPathInvalid.path should carry the ORT_DYLIB_PATH value, got {}",
+                path.display()
+            );
+            assert!(
+                reason.contains("ORT_DYLIB_PATH"),
+                "OrtPathInvalid.reason should name ORT_DYLIB_PATH, got: {reason}"
+            );
+        }
+        other => panic!("expected OrtPathInvalid, got {other:?}"),
+    }
+}
+
 /// An `ort_library_path` that points at a directory (e.g. a user mistakenly
 /// passing the directory containing the dylib instead of the dylib itself)
 /// must also fail fast with `OrtPathInvalid`. Without the pre-check, pyke/ort
@@ -97,6 +146,7 @@ fn test_ort_load_fails_with_nonexistent_path() {
 /// not validate the input is a regular file.
 #[test]
 fn test_ort_load_fails_when_path_is_directory() {
+    let _env = ENV_LOCK.lock().unwrap_or_else(PoisonError::into_inner);
     // `temp_dir()` is guaranteed to exist and is a directory on every platform.
     let dir_path = std::env::temp_dir();
 

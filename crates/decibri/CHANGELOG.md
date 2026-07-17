@@ -9,7 +9,11 @@ For other decibri packages, see:
 - npm package: [npm/decibri/CHANGELOG.md](../../npm/decibri/CHANGELOG.md)
 - Python package: [bindings/python/CHANGELOG.md](../../bindings/python/CHANGELOG.md)
 
-## [5.1.0] - Unreleased
+## [5.1.0] - 2026-07-17
+
+### Fixed
+
+- Guard the ONNX Runtime load when no library path is configured, so a missing or unresolvable runtime fails with a clear error instead of hanging inside the load.
 
 ### Added
 
