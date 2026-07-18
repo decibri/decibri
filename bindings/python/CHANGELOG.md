@@ -8,6 +8,12 @@ For Rust core (`crates/decibri`) and npm binding (`bindings/node`) changes, see 
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.7.0] - 2026-07-18
+
+### Changed
+
+- Picks up the decibri Rust core 5.2.0 (which adds an underrun sample counter on its `SpeakerStream`) and a refreshed native dependency set (tokio 1.52.3) in the shipped extension module. No change to the Python API surface.
+
 ## [0.6.0] - 2026-07-17
 
 ### Added
