@@ -9,6 +9,12 @@ For other decibri packages, see:
 - npm package: [npm/decibri/CHANGELOG.md](../../npm/decibri/CHANGELOG.md)
 - Python package: [bindings/python/CHANGELOG.md](../../bindings/python/CHANGELOG.md)
 
+## [Unreleased]
+
+### Added
+
+- An underrun sample counter on `SpeakerStream`: `underrun_count` exposes the number of samples emitted as silence fill during playback underrun.
+
 ## [5.1.0] - 2026-07-17
 
 ### Fixed
