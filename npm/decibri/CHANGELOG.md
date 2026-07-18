@@ -9,6 +9,12 @@ For other decibri packages, see:
 - Rust crate: [crates/decibri/CHANGELOG.md](../../crates/decibri/CHANGELOG.md)
 - Python wheel: [bindings/python/CHANGELOG.md](../../bindings/python/CHANGELOG.md)
 
+## [5.2.0] - 2026-07-18
+
+### Changed
+
+- Picks up the decibri Rust core 5.2.0 (which adds an underrun sample counter on its `SpeakerStream`) and a refreshed native dependency set (napi 3.9.0, tokio 1.52.3, serde_json 1.0.150) in the shipped platform binaries. No change to the Node.js API surface.
+
 ## [5.1.0] - 2026-07-17
 
 ### Added

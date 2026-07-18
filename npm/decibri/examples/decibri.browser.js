@@ -2,7 +2,7 @@
 "use strict";
 var decibri = (function() {
 	//#region \0rolldown/runtime.js
-	var __commonJSMin = (cb, mod) => () => (mod || cb((mod = { exports: {} }).exports, mod), mod.exports);
+	var __commonJSMin = (cb, mod) => () => (mod || (cb((mod = { exports: {} }).exports, mod), cb = null), mod.exports);
 	//#endregion
 	//#region npm/decibri/src/browser/emitter.js
 	var require_emitter = /* @__PURE__ */ __commonJSMin(((exports, module) => {
@@ -70,7 +70,7 @@ var decibri = (function() {
 	var require_decibri_browser = /* @__PURE__ */ __commonJSMin(((exports, module) => {
 		const { Emitter } = require_emitter();
 		const { WORKLET_SOURCE } = require_worklet_inline();
-		const VERSION = "5.1.0";
+		const VERSION = "5.2.0";
 		/**
 		* Browser microphone capture.
 		*
