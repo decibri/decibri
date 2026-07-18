@@ -419,7 +419,7 @@ jobs:
         # Reference: PyO3/maturin-action README; matches polars / ruff /
         # tokenizers production CI patterns. Fully cited in
         # phase-7-wheel-hardening.md Step 2.5.
-        uses: PyO3/maturin-action@3e2bdf6ba6453a61e649744019b8a2d906c7eb38 # v1.51.0
+        uses: PyO3/maturin-action@e83996d129638aa358a18fbd1dfb82f0b0fb5d3b # v1.51.0
         with:
           manylinux: 2_28
           target: ${{ matrix.os == 'ubuntu-24.04-arm' && 'aarch64-unknown-linux-gnu' || 'x86_64-unknown-linux-gnu' }}

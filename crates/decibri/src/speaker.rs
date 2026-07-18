@@ -8,7 +8,7 @@
 //! [`crate::microphone`].
 
 #[cfg(feature = "playback")]
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 #[cfg(feature = "playback")]
 use std::sync::{Arc, Mutex};
 
@@ -72,7 +72,9 @@ impl SpeakerConfig {
 /// sentinels it drops so a blocked [`SpeakerStream::drain`] still returns.
 /// Otherwise it plays the accumulator and then the channel, stashing any
 /// overflow back into `accum`, and bumps `sentinels_played` for each drain
-/// sentinel (an empty vec) it consumes.
+/// sentinel (an empty vec) it consumes. Any remainder it fills with silence
+/// because the queue ran dry is counted, in samples, into `underruns`; the
+/// stopped-branch silence is not counted.
 #[cfg(feature = "playback")]
 fn render_output(
     data: &mut [f32],
@@ -80,6 +82,7 @@ fn render_output(
     receiver: &Receiver<Vec<f32>>,
     running: &AtomicBool,
     sentinels_played: &AtomicUsize,
+    underruns: &AtomicU64,
 ) {
     if !running.load(Ordering::Relaxed) {
         // Stopped: drop everything queued and play silence. Count discarded
@@ -127,7 +130,9 @@ fn render_output(
                 }
             }
             Err(_) => {
-                // Nothing queued: fill the remainder with silence.
+                // Nothing queued: fill the remainder with silence. That
+                // silence is the underrun fill, counted in samples.
+                underruns.fetch_add((data.len() - written) as u64, Ordering::Relaxed);
                 data[written..].fill(0.0);
                 return;
             }
@@ -207,6 +212,12 @@ pub struct SpeakerStream {
     // its ticket, so sequential drains each wait for their own audio.
     sentinel_seq: Arc<AtomicUsize>,
     sentinels_played: Arc<AtomicUsize>,
+    // Count of samples emitted as silence fill because the playback queue ran
+    // dry (an underrun), including silence rendered before the first send.
+    // Incremented by the output callback, read via
+    // [`underrun_count`](Self::underrun_count). Stop-time silence is excluded:
+    // a stopped stream emits silence by design, not from an underrun.
+    underruns: Arc<AtomicU64>,
     // Last device/driver error reported by the cpal output error callback
     // while streaming, retrievable via [`take_last_error`](Self::take_last_error).
     // Lets a consumer that sees a closed stream distinguish a driver failure
@@ -273,6 +284,19 @@ impl SpeakerStream {
     /// from an explicit [`stop`](Self::stop).
     pub fn take_last_error(&self) -> Option<DecibriError> {
         self.last_error.lock().ok().and_then(|mut slot| slot.take())
+    }
+
+    /// Total number of samples emitted as silence fill because the playback
+    /// queue ran dry (an underrun). The unit is samples, not events: one short
+    /// render adds the length of its silence tail. Counting starts at stream
+    /// open, so silence rendered before the first [`send`](Self::send) is
+    /// included, matching the capture side, which counts from stream open.
+    /// Silence emitted after [`stop`](Self::stop) is excluded: a stopped
+    /// stream emits silence by design, not from an underrun. Stays 0 while the
+    /// producer keeps the queue fed; a rising count means the output is
+    /// papering over gaps with silence.
+    pub fn underrun_count(&self) -> u64 {
+        self.underruns.load(Ordering::Relaxed)
     }
 
     /// Immediate stop, releasing the device. The output goes silent at once and
@@ -421,8 +445,10 @@ impl Speaker {
         let running = Arc::new(AtomicBool::new(true));
         let sentinel_seq = Arc::new(AtomicUsize::new(0));
         let sentinels_played = Arc::new(AtomicUsize::new(0));
+        let underruns = Arc::new(AtomicU64::new(0));
         let running_cb = running.clone();
         let sentinels_played_cb = sentinels_played.clone();
+        let underruns_cb = underruns.clone();
         let running_clone = running.clone();
         let last_error = Arc::new(Mutex::new(None));
         let err_last_error = last_error.clone();
@@ -443,6 +469,7 @@ impl Speaker {
                 &receiver,
                 &running_cb,
                 &sentinels_played_cb,
+                &underruns_cb,
             );
         });
 
@@ -470,6 +497,7 @@ impl Speaker {
             running,
             sentinel_seq,
             sentinels_played,
+            underruns,
             last_error,
         })
     }
@@ -493,6 +521,7 @@ mod tests {
             running: Arc::new(AtomicBool::new(true)),
             sentinel_seq: Arc::new(AtomicUsize::new(0)),
             sentinels_played: sentinels_played.clone(),
+            underruns: Arc::new(AtomicU64::new(0)),
             last_error: Arc::new(Mutex::new(None)),
         };
         (stream, receiver, sentinels_played)
@@ -513,6 +542,7 @@ mod tests {
             receiver,
             &stream.running,
             &stream.sentinels_played,
+            &stream.underruns,
         );
         data
     }
@@ -535,6 +565,7 @@ mod tests {
                 receiver,
                 &stream.running,
                 &stream.sentinels_played,
+                &stream.underruns,
             );
             assert!(
                 Instant::now() <= deadline,
@@ -657,6 +688,38 @@ mod tests {
         assert!(
             receiver.try_recv().is_err(),
             "a full channel must be fully discarded after stop"
+        );
+    }
+
+    #[test]
+    fn test_underrun_count_counts_silence_fill_samples() {
+        let (stream, receiver, _played) = test_stream();
+        let mut accum = Vec::new();
+
+        // Running, a short send then a larger render: the silence tail counts.
+        stream.send(vec![0.5_f32; 3]).unwrap();
+        render_once(&stream, &mut accum, &receiver, 5);
+        assert_eq!(
+            stream.underrun_count(),
+            2,
+            "the silence tail after queued audio counts, in samples"
+        );
+
+        // Running, a render on an empty channel: the full buffer counts.
+        render_once(&stream, &mut accum, &receiver, 8);
+        assert_eq!(
+            stream.underrun_count(),
+            10,
+            "a render with nothing queued counts the whole buffer"
+        );
+
+        // Stopped: the silence a stopped stream emits is not an underrun.
+        stream.stop();
+        render_once(&stream, &mut accum, &receiver, 16);
+        assert_eq!(
+            stream.underrun_count(),
+            10,
+            "stop-time silence must not advance the underrun count"
         );
     }
 
