@@ -204,6 +204,17 @@ class FileConsumed(DecibriError):
     """
 
 
+class FileEngaged(DecibriError):
+    """Raised when a File whose iteration has begun is analyzed.
+
+    Whole-recording analysis times every window from the start of the
+    recording, so it runs only on a File still at its start. Once iteration
+    has pulled from the File, analyzing it raises this rather than reporting
+    on the part not yet read. Construct a second File to do both. A lifecycle
+    failure like FileConsumed; catch via DecibriError to handle it generically.
+    """
+
+
 # OrtError intermediate parent
 
 

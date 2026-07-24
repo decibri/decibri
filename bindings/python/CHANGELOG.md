@@ -8,6 +8,21 @@ For Rust core (`crates/decibri`) and npm package (`npm/decibri`) changes, see [t
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- `FileEngaged`, a `DecibriError` subclass raised when a `File` whose iteration has begun is analyzed. Importable via `decibri.FileEngaged` or from `decibri.exceptions`.
+
+### Changed
+
+- `File.analyze()` / `analyse()` and the `AsyncFile` equivalents raise `FileEngaged` once iteration has begun, instead of returning a report of the part not yet read timed from the start of the recording. Construct a second `File` to both iterate a recording and analyze it.
+- A fully iterated `File` raises `FileEngaged` on an analysis where it previously raised `FileConsumed`.
+
+### Fixed
+
+- An analysis rejected before the pass begins leaves the `File` usable, so correcting the call and iterating the recording still works. A `File` analyzed without `vad=` was previously consumed by the rejected call. A failure during the pass, such as the detector failing to load, still consumes the source.
+
 ## [0.7.1] - 2026-07-24
 
 ### Changed

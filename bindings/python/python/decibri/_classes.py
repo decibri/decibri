@@ -1609,7 +1609,17 @@ class File:
         ``VadNotConfigured``; the energy mode has no whole-recording
         analysis and raises ``ValueError``. Never constructs a detector
         silently.
+
+        Requires a ``File`` still at its start: once iteration has pulled
+        from it, this raises ``FileEngaged`` rather than reporting on the
+        part not yet read. Every failure detected before the pass begins
+        leaves the ``File`` usable, so iterating it afterwards still works;
+        a failure during the pass, such as the detector failing to load,
+        consumes the source.
         """
+        # Ahead of the mode check, so an engaged File reports the same error
+        # here as it does in the core and the other binding.
+        self._bridge.check_not_engaged()
         if self._vad_enabled and self._vad_mode == "energy":
             raise ValueError(
                 "analyze() requires vad='silero'; "

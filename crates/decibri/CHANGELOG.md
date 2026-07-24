@@ -9,6 +9,16 @@ For other decibri packages, see:
 - npm package: [npm/decibri/CHANGELOG.md](../../npm/decibri/CHANGELOG.md)
 - Python package: [bindings/python/CHANGELOG.md](../../bindings/python/CHANGELOG.md)
 
+## [Unreleased]
+
+### Added
+
+- `DecibriError::FileEngaged`, reported when whole-recording analysis is requested on a `File` whose iteration has begun.
+
+### Changed
+
+- `File::analyze` and `File::analyse` report `DecibriError::FileEngaged` when iteration has already advanced the read cursor, instead of scoring only the part not yet read and timing its windows and segments from the start of the recording. Every route that reaches the source is covered, including the `Iterator` adapters and provided methods. Use one `File` per operation.
+
 ## [5.2.0] - 2026-07-18
 
 ### Added

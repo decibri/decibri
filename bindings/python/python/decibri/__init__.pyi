@@ -25,6 +25,7 @@ from decibri.exceptions import DeviceError as DeviceError
 from decibri.exceptions import DeviceFailed as DeviceFailed
 from decibri.exceptions import DeviceIndexOutOfRange as DeviceIndexOutOfRange
 from decibri.exceptions import FileConsumed as FileConsumed
+from decibri.exceptions import FileEngaged as FileEngaged
 from decibri.exceptions import MicrophoneNotFound as MicrophoneNotFound
 from decibri.exceptions import ModelLoadFailed as ModelLoadFailed
 from decibri.exceptions import ForkAfterOrtInit as ForkAfterOrtInit

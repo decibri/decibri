@@ -479,6 +479,11 @@ export declare class File extends Readable {
    * pass). Requires `vad: 'silero'`: a File opened without `vad` rejects
    * with the core's "analysis requires VAD" error, and the energy mode has
    * no whole-file analysis.
+   *
+   * Requires a File that is not already being streamed: once the stream has
+   * been engaged this rejects with a `DecibriError` carrying the code
+   * `'FILE_ENGAGED'`. Every failure detected before the pass begins leaves
+   * the File usable; a failure during the pass consumes the source.
    */
   analyze(): Promise<VadReport>;
 

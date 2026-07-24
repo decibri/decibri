@@ -147,6 +147,7 @@ const EXCEPTION_NAMES: &[&str] = &[
     "VadThresholdOutOfRange",
     "FileReadFailed",
     "FileConsumed",
+    "FileEngaged",
     "WavInvalid",
     "VadNotConfigured",
     "VadModelLoadFailed",
@@ -310,7 +311,7 @@ fn to_py_err(py: Python<'_>, err: CoreDecibriError) -> PyErr {
             Box::new(move |cls| PyErr::from_type(cls, (msg,))),
         ),
 
-        // Offline file source variants (3).
+        // Offline file source variants (4).
         CoreDecibriError::FileReadFailed { .. } => (
             "FileReadFailed",
             Box::new(move |cls| PyErr::from_type(cls, (msg,))),
@@ -321,6 +322,10 @@ fn to_py_err(py: Python<'_>, err: CoreDecibriError) -> PyErr {
         ),
         CoreDecibriError::VadNotConfigured => (
             "VadNotConfigured",
+            Box::new(move |cls| PyErr::from_type(cls, (msg,))),
+        ),
+        CoreDecibriError::FileEngaged => (
+            "FileEngaged",
             Box::new(move |cls| PyErr::from_type(cls, (msg,))),
         ),
 
@@ -1965,6 +1970,9 @@ struct FileBridge {
     /// state, where a later read fails loud, from natural exhaustion and
     /// `close()`, where a later read ends quietly.
     consumed: AtomicBool,
+    /// Set once `read()` has driven the source. Analysis is refused from then
+    /// on, so a report can never describe only the unread remainder.
+    engaged: AtomicBool,
     format: BindingSampleFormat,
     numpy: bool,
     vad_enabled: bool,
@@ -2239,6 +2247,10 @@ impl FileBridge {
             let Some(file) = guard.as_mut() else {
                 return Ok(None);
             };
+            // The cursor is about to move: analysis of this File is refused
+            // from here on. Set before the pull, so a pull that delivers
+            // nothing still counts.
+            self.engaged.store(true, Ordering::Relaxed);
             let next = py.detach(|| file.next());
             let chunk = match next {
                 None => {
@@ -2299,12 +2311,37 @@ impl FileBridge {
         Ok(Some(obj))
     }
 
+    /// Raise if iteration has begun. The wrapper calls this ahead of its own
+    /// mode validation, so the check order matches the core and the other
+    /// binding.
+    fn check_not_engaged(&self, py: Python<'_>) -> PyResult<()> {
+        if self.engaged.load(Ordering::Relaxed) {
+            return Err(to_py_err(py, CoreDecibriError::FileEngaged));
+        }
+        Ok(())
+    }
+
     /// Consume the source with the core's whole-recording analysis. Returns
     /// the per-window scores as `(start, end, probability, is_speech)` tuples
     /// and the merged segments as `(start, end)` tuples; the wrapper shapes
     /// them into the public report types.
+    ///
+    /// Everything checkable is checked before the source is taken, so a
+    /// rejected call leaves the File exactly as it was and the caller can fix
+    /// the configuration and retry.
     #[allow(clippy::type_complexity)]
     fn analyze(&self, py: Python<'_>) -> PyResult<(Vec<(f64, f64, f32, bool)>, Vec<(f64, f64)>)> {
+        if self.engaged.load(Ordering::Relaxed) {
+            return Err(to_py_err(py, CoreDecibriError::FileEngaged));
+        }
+        // The detector configuration is read off the source itself, so this
+        // check cannot drift from the one the core applies.
+        if lock_recover(&self.inner)
+            .as_ref()
+            .is_some_and(|file| file.vad_rate().is_none())
+        {
+            return Err(to_py_err(py, CoreDecibriError::VadNotConfigured));
+        }
         let file = lock_recover(&self.inner).take();
         let Some(file) = file else {
             return Err(raise_named(
@@ -2363,6 +2400,7 @@ impl FileBridge {
         Self {
             inner: StdMutex::new(Some(file)),
             consumed: AtomicBool::new(false),
+            engaged: AtomicBool::new(false),
             format,
             numpy,
             vad_enabled: vad,

@@ -664,6 +664,7 @@ fn to_napi_error(e: decibri::error::DecibriError) -> Error {
         | PermissionDenied
         | MicrophoneStreamClosed
         | SpeakerStreamClosed
+        | FileEngaged
         | DeviceFailed { .. }
         | OrtInitFailed { .. }
         | OrtLoadFailed { .. }
@@ -1237,6 +1238,7 @@ impl FileParts {
         FileHandle {
             inner: Some(self.file),
             consumed: false,
+            engaged: false,
             format: self.format,
             vad_enabled: self.vad_enabled,
             energy_vad: self.energy_vad,
@@ -1272,8 +1274,9 @@ impl Task for OpenFileTask {
 }
 
 /// Background task that consumes the source with the core's whole-recording
-/// analysis on the libuv thread pool. A `File` already consumed (analyzed,
-/// closed, or fully read) rejects rather than silently re-reading.
+/// analysis on the libuv thread pool. A `File` whose source is already gone
+/// (analyzed, or closed) rejects rather than silently re-reading; a `File`
+/// that was read instead is refused earlier, by the engagement check.
 pub struct AnalyzeFileTask {
     file: Option<CoreFile>,
 }
@@ -1309,6 +1312,9 @@ pub struct FileHandle {
     /// state, where a later read fails loud, from natural exhaustion and
     /// `close()`, where a later read ends quietly.
     consumed: bool,
+    /// Set once `read_chunk` has driven the source. Analysis is refused from
+    /// then on, so a report can never describe only the unread remainder.
+    engaged: bool,
     format: SampleFormat,
     vad_enabled: bool,
     energy_vad: bool,
@@ -1393,6 +1399,10 @@ impl FileHandle {
         let Some(file) = self.inner.as_mut() else {
             return Ok(None);
         };
+        // The cursor is about to move: analysis of this File is refused from
+        // here on. Set before the pull, so a pull that delivers nothing still
+        // counts.
+        self.engaged = true;
         let chunk = match file.next() {
             None => {
                 // Fully delivered: drop the source so held memory is released
@@ -1459,15 +1469,29 @@ impl FileHandle {
     /// JS event loop. Resolves to the `VadReport`; a `File` built without VAD
     /// rejects with the core's typed error, never a silently constructed
     /// detector.
+    ///
+    /// Everything checkable is checked before the source is taken, so a
+    /// rejected call leaves the File exactly as it was and the caller can fix
+    /// the configuration and retry.
     #[napi]
-    pub fn analyze(&mut self) -> AsyncTask<AnalyzeFileTask> {
+    pub fn analyze(&mut self) -> Result<AsyncTask<AnalyzeFileTask>> {
+        if self.engaged {
+            return Err(to_napi_error(decibri::error::DecibriError::FileEngaged));
+        }
+        // The detector configuration is read off the source itself, so this
+        // check cannot drift from the one the core applies.
+        if self.inner.as_ref().is_some_and(|f| f.vad_rate().is_none()) {
+            return Err(to_napi_error(
+                decibri::error::DecibriError::VadNotConfigured,
+            ));
+        }
         let file = self.inner.take();
         // The source is taken: a later iteration reads as consumed, not as an
         // empty recording, whatever the analysis resolves to.
         if file.is_some() {
             self.consumed = true;
         }
-        AsyncTask::new(AnalyzeFileTask { file })
+        Ok(AsyncTask::new(AnalyzeFileTask { file }))
     }
 
     /// Release the source. Idempotent; a closed File reads as ended.

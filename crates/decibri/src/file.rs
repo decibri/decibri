@@ -246,6 +246,8 @@ pub struct VadReport {
 /// [`analyze`](Self::analyze) (or [`analyse`](Self::analyse)) to score the
 /// whole recording instead. Iteration and analysis are separate single
 /// passes: each consumes the source once, so use one `File` per operation.
+/// Analysis is refused once iteration has begun, rather than scoring the
+/// unread remainder.
 pub struct File {
     /// Interleaved source samples at `input_rate` with `input_channels`.
     source: Vec<f32>,
@@ -256,6 +258,10 @@ pub struct File {
     input_channels: u16,
     /// Cursor into `source`, in interleaved samples.
     pos: usize,
+    /// Whether iteration has driven the cursor. Set by [`Iterator::next`] and
+    /// never by [`File::analyze`], so it distinguishes a cursor the caller
+    /// moved from one the analysis pass moved itself.
+    engaged: bool,
     /// The conditioning chain; `None` when the source is already mono at the
     /// target rate with no conditioning enabled (the zero-cost direct path).
     stage: Option<CaptureStage>,
@@ -396,6 +402,7 @@ impl File {
             input_rate,
             input_channels,
             pos: 0,
+            engaged: false,
             stage,
             reblock: VecDeque::new(),
             flushed: false,
@@ -483,7 +490,11 @@ impl File {
     /// [`FileConfig::vad_holdoff_ms`] of file time. Consumes the `File`: the
     /// analysis is a single pass, separate from iteration.
     ///
+    /// Runs only on a source still at its start. Once iteration has pulled
+    /// from the `File`, analysis reports [`DecibriError::FileEngaged`].
+    ///
     /// # Errors
+    /// - [`DecibriError::FileEngaged`] when iteration has already begun.
     /// - [`DecibriError::VadNotConfigured`] when the `File` was built without
     ///   [`FileConfig::vad`].
     /// - Detector construction and inference errors exactly as [`SileroVad`]
@@ -491,6 +502,11 @@ impl File {
     /// - Chain errors exactly as iteration reports them.
     #[cfg(feature = "vad")]
     pub fn analyze(mut self) -> Result<VadReport, DecibriError> {
+        // Window and segment times are absolute, measured from the start of
+        // the recording, so the pass runs only from the start of the source.
+        if self.engaged {
+            return Err(DecibriError::FileEngaged);
+        }
         let Some(vad) = self.vad.clone() else {
             return Err(DecibriError::VadNotConfigured);
         };
@@ -674,6 +690,11 @@ impl Iterator for File {
     /// chain's end-of-stream tail has been drained. Returns `None` after the
     /// final chunk; an error ends the iteration.
     fn next(&mut self) -> Option<Self::Item> {
+        // The one place iteration reaches the source: the adapters and the
+        // provided methods all arrive here. The mark precedes the finished
+        // check and any delivery, so a call that moves the cursor and returns
+        // nothing still counts.
+        self.engaged = true;
         if self.finished {
             return None;
         }
@@ -1142,6 +1163,15 @@ mod tests {
             .join("vad-golden-tts-speech-16k.wav")
     }
 
+    /// Per-window scores a whole analysis of the golden recording returns.
+    #[cfg(feature = "vad")]
+    const GOLDEN_SCORE_COUNT: usize = 208;
+
+    /// Merged speech segments a whole analysis of the golden recording
+    /// returns.
+    #[cfg(feature = "vad")]
+    const GOLDEN_SEGMENT_COUNT: usize = 2;
+
     #[cfg(feature = "vad")]
     fn vad_file_config() -> FileConfig {
         FileConfig {
@@ -1168,6 +1198,216 @@ mod tests {
             file.analyse(),
             Err(DecibriError::VadNotConfigured)
         ));
+    }
+
+    /// Analysis after iteration has begun reports the typed error rather than
+    /// scoring the unread remainder and timing it from zero.
+    ///
+    /// The `File` here has no VAD configured, so the error also pins the
+    /// check order: the engaged state is reported before the missing
+    /// detector configuration.
+    #[cfg(feature = "vad")]
+    #[test]
+    fn analyze_after_partial_iteration_errors() {
+        let mut file = File::buffer(sine(16000, 0.5), 16000, FileConfig::default()).unwrap();
+        let first = file.next();
+        assert!(matches!(first, Some(Ok(_))), "the first chunk is delivered");
+        assert!(matches!(file.analyze(), Err(DecibriError::FileEngaged)));
+
+        let mut file = File::buffer(sine(16000, 0.5), 16000, FileConfig::default()).unwrap();
+        let _ = file.next();
+        assert!(matches!(file.analyse(), Err(DecibriError::FileEngaged)));
+    }
+
+    /// Every route that can advance the cursor and leave the `File` owned is
+    /// guarded, not only the ones spelled `next()`.
+    ///
+    /// `Iterator`'s provided methods and its adapters all reach the source
+    /// through `File::next`, whether called directly on `&mut File` or
+    /// through `by_ref()`, so each of these must report the same error. The
+    /// routes that take the `File` by value cannot be followed by an analysis
+    /// at all, which the type system already covers.
+    #[cfg(feature = "vad")]
+    #[test]
+    fn analyze_after_any_iteration_route_errors() {
+        /// Drive a fresh `File` through one iteration route, then report
+        /// whether the analysis that follows refuses.
+        fn refuses_after(drive: impl FnOnce(&mut File)) -> bool {
+            let mut file = File::buffer(sine(16000, 0.5), 16000, FileConfig::default()).unwrap();
+            drive(&mut file);
+            matches!(file.analyze(), Err(DecibriError::FileEngaged))
+        }
+
+        // Provided methods that borrow the `File`.
+        assert!(
+            refuses_after(|f| {
+                let _ = f.next();
+            }),
+            "after next()"
+        );
+        assert!(
+            refuses_after(|f| {
+                let _ = f.nth(1);
+            }),
+            "after nth()"
+        );
+        assert!(
+            refuses_after(|f| {
+                let _ = f.find(|_| false);
+            }),
+            "after find()"
+        );
+        assert!(
+            refuses_after(|f| {
+                let _ = f.find_map(|_| None::<()>);
+            }),
+            "after find_map()"
+        );
+        assert!(
+            refuses_after(|f| {
+                let _ = f.position(|_| false);
+            }),
+            "after position()"
+        );
+        assert!(
+            refuses_after(|f| {
+                let _ = f.any(|_| false);
+            }),
+            "after any()"
+        );
+        assert!(
+            refuses_after(|f| {
+                let _ = f.all(|_| true);
+            }),
+            "after all()"
+        );
+        assert!(
+            refuses_after(|f| {
+                let _ = f.try_fold(0usize, |n, _| Some(n + 1));
+            }),
+            "after try_fold()"
+        );
+        assert!(
+            refuses_after(|f| {
+                let _ = f.try_for_each(|_| Some(()));
+            }),
+            "after try_for_each()"
+        );
+
+        // Adapters, reached through by_ref() so the `File` survives them.
+        assert!(
+            refuses_after(|f| {
+                let _ = f.by_ref().take(2).count();
+            }),
+            "after take()"
+        );
+        assert!(
+            refuses_after(|f| {
+                let _ = f.by_ref().filter(|r| r.is_ok()).count();
+            }),
+            "after filter().count()"
+        );
+        assert!(
+            refuses_after(|f| {
+                let _ = f.by_ref().last();
+            }),
+            "after last()"
+        );
+        assert!(
+            refuses_after(|f| f.by_ref().for_each(drop)),
+            "after for_each()"
+        );
+        // Peeking pulls a chunk and buffers it inside the adapter, so it moves
+        // the cursor without the caller ever seeing a delivery.
+        assert!(
+            refuses_after(|f| {
+                let _ = f.by_ref().peekable().peek().is_some();
+            }),
+            "after peekable().peek()"
+        );
+
+        // `&mut File` is an `Iterator` in its own right, which reaches
+        // `IntoIterator` and the collection traits without moving the `File`.
+        assert!(
+            refuses_after(|f| {
+                for chunk in &mut *f {
+                    drop(chunk);
+                }
+            }),
+            "after a for loop over &mut File"
+        );
+        assert!(
+            refuses_after(|f| {
+                let _ = (&mut *f).collect::<Vec<_>>();
+            }),
+            "after collect() over &mut File"
+        );
+
+        assert!(
+            refuses_after(|f| {
+                for chunk in f.by_ref() {
+                    drop(chunk);
+                }
+            }),
+            "after a for loop over by_ref()"
+        );
+    }
+
+    /// A `next()` that delivers no chunk still advances the cursor, so it
+    /// counts as iteration: an empty source and a fully drained one both
+    /// refuse a later analysis.
+    #[cfg(feature = "vad")]
+    #[test]
+    fn analyze_after_iteration_without_delivery_errors() {
+        // An empty source: the first `next()` flushes the chain and returns
+        // nothing, having delivered no chunk at all.
+        let mut file = File::buffer(Vec::new(), 16000, FileConfig::default()).unwrap();
+        assert!(file.next().is_none(), "an empty source delivers no chunk");
+        assert!(matches!(file.analyze(), Err(DecibriError::FileEngaged)));
+
+        // A drained source: iteration ran to its end, which is the shape a
+        // caller reaches by streaming the whole recording first.
+        let mut file = File::buffer(sine(16000, 0.5), 16000, FileConfig::default()).unwrap();
+        file.by_ref().for_each(drop);
+        assert!(matches!(file.analyze(), Err(DecibriError::FileEngaged)));
+    }
+
+    /// A drained `File` keeps ending quietly: `next()` goes on returning
+    /// `None` rather than reporting the engaged state, which belongs to
+    /// analysis alone.
+    #[test]
+    fn iteration_past_exhaustion_stays_quiet() {
+        let mut file = File::buffer(sine(16000, 0.5), 16000, FileConfig::default()).unwrap();
+        let delivered = file.by_ref().filter(|chunk| chunk.is_ok()).count();
+        assert!(delivered > 0, "the first pass delivers audio");
+        assert!(file.next().is_none(), "a drained File ends quietly");
+        assert!(file.next().is_none(), "and stays ended on every later call");
+    }
+
+    /// A `File` nobody has iterated still analyzes: the guard costs the
+    /// ordinary path nothing.
+    #[cfg(feature = "vad")]
+    #[test]
+    fn analyze_on_a_pristine_file_still_succeeds() {
+        let report = File::open(golden_wav_path(), vad_file_config())
+            .unwrap()
+            .analyze()
+            .unwrap();
+        assert!(!report.scores.is_empty());
+        assert!(!report.segments.is_empty());
+    }
+
+    /// The analysis of the golden recording, pinned to exact counts. A change
+    /// to either number means the analysis itself changed.
+    #[cfg(feature = "vad")]
+    #[test]
+    fn analyze_of_the_golden_recording_is_pinned() {
+        let report = File::open(golden_wav_path(), vad_file_config())
+            .unwrap()
+            .analyze()
+            .unwrap();
+        assert_eq!(report.scores.len(), GOLDEN_SCORE_COUNT);
+        assert_eq!(report.segments.len(), GOLDEN_SEGMENT_COUNT);
     }
 
     /// THE detector-feed invariant: analysis scores equal feeding the

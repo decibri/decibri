@@ -218,6 +218,16 @@ pub enum DecibriError {
     #[error("analysis requires VAD; construct the File with a vad configuration")]
     VadNotConfigured,
 
+    /// Whole-recording analysis was requested on a source whose iteration has
+    /// already advanced the read cursor.
+    ///
+    /// Analysis reports window and segment times from the start of the
+    /// recording, so it runs only on a source that is still at its start.
+    /// Static message to keep the text stable. Additive variant permitted by
+    /// `#[non_exhaustive]`.
+    #[error("File iteration has begun; construct a new File to analyze the whole recording")]
+    FileEngaged,
+
     // ── ORT and VAD model errors ───────────────────────────────────────
     //
     // These variants carry the underlying ORT failure boxed as a
@@ -470,6 +480,16 @@ mod tests {
         assert!(
             msg.starts_with("Microphone permission denied. "),
             "frozen prefix must not drift: {msg}"
+        );
+    }
+
+    /// The `FileEngaged` Display message is matched by prefix in the Node
+    /// binding to assign the error its stable code, so the text is frozen.
+    #[test]
+    fn file_engaged_message_is_frozen() {
+        assert_eq!(
+            DecibriError::FileEngaged.to_string(),
+            "File iteration has begun; construct a new File to analyze the whole recording"
         );
     }
 }

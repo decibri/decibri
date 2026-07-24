@@ -9,6 +9,22 @@ For other decibri packages, see:
 - Rust crate: [crates/decibri/CHANGELOG.md](../../crates/decibri/CHANGELOG.md)
 - Python wheel: [bindings/python/CHANGELOG.md](../../bindings/python/CHANGELOG.md)
 
+## [Unreleased]
+
+### Added
+
+- The refused-analysis failure carries the dedicated `code` `'FILE_ENGAGED'` on a `DecibriError`.
+
+### Changed
+
+- `File.analyze()` and `File.analyse()` reject once the stream has been engaged, instead of resolving to a report of the part not yet read timed from the start of the recording. Any route that starts the flow counts: `resume()`, a `'data'` or `'readable'` listener, `read()`, `pipe()`, and async iteration. Construct a second `File` to both stream a recording and analyze it.
+- A fully streamed `File` rejects an analysis with `'FILE_ENGAGED'` where it previously rejected with `'FILE_CONSUMED'`.
+
+### Fixed
+
+- A `File.analyze()` rejected before the pass begins leaves the `File` usable, so correcting the call and streaming the recording still works. A `File` analyzed without `vad` was previously consumed by the rejected call. A failure during the pass, such as the detector failing to load, still consumes the source.
+- Analysing a `File` whose stream has been engaged no longer raises from the stream's own read machinery, where an `'error'` event with no listener terminates the process. The rejection now arrives from the `analyze()` call itself.
+
 ## [5.2.1] - 2026-07-24
 
 ### Changed

@@ -6,6 +6,7 @@ const fs = require('fs');
 const { DecibriBridge, FileHandle } = require('../index.js');
 const {
   wrapNativeError,
+  fileEngagedError,
   DecibriError,
   DeviceError,
   OrtError,
@@ -605,6 +606,10 @@ class File extends Readable {
     this._sampleRate = prepared.nativeOptions.sampleRate;
     this._bytesPerSample = prepared.dtype === 'int16' ? 2 : 4;
     this._ended = false;
+    // Set the moment the consumer asks the stream for data, which is earlier
+    // than the moment data arrives: `resume()` and a 'readable' listener both
+    // schedule the first `_read()` for a later tick. See _engage.
+    this._engaged = false;
 
     // ── Create or adopt native handle ───────────────────────────────────────
 
@@ -838,8 +843,64 @@ class File extends Readable {
     return new File(null, options, { prepared, native });
   }
 
+  /**
+   * @internal Mark the stream as engaged: the consumer has asked it for data,
+   * so `analyze()` is refused from here on. Every entry point that starts the
+   * flow marks synchronously with the consumer's own call; the read it
+   * schedules runs on a later tick.
+   */
+  _engage() {
+    this._engaged = true;
+  }
+
+  /**
+   * Start the flow of data. Also engages the stream: `analyze()` is refused
+   * once the recording is being streamed.
+   * @returns {this}
+   */
+  resume() {
+    this._engage();
+    return super.resume();
+  }
+
+  /**
+   * Pull from the stream's buffer. Also engages the stream: `analyze()` is
+   * refused once the recording is being read.
+   * @param {number} [size]
+   * @returns {Buffer|null}
+   */
+  read(size) {
+    this._engage();
+    return super.read(size);
+  }
+
+  /**
+   * Attach a listener. A 'data' or 'readable' listener starts the flow, so it
+   * engages the stream; listeners for the VAD, error, and end events do not.
+   * @param {string|symbol} event
+   * @param {Function} listener
+   * @returns {this}
+   */
+  on(event, listener) {
+    if (event === 'data' || event === 'readable') {
+      this._engage();
+    }
+    return super.on(event, listener);
+  }
+
+  /**
+   * Alias of `on`, kept in step so it engages the stream the same way.
+   * @param {string|symbol} event
+   * @param {Function} listener
+   * @returns {this}
+   */
+  addListener(event, listener) {
+    return this.on(event, listener);
+  }
+
   /** @internal */
   _read() {
+    this._engage();
     if (this._ended) {
       return;
     }
@@ -921,9 +982,22 @@ class File extends Readable {
    * whole-file analysis and rejects likewise. Never constructs a detector
    * silently.
    *
+   * Requires a `File` that is not already being streamed: once the stream has
+   * been engaged, this rejects with a `DecibriError` carrying the code
+   * `'FILE_ENGAGED'` rather than reporting on the part not yet read. Every
+   * failure detected before the pass begins leaves the `File` usable, so
+   * streaming it afterwards still works; a failure during the pass, such as
+   * the detector failing to load, consumes the source.
+   *
    * @returns {Promise<import('./decibri').VadReport>}
    */
   async analyze() {
+    // Checked before the native handle is touched: the rejection belongs to
+    // this call, and the source is never taken from a File that keeps
+    // streaming.
+    if (this._engaged) {
+      throw fileEngagedError();
+    }
     if (this._vad && this._vadMode === 'energy') {
       throw new RangeError(
         "analyze() requires vad: 'silero'; energy mode does not support whole-file analysis"

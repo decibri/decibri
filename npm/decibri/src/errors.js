@@ -78,6 +78,22 @@ const ORT_CODES = [
   ['Silero VAD inference failed', 'ORT_INFERENCE_FAILED'],
 ];
 
+// The core's message for analysing a File whose iteration has begun. The
+// wrapper raises it at the call site, before the native handle is touched.
+const FILE_ENGAGED_MESSAGE =
+  'File iteration has begun; construct a new File to analyze the whole recording';
+
+/**
+ * The lifecycle error for analysing a File that is already being iterated.
+ * One place for the message and the code, shared by the wrapper's call-site
+ * check and the native classification below.
+ *
+ * @returns {DecibriError}
+ */
+function fileEngagedError() {
+  return new DecibriError(FILE_ENGAGED_MESSAGE, 'FILE_ENGAGED');
+}
+
 /**
  * Wrap an error thrown from a native DecibriBridge / DecibriOutputBridge call
  * into the appropriate JS error: a built-in for argument validation, or a
@@ -152,6 +168,12 @@ function wrapNativeError(err) {
   if (msg.startsWith('File already consumed')) {
     return new DecibriError(msg, 'FILE_CONSUMED');
   }
+  // Analysing a File whose iteration has begun. The companion lifecycle
+  // failure to FILE_CONSUMED, and authored in crates/decibri/src/error.rs
+  // rather than the napi layer.
+  if (msg.startsWith('File iteration has begun')) {
+    return new DecibriError(msg, 'FILE_ENGAGED');
+  }
 
   // Any other error from the native constructor is still a decibri error.
   return new DecibriError(msg, 'DECIBRI_ERROR');
@@ -162,5 +184,6 @@ module.exports = {
   DeviceError,
   OrtError,
   OrtPathError,
+  fileEngagedError,
   wrapNativeError,
 };

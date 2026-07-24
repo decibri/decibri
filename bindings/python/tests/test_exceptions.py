@@ -1,7 +1,7 @@
 """Exception hierarchy tests.
 
-Covers all 38 exception classes shipped in the public ``decibri`` namespace:
-1 base (DecibriError) + 16 direct subclasses + DeviceError intermediate
+Covers all 45 exception classes shipped in the public ``decibri`` namespace:
+1 base (DecibriError) + 23 direct subclasses + DeviceError intermediate
 + 8 direct DeviceError subclasses + OrtError intermediate + 8 direct
 OrtError subclasses + OrtPathError intermediate + 2 direct OrtPathError
 subclasses.
@@ -32,6 +32,9 @@ from decibri import (
     DeviceFailed,
     DeviceIndexOutOfRange,
     FileConsumed,
+    FileEngaged,
+    FileReadFailed,
+    ForkAfterOrtInit,
     MicrophoneNotFound,
     FramesPerBufferOutOfRange,
     InvalidFormat,
@@ -59,24 +62,26 @@ from decibri import (
     StreamOpenFailed,
     StreamStartFailed,
     VadModelLoadFailed,
+    VadNotConfigured,
     VadSampleRateUnsupported,
     VadThresholdOutOfRange,
+    WavInvalid,
 )
 import pytest
 
 
 # ---------------------------------------------------------------------------
-# All 37 classes are reachable and inherit from Exception via DecibriError.
+# All 45 classes are reachable and inherit from Exception via DecibriError.
 # ---------------------------------------------------------------------------
 
 
 ALL_DECIBRI_ERROR_CLASSES = (
     DecibriError,
-    # 18 direct DecibriError subclasses (non-device, non-ORT). DeviceFailed
+    # 23 direct DecibriError subclasses (non-device, non-ORT). DeviceFailed
     # is a runtime device/driver failure (distinct from the DeviceError
     # enumeration/selection family); OnnxBackendFailed is the non-ORT ONNX
-    # backend catch-all (distinct from the OrtError family); FileConsumed is
-    # the File single-pass lifecycle error.
+    # backend catch-all (distinct from the OrtError family); FileConsumed and
+    # FileEngaged are the File single-pass lifecycle errors.
     AlreadyRunning,
     MicrophoneStreamClosed,
     ChannelsOutOfRange,
@@ -95,6 +100,11 @@ ALL_DECIBRI_ERROR_CLASSES = (
     DeviceFailed,
     OnnxBackendFailed,
     FileConsumed,
+    FileEngaged,
+    FileReadFailed,
+    WavInvalid,
+    VadNotConfigured,
+    ForkAfterOrtInit,
     # DeviceError intermediate + 8 direct subclasses
     DeviceError,
     DeviceEnumerationFailed,
@@ -122,11 +132,12 @@ ALL_DECIBRI_ERROR_CLASSES = (
 
 
 def test_class_count() -> None:
-    # 40 total: 1 base + 18 direct + DeviceError + 8 device + OrtError
-    # + 8 ORT direct + OrtPathError + 2 path. The addition over the prior 39 is
-    # FileConsumed, the lifecycle error raised when a File is reused after its
-    # single pass; a direct DecibriError subclass.
-    assert len(ALL_DECIBRI_ERROR_CLASSES) == 40
+    # 45 total: 1 base + 23 direct + DeviceError + 8 device + OrtError
+    # + 8 ORT direct + OrtPathError + 2 path. The additions over the prior 40
+    # are FileEngaged, raised when a File whose iteration has begun is
+    # analyzed, and four classes the tuple previously omitted: FileReadFailed,
+    # WavInvalid, VadNotConfigured, and ForkAfterOrtInit.
+    assert len(ALL_DECIBRI_ERROR_CLASSES) == 45
 
 
 def test_all_inherit_from_decibri_error() -> None:
