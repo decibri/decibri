@@ -32,6 +32,7 @@ from decibri.exceptions import (
     DeviceError,
     DeviceFailed,
     DeviceIndexOutOfRange,
+    FileConsumed,
     FileReadFailed,
     ForkAfterOrtInit,
     FramesPerBufferOutOfRange,

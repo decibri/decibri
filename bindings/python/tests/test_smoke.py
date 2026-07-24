@@ -10,7 +10,9 @@ each surface lives in test_capture, test_output, test_vad, test_config,
 test_exceptions, test_error_messages, and test_lifecycle.
 """
 
+import ast
 import importlib.resources
+from pathlib import Path
 
 import decibri
 
@@ -209,3 +211,55 @@ def test_silero_model_bundled_in_wheel() -> None:
     assert model_path.is_file(), f"bundled Silero model not found at {model_path}"
     size = model_path.stat().st_size
     assert size > 2 * 1024 * 1024, f"bundled Silero model is suspiciously small: {size} bytes"
+
+
+# ---------------------------------------------------------------------------
+# Stub / runtime re-export parity
+# ---------------------------------------------------------------------------
+
+
+def _submodule_reexports(source: str, *, require_explicit: bool) -> set[str]:
+    """Collect names re-exported from ``decibri`` submodules in a source file.
+
+    Walks ``from decibri.<submodule> import ...`` statements. For the runtime
+    ``__init__.py`` every imported name is a package attribute, so
+    ``require_explicit`` is False. For the ``.pyi`` stub only the PEP 484
+    ``import X as X`` form is a re-export, so ``require_explicit`` is True.
+    """
+    names: set[str] = set()
+    for node in ast.walk(ast.parse(source)):
+        if not isinstance(node, ast.ImportFrom):
+            continue
+        if not node.module or not node.module.startswith("decibri."):
+            continue
+        for alias in node.names:
+            if require_explicit and alias.asname != alias.name:
+                continue
+            names.add(alias.name)
+    return names
+
+
+def test_stub_matches_runtime_reexports() -> None:
+    """The ``__init__.pyi`` stub re-exports exactly the runtime package surface.
+
+    A name importable at runtime (``from decibri import X``) but missing from
+    the stub fails ``mypy --strict`` for anyone type-checking against the
+    shipped ``py.typed`` package; a name in the stub but not the runtime is a
+    dangling type-only export. This guards the whole class of drift with no
+    type checker and no hardware.
+    """
+    init_py = Path(decibri.__file__)
+    init_pyi = init_py.with_suffix(".pyi")
+    assert init_pyi.is_file(), f"type stub not found at {init_pyi}"
+
+    runtime = _submodule_reexports(init_py.read_text(), require_explicit=False)
+    stub = _submodule_reexports(init_pyi.read_text(), require_explicit=True)
+
+    missing_from_stub = sorted(runtime - stub)
+    missing_from_runtime = sorted(stub - runtime)
+    assert not missing_from_stub, (
+        f"present at runtime but absent from __init__.pyi: {missing_from_stub}"
+    )
+    assert not missing_from_runtime, (
+        f"present in __init__.pyi but absent from runtime: {missing_from_runtime}"
+    )

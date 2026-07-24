@@ -8,6 +8,16 @@ For Rust core (`crates/decibri`) and npm binding (`bindings/node`) changes, see 
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Changed
+
+- A `File` reused after its single pass now raises `FileConsumed` (a `DecibriError` subclass) instead of a builtin `ValueError`, matching the other lifecycle failures. This covers a second `analyze()` and, newly, iterating a `File` that has already been analyzed, which previously yielded an empty result. A `File` that ran out of audio, or that you closed, still ends quietly. Importable via `decibri.FileConsumed` or from `decibri.exceptions`.
+
+### Fixed
+
+- `Vad`, `DeviceFailed`, and `OnnxBackendFailed` are now re-exported from the package type stub, so `from decibri import Vad` (and the two exception classes) type-checks under strict type checking.
+
 ## [0.7.0] - 2026-07-18
 
 ### Changed

@@ -144,6 +144,14 @@ function wrapNativeError(err) {
   if (msg.startsWith('ONNX backend error from')) {
     return new DecibriError(msg, 'ONNX_BACKEND_FAILED');
   }
+  // Reusing a File after its single pass (analysis or iteration consumed the
+  // source) is a lifecycle failure, the offline counterpart of a closed stream:
+  // a base DecibriError with a dedicated code, not the RangeError reserved for
+  // argument validation. Unlike the prefixes above, this message is authored in
+  // the napi layer (bindings/node/src/lib.rs), not in crates/decibri/src/error.rs.
+  if (msg.startsWith('File already consumed')) {
+    return new DecibriError(msg, 'FILE_CONSUMED');
+  }
 
   // Any other error from the native constructor is still a decibri error.
   return new DecibriError(msg, 'DECIBRI_ERROR');
