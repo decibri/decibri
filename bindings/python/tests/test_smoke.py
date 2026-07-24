@@ -18,7 +18,7 @@ import decibri
 
 
 def test_package_imports() -> None:
-    assert decibri.__version__ == "0.7.1"
+    assert decibri.__version__ == "0.7.2"
     # The bridges are hidden behind the private _decibri module. They are
     # NOT accessible at decibri.<X> top level (sync or async). The async
     # pair was never accessible at the top level; the sync pair
@@ -56,7 +56,7 @@ def test_version_decibri_matches_rust_core() -> None:
     # Literal equality is intentional. When the Rust workspace bumps past
     # 4.0.0 this assertion breaks deliberately, to force a conscious update of
     # the Python expectation alongside the Rust version bump.
-    assert _decibri.MicrophoneBridge.version().decibri == "5.2.0"
+    assert _decibri.MicrophoneBridge.version().decibri == "5.2.1"
 
 
 def test_version_audio_backend_matches_cpal() -> None:
@@ -72,9 +72,9 @@ def test_version_info_fields() -> None:
     from decibri import _decibri
 
     info = _decibri.MicrophoneBridge.version()
-    assert info.decibri == "5.2.0"
+    assert info.decibri == "5.2.1"
     assert info.audio_backend == "cpal 0.17"
-    assert info.binding == "0.7.1"
+    assert info.binding == "0.7.2"
 
 
 def test_version_info_is_frozen() -> None:
