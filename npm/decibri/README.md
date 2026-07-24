@@ -235,7 +235,7 @@ Same options as Node.js, plus:
 | `noiseSuppression` | boolean | true | Browser noise suppression |
 | `workletUrl` | string | inline blob | Custom worklet URL for strict CSP |
 
-The browser runs energy-mode VAD only, so its `vad` option accepts `false` or `'energy'`. The browser `version()` returns `{ decibri }` only.
+The browser runs energy-mode VAD only, so its `vad` option accepts `false` or `'energy'`. The browser `version()` returns `{ decibri }` only: the browser build has no native core, so `decibri` reports the installed package version. In Node, `version().decibri` reports the native core version.
 
 ### Key differences from Node.js
 

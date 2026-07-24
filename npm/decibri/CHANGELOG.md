@@ -13,6 +13,7 @@ For other decibri packages, see:
 
 ### Changed
 
+- Documented what `version().decibri` reports: the native core version in Node, and the installed package version in the browser build, which has no native core.
 - The consumed-`File` failure now carries the dedicated `code` `'FILE_CONSUMED'` instead of the generic `'DECIBRI_ERROR'`. The `DecibriError` class and the message are unchanged; branch on `err.code` to handle it specifically.
 - Flat `vadThreshold` and `vadHoldoff` options on `File` now raise the same migration error the `Microphone` raises, instead of being silently ignored. Pass them on the `vad` config object: `vad: { model: 'silero', threshold: 0.5, holdoffMs: 300 }`.
 
