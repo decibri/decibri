@@ -70,7 +70,7 @@ var decibri = (function() {
 	var require_decibri_browser = /* @__PURE__ */ __commonJSMin(((exports, module) => {
 		const { Emitter } = require_emitter();
 		const { WORKLET_SOURCE } = require_worklet_inline();
-		const VERSION = "5.2.0";
+		const VERSION = "5.2.1";
 		/**
 		* Browser microphone capture.
 		*

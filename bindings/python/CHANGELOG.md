@@ -4,11 +4,11 @@
 
 This file tracks changes to the decibri Python package published to PyPI (`pip install decibri`).
 
-For Rust core (`crates/decibri`) and npm binding (`bindings/node`) changes, see [the root CHANGELOG.md](../../CHANGELOG.md). The Rust core and npm binding ship together at the same version under the `v*` tag pattern; the Python package has its own version trajectory aligned with API surface stability and ships under the `python-v*` tag pattern.
+For Rust core (`crates/decibri`) and npm package (`npm/decibri`) changes, see [the root CHANGELOG.md](../../CHANGELOG.md). Each package versions independently and releases under its own tag pattern: `crate-v*` for the Rust core, `npm-v*` for the npm package, and `python-v*` for the Python package.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.7.1] - 2026-07-24
 
 ### Changed
 

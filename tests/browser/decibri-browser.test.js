@@ -1,4 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
+import pkg from '../../npm/decibri/package.json';
 
 // ── Browser API mocks ────────────────────────────────────────────────────────
 
@@ -555,5 +556,11 @@ describe('Microphone.version()', () => {
     const v = Microphone.version();
     expect(v).toHaveProperty('decibri');
     expect(typeof v.decibri).toBe('string');
+  });
+
+  it('reports the package version', () => {
+    // The browser VERSION constant is maintained by hand; it must match the
+    // package version in npm/decibri/package.json.
+    expect(Microphone.version().decibri).toBe(pkg.version);
   });
 });
