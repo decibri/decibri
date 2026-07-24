@@ -6,7 +6,7 @@ const { WORKLET_SOURCE } = require('./worklet-inline.js');
 // Browser build version. Keep in sync with package.json on each release; the
 // browser bundle cannot read package.json at runtime the way the Node wrapper
 // does, so this is a maintained constant.
-const VERSION = '5.2.1';
+const VERSION = '5.2.2';
 
 /**
  * Browser microphone capture.
