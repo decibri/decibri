@@ -644,6 +644,14 @@ class File extends Readable {
 
     // ── Validate VAD options (same acceptance as Microphone) ────────────────
 
+    // The flat vadThreshold/vadHoldoff forms are rejected with the same
+    // migration error the Microphone raises; pass them on the vad config object.
+    if (options.vadThreshold !== undefined || options.vadHoldoff !== undefined) {
+      throw new TypeError(
+        'vadThreshold and vadHoldoff are no longer supported. ' +
+          "Pass them on the vad config object: vad: { model: 'silero', threshold: 0.5, holdoffMs: 300 }."
+      );
+    }
     const vad = options.vad ?? false;
     let vadEnabled;
     let vadMode;

@@ -146,6 +146,7 @@ const EXCEPTION_NAMES: &[&str] = &[
     "VadSampleRateUnsupported",
     "VadThresholdOutOfRange",
     "FileReadFailed",
+    "FileConsumed",
     "WavInvalid",
     "VadNotConfigured",
     "VadModelLoadFailed",
@@ -1960,6 +1961,10 @@ struct FileBridge {
     /// The core offline source. `None` once consumed by analysis, closed, or
     /// fully iterated: a File is a single pass.
     inner: StdMutex<Option<CoreFile>>,
+    /// Set only when `analyze()` takes the source. Separates the analyzed
+    /// state, where a later read fails loud, from natural exhaustion and
+    /// `close()`, where a later read ends quietly.
+    consumed: AtomicBool,
     format: BindingSampleFormat,
     numpy: bool,
     vad_enabled: bool,
@@ -2219,6 +2224,16 @@ impl FileBridge {
     /// the pre-conditioning feed. Returns `None` once the source is fully
     /// delivered (after the end-of-stream tail) or already consumed.
     fn read<'py>(&self, py: Python<'py>) -> PyResult<Option<Bound<'py, PyAny>>> {
+        // A File analyzed then iterated fails loud rather than yielding an
+        // empty stream indistinguishable from a silent recording. Exhaustion
+        // and close() leave `consumed` false and still read as ended.
+        if self.consumed.load(Ordering::Relaxed) {
+            return Err(raise_named(
+                py,
+                "FileConsumed",
+                "File already consumed; construct a new File for another pass",
+            ));
+        }
         let (data, channels) = {
             let mut guard = lock_recover(&self.inner);
             let Some(file) = guard.as_mut() else {
@@ -2292,10 +2307,15 @@ impl FileBridge {
     fn analyze(&self, py: Python<'_>) -> PyResult<(Vec<(f64, f64, f32, bool)>, Vec<(f64, f64)>)> {
         let file = lock_recover(&self.inner).take();
         let Some(file) = file else {
-            return Err(PyValueError::new_err(
+            return Err(raise_named(
+                py,
+                "FileConsumed",
                 "File already consumed; construct a new File for another pass",
             ));
         };
+        // The source is taken: a later iteration reads as consumed, not as an
+        // empty recording, whatever the analysis below returns.
+        self.consumed.store(true, Ordering::Relaxed);
         let report = py.detach(|| file.analyze()).map_err(|e| to_py_err(py, e))?;
         Ok((
             report
@@ -2342,6 +2362,7 @@ impl FileBridge {
     ) -> Self {
         Self {
             inner: StdMutex::new(Some(file)),
+            consumed: AtomicBool::new(false),
             format,
             numpy,
             vad_enabled: vad,

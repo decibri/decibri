@@ -193,6 +193,17 @@ class VadNotConfigured(DecibriError):
     """Raised when whole-recording analysis is requested without VAD."""
 
 
+class FileConsumed(DecibriError):
+    """Raised when a File is reused after its single pass.
+
+    A File serves one operation: a whole-recording analysis or one
+    iteration. Reusing it (analyzing twice, or iterating a File that has
+    already been analyzed) raises this rather than yielding an empty stream.
+    A lifecycle failure like a closed microphone or speaker stream; catch via
+    DecibriError to handle it generically.
+    """
+
+
 # OrtError intermediate parent
 
 

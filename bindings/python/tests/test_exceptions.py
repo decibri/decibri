@@ -31,6 +31,7 @@ from decibri import (
     DeviceError,
     DeviceFailed,
     DeviceIndexOutOfRange,
+    FileConsumed,
     MicrophoneNotFound,
     FramesPerBufferOutOfRange,
     InvalidFormat,
@@ -71,10 +72,11 @@ import pytest
 
 ALL_DECIBRI_ERROR_CLASSES = (
     DecibriError,
-    # 17 direct DecibriError subclasses (non-device, non-ORT). DeviceFailed
+    # 18 direct DecibriError subclasses (non-device, non-ORT). DeviceFailed
     # is a runtime device/driver failure (distinct from the DeviceError
     # enumeration/selection family); OnnxBackendFailed is the non-ORT ONNX
-    # backend catch-all (distinct from the OrtError family).
+    # backend catch-all (distinct from the OrtError family); FileConsumed is
+    # the File single-pass lifecycle error.
     AlreadyRunning,
     MicrophoneStreamClosed,
     ChannelsOutOfRange,
@@ -92,6 +94,7 @@ ALL_DECIBRI_ERROR_CLASSES = (
     VadThresholdOutOfRange,
     DeviceFailed,
     OnnxBackendFailed,
+    FileConsumed,
     # DeviceError intermediate + 8 direct subclasses
     DeviceError,
     DeviceEnumerationFailed,
@@ -119,12 +122,11 @@ ALL_DECIBRI_ERROR_CLASSES = (
 
 
 def test_class_count() -> None:
-    # 39 total: 1 base + 17 direct + DeviceError + 8 device + OrtError
-    # + 8 ORT direct + OrtPathError + 2 path. The addition over the prior 38 is
-    # MultichannelNotSupported, the config-validation error raised when a
-    # microphone is asked to capture more than one channel; a direct
-    # DecibriError subclass.
-    assert len(ALL_DECIBRI_ERROR_CLASSES) == 39
+    # 40 total: 1 base + 18 direct + DeviceError + 8 device + OrtError
+    # + 8 ORT direct + OrtPathError + 2 path. The addition over the prior 39 is
+    # FileConsumed, the lifecycle error raised when a File is reused after its
+    # single pass; a direct DecibriError subclass.
+    assert len(ALL_DECIBRI_ERROR_CLASSES) == 40
 
 
 def test_all_inherit_from_decibri_error() -> None:

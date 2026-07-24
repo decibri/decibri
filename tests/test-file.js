@@ -153,6 +153,10 @@ async function fileTests(h) {
   assertThrows(() => new File(wavPath, { sampleRate: 999 }), RangeError, 'sample rate must be between');
   assertThrows(() => new File(wavPath, { vad: true }), TypeError, 'vad: true is no longer supported');
   assertThrows(() => new File(wavPath, { vad: 'bogus' }), TypeError, 'Invalid vad value');
+  // The flat vadThreshold/vadHoldoff forms raise the same migration error a
+  // Microphone raises, instead of being silently ignored on File.
+  assertThrows(() => new File(wavPath, { vadThreshold: 0.7 }), TypeError, 'vadThreshold and vadHoldoff are no longer supported');
+  assertThrows(() => new File(wavPath, { vadHoldoff: 100 }), TypeError, 'vadThreshold and vadHoldoff are no longer supported');
   assertThrows(() => new File(wavPath, { highpass: 60 }), RangeError, 'highpass must be one of: 80, 100');
   assertThrows(() => new File(42), TypeError, 'path must be a string');
 
@@ -273,6 +277,45 @@ async function fileTests(h) {
     await oneShot.analyze();
     await assertRejects(() => oneShot.analyze(), DecibriError, 'File already consumed');
   }
+
+  console.log('File: consumed source is a loud lifecycle failure');
+
+  // analyze() on a no-VAD File takes the source, then rejects for the missing
+  // VAD; the source is consumed either way, so a later iteration fails loud
+  // instead of yielding an empty stream that reads like a silent recording.
+  const analyzed = File.buffer(sineSamples(16000, 0.2), { inputRate: 16000 });
+  await assertRejects(() => analyzed.analyze(), RangeError, 'analysis requires VAD');
+  await assertRejects(() => readAll(analyzed), DecibriError, 'File already consumed');
+
+  // The consumed failure carries the dedicated FILE_CONSUMED code.
+  const coded = File.buffer(sineSamples(16000, 0.2), { inputRate: 16000 });
+  await assertRejects(() => coded.analyze(), RangeError, 'analysis requires VAD');
+  let consumedErr = null;
+  try {
+    await readAll(coded);
+  } catch (e) {
+    consumedErr = e;
+  }
+  assert(
+    consumedErr instanceof DecibriError && consumedErr.code === 'FILE_CONSUMED',
+    `a consumed File carries the FILE_CONSUMED code (got ${consumedErr && consumedErr.code})`
+  );
+
+  // An exhausted File yields nothing on a second pass, no error.
+  const exhausted = File.buffer(sineSamples(16000, 0.2), { inputRate: 16000 });
+  assert((await readAll(exhausted)).length > 0, 'first pass over a File delivers audio');
+  assert(
+    (await readAll(exhausted)).length === 0,
+    'a second pass over an exhausted File yields nothing, no error'
+  );
+
+  // A closed File reads as an ended stream, no error.
+  const closedFile = File.buffer(sineSamples(16000, 0.2), { inputRate: 16000 });
+  closedFile.close();
+  assert(
+    (await readAll(closedFile)).length === 0,
+    'reading a closed File yields nothing, no error'
+  );
 
   console.log('Microphone: wall-clock VAD state machine characterization');
 

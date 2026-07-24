@@ -1236,6 +1236,7 @@ impl FileParts {
     fn into_handle(self) -> FileHandle {
         FileHandle {
             inner: Some(self.file),
+            consumed: false,
             format: self.format,
             vad_enabled: self.vad_enabled,
             energy_vad: self.energy_vad,
@@ -1304,6 +1305,10 @@ pub struct FileHandle {
     /// The core offline source. `None` once consumed by analysis, closed, or
     /// fully read: a File is a single pass.
     inner: Option<CoreFile>,
+    /// Set only when `analyze()` takes the source. Separates the analyzed
+    /// state, where a later read fails loud, from natural exhaustion and
+    /// `close()`, where a later read ends quietly.
+    consumed: bool,
     format: SampleFormat,
     vad_enabled: bool,
     energy_vad: bool,
@@ -1376,6 +1381,15 @@ impl FileHandle {
     /// delivered (after the end-of-stream tail) or already consumed.
     #[napi]
     pub fn read_chunk(&mut self) -> Result<Option<Buffer>> {
+        // A File analyzed then iterated fails loud rather than yielding an
+        // empty stream indistinguishable from a silent recording. Exhaustion
+        // and close() leave `consumed` false and still read as ended.
+        if self.consumed {
+            return Err(Error::new(
+                Status::InvalidArg,
+                "File already consumed; construct a new File for another pass",
+            ));
+        }
         let Some(file) = self.inner.as_mut() else {
             return Ok(None);
         };
@@ -1447,9 +1461,13 @@ impl FileHandle {
     /// detector.
     #[napi]
     pub fn analyze(&mut self) -> AsyncTask<AnalyzeFileTask> {
-        AsyncTask::new(AnalyzeFileTask {
-            file: self.inner.take(),
-        })
+        let file = self.inner.take();
+        // The source is taken: a later iteration reads as consumed, not as an
+        // empty recording, whatever the analysis resolves to.
+        if file.is_some() {
+            self.consumed = true;
+        }
+        AsyncTask::new(AnalyzeFileTask { file })
     }
 
     /// Release the source. Idempotent; a closed File reads as ended.

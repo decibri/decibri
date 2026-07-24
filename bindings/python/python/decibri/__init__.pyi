@@ -8,6 +8,7 @@ from decibri._classes import File as File
 from decibri._classes import Microphone as Microphone
 from decibri._classes import Segment as Segment
 from decibri._classes import Speaker as Speaker
+from decibri._classes import Vad as Vad
 from decibri._classes import VadReport as VadReport
 from decibri._classes import VadWindow as VadWindow
 from decibri._decibri import MicrophoneInfo as MicrophoneInfo
@@ -21,7 +22,9 @@ from decibri.exceptions import MultichannelNotSupported as MultichannelNotSuppor
 from decibri.exceptions import DecibriError as DecibriError
 from decibri.exceptions import DeviceEnumerationFailed as DeviceEnumerationFailed
 from decibri.exceptions import DeviceError as DeviceError
+from decibri.exceptions import DeviceFailed as DeviceFailed
 from decibri.exceptions import DeviceIndexOutOfRange as DeviceIndexOutOfRange
+from decibri.exceptions import FileConsumed as FileConsumed
 from decibri.exceptions import MicrophoneNotFound as MicrophoneNotFound
 from decibri.exceptions import ModelLoadFailed as ModelLoadFailed
 from decibri.exceptions import ForkAfterOrtInit as ForkAfterOrtInit
@@ -32,6 +35,7 @@ from decibri.exceptions import MultipleDevicesMatch as MultipleDevicesMatch
 from decibri.exceptions import NoMicrophoneFound as NoMicrophoneFound
 from decibri.exceptions import NoSpeakerFound as NoSpeakerFound
 from decibri.exceptions import NotAnInputDevice as NotAnInputDevice
+from decibri.exceptions import OnnxBackendFailed as OnnxBackendFailed
 from decibri.exceptions import OrtError as OrtError
 from decibri.exceptions import OrtInferenceFailed as OrtInferenceFailed
 from decibri.exceptions import OrtInitFailed as OrtInitFailed

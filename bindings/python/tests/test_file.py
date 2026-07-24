@@ -25,6 +25,7 @@ import pytest
 import decibri
 from decibri import File, Segment, Vad, VadReport, VadWindow
 from decibri.exceptions import (
+    FileConsumed,
     FileReadFailed,
     VadNotConfigured,
     WavInvalid,
@@ -308,11 +309,42 @@ def test_analyze_consumed_file_raises(tmp_path: Path) -> None:
     write_wav(path, sine_samples(16000, 0.2), 16000)
     file = File(path, vad="energy")
     file.close()
-    with pytest.raises(ValueError, match="File already consumed"):
+    with pytest.raises(FileConsumed, match="File already consumed"):
         # Energy mode would be rejected first; bypass by checking the
         # bridge-level consumed state via a silero-free close: the
         # consumed check fires before mode validation at the bridge.
         file._bridge.analyze()
+
+
+def test_iteration_after_analysis_raises() -> None:
+    """A File whose source was taken by analysis raises on a later read,
+    rather than yielding an empty stream indistinguishable from silence."""
+    file = File.buffer(sine_samples(16000, 0.2), input_rate=16000)
+    # analyze() on a no-VAD File takes the source, then reports the missing
+    # VAD; the source is consumed either way.
+    with pytest.raises(VadNotConfigured):
+        file.analyze()
+    with pytest.raises(FileConsumed):
+        for _ in file:
+            pass
+    with pytest.raises(FileConsumed):
+        file.read()
+
+
+def test_iteration_after_exhaustion_is_quiet() -> None:
+    """A File read to the end yields nothing on a second pass, no error."""
+    file = File.buffer(sine_samples(16000, 0.2), input_rate=16000)
+    assert len(read_all(file)) > 0
+    assert read_all(file) == b""
+    assert file.read() is None
+
+
+def test_read_after_close_is_quiet() -> None:
+    """A closed File reads as an ended stream, no error."""
+    file = File.buffer(sine_samples(16000, 0.2), input_rate=16000)
+    file.close()
+    assert file.read() is None
+    assert list(file) == []
 
 
 def test_vad_object_configures_file() -> None:
