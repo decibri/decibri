@@ -989,7 +989,9 @@ class AsyncFile:
 
         Async parallel of ``File.analyze``: the single conditioning and
         detection pass runs off the event loop. Requires VAD exactly as
-        the sync method does.
+        the sync method does, and requires an ``AsyncFile`` still at its
+        start: once iteration has pulled from it, this raises
+        ``FileEngaged``.
         """
         loop = asyncio.get_running_loop()
         return await loop.run_in_executor(None, self._file.analyze)

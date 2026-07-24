@@ -21,11 +21,14 @@
 const path = require('path');
 const fs = require('fs');
 const os = require('os');
+const { spawnSync } = require('child_process');
+
+const DECIBRI_ENTRY = path.join(__dirname, '..', 'npm', 'decibri', 'src', 'decibri.js');
 const {
   Microphone,
   File,
   DecibriError,
-} = require(path.join(__dirname, '..', 'npm', 'decibri', 'src', 'decibri.js'));
+} = require(DECIBRI_ENTRY);
 
 const GOLDEN_WAV = path.join(
   __dirname, '..', 'crates', 'decibri', 'tests', 'assets', 'vad-golden-tts-speech-16k.wav'
@@ -242,6 +245,13 @@ async function fileTests(h) {
       if (w.isSpeech !== w.vadScore >= 0.5) thresholdConsistent = false;
       maxScore = Math.max(maxScore, w.vadScore);
     }
+    // The whole analysis, pinned to exact counts. A change to either number
+    // means the analysis itself changed.
+    assert(
+      report.scores.length === 208 && report.segments.length === 2,
+      `the golden recording analyzes to 208 scores and 2 segments ` +
+        `(got ${report.scores.length} and ${report.segments.length})`
+    );
     assert(tiled, 'windows tile the recording in 32 ms steps of file time');
     assert(thresholdConsistent, 'isSpeech is the raw threshold test per window');
     assert(maxScore >= 0.5, `real speech crosses the threshold (max ${maxScore.toFixed(2)})`);
@@ -278,18 +288,122 @@ async function fileTests(h) {
     await assertRejects(() => oneShot.analyze(), DecibriError, 'File already consumed');
   }
 
+  console.log('File: analysis of an engaged stream is refused at the call');
+
+  // Engaging the stream at all refuses a later analysis, rather than
+  // reporting on the part not yet read. Each of these engages by a different
+  // route, and a bare resume()/pause() pair with no data listener is enough:
+  // the read it schedules runs on a later tick.
+  //
+  // These Files carry no vad, so the error also pins the check order: the
+  // engaged state is reported before the missing detector configuration.
+  // Keeping them model-free is what lets these cases run without a staged
+  // ONNX Runtime.
+  const engageRoutes = {
+    'resume(); pause()': (f) => { f.resume(); f.pause(); },
+    "on('data')": (f) => { f.on('data', () => {}); f.pause(); },
+    "on('readable')": (f) => { f.on('readable', () => {}); },
+    "once('readable')": (f) => { f.once('readable', () => {}); },
+    'read()': (f) => { f.read(); },
+  };
+  for (const [label, engage] of Object.entries(engageRoutes)) {
+    const engaged = File.buffer(sineSamples(16000, 0.2), { inputRate: 16000 });
+    engage(engaged);
+    await assertRejects(() => engaged.analyze(), DecibriError, 'File iteration has begun');
+    engaged.close();
+  }
+
+  // The refusal carries the dedicated FILE_ENGAGED code, and analyse()
+  // refuses on the same terms.
+  const engagedFile = File.buffer(sineSamples(16000, 0.2), { inputRate: 16000 });
+  engagedFile.resume();
+  engagedFile.pause();
+  let engagedErr = null;
+  try {
+    await engagedFile.analyze();
+  } catch (e) {
+    engagedErr = e;
+  }
+  assert(
+    engagedErr instanceof DecibriError && engagedErr.code === 'FILE_ENGAGED',
+    `an engaged File carries the FILE_ENGAGED code (got ${engagedErr && engagedErr.code})`
+  );
+  await assertRejects(() => engagedFile.analyse(), DecibriError, 'File iteration has begun');
+  engagedFile.close();
+
+  // An engaged energy-mode File reports the engaged state, not the mode, so
+  // the check order matches the core and the Python package.
+  const engagedEnergy = File.buffer(sineSamples(16000, 0.2), { inputRate: 16000, vad: 'energy' });
+  engagedEnergy.resume();
+  engagedEnergy.pause();
+  await assertRejects(() => engagedEnergy.analyze(), DecibriError, 'File iteration has begun');
+  engagedEnergy.close();
+
+  // A fully read File refuses analysis on the same terms as a partly read one.
+  const drained = File.buffer(sineSamples(16000, 0.2), { inputRate: 16000 });
+  await readAll(drained);
+  await assertRejects(() => drained.analyze(), DecibriError, 'File iteration has begun');
+
+  // The refusal has to keep the process alive, not just reject: an 'error'
+  // event from the stream's own read machinery, with no listener attached,
+  // terminates the process. Run it in a child so the exit status is the
+  // assertion.
+  const survivorPath = path.join(tmp, 'survivor.js');
+  fs.writeFileSync(
+    survivorPath,
+    [
+      "'use strict';",
+      `const { File } = require(${JSON.stringify(DECIBRI_ENTRY)});`,
+      'const f = File.buffer(new Float32Array(3200), { inputRate: 16000 });',
+      'f.resume();',
+      'f.pause();',
+      "f.analyze().then(() => process.exit(3)).catch(() => {});",
+      '',
+    ].join('\n')
+  );
+  const survivor = spawnSync(process.execPath, [survivorPath], { encoding: 'utf8' });
+  assert(
+    survivor.status === 0,
+    `analysing an engaged File leaves the process alive ` +
+      `(exit ${survivor.status}, stderr: ${(survivor.stderr || '').split('\n')[0]})`
+  );
+
+  console.log('File: a refused analysis leaves the File usable');
+
+  // Every rejection reachable before the pass begins leaves the source in
+  // place, so fixing the call and streaming the recording still works.
+  const refusedNoVad = File.buffer(sineSamples(16000, 0.2), { inputRate: 16000 });
+  await assertRejects(() => refusedNoVad.analyze(), RangeError, 'analysis requires VAD');
+  assert(
+    (await readAll(refusedNoVad)).length === 6400,
+    'a File rejected for the missing VAD still delivers its audio'
+  );
+
+  const refusedEnergy = File.buffer(sineSamples(16000, 0.2), { inputRate: 16000, vad: 'energy' });
+  await assertRejects(() => refusedEnergy.analyze(), RangeError, "analyze() requires vad: 'silero'");
+  assert(
+    (await readAll(refusedEnergy)).length === 6400,
+    'a File rejected for the energy mode still delivers its audio'
+  );
+
+  const refusedEngaged = File.buffer(sineSamples(16000, 0.2), { inputRate: 16000 });
+  refusedEngaged.resume();
+  refusedEngaged.pause();
+  await assertRejects(() => refusedEngaged.analyze(), DecibriError, 'File iteration has begun');
+  assert(
+    (await readAll(refusedEngaged)).length === 6400,
+    'a File refused for being engaged still delivers its audio'
+  );
+
   console.log('File: consumed source is a loud lifecycle failure');
 
-  // analyze() on a no-VAD File takes the source, then rejects for the missing
-  // VAD; the source is consumed either way, so a later iteration fails loud
-  // instead of yielding an empty stream that reads like a silent recording.
-  const analyzed = File.buffer(sineSamples(16000, 0.2), { inputRate: 16000 });
-  await assertRejects(() => analyzed.analyze(), RangeError, 'analysis requires VAD');
-  await assertRejects(() => readAll(analyzed), DecibriError, 'File already consumed');
-
-  // The consumed failure carries the dedicated FILE_CONSUMED code.
-  const coded = File.buffer(sineSamples(16000, 0.2), { inputRate: 16000 });
-  await assertRejects(() => coded.analyze(), RangeError, 'analysis requires VAD');
+  // A successful analysis takes the source, so a later iteration fails loud
+  // instead of yielding an empty stream that reads like a silent recording,
+  // and it carries the dedicated FILE_CONSUMED code. The detector may fail to
+  // load without a staged ONNX Runtime; the source is taken either way, which
+  // is the state under test here.
+  const coded = File.buffer(sineSamples(16000, 0.2), { inputRate: 16000, vad: 'silero' });
+  await coded.analyze().catch(() => {});
   let consumedErr = null;
   try {
     await readAll(coded);

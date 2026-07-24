@@ -25,7 +25,9 @@ import pytest
 import decibri
 from decibri import File, Segment, Vad, VadReport, VadWindow
 from decibri.exceptions import (
+    DecibriError,
     FileConsumed,
+    FileEngaged,
     FileReadFailed,
     VadNotConfigured,
     WavInvalid,
@@ -267,6 +269,18 @@ def test_analyze_returns_report_with_speech() -> None:
 
 @requires_golden
 @pytest.mark.requires_bundled_ort
+def test_analyze_of_the_golden_recording_is_pinned() -> None:
+    """The analysis of the golden recording, pinned to exact counts.
+
+    A change to either number means the analysis itself changed.
+    """
+    report = File(_GOLDEN_WAV, vad="silero").analyze()
+    assert len(report.scores) == 208
+    assert len(report.segments) == 2
+
+
+@requires_golden
+@pytest.mark.requires_bundled_ort
 def test_analyse_equals_analyze() -> None:
     """Both spellings return the same analysis."""
     a = File(_GOLDEN_WAV, vad="silero").analyze()
@@ -319,16 +333,83 @@ def test_analyze_consumed_file_raises(tmp_path: Path) -> None:
 def test_iteration_after_analysis_raises() -> None:
     """A File whose source was taken by analysis raises on a later read,
     rather than yielding an empty stream indistinguishable from silence."""
-    file = File.buffer(sine_samples(16000, 0.2), input_rate=16000)
-    # analyze() on a no-VAD File takes the source, then reports the missing
-    # VAD; the source is consumed either way.
-    with pytest.raises(VadNotConfigured):
+    file = File.buffer(sine_samples(16000, 0.2), input_rate=16000, vad="silero")
+    # A successful analysis takes the source. The detector may fail to load
+    # without a staged ONNX Runtime; the source is taken either way, which is
+    # the state under test here.
+    try:
         file.analyze()
+    except DecibriError:
+        pass
     with pytest.raises(FileConsumed):
         for _ in file:
             pass
     with pytest.raises(FileConsumed):
         file.read()
+
+
+def test_analyze_after_iteration_raises() -> None:
+    """Analysis of a File whose iteration has begun raises, rather than
+    reporting on the part not yet read with whole-recording timings.
+
+    These Files carry no VAD, so the error also pins the check order: the
+    engaged state is reported before the missing detector configuration.
+    """
+    file = File.buffer(sine_samples(16000, 0.5), input_rate=16000)
+    assert file.read() is not None
+    with pytest.raises(FileEngaged, match="File iteration has begun"):
+        file.analyze()
+    with pytest.raises(FileEngaged):
+        file.analyse()
+
+
+def test_analyze_after_iteration_reports_engaged_before_mode() -> None:
+    """An engaged energy-mode File reports the engaged state, not the mode,
+    so the check order matches the core and the Node package."""
+    file = File.buffer(sine_samples(16000, 0.5), input_rate=16000, vad="energy")
+    assert file.read() is not None
+    with pytest.raises(FileEngaged):
+        file.analyze()
+
+
+def test_analyze_after_full_iteration_raises() -> None:
+    """A File read to the end refuses analysis on the same terms as a partly
+    read one."""
+    file = File.buffer(sine_samples(16000, 0.5), input_rate=16000)
+    for _ in file:
+        pass
+    with pytest.raises(FileEngaged):
+        file.analyze()
+
+
+def test_analyze_after_iteration_without_delivery_raises() -> None:
+    """A read that delivers nothing still moves the cursor, so it counts as
+    iteration."""
+    file = File.buffer([], input_rate=16000)
+    assert file.read() is None
+    with pytest.raises(FileEngaged):
+        file.analyze()
+
+
+def test_refused_analysis_leaves_the_file_usable() -> None:
+    """Every rejection reachable before the pass begins leaves the source in
+    place, so fixing the call and iterating the recording still works."""
+    no_vad = File.buffer(sine_samples(16000, 0.2), input_rate=16000)
+    with pytest.raises(VadNotConfigured):
+        no_vad.analyze()
+    assert len(read_all(no_vad)) == 6400
+
+    energy = File.buffer(sine_samples(16000, 0.2), input_rate=16000, vad="energy")
+    with pytest.raises(ValueError):
+        energy.analyze()
+    assert len(read_all(energy)) == 6400
+
+    engaged = File.buffer(sine_samples(16000, 0.5), input_rate=16000)
+    assert engaged.read() is not None
+    with pytest.raises(FileEngaged):
+        engaged.analyze()
+    # The rest of the recording is still there to read.
+    assert len(read_all(engaged)) > 0
 
 
 def test_iteration_after_exhaustion_is_quiet() -> None:
@@ -388,6 +469,23 @@ async def test_async_file_metadata_and_buffer() -> None:
         assert chunk.timestamp == pytest.approx(count * 0.1)
         count += 1
     assert count == 3
+
+
+@pytest.mark.asyncio
+async def test_async_analyze_after_iteration_raises() -> None:
+    """An AsyncFile refuses analysis once its iteration has begun, exactly as
+    the sync File does, and the refusal leaves it usable."""
+    f = await decibri.AsyncFile.buffer(sine_samples(16000, 0.5), input_rate=16000)
+    assert await f.read() is not None
+    with pytest.raises(FileEngaged, match="File iteration has begun"):
+        await f.analyze()
+    with pytest.raises(FileEngaged):
+        await f.analyse()
+    # The rest of the recording is still there to read.
+    remaining = 0
+    async for chunk in f:
+        remaining += len(chunk)
+    assert remaining > 0
 
 
 @requires_golden
