@@ -59,6 +59,7 @@ from decibri.exceptions import (
     OrtTensorExtractFailed,
     OrtThreadsConfigFailed,
     PermissionDenied,
+    ResampleConfigInvalid,
     SampleRateOutOfRange,
     SpeakerNotFound,
     SpeakerStreamClosed,

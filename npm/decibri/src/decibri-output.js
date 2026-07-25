@@ -86,7 +86,9 @@ class Speaker extends Writable {
     // for a clean Node-side RangeError without a round-trip.
     let resolvedDevice = options.device;
     if (typeof options.device === 'number') {
-      const devices = DecibriOutputBridge.devices();
+      // Through the static so an enumeration failure raised while resolving an
+      // index carries the same DeviceError the public listing does.
+      const devices = Speaker.devices();
       if (options.device < 0 || options.device >= devices.length) {
         throw new RangeError('device index out of range. Call Speaker.devices() to list available devices');
       }
@@ -258,7 +260,11 @@ class Speaker extends Writable {
    * @returns {Array<{index: number, name: string, maxOutputChannels: number, defaultSampleRate: number, isDefault: boolean}>}
    */
   static devices() {
-    return DecibriOutputBridge.devices();
+    try {
+      return DecibriOutputBridge.devices();
+    } catch (err) {
+      throw wrapNativeError(err);
+    }
   }
 
   /**

@@ -14,6 +14,8 @@ For other decibri packages, see:
 ### Added
 
 - `SpeakerSink::take_last_error`, reporting the device or driver failure recorded while streaming. It reads the same slot as `SpeakerStream::take_last_error`, so a caller holding only a sink can tell a driver failure apart from an explicit `stop()`.
+- `DecibriError::code`, returning a stable machine-readable identity for the failure. It is SCREAMING_SNAKE of the variant name; `OrtPathInvalid` reports `ORT_LOAD_FAILED`, the same code as `OrtLoadFailed`, because the two are one user-facing failure.
+- `DecibriError::variant_name`, returning the variant's own name. The Python binding's exception classes carry the same names.
 
 ### Changed
 

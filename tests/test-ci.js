@@ -9,7 +9,7 @@
  */
 
 const path = require('path');
-const { Microphone, Speaker, inputDevices, outputDevices, version, DecibriError, DeviceError } = require(path.join(__dirname, '..', 'npm', 'decibri', 'src', 'decibri.js'));
+const { Microphone, Speaker, File, inputDevices, outputDevices, version, DecibriError, DeviceError } = require(path.join(__dirname, '..', 'npm', 'decibri', 'src', 'decibri.js'));
 const { wrapNativeError, OrtError } = require(path.join(__dirname, '..', 'npm', 'decibri', 'src', 'errors.js'));
 const pkg = require(path.join(__dirname, '..', 'npm', 'decibri', 'package.json'));
 
@@ -427,6 +427,220 @@ try {
 console.log('  Group 7 done\n');
 
 // ═══════════════════════════════════════════════════════════════════════════════
+// Group 7b: every core error variant has its own Node identity
+// ═══════════════════════════════════════════════════════════════════════════════
+//
+// The addon exposes one representative instance of every core variant compiled
+// into it (name, code, Display string). The core assigns the code from an
+// exhaustive match with no catch-all, so a new variant fails the Rust build
+// until it has one; this group is what stops the Node table from falling
+// behind that. It catches a reworded core message (the prefix stops matching),
+// a new variant (no prefix exists), and a new variant whose message shares an
+// existing prefix (it lands on the wrong code).
+
+console.log('--- Group 7b: core error catalog coverage ---');
+
+// Variants that deliberately keep a Node built-in instead of a decibri class.
+// Argument validation is a RangeError / TypeError in Node, matching Node core
+// and matching the wrapper's own pre-checks for the same inputs. Pinned by
+// name so a new variant landing here has to be added deliberately.
+const BUILTIN_VARIANTS = [
+  'SampleRateOutOfRange',
+  'ChannelsOutOfRange',
+  'MultichannelNotSupported',
+  'FramesPerBufferOutOfRange',
+  'AgcTargetOutOfRange',
+  'LimiterCeilingOutOfRange',
+  'InvalidFormat',
+  'DeviceIndexOutOfRange',
+  'VadSampleRateUnsupported',
+  'VadThresholdOutOfRange',
+  'VadNotConfigured',
+];
+
+// The codes that shipped before every variant was routed. None may change
+// value: they are what a consumer branching on `err.code` already reads.
+const PRE_EXISTING_CODES = [
+  'MICROPHONE_NOT_FOUND',
+  'SPEAKER_NOT_FOUND',
+  'MULTIPLE_DEVICES_MATCH',
+  'NO_MICROPHONE_FOUND',
+  'NO_SPEAKER_FOUND',
+  'NOT_AN_INPUT_DEVICE',
+  'DEVICE_ENUMERATION_FAILED',
+  'ORT_INIT_FAILED',
+  'ORT_LOAD_FAILED',
+  'ORT_SESSION_BUILD_FAILED',
+  'ORT_THREADS_CONFIG_FAILED',
+  'VAD_MODEL_LOAD_FAILED',
+  'MODEL_LOAD_FAILED',
+  'ORT_INFERENCE_FAILED',
+  'ORT_TENSOR_CREATE_FAILED',
+  'ORT_TENSOR_EXTRACT_FAILED',
+  'DEVICE_FAILED',
+  'ONNX_BACKEND_FAILED',
+  'FILE_ENGAGED',
+  'FILE_CONSUMED',
+];
+
+{
+  const catalog = JSON.parse(require(path.join(__dirname, '..', 'npm', 'decibri', 'index.js')).__errorCatalog());
+  assert(catalog.length > 0, 'the addon reports a non-empty error catalog');
+
+  const codeOwners = new Map();
+  const builtins = [];
+  let mismatches = 0;
+
+  for (const entry of catalog) {
+    const wrapped = wrapNativeError(new Error(entry.message));
+    if (wrapped instanceof DecibriError) {
+      if (wrapped.code !== entry.code) {
+        console.log(`  FAIL: ${entry.name} should carry ${entry.code}, got ${wrapped.code}`);
+        mismatches++;
+      }
+      if (!codeOwners.has(wrapped.code)) codeOwners.set(wrapped.code, []);
+      codeOwners.get(wrapped.code).push(entry.name);
+    } else {
+      builtins.push(entry.name);
+      if (!(wrapped instanceof RangeError) && !(wrapped instanceof TypeError)) {
+        console.log(`  FAIL: ${entry.name} is neither a DecibriError nor a Node built-in`);
+        mismatches++;
+      }
+    }
+  }
+  assert(mismatches === 0, 'every core variant reaches the code its own core assigns');
+
+  // The built-in set is exactly the pinned list: nothing new drifted into it,
+  // and nothing that was a built-in quietly became a decibri class.
+  assert(
+    builtins.slice().sort().join(',') === BUILTIN_VARIANTS.slice().sort().join(','),
+    `built-in variants match the pinned set (got ${builtins.sort().join(',')})`
+  );
+
+  // One variant, one identity. The only code owned by two variants is the
+  // documented OrtPathInvalid collapse onto OrtLoadFailed's code.
+  const shared = [...codeOwners].filter(([, names]) => names.length > 1);
+  assert(shared.length === 1, `exactly one code is shared (got ${shared.length})`);
+  assert(
+    shared.length === 1 && shared[0][0] === 'ORT_LOAD_FAILED',
+    'the shared code is ORT_LOAD_FAILED'
+  );
+  assert(
+    shared.length === 1 && shared[0][1].slice().sort().join(',') === 'OrtLoadFailed,OrtPathInvalid',
+    'the shared code belongs to the OrtLoadFailed / OrtPathInvalid pair'
+  );
+
+  // No catalog message falls to the unclassified bucket.
+  assert(!codeOwners.has('DECIBRI_ERROR'), 'no core variant lands on DECIBRI_ERROR');
+
+  // The codes that shipped before this change all still exist with the same
+  // value. FILE_CONSUMED is authored in the napi layer rather than the core,
+  // so it is checked through its own message.
+  const produced = new Set(codeOwners.keys());
+  produced.add(wrapNativeError(new Error('File already consumed')).code);
+  const missing = PRE_EXISTING_CODES.filter((code) => !produced.has(code));
+  assert(missing.length === 0, `every pre-existing code still exists (missing: ${missing.join(',')})`);
+}
+
+console.log('  Group 7b done\n');
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// Group 7c: typed errors where there used to be untyped ones
+// ═══════════════════════════════════════════════════════════════════════════════
+
+console.log('--- Group 7c: typed model, resampler, and enumeration failures ---');
+
+// A missing model file is caught by the wrapper's pre-check, before the native
+// bridge exists, so it never passes through wrapNativeError. It carries the
+// class and code the deep load failure would.
+{
+  const missing = path.join(__dirname, 'no-such-model-b8f2.onnx');
+  for (const construct of [
+    () => new Microphone({ vad: { model: 'silero' }, modelPath: missing }),
+    () => new File(path.join(__dirname, 'no-such-source-b8f2.wav'), {
+      vad: { model: 'silero' },
+      modelPath: missing,
+    }),
+  ]) {
+    try {
+      construct();
+      console.log('  FAIL: a missing model path did not throw');
+      failed++;
+    } catch (e) {
+      assert(e instanceof OrtError, `missing model path is an OrtError (got ${e.constructor.name})`);
+      assert(e instanceof DecibriError, 'missing model path is a DecibriError');
+      assert(e.code === 'VAD_MODEL_LOAD_FAILED', `missing model code is VAD_MODEL_LOAD_FAILED (got ${e.code})`);
+      assert(e.message.includes('Silero VAD model not found at'), 'missing model message unchanged');
+    }
+  }
+}
+
+// ResampleConfigInvalid reaches the typed surface. It is defensive in the core
+// (no accepted rate pair provokes it), so wrapNativeError is exercised with the
+// frozen Display string.
+{
+  const resample = wrapNativeError(
+    new Error('the requested sample rate conversion is not supported by the resampler')
+  );
+  assert(resample instanceof DecibriError, 'ResampleConfigInvalid maps to a DecibriError');
+  assert(
+    resample.code === 'RESAMPLE_CONFIG_INVALID',
+    `code is RESAMPLE_CONFIG_INVALID (got ${resample.code})`
+  );
+}
+
+// A device enumeration failure raised by the native listing reaches the caller
+// as a DeviceError through both entry points, not as a raw napi error.
+//
+// The napi classes are frozen (their statics are non-writable and
+// non-configurable), so the addon is stubbed at the module-cache level and the
+// two wrappers are re-required against the stub. errors.js is left cached, so
+// the classes the assertions below compare against are the same objects.
+{
+  const indexPath = require.resolve(path.join(__dirname, '..', 'npm', 'decibri', 'index.js'));
+  const wrapperPaths = [
+    require.resolve(path.join(__dirname, '..', 'npm', 'decibri', 'src', 'decibri.js')),
+    require.resolve(path.join(__dirname, '..', 'npm', 'decibri', 'src', 'decibri-output.js')),
+  ];
+  const indexEntry = require.cache[indexPath];
+  const realExports = indexEntry.exports;
+  const boom = () => {
+    throw new Error('Failed to enumerate devices: host unavailable');
+  };
+  const stub = Object.create(realExports);
+  stub.DecibriBridge = { devices: boom };
+  stub.DecibriOutputBridge = { devices: boom };
+
+  try {
+    indexEntry.exports = stub;
+    for (const p of wrapperPaths) delete require.cache[p];
+    const stubbed = require(wrapperPaths[0]);
+    for (const [label, list] of [
+      ['Microphone', () => stubbed.Microphone.devices()],
+      ['Speaker', () => stubbed.Speaker.devices()],
+    ]) {
+      try {
+        list();
+        console.log(`  FAIL: ${label}.devices() did not throw`);
+        failed++;
+      } catch (e) {
+        assert(e instanceof DeviceError, `${label}.devices() failure is a DeviceError`);
+        assert(
+          e.code === 'DEVICE_ENUMERATION_FAILED',
+          `${label}.devices() code is DEVICE_ENUMERATION_FAILED (got ${e.code})`
+        );
+      }
+    }
+  } finally {
+    indexEntry.exports = realExports;
+    for (const p of wrapperPaths) delete require.cache[p];
+    require(wrapperPaths[0]);
+  }
+}
+
+console.log('  Group 7c done\n');
+
+// ═══════════════════════════════════════════════════════════════════════════════
 // Group 8: Denoise option (deterministic, no hardware required)
 // ═══════════════════════════════════════════════════════════════════════════════
 //
@@ -817,6 +1031,7 @@ async function asyncWriteDrainTests() {
 // apart, and a driver failure the core stashes and reports on the next call.
 const DEVICE_LOST = 'decibri: audio device error: device unplugged';
 const PERMISSION_DENIED = 'Microphone permission denied. Check system settings.';
+const STAGE_FAILURE = 'Silero VAD inference failed: tensor shape mismatch';
 
 // A native handle stub. `failing` names the call that fails, so every other call
 // behaves normally: 'write', 'drain', 'startCallback' (the pump reports a
@@ -880,18 +1095,31 @@ async function errorDeliveryTests() {
   }
 
   // PATH 1b: capture that fails to start at all. The synchronous throw out of
-  // native start() reaches the consumer on the same 'error' event. A permission
-  // denial has no prefix of its own in wrapNativeError, so it carries the
-  // unclassified code; the class and the code are both asserted so a later
-  // narrowing of the code table has to change this line deliberately.
+  // native start() reaches the consumer on the same 'error' event, carrying the
+  // permission denial's own code.
   {
     const mic = new Microphone({ sampleRate: 16000, channels: 1 });
     mic._native = nativeStub(PERMISSION_DENIED, 'start');
     mic._read();
     const err = await nextError(mic);
     assert(err instanceof DecibriError, 'a failed capture start is a DecibriError');
-    assert(err.code === 'DECIBRI_ERROR', `failed-start code is DECIBRI_ERROR (got ${err.code})`);
+    assert(err.code === 'PERMISSION_DENIED', `failed-start code is PERMISSION_DENIED (got ${err.code})`);
     assert(mic._started === false, 'a failed start clears _started');
+  }
+
+  // PATH 1c: a conditioning stage that fails mid-capture. The native pump
+  // forwards the stage's own failure rather than ending the stream silently,
+  // and it reaches the consumer with its own identity, not the device one.
+  {
+    const mic = new Microphone({ sampleRate: 16000, channels: 1 });
+    mic._native = nativeStub(STAGE_FAILURE, 'startCallback');
+    mic._read();
+    const err = await nextError(mic);
+    assert(err instanceof OrtError, 'a conditioning failure mid-capture is an OrtError');
+    assert(
+      err.code === 'ORT_INFERENCE_FAILED',
+      `conditioning failure code is ORT_INFERENCE_FAILED (got ${err.code})`
+    );
   }
 
   // PATH 2: a device lost under a synchronous write.

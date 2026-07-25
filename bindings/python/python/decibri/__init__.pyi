@@ -50,6 +50,7 @@ from decibri.exceptions import OrtThreadsConfigFailed as OrtThreadsConfigFailed
 from decibri.exceptions import SpeakerNotFound as SpeakerNotFound
 from decibri.exceptions import SpeakerStreamClosed as SpeakerStreamClosed
 from decibri.exceptions import PermissionDenied as PermissionDenied
+from decibri.exceptions import ResampleConfigInvalid as ResampleConfigInvalid
 from decibri.exceptions import SampleRateOutOfRange as SampleRateOutOfRange
 from decibri.exceptions import StreamOpenFailed as StreamOpenFailed
 from decibri.exceptions import StreamStartFailed as StreamStartFailed

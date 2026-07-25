@@ -14,6 +14,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 - `Speaker.underrun_count`: a read-only property exposing the core stream's silence-fill counter, in samples. 0 while the producer keeps the queue fed; a rising value means playback is papering over gaps with silence.
 - `File.input_rate` and `AsyncFile.input_rate`: read-only properties reporting the source's native rate, from the WAV header or the explicit `input_rate` of `buffer`.
+- `ResampleConfigInvalid`, a `DecibriError` subclass for an unsupported capture sample rate conversion. Importable via `decibri.ResampleConfigInvalid` or from `decibri.exceptions`. It completes the set: every core failure now has a class of its own. The conversion it reports is defensive in the core and not reachable through the Python surface.
 
 ### Changed
 

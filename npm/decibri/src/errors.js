@@ -58,6 +58,38 @@ class OrtPathError extends OrtError {
 // variant's Display string (see bindings/node/src/lib.rs to_napi_error), so the
 // message text is the only thing left to classify on. The prefixes below match
 // the frozen core messages in crates/decibri/src/error.rs.
+//
+// The codes are the core's own: DecibriError::code() assigns one per variant
+// from an exhaustive match, and the catalog check in tests/test-ci.js walks
+// every variant compiled into the addon and asserts the table below reaches
+// the same identity. A reworded core message, a new variant, or a prefix that
+// collides with an existing one all fail that check.
+//
+// Prefix matching stays because some messages never cross the FFI boundary:
+// the napi-authored `File already consumed`, and the model pre-checks in
+// decibri.js, which are classified here without a native round-trip.
+
+// Argument validation the core also names. These keep Node's built-ins rather
+// than a decibri class, so the class matches the wrapper's own pre-check for
+// the same input (decibri.js raises RangeError for a bad agc or limiter before
+// the core ever sees it).
+const RANGE_PREFIXES = [
+  'sample rate must be between',
+  'channels must be between',
+  'multichannel capture is not supported',
+  'frames per buffer must be between',
+  'agc target level must be between',
+  'limiter ceiling must be between',
+  'Silero VAD only supports',
+  'VAD threshold must be between',
+  'device index out of range',
+  'analysis requires VAD',
+];
+
+const TYPE_PREFIXES = [
+  "dtype must be 'int16' or 'float32'",
+  "format must be 'int16' or 'float32'",
+];
 
 const DEVICE_CODES = [
   ['No microphone found matching', 'MICROPHONE_NOT_FOUND'],
@@ -76,6 +108,32 @@ const ORT_CODES = [
   ['Failed to create ort session builder', 'ORT_SESSION_BUILD_FAILED'],
   ['Failed to set ort threads', 'ORT_THREADS_CONFIG_FAILED'],
   ['Silero VAD inference failed', 'ORT_INFERENCE_FAILED'],
+];
+
+// Failures that carry a base DecibriError plus their own code: stream
+// lifecycle, runtime device and driver faults, offline file reads, and the
+// two ONNX failures that are not ORT setup failures. Matches the Python
+// binding, where each of these is a direct DecibriError subclass rather than
+// a member of the DeviceError or OrtError family.
+const BASE_CODES = [
+  ['audio stream is already running', 'ALREADY_RUNNING'],
+  ['Failed to open audio stream', 'STREAM_OPEN_FAILED'],
+  ['Failed to start audio stream', 'STREAM_START_FAILED'],
+  ['Microphone permission denied.', 'PERMISSION_DENIED'],
+  ['Microphone stream is closed', 'MICROPHONE_STREAM_CLOSED'],
+  ['Speaker stream is closed', 'SPEAKER_STREAM_CLOSED'],
+  ['decibri: audio device error:', 'DEVICE_FAILED'],
+  ['the requested sample rate conversion is not supported', 'RESAMPLE_CONFIG_INVALID'],
+  ['Failed to read audio file', 'FILE_READ_FAILED'],
+  ['invalid WAV file:', 'WAV_INVALID'],
+  ['ONNX Runtime was initialized in pid', 'FORK_AFTER_ORT_INIT'],
+  ['ONNX backend error from', 'ONNX_BACKEND_FAILED'],
+  // Authored in the napi layer (bindings/node/src/lib.rs), not in
+  // crates/decibri/src/error.rs: reusing a File after its single pass.
+  ['File already consumed', 'FILE_CONSUMED'],
+  // The offline counterpart of a closed stream: analysing a File whose
+  // iteration has begun.
+  ['File iteration has begun', 'FILE_ENGAGED'],
 ];
 
 // The core's message for analysing a File whose iteration has begun. The
@@ -109,22 +167,11 @@ function wrapNativeError(err) {
   // Argument validation stays as Node built-ins. `device index out of range`
   // is kept here (RangeError) so the index error type is the same whether it
   // is raised by the client-side bounds check or by the core.
-  if (
-    msg.startsWith('sample rate must be between') ||
-    msg.startsWith('channels must be between') ||
-    msg.startsWith('frames per buffer must be between') ||
-    msg.startsWith('Silero VAD only supports') ||
-    msg.startsWith('VAD threshold must be between') ||
-    msg.startsWith('device index out of range') ||
-    msg.startsWith('analysis requires VAD')
-  ) {
-    return new RangeError(msg);
+  for (const prefix of RANGE_PREFIXES) {
+    if (msg.startsWith(prefix)) return new RangeError(msg);
   }
-  if (
-    msg.startsWith("dtype must be 'int16' or 'float32'") ||
-    msg.startsWith("format must be 'int16' or 'float32'")
-  ) {
-    return new TypeError(msg);
+  for (const prefix of TYPE_PREFIXES) {
+    if (msg.startsWith(prefix)) return new TypeError(msg);
   }
 
   // Device enumeration / selection failures.
@@ -148,31 +195,12 @@ function wrapNativeError(err) {
     return new OrtError(msg, 'ORT_TENSOR_EXTRACT_FAILED');
   }
 
-  // Runtime device/driver failure during streaming. Distinct from the
+  // Stream lifecycle, runtime device/driver faults, offline file reads, and the
+  // ONNX failures outside the ORT setup family. Distinct from the
   // enumeration/selection DeviceError family above (which mirrors the core's
-  // "Device errors"): this is the core's "Stream errors" DeviceFailed, surfaced
-  // as a base DecibriError with a dedicated code.
-  if (msg.startsWith('decibri: audio device error:')) {
-    return new DecibriError(msg, 'DEVICE_FAILED');
-  }
-  // Non-ORT ONNX backend failure: the reserved backend catch-all, surfaced as a
-  // base DecibriError with a dedicated code (not an OrtError).
-  if (msg.startsWith('ONNX backend error from')) {
-    return new DecibriError(msg, 'ONNX_BACKEND_FAILED');
-  }
-  // Reusing a File after its single pass (analysis or iteration consumed the
-  // source) is a lifecycle failure, the offline counterpart of a closed stream:
-  // a base DecibriError with a dedicated code, not the RangeError reserved for
-  // argument validation. Unlike the prefixes above, this message is authored in
-  // the napi layer (bindings/node/src/lib.rs), not in crates/decibri/src/error.rs.
-  if (msg.startsWith('File already consumed')) {
-    return new DecibriError(msg, 'FILE_CONSUMED');
-  }
-  // Analysing a File whose iteration has begun. The companion lifecycle
-  // failure to FILE_CONSUMED, and authored in crates/decibri/src/error.rs
-  // rather than the napi layer.
-  if (msg.startsWith('File iteration has begun')) {
-    return new DecibriError(msg, 'FILE_ENGAGED');
+  // "Device errors").
+  for (const [prefix, code] of BASE_CODES) {
+    if (msg.startsWith(prefix)) return new DecibriError(msg, code);
   }
 
   // Any other error from the native constructor is still a decibri error.

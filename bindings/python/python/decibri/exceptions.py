@@ -4,13 +4,13 @@ This module is the public home for the decibri exception hierarchy. All
 classes are also re-exported at ``decibri.<X>`` for convenience; users
 may import from either path.
 
-42 instance classes plus 3 intermediate parent classes (DeviceError,
-OrtError, OrtPathError) for catch ergonomics, totaling 45 class
+43 instance classes plus 3 intermediate parent classes (DeviceError,
+OrtError, OrtPathError) for catch ergonomics, totaling 46 class
 definitions. Single-inheritance hierarchy per CPython convention.
 
 Hierarchy:
     DecibriError
-    + 23 direct subclasses (config + runtime errors that don't involve
+    + 24 direct subclasses (config + runtime errors that don't involve
       device enumeration or ORT, including DeviceFailed and OnnxBackendFailed)
     + DeviceError (intermediate; no instances; catches device-related)
         + 8 direct device subclasses (MicrophoneNotFound, SpeakerNotFound,
@@ -179,6 +179,15 @@ class VadSampleRateUnsupported(DecibriError):
 
 class VadThresholdOutOfRange(DecibriError):
     """Raised when vad_threshold is not in the [0.0, 1.0] range."""
+
+
+class ResampleConfigInvalid(DecibriError):
+    """Raised when a capture sample rate conversion is unsupported.
+
+    Defensive: every rate pair the configuration validator accepts is within
+    the resampler's range, so this is not reachable from the Python surface.
+    It exists so the core's variant has a class here like every other.
+    """
 
 
 class FileReadFailed(DecibriError):
