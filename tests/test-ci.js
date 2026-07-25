@@ -340,6 +340,12 @@ assert(typeof mOverrun.overrunCount === 'number', 'overrunCount is a number');
 assert(mOverrun.overrunCount === 0, 'overrunCount is 0 on a fresh stream');
 mOverrun.stop();
 
+// underrunCount: readable accessor, 0 on a fresh (not-yet-underrun) stream.
+const sUnderrun = new Speaker({ sampleRate: 16000, channels: 1 });
+assert(typeof sUnderrun.underrunCount === 'number', 'underrunCount is a number');
+assert(sUnderrun.underrunCount === 0, 'underrunCount is 0 on a fresh stream');
+sUnderrun.stop();
+
 console.log('  Group 5 done\n');
 
 // ═══════════════════════════════════════════════════════════════════════════════

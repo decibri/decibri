@@ -981,6 +981,16 @@ impl DecibriOutputBridge {
         self.stream.as_ref().is_some_and(|s| s.is_playing())
     }
 
+    /// Number of samples emitted as silence fill because the playback queue
+    /// ran dry (the core stream's underrun counter). Returns 0 while the
+    /// producer keeps the queue fed or when no stream is active. Returned as
+    /// f64 (an exact JS number for any realistic count) to match the
+    /// microphone bridge's `overrunCount` getter.
+    #[napi(getter)]
+    pub fn underrun_count(&self) -> f64 {
+        self.stream.as_ref().map_or(0, |s| s.underrun_count()) as f64
+    }
+
     /// List all available audio output devices.
     #[napi]
     pub fn devices() -> Result<Vec<OutputDeviceInfoJs>> {
@@ -1201,6 +1211,7 @@ pub struct FileParts {
     vad_threshold: f32,
     ort_library_path: Option<String>,
     sample_rate: u32,
+    input_rate: u32,
 }
 
 /// Open a WAV path as the core offline source: the blocking work (file read,
@@ -1221,6 +1232,7 @@ fn build_file_parts(path: &str, options: Option<&FileOptions>) -> Result<FilePar
     };
     let config = build_file_config(opts)?;
     let file = CoreFile::open(path, config).map_err(to_napi_error)?;
+    let input_rate = file.input_rate();
     Ok(FileParts {
         file,
         format,
@@ -1230,6 +1242,7 @@ fn build_file_parts(path: &str, options: Option<&FileOptions>) -> Result<FilePar
         vad_threshold: opts.vad_threshold.unwrap_or(0.5) as f32,
         ort_library_path: opts.ort_library_path.clone(),
         sample_rate: opts.sample_rate.unwrap_or(16000),
+        input_rate,
     })
 }
 
@@ -1248,6 +1261,7 @@ impl FileParts {
             ort_library_path: self.ort_library_path,
             vad_probability: 0.0,
             sample_rate: self.sample_rate,
+            input_rate: self.input_rate,
         }
     }
 }
@@ -1328,6 +1342,9 @@ pub struct FileHandle {
     /// exactly as DecibriBridge exposes its own.
     vad_probability: f32,
     sample_rate: u32,
+    /// The source's native rate, copied at construction so the getter stays
+    /// readable after the source is consumed.
+    input_rate: u32,
 }
 
 #[napi]
@@ -1378,6 +1395,7 @@ impl FileHandle {
             vad_threshold: opts.vad_threshold.unwrap_or(0.5) as f32,
             ort_library_path: opts.ort_library_path.clone(),
             sample_rate: opts.sample_rate.unwrap_or(16000),
+            input_rate,
         }
         .into_handle())
     }
@@ -1511,5 +1529,12 @@ impl FileHandle {
     #[napi(getter)]
     pub fn sample_rate(&self) -> u32 {
         self.sample_rate
+    }
+
+    /// The source's native rate, from the WAV header or the explicit
+    /// `inputRate` of `buffer`.
+    #[napi(getter)]
+    pub fn input_rate(&self) -> u32 {
+        self.input_rate
     }
 }

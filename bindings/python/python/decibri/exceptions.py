@@ -4,21 +4,21 @@ This module is the public home for the decibri exception hierarchy. All
 classes are also re-exported at ``decibri.<X>`` for convenience; users
 may import from either path.
 
-36 instance classes (one per Rust DecibriError variant) plus 3 intermediate
-parent classes (DeviceError, OrtError, OrtPathError) for catch ergonomics,
-totaling 39 class definitions. Single-inheritance hierarchy per CPython
-convention.
+42 instance classes plus 3 intermediate parent classes (DeviceError,
+OrtError, OrtPathError) for catch ergonomics, totaling 45 class
+definitions. Single-inheritance hierarchy per CPython convention.
 
 Hierarchy:
     DecibriError
-    + 18 direct subclasses (config + runtime errors that don't involve
+    + 23 direct subclasses (config + runtime errors that don't involve
       device enumeration or ORT, including DeviceFailed and OnnxBackendFailed)
     + DeviceError (intermediate; no instances; catches device-related)
         + 8 direct device subclasses (MicrophoneNotFound, SpeakerNotFound,
           MultipleDevicesMatch, DeviceIndexOutOfRange, NoMicrophoneFound,
           NoSpeakerFound, NotAnInputDevice, DeviceEnumerationFailed)
     + OrtError (intermediate; no instances; catches all ORT-related)
-        + 7 direct ORT subclasses (init, session, threads, inference, tensors)
+        + 8 direct ORT subclasses (init, session, threads, models,
+          inference, tensors)
         + OrtPathError (intermediate; no instances; catches path-specific)
             + OrtLoadFailed (has path field; ORT failed to load)
             + OrtPathInvalid (has path field; pre-check rejected)

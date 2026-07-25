@@ -19,6 +19,9 @@ Verifies:
   instances of the pure-Python exception classes, not Rust-side duplicates.
 """
 
+import re
+from pathlib import Path
+
 import decibri
 from decibri import (
     AgcTargetOutOfRange,
@@ -373,3 +376,44 @@ def test_binding_raises_pure_python_classes() -> None:
     # Same class object as re-exported via decibri.<X>
     assert type(e) is decibri.InvalidFormat
     assert type(e) is py_exc.InvalidFormat
+
+
+# ---------------------------------------------------------------------------
+# EXCEPTION_NAMES registry parity.
+#
+# The Rust binding's EXCEPTION_NAMES registry (bindings/python/src/lib.rs)
+# names every class the binding raises; exception_class() resolves each name
+# against decibri.exceptions at first use. A misspelled or missing entry only
+# fails at raise time, deep inside whichever call happens to hit it first, so
+# this test parses the registry out of the Rust source and resolves every
+# entry up front. Mirrors the source-parsing shape of the stub parity test in
+# test_smoke.py. Runs only where the Rust source tree is present (the main
+# pytest suite); the wheel install-test gate does not include this file.
+# ---------------------------------------------------------------------------
+
+
+_BINDING_LIB_RS = Path(__file__).resolve().parent.parent / "src" / "lib.rs"
+
+
+def test_exception_names_registry_resolves_in_module() -> None:
+    """Every EXCEPTION_NAMES entry names a DecibriError class in decibri.exceptions."""
+    from decibri import exceptions as py_exc
+
+    source = _BINDING_LIB_RS.read_text(encoding="utf-8")
+    registry = re.search(
+        r"const EXCEPTION_NAMES: &\[&str\] = &\[(.*?)\];", source, re.DOTALL
+    )
+    assert registry is not None, "EXCEPTION_NAMES not found in src/lib.rs"
+    names = re.findall(r'"([A-Za-z]+)"', registry.group(1))
+    # Parse sanity: the registry is never empty and always contains the base.
+    assert names, "no entries parsed from EXCEPTION_NAMES"
+    assert "DecibriError" in names, "base class missing from parsed EXCEPTION_NAMES"
+
+    for name in names:
+        cls = getattr(py_exc, name, None)
+        assert cls is not None, (
+            f"EXCEPTION_NAMES entry {name!r} has no matching class in decibri.exceptions"
+        )
+        assert isinstance(cls, type) and issubclass(cls, py_exc.DecibriError), (
+            f"decibri.exceptions.{name} is not a DecibriError subclass"
+        )

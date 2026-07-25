@@ -110,6 +110,16 @@ def test_microphone_overrun_count_accessor() -> None:
         mic.close()
 
 
+def test_speaker_underrun_count_accessor() -> None:
+    """underrun_count is readable and 0 on a fresh, not-yet-started stream."""
+    spk = decibri.Speaker()
+    try:
+        assert isinstance(spk.underrun_count, int)
+        assert spk.underrun_count == 0
+    finally:
+        spk.close()
+
+
 def test_exception_root_importable() -> None:
     """The exception hierarchy root is reachable from the package."""
     from decibri import DecibriError

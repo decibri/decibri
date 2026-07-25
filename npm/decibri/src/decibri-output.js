@@ -229,6 +229,16 @@ class Speaker extends Writable {
   }
 
   /**
+   * Number of samples emitted as silence fill because the playback queue ran
+   * dry. 0 while the producer keeps the queue fed, or before playback starts.
+   * A rising value means the output is papering over gaps with silence.
+   * @returns {number}
+   */
+  get underrunCount() {
+    return this._native.underrunCount;
+  }
+
+  /**
    * List all available output devices on the system.
    * @returns {Array<{index: number, name: string, maxOutputChannels: number, defaultSampleRate: number, isDefault: boolean}>}
    */

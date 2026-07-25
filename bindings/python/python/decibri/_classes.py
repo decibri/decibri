@@ -1010,6 +1010,17 @@ class Speaker:
     def is_playing(self) -> bool:
         return self._bridge.is_playing
 
+    @property
+    def underrun_count(self) -> int:
+        """Number of samples emitted as silence fill because the playback
+        queue ran dry.
+
+        0 while the producer keeps the queue fed, or before playback
+        starts. A rising value means the output is papering over gaps with
+        silence.
+        """
+        return self._bridge.underrun_count
+
     @staticmethod
     def devices() -> list[SpeakerInfo]:
         """List available audio output devices."""
@@ -1669,6 +1680,13 @@ class File:
     def sample_rate(self) -> int:
         """The target output rate every delivered chunk carries."""
         return self._sample_rate
+
+    @property
+    def input_rate(self) -> int:
+        """The source's native rate, from the WAV header or the explicit
+        ``input_rate`` of ``File.buffer``.
+        """
+        return self._bridge.input_rate
 
     def __del__(self) -> None:
         # Defensive finalizer; same shape as Microphone.__del__.

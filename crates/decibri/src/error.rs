@@ -5,10 +5,10 @@ use thiserror::Error;
 
 // Per-platform guidance for `PermissionDenied`. Attribute-gated so each
 // platform's binary embeds only its own hint string. The attribute-gated
-// pattern matches the crate's existing conditional-compilation idiom: 52
-// `#[cfg(...)]` attribute sites across the crate (all feature-predicates),
-// 0 `cfg!()` macro sites. The `not(any(...))` fallback covers BSDs and
-// any future target-os values uncategorized at compile time.
+// pattern matches the crate's existing conditional-compilation idiom: 203
+// `#[cfg(...)]` attribute sites across the crate, 0 `cfg!()` macro sites.
+// The `not(any(...))` fallback covers BSDs and any future target-os values
+// uncategorized at compile time.
 
 #[cfg(target_os = "macos")]
 const PERMISSION_HINT: &str = "Enable in System Settings > Privacy & Security > Microphone.";
