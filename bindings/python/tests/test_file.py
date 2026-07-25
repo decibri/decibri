@@ -121,6 +121,18 @@ def test_buffer_resamples_to_target() -> None:
     assert 4000 <= out_samples <= 4000 + 512
 
 
+def test_input_rate_reports_source_native_rate(tmp_path: Path) -> None:
+    """input_rate is the source's native rate; sample_rate the target rate."""
+    file = File.buffer(sine_samples(48000, 0.1), input_rate=48000, sample_rate=16000)
+    assert file.input_rate == 48000
+    assert file.sample_rate == 16000
+
+    path = tmp_path / "clip.wav"
+    write_wav(path, sine_samples(22050, 0.1), 22050)
+    opened = File(path)
+    assert opened.input_rate == 22050
+
+
 def test_conditioning_removes_dc_offset() -> None:
     """dc_removal conditions the delivered audio (mean offset removed)."""
     offset = [0.25 + s for s in sine_samples(16000, 0.5, amplitude=0.1)]

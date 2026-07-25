@@ -1019,5 +1019,12 @@ class AsyncFile:
         """The target output rate every delivered chunk carries."""
         return self._file.sample_rate
 
+    @property
+    def input_rate(self) -> int:
+        """The source's native rate, from the WAV header or the explicit
+        ``input_rate`` of ``AsyncFile.buffer``.
+        """
+        return self._file.input_rate
+
     def __repr__(self) -> str:
         return f"Async{self._file!r}"

@@ -900,6 +900,9 @@ fn parse_wav(bytes: &[u8]) -> Result<WavSource, DecibriError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    // The module-level resampler import is `vad`-gated; the reference
+    // resampler in the buffer tests must resolve under `capture` alone.
+    use decibri_resampler::{PolyphaseResampler, Resampler};
 
     /// Interleave a mono signal into a synthetic WAV byte vector: 16-bit PCM
     /// (format 1) or 32-bit float (format 3), any rate and channel count.

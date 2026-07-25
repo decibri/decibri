@@ -623,6 +623,13 @@ export declare class Speaker extends Writable {
   /** Whether audio is currently being output. */
   readonly isPlaying: boolean;
 
+  /**
+   * Number of samples emitted as silence fill because the playback queue ran
+   * dry. 0 while the producer keeps the queue fed, or before playback starts.
+   * A rising value means the output is papering over gaps with silence.
+   */
+  readonly underrunCount: number;
+
   /** List all available audio output devices. */
   static devices(): SpeakerInfo[];
 

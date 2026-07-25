@@ -6,11 +6,13 @@
 //! handles only the Rust-Python boundary, error mapping, and GIL release on
 //! blocking calls.
 //!
-//! Error mapping covers all 29 `DecibriError` variants and surfaces them as
-//! 31 distinct Python exception classes (1 base + 19 direct subclasses + the
-//! ORT family of 8 + the OrtPathError catch-target + 2 path-specific ORT
-//! subclasses). The Python class hierarchy lives in `decibri.exceptions`;
-//! this crate constructs and raises instances via `pyo3::create_exception!`.
+//! Error mapping covers all 41 `DecibriError` variants and surfaces them as
+//! instances of the pure-Python exception classes in `decibri.exceptions`
+//! (45 class definitions: 1 base + 23 direct subclasses + the DeviceError
+//! catch-target + 8 device subclasses + the OrtError catch-target + 8 direct
+//! ORT subclasses + the OrtPathError catch-target + 2 path-specific ORT
+//! subclasses). This crate looks the classes up by name at first use and
+//! raises via `PyErr::from_type`.
 //!
 //! Format handling is binding-layer only. The decibri Rust core has no
 //! `SampleFormat` enum; it operates on `f32` internally. This binding accepts
@@ -199,8 +201,9 @@ fn exception_class<'py>(py: Python<'py>, name: &'static str) -> PyResult<Bound<'
 // ---------------------------------------------------------------------------
 // Error mapping: DecibriError -> PyErr.
 //
-// Covers all 37 variants explicitly. Catch-all `_ =>` arm at end is required
-// because DecibriError is #[non_exhaustive].
+// Covers 40 of the 41 variants explicitly; ResampleConfigInvalid routes to
+// the catch-all `_ =>` arm, which is required anyway because DecibriError is
+// #[non_exhaustive].
 //
 // For variants with a `path` field (OrtLoadFailed, OrtPathInvalid,
 // VadModelLoadFailed, ModelLoadFailed), the mapper passes a tuple as the args
@@ -217,7 +220,7 @@ fn to_py_err(py: Python<'_>, err: CoreDecibriError) -> PyErr {
     // and VadModelLoadFailed unpack multi-element tuples into named
     // attributes; other classes accept a single message string.
     let (name, raise): (&'static str, ExceptionRaiser) = match err {
-        // Unit variants (13).
+        // Unit variants (15).
         CoreDecibriError::SampleRateOutOfRange => (
             "SampleRateOutOfRange",
             Box::new(move |cls| PyErr::from_type(cls, (msg,))),
@@ -1459,6 +1462,17 @@ impl SpeakerBridge {
         self.stream.is_some()
     }
 
+    /// Number of samples emitted as silence fill because the playback queue
+    /// ran dry (the core stream's underrun counter). Returns 0 while the
+    /// producer keeps the queue fed or when no stream is active.
+    #[getter]
+    fn underrun_count(&self) -> u64 {
+        match &self.stream {
+            Some(stream) => stream.underrun_count(),
+            None => 0,
+        }
+    }
+
     #[staticmethod]
     fn devices(py: Python<'_>) -> PyResult<Vec<OutputDeviceInfo>> {
         let core_devices = py.detach(output_devices).map_err(|e| to_py_err(py, e))?;
@@ -1961,7 +1975,7 @@ impl AsyncSpeakerBridge {
 // the core's own detector).
 // ---------------------------------------------------------------------------
 
-#[pyclass]
+#[pyclass(module = "decibri._decibri")]
 struct FileBridge {
     /// The core offline source. `None` once consumed by analysis, closed, or
     /// fully iterated: a File is a single pass.
@@ -1988,6 +2002,9 @@ struct FileBridge {
     /// `vad_probability` getter exactly as MicrophoneBridge exposes its own.
     last_vad_probability: AtomicU32,
     sample_rate: u32,
+    /// The source's native rate, copied at construction so the getter stays
+    /// readable after the source is consumed.
+    input_rate: u32,
 }
 
 /// Build the core [`FileConfig`] from the bridge keyword arguments, mapping
@@ -2381,6 +2398,13 @@ impl FileBridge {
     fn sample_rate(&self) -> u32 {
         self.sample_rate
     }
+
+    /// The source's native rate, from the WAV header or the explicit
+    /// `input_rate` of `buffer`.
+    #[getter]
+    fn input_rate(&self) -> u32 {
+        self.input_rate
+    }
 }
 
 impl FileBridge {
@@ -2397,6 +2421,7 @@ impl FileBridge {
         ort_library_path: Option<PathBuf>,
         sample_rate: u32,
     ) -> Self {
+        let input_rate = file.input_rate();
         Self {
             inner: StdMutex::new(Some(file)),
             consumed: AtomicBool::new(false),
@@ -2411,6 +2436,7 @@ impl FileBridge {
             ort_library_path,
             last_vad_probability: AtomicU32::new(0),
             sample_rate,
+            input_rate,
         }
     }
 

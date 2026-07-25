@@ -37,11 +37,16 @@ crossbeam-channel = "0.5"
 #                If omitted, ort silently falls back to api-17 (the baseline) and its
 #                own EP modules fail to compile against the older OrtApi struct.
 # We deliberately exclude ort's other defaults (`download-binaries`, `tls-native`,
-# `copy-dylibs`, `ndarray`, `tracing`) because:
+# `copy-dylibs`, `tracing`) because:
 #   - `download-binaries` / `tls-native` / `copy-dylibs` are the old embedding path
 #     we're migrating away from in 3.1.0 (available opt-in via
 #     `ort-download-binaries` feature on crates/decibri for pure-Rust consumers).
-#   - `ndarray` / `tracing` are optional integrations decibri doesn't use.
+#   - `tracing` is an optional integration decibri doesn't use; ort gates it as
+#     `tracing?/std`, so leaving it off the feature list keeps it off.
+# `ndarray` cannot be excluded: ort's `std` feature lists `ndarray/std` (not
+# `ndarray?/std`), which force-enables the optional `ndarray` dependency, and
+# ort's `load-dynamic` (pulled by our `ort-load-dynamic` mode) enables `std` in
+# turn. decibri does not use the ndarray integration; it compiles unused.
 #
 # Distribution mode (load-dynamic vs download-binaries) is selected by crates/decibri
 # via the `ort-load-dynamic` / `ort-download-binaries` features.

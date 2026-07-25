@@ -9,6 +9,12 @@ For other decibri packages, see:
 - Rust crate: [crates/decibri/CHANGELOG.md](../../crates/decibri/CHANGELOG.md)
 - Python wheel: [bindings/python/CHANGELOG.md](../../bindings/python/CHANGELOG.md)
 
+## [Unreleased]
+
+### Added
+
+- `underrunCount`: a read-only accessor on `Speaker` exposing the core stream's silence-fill counter, in samples. 0 while the producer keeps the queue fed; a rising value means playback is papering over gaps with silence.
+
 ## [5.2.2] - 2026-07-25
 
 ### Added
