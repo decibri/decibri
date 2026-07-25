@@ -484,11 +484,15 @@ impl File {
     /// Analyze the whole recording for speech and return the per-window
     /// scores and merged speech segments, timed in seconds of file time.
     ///
-    /// Runs the conditioning pass once, scoring the pre-conditioning signal
+    /// Runs one pass over the recording, scoring the pre-conditioning signal
     /// window by window (512 samples at 16 kHz, 256 at 8 kHz), then merges
     /// consecutive speech windows whose silence gaps are within
     /// [`FileConfig::vad_holdoff_ms`] of file time. Consumes the `File`: the
     /// analysis is a single pass, separate from iteration.
+    ///
+    /// The scored signal is the one the channel and rate normalization
+    /// produces, taken before any conditioning transform, so the report is the
+    /// same whatever conditioning the [`FileConfig`] enables.
     ///
     /// Runs only on a source still at its start. Once iteration has pulled
     /// from the `File`, analysis reports [`DecibriError::FileEngaged`].
@@ -516,15 +520,14 @@ impl File {
         let window = detector_config.validate()?;
         let mut detector = SileroVad::new(detector_config)?;
 
-        // Drive the whole source through the chain, scoring the detector feed
-        // one exact window at a time so each call yields exactly one score.
-        // The delivered audio is discarded as it accumulates: analysis
-        // returns the report, not the conditioned chunks.
+        // Drive the whole source through the normalize tier, scoring the
+        // detector feed one exact window at a time so each call yields exactly
+        // one score. The conditioning transform does not run: analysis returns
+        // the report, not the conditioned chunks.
         let mut probabilities: Vec<f32> = Vec::new();
         let mut pending: Vec<f32> = Vec::new();
         while !self.flushed {
-            self.advance()?;
-            self.reblock.clear();
+            self.advance_feed()?;
             pending.extend(self.vad_queue.drain(..));
             let mut offset = 0;
             while pending.len() - offset >= window {
@@ -562,19 +565,46 @@ impl File {
         self.analyze()
     }
 
+    /// The next source block's range, moving the cursor past it; `None` once
+    /// the source is exhausted. The one place either pass advances the cursor,
+    /// so both step the source in the same blocks.
+    fn next_range(&mut self) -> Option<std::ops::Range<usize>> {
+        if self.pos >= self.source.len() {
+            return None;
+        }
+        let feed = FEED_FRAMES * self.input_channels as usize;
+        let end = (self.pos + feed).min(self.source.len());
+        let range = self.pos..end;
+        self.pos = end;
+        Some(range)
+    }
+
     /// Feed source blocks through the chain until the re-block buffer can
     /// deliver one chunk or the source is exhausted and flushed. One step of
-    /// the single pass; both iteration and analysis drive it.
+    /// the iteration pass, which delivers the conditioned audio.
     fn advance(&mut self) -> Result<(), DecibriError> {
         while self.reblock.len() < DELIVERY_FRAMES && !self.flushed {
-            if self.pos < self.source.len() {
-                let feed = FEED_FRAMES * self.input_channels as usize;
-                let end = (self.pos + feed).min(self.source.len());
-                let range = self.pos..end;
-                self.pos = end;
-                self.ingest(range)?;
-            } else {
-                self.flush_chain()?;
+            match self.next_range() {
+                Some(range) => self.ingest(range)?,
+                None => {
+                    self.flush_chain()?;
+                    self.flushed = true;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Feed one source block through the normalize tier and append the
+    /// detector feed. One step of the analysis pass, which returns the report
+    /// rather than the conditioned audio, so the conditioning transform is not
+    /// run.
+    #[cfg(feature = "vad")]
+    fn advance_feed(&mut self) -> Result<(), DecibriError> {
+        match self.next_range() {
+            Some(range) => self.ingest_feed(range)?,
+            None => {
+                self.flush_feed()?;
                 self.flushed = true;
             }
         }
@@ -612,6 +642,46 @@ impl File {
         #[cfg(feature = "vad")]
         if want_feed {
             self.push_vad_feed();
+        }
+        Ok(())
+    }
+
+    /// Run one source block through the normalize tier, appending the result
+    /// to the detector feed. The analysis counterpart of
+    /// [`ingest`](Self::ingest): the feed is the post-normalize signal on
+    /// either path, so the transform tier stays unrun here.
+    #[cfg(feature = "vad")]
+    fn ingest_feed(&mut self, range: std::ops::Range<usize>) -> Result<(), DecibriError> {
+        self.scratch.clear();
+        match &mut self.stage {
+            None => self.scratch.extend_from_slice(&self.source[range]),
+            Some(stage) => {
+                let normalized = stage.run_normalize(&self.source[range])?;
+                self.scratch.extend_from_slice(normalized);
+            }
+        }
+        self.push_vad_feed();
+        Ok(())
+    }
+
+    /// Drain the normalize tier's end-of-stream tail into the detector feed,
+    /// once, when the source is exhausted. The analysis counterpart of
+    /// [`flush_chain`](Self::flush_chain).
+    #[cfg(feature = "vad")]
+    fn flush_feed(&mut self) -> Result<(), DecibriError> {
+        self.scratch.clear();
+        if let Some(stage) = &mut self.stage {
+            let tail = stage.flush_normalize()?;
+            self.scratch.extend_from_slice(tail);
+        }
+        self.push_vad_feed();
+        // Drain the detector-feed resampler's own tail so trailing windows are
+        // scored rather than stranded.
+        if let Some(resampler) = &mut self.vad_resampler {
+            let mut tail = Vec::new();
+            resampler.flush(&mut tail);
+            self.vad_queue.extend(tail);
+            self.cap_vad_queue();
         }
         Ok(())
     }
@@ -1154,6 +1224,16 @@ mod tests {
             .join("silero_vad.onnx")
     }
 
+    #[cfg(all(feature = "vad", feature = "denoise"))]
+    fn denoise_model_path() -> PathBuf {
+        let manifest_dir = env!("CARGO_MANIFEST_DIR");
+        Path::new(manifest_dir)
+            .join("..")
+            .join("..")
+            .join("models")
+            .join("fastenhancer_t.onnx")
+    }
+
     #[cfg(feature = "vad")]
     fn golden_wav_path() -> PathBuf {
         let manifest_dir = env!("CARGO_MANIFEST_DIR");
@@ -1452,6 +1532,57 @@ mod tests {
         for segment in &report.segments {
             assert!(segment.start < segment.end);
             assert!(segment.end <= duration + 1e-9);
+        }
+    }
+
+    /// The analysis report does not depend on the conditioning settings: the
+    /// detector reads the signal the normalize tier produces, taken before any
+    /// conditioning transform. Analysis runs that tier alone, so this equality
+    /// must hold for every conditioning setting.
+    #[cfg(feature = "vad")]
+    #[test]
+    fn analyze_report_is_independent_of_the_dsp_tier() {
+        let path = golden_wav_path();
+        let plain = File::open(&path, vad_file_config())
+            .unwrap()
+            .analyze()
+            .unwrap();
+
+        let mut config = vad_file_config();
+        config.dc_removal = true;
+        config.highpass = Some(HighpassFilter::Hz80);
+        config.agc = Some(-18);
+        config.limiter = Some(-1.0);
+        let conditioned = File::open(&path, config).unwrap().analyze().unwrap();
+
+        assert_eq!(plain.scores, conditioned.scores);
+        assert_eq!(plain.segments, conditioned.segments);
+    }
+
+    /// The same equality with denoise on. Denoise is framed and
+    /// length-changing, unlike the same-length DSP stages, so it exercises the
+    /// invariant on a transform whose output no longer lines up with its
+    /// input. Checked at the detector's own rate and at a target rate that puts
+    /// a resampler in the normalize tier, which covers the end-of-stream tail
+    /// as well.
+    #[cfg(all(feature = "vad", feature = "denoise"))]
+    #[test]
+    fn analyze_report_is_independent_of_denoise() {
+        let path = golden_wav_path();
+        for rate in [16000, 22050] {
+            let mut plain_config = vad_file_config();
+            plain_config.sample_rate = rate;
+            let plain = File::open(&path, plain_config).unwrap().analyze().unwrap();
+
+            let mut config = vad_file_config();
+            config.sample_rate = rate;
+            config.dc_removal = true;
+            config.denoise = Some(DenoiseModel::FastEnhancerT);
+            config.denoise_model_path = Some(denoise_model_path());
+            let denoised = File::open(&path, config).unwrap().analyze().unwrap();
+
+            assert_eq!(plain.scores, denoised.scores, "scores at {rate} Hz");
+            assert_eq!(plain.segments, denoised.segments, "segments at {rate} Hz");
         }
     }
 

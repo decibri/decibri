@@ -9,6 +9,12 @@ For other decibri packages, see:
 - npm package: [npm/decibri/CHANGELOG.md](../../npm/decibri/CHANGELOG.md)
 - Python package: [bindings/python/CHANGELOG.md](../../bindings/python/CHANGELOG.md)
 
+## [Unreleased]
+
+### Changed
+
+- Whole-recording analysis (`File::analyze`, `File::analyse`) is faster: it runs only the channel and rate normalization the detector reads, not the conditioning transform. The report is unchanged, and iterating a `File` still applies conditioning in full.
+
 ## [5.2.1] - 2026-07-25
 
 ### Added
