@@ -105,10 +105,14 @@ class AsyncMicrophone:
 
     Cleanup and disconnect:
         Mid-stream device disconnect (USB unplug, default-device switch,
-        driver error) is surfaced as a ``MicrophoneStreamClosed`` raised on
-        the next ``await read()``. cpal detects the disconnect and
-        closes the underlying stream within roughly 20ms; the bridge
-        then reports the closed state on its next read attempt.
+        driver error) is surfaced as a ``DeviceFailed`` raised on the next
+        ``await read()``, carrying the driver's own cause. cpal detects the
+        disconnect and closes the underlying stream within roughly 20ms; the
+        bridge then reports the closed state on its next read attempt.
+        ``DeviceFailed`` derives from ``DecibriError``, not from
+        ``MicrophoneStreamClosed``, so catch ``DecibriError`` (or
+        ``DeviceFailed`` itself) to handle a disconnect. A deliberate
+        ``stop()`` still raises ``MicrophoneStreamClosed``.
 
         Sibling-task cancellation works correctly here: cancelling a
         concurrent ``await stop()`` from another asyncio task while a
@@ -666,6 +670,15 @@ class AsyncSpeaker:
     immediately followed by another write/drain cycle (spawn_blocking does
     not cooperatively cancel OS threads); for production use, complete
     drains before initiating new writes.
+
+    Disconnect:
+        A playback device that fails mid-stream (USB unplug, driver reset)
+        raises ``DeviceFailed`` from the next ``await write()`` or
+        ``await drain()``, carrying the driver's own cause. A producer that
+        has stopped writing is not told; ``is_playing`` goes false
+        immediately either way. A deliberate ``await stop()`` is never
+        reported as a device failure: a later write raises
+        ``SpeakerStreamClosed`` as before.
 
     Resource cleanup:
         Always use ``async with AsyncSpeaker(...) as o:`` or call

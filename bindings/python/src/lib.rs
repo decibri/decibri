@@ -210,6 +210,40 @@ fn exception_class<'py>(py: Python<'py>, name: &'static str) -> PyResult<Bound<'
 // so the Python __init__ override can store named attributes.
 // ---------------------------------------------------------------------------
 
+/// Resolve the cause behind a failed capture read.
+///
+/// The core reports `MicrophoneStreamClosed` for both a deliberate stop and a
+/// device that died under it, and stashes the typed cause in the latter case.
+/// `take` drains that slot, and is called only for the closed-stream error so
+/// any other read failure is passed through with its own cause intact. A
+/// deliberate stop stashes nothing, so it keeps raising `MicrophoneStreamClosed`.
+fn capture_failure_cause<F>(err: CoreDecibriError, take: F) -> CoreDecibriError
+where
+    F: FnOnce() -> Option<CoreDecibriError>,
+{
+    match err {
+        CoreDecibriError::MicrophoneStreamClosed => {
+            take().unwrap_or(CoreDecibriError::MicrophoneStreamClosed)
+        }
+        other => other,
+    }
+}
+
+/// The playback counterpart of [`capture_failure_cause`]. A stopped speaker
+/// keeps raising `SpeakerStreamClosed`; one whose device died raises the
+/// stashed `DeviceFailed`.
+fn speaker_failure_cause<F>(err: CoreDecibriError, take: F) -> CoreDecibriError
+where
+    F: FnOnce() -> Option<CoreDecibriError>,
+{
+    match err {
+        CoreDecibriError::SpeakerStreamClosed => {
+            take().unwrap_or(CoreDecibriError::SpeakerStreamClosed)
+        }
+        other => other,
+    }
+}
+
 type ExceptionRaiser = Box<dyn FnOnce(Bound<'_, PyType>) -> PyErr>;
 
 fn to_py_err(py: Python<'_>, err: CoreDecibriError) -> PyErr {
@@ -874,7 +908,10 @@ impl MicrophoneBridge {
         let result: Result<Option<AudioChunk>, CoreDecibriError> =
             py.detach(|| stream.next_chunk(samples, timeout));
 
-        let Some(chunk) = result.map_err(|e| to_py_err(py, e))? else {
+        let Some(chunk) = result
+            .map_err(|e| capture_failure_cause(e, || stream.take_last_error()))
+            .map_err(|e| to_py_err(py, e))?
+        else {
             return Ok(None);
         };
 
@@ -1287,6 +1324,7 @@ impl SpeakerBridge {
             BindingSampleFormat::Float32 => py.detach(|| f32_le_bytes_to_f32(&owned_samples)),
         };
         py.detach(|| stream.send(samples_f32))
+            .map_err(|e| speaker_failure_cause(e, || stream.take_last_error()))
             .map_err(|e| to_py_err(py, e))?;
         Ok(())
     }
@@ -1303,6 +1341,7 @@ impl SpeakerBridge {
         let samples_f32: Vec<f32> =
             py.detach(|| owned.iter().map(|&s| s as f32 / 32768.0).collect());
         py.detach(|| stream.send(samples_f32))
+            .map_err(|e| speaker_failure_cause(e, || stream.take_last_error()))
             .map_err(|e| to_py_err(py, e))?;
         Ok(())
     }
@@ -1314,6 +1353,7 @@ impl SpeakerBridge {
             .ok_or_else(|| raise_named(py, "SpeakerStreamClosed", "output is not running"))?;
         let samples_f32: Vec<f32> = samples.to_vec();
         py.detach(|| stream.send(samples_f32))
+            .map_err(|e| speaker_failure_cause(e, || stream.take_last_error()))
             .map_err(|e| to_py_err(py, e))?;
         Ok(())
     }
@@ -1428,7 +1468,13 @@ impl SpeakerBridge {
             .as_mut()
             .ok_or_else(|| raise_named(py, "SpeakerStreamClosed", "output is not running"))?;
         py.detach(|| stream.drain());
-        Ok(())
+        // The drain returns early once the stream stops running, which covers a
+        // deliberate stop and a driver failure alike; only the failure stashes a
+        // typed cause, so an empty slot leaves a normal drain silent.
+        match stream.take_last_error() {
+            Some(cause) => Err(to_py_err(py, cause)),
+            None => Ok(()),
+        }
     }
 
     fn stop(&mut self) -> PyResult<()> {

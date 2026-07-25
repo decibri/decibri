@@ -15,6 +15,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - `Speaker.underrun_count`: a read-only property exposing the core stream's silence-fill counter, in samples. 0 while the producer keeps the queue fed; a rising value means playback is papering over gaps with silence.
 - `File.input_rate` and `AsyncFile.input_rate`: read-only properties reporting the source's native rate, from the WAV header or the explicit `input_rate` of `buffer`.
 
+### Changed
+
+- **A device that fails mid-stream now raises `DeviceFailed`, where `MicrophoneStreamClosed` or `SpeakerStreamClosed` was raised before.** `DeviceFailed` derives from `DecibriError`, not from either closed-stream class, so code that catches `MicrophoneStreamClosed` or `SpeakerStreamClosed` to handle a disconnect stops catching one. Catch `DecibriError`, or `DeviceFailed` itself. The exception carries the driver's own cause in its message. `DeviceFailed` was previously documented but unreachable from any capture or playback path.
+- A deliberate `stop()` or `close()` is unchanged: it still raises `MicrophoneStreamClosed` or `SpeakerStreamClosed`, and is never reported as a device failure.
+- `Speaker.drain()` and `AsyncSpeaker.drain()` raise `DeviceFailed` when the device failed while the queued audio was still playing, instead of returning normally.
+- A playback device failure surfaces on the next `write()` or `drain()`, so a producer that has stopped writing is not told; `is_playing` goes false immediately either way.
+
 ## [0.7.2] - 2026-07-25
 
 ### Added

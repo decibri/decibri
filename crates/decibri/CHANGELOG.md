@@ -11,9 +11,14 @@ For other decibri packages, see:
 
 ## [Unreleased]
 
+### Added
+
+- `SpeakerSink::take_last_error`, reporting the device or driver failure recorded while streaming. It reads the same slot as `SpeakerStream::take_last_error`, so a caller holding only a sink can tell a driver failure apart from an explicit `stop()`.
+
 ### Changed
 
 - Whole-recording analysis (`File::analyze`, `File::analyse`) is faster: it runs only the channel and rate normalization the detector reads, not the conditioning transform. The report is unchanged, and iterating a `File` still applies conditioning in full.
+- `SpeakerStream::take_last_error` and `MicrophoneStream::take_last_error` document that the slot holds one error and taking it clears it, so the first observer wins. Keep to one draining call site per consumer.
 
 ## [5.2.1] - 2026-07-25
 

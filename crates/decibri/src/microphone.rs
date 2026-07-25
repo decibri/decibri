@@ -740,6 +740,11 @@ impl MicrophoneStream {
     /// Reading it here drains it (returns `None` afterwards), letting a
     /// consumer that observes a closed stream tell a driver failure apart from
     /// an explicit [`stop`](Self::stop).
+    ///
+    /// The slot holds one error and taking it clears it, so the first observer
+    /// wins. Keep to one draining call site per consumer: a second site that
+    /// takes the error for a different purpose swallows the one the first was
+    /// going to report. A non-consuming read needs its own accessor.
     pub fn take_last_error(&self) -> Option<DecibriError> {
         self.last_error.lock().ok().and_then(|mut slot| slot.take())
     }

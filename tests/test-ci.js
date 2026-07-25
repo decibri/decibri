@@ -803,11 +803,173 @@ async function asyncWriteDrainTests() {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
+// Group 11: every path that delivers an error to a consumer carries a decibri
+// class and code
+// ═══════════════════════════════════════════════════════════════════════════════
+//
+// The four delivery paths (Microphone 'error', Speaker write, Speaker end, and
+// the async writeAsync/drainAsync pair) can only fail against a real device that
+// dies mid-stream, so each one is driven here by swapping the native handle for
+// a stub that throws the frozen core Display string a live failure would carry.
+// Assertions are by class and code, never by message text.
+
+// The core's Display strings for the two failures a consumer most needs to tell
+// apart, and a driver failure the core stashes and reports on the next call.
+const DEVICE_LOST = 'decibri: audio device error: device unplugged';
+const PERMISSION_DENIED = 'Microphone permission denied. Check system settings.';
+
+// A native handle stub. `failing` names the call that fails, so every other call
+// behaves normally: 'write', 'drain', 'startCallback' (the pump reports a
+// mid-stream failure), 'start' (the synchronous throw), 'async' (both async
+// methods reject), or 'none' (healthy throughout).
+function nativeStub(message, failing) {
+  const boom = () => {
+    throw new Error(message);
+  };
+  const calls = { stopped: false };
+  return {
+    calls,
+    write: failing === 'write' ? boom : () => {},
+    drain: failing === 'drain' ? boom : () => {},
+    stop() {
+      calls.stopped = true;
+    },
+    start(cb) {
+      if (failing === 'start') boom();
+      // The real pump delivers to this callback from its own thread, never
+      // synchronously inside start().
+      if (failing === 'startCallback') setImmediate(() => cb(new Error(message)));
+    },
+    writeAsync: () => (failing === 'none' ? Promise.resolve() : Promise.reject(new Error(message))),
+    drainAsync: () => (failing === 'none' ? Promise.resolve() : Promise.reject(new Error(message))),
+    get isPlaying() {
+      return false;
+    },
+    get underrunCount() {
+      return 0;
+    },
+    get vadProbability() {
+      return 0;
+    },
+  };
+}
+
+/** Resolve with the first 'error' emitted, or reject if none arrives. */
+function nextError(emitter) {
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error('no error event was emitted')), 2000);
+    emitter.once('error', (err) => {
+      clearTimeout(timer);
+      resolve(err);
+    });
+  });
+}
+
+async function errorDeliveryTests() {
+  console.log('--- Group 11: typed errors on every delivery path ---');
+
+  // PATH 1a: a device lost mid-capture, delivered to the pump callback.
+  {
+    const mic = new Microphone({ sampleRate: 16000, channels: 1 });
+    mic._native = nativeStub(DEVICE_LOST, 'startCallback');
+    mic._read();
+    const err = await nextError(mic);
+    assert(err instanceof DecibriError, 'mic stream failure is a DecibriError');
+    assert(err.code === 'DEVICE_FAILED', `mic stream failure code is DEVICE_FAILED (got ${err.code})`);
+    assert(mic._started === false, 'a stream failure clears _started');
+  }
+
+  // PATH 1b: capture that fails to start at all. The synchronous throw out of
+  // native start() reaches the consumer on the same 'error' event. A permission
+  // denial has no prefix of its own in wrapNativeError, so it carries the
+  // unclassified code; the class and the code are both asserted so a later
+  // narrowing of the code table has to change this line deliberately.
+  {
+    const mic = new Microphone({ sampleRate: 16000, channels: 1 });
+    mic._native = nativeStub(PERMISSION_DENIED, 'start');
+    mic._read();
+    const err = await nextError(mic);
+    assert(err instanceof DecibriError, 'a failed capture start is a DecibriError');
+    assert(err.code === 'DECIBRI_ERROR', `failed-start code is DECIBRI_ERROR (got ${err.code})`);
+    assert(mic._started === false, 'a failed start clears _started');
+  }
+
+  // PATH 2: a device lost under a synchronous write.
+  {
+    const spk = new Speaker({ sampleRate: 16000, channels: 1 });
+    spk._native = nativeStub(DEVICE_LOST, 'write');
+    spk.write(Buffer.alloc(64));
+    const err = await nextError(spk);
+    assert(err instanceof DecibriError, 'speaker write failure is a DecibriError');
+    assert(err.code === 'DEVICE_FAILED', `speaker write failure code is DEVICE_FAILED (got ${err.code})`);
+  }
+
+  // PATH 3: a device lost while end() flushes the tail. The device must still
+  // be released on the failing path.
+  {
+    const spk = new Speaker({ sampleRate: 16000, channels: 1 });
+    const native = nativeStub(DEVICE_LOST, 'drain');
+    spk._native = native;
+    spk.end();
+    const err = await nextError(spk);
+    assert(err instanceof DecibriError, 'speaker end() failure is a DecibriError');
+    assert(err.code === 'DEVICE_FAILED', `speaker end() failure code is DEVICE_FAILED (got ${err.code})`);
+    assert(native.calls.stopped === true, 'end() still stops the stream when the drain fails');
+  }
+
+  // PATH 4: the async pair. These already wrapped before this change; they are
+  // pinned here so all four paths are asserted together. This exercises the JS
+  // wrap only: the native tasks that now report a stashed failure cannot be
+  // driven without a device that actually dies.
+  {
+    const spk = new Speaker({ sampleRate: 16000, channels: 1 });
+    spk._native = nativeStub(DEVICE_LOST, 'async');
+    await assertRejects(() => spk.writeAsync(Buffer.alloc(64)), DecibriError, 'audio device error');
+    await assertRejects(() => spk.drainAsync(), DecibriError, 'audio device error');
+    const rejected = await spk.drainAsync().catch((e) => e);
+    assert(rejected.code === 'DEVICE_FAILED', `drainAsync code is DEVICE_FAILED (got ${rejected.code})`);
+    spk.destroy();
+  }
+
+  // THE REGRESSION THAT MATTERS: a deliberate close is not a device fault.
+  // A healthy native ends cleanly, with 'finish' and no 'error'.
+  {
+    const spk = new Speaker({ sampleRate: 16000, channels: 1 });
+    const native = nativeStub(DEVICE_LOST, 'none');
+    spk._native = native;
+    const outcome = await new Promise((resolve) => {
+      spk.once('error', (e) => resolve({ errored: true, e }));
+      spk.once('finish', () => resolve({ errored: false }));
+      spk.end(Buffer.alloc(64));
+    });
+    assert(outcome.errored === false, 'a deliberate end() is not reported as a device failure');
+    assert(native.calls.stopped === true, 'a clean end() stops the stream');
+  }
+
+  // A deliberate microphone stop() ends the stream cleanly with no 'error'.
+  {
+    const mic = new Microphone({ sampleRate: 16000, channels: 1 });
+    mic._native = nativeStub(DEVICE_LOST, 'none');
+    mic._read();
+    mic.stop();
+    const outcome = await new Promise((resolve) => {
+      mic.once('error', (e) => resolve({ errored: true, e }));
+      mic.once('end', () => resolve({ errored: false }));
+      mic.resume();
+    });
+    assert(outcome.errored === false, 'a deliberate mic stop() is not reported as a device failure');
+  }
+
+  console.log('  Group 11 done\n');
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
 // Summary (runs after the async groups resolve)
 // ═══════════════════════════════════════════════════════════════════════════════
 
 asyncOpenTests()
   .then(asyncWriteDrainTests)
+  .then(errorDeliveryTests)
   .then(() =>
     // The offline File source cases (conditioning, per-chunk VAD in file
     // time, whole-file analysis), sharing this run's counters.

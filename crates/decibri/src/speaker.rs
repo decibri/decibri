@@ -282,6 +282,12 @@ impl SpeakerStream {
     /// playback. Reading it here drains it (returns `None` afterwards), letting
     /// a consumer that observes a closed stream tell a driver failure apart
     /// from an explicit [`stop`](Self::stop).
+    ///
+    /// The slot holds one error and taking it clears it, so the first observer
+    /// wins. This stream and every [`SpeakerSink`] it hands out read the same
+    /// slot. Keep to one draining call site per consumer: a second site that
+    /// takes the error for a different purpose swallows the one the first was
+    /// going to report. A non-consuming read needs its own accessor.
     pub fn take_last_error(&self) -> Option<DecibriError> {
         self.last_error.lock().ok().and_then(|mut slot| slot.take())
     }
@@ -321,8 +327,9 @@ impl SpeakerStream {
     /// off-thread `send` and `drain` never block a holder of the stream that
     /// needs `stop` or `is_playing`.
     ///
-    /// The handle shares the same crossbeam channel and atomic drain flags as
-    /// the stream, so [`SpeakerSink::send`] and [`SpeakerSink::drain`] behave
+    /// The handle shares the same crossbeam channel, atomic drain flags and
+    /// device-error slot as the stream, so [`SpeakerSink::send`],
+    /// [`SpeakerSink::drain`] and [`SpeakerSink::take_last_error`] behave
     /// exactly like their [`SpeakerStream`] counterparts. The stream must stay
     /// alive while a sink is in use: dropping the `SpeakerStream` releases the
     /// device, after which a `send` on a surviving sink returns
@@ -333,6 +340,7 @@ impl SpeakerStream {
             running: self.running.clone(),
             sentinel_seq: self.sentinel_seq.clone(),
             sentinels_played: self.sentinels_played.clone(),
+            last_error: self.last_error.clone(),
         }
     }
 }
@@ -375,6 +383,10 @@ pub struct SpeakerSink {
     running: Arc<AtomicBool>,
     sentinel_seq: Arc<AtomicUsize>,
     sentinels_played: Arc<AtomicUsize>,
+    // Shares the originating stream's device-error slot, so a caller holding
+    // only a sink (an off-thread writer) can tell a driver failure apart from
+    // an explicit stop. See [`SpeakerSink::take_last_error`].
+    last_error: Arc<Mutex<Option<DecibriError>>>,
 }
 
 #[cfg(feature = "playback")]
@@ -397,6 +409,18 @@ impl SpeakerSink {
             &self.sentinel_seq,
             &self.sentinels_played,
         );
+    }
+
+    /// Take the last device/driver error reported while streaming, if any.
+    ///
+    /// Reads the same slot as [`SpeakerStream::take_last_error`], so a caller
+    /// that holds only a sink can tell a driver failure apart from an explicit
+    /// [`SpeakerStream::stop`] after a [`send`](Self::send) returns
+    /// [`DecibriError::SpeakerStreamClosed`]. Taking the error clears it, and
+    /// the stream and all its sinks share the one slot, so the first observer
+    /// wins.
+    pub fn take_last_error(&self) -> Option<DecibriError> {
+        self.last_error.lock().ok().and_then(|mut slot| slot.take())
     }
 }
 
@@ -747,6 +771,83 @@ mod tests {
         assert!(
             stream.send(Vec::new()).is_ok(),
             "an empty send is a documented no-op even after stop"
+        );
+    }
+
+    /// Record a device failure the way the cpal output error callback does:
+    /// stash the typed cause, then mark the stream stopped.
+    fn fail_device(stream: &SpeakerStream) {
+        *stream.last_error.lock().unwrap() = Some(DecibriError::DeviceFailed {
+            source: "device disconnected".into(),
+        });
+        stream.running.store(false, Ordering::Relaxed);
+    }
+
+    #[test]
+    fn test_sink_takes_the_device_error_from_the_shared_slot() {
+        let (stream, _receiver, _played) = test_stream();
+        let sink = stream.sink();
+        assert!(
+            sink.take_last_error().is_none(),
+            "a healthy stream's sink has no error to report"
+        );
+
+        fail_device(&stream);
+
+        let err = sink
+            .send(vec![1.0_f32; 4])
+            .expect_err("a send after a device failure must fail");
+        assert!(
+            matches!(err, DecibriError::SpeakerStreamClosed),
+            "the send itself still reports the generic closed-stream error"
+        );
+        let cause = sink
+            .take_last_error()
+            .expect("the sink must reach the stream's device-error slot");
+        assert!(
+            matches!(cause, DecibriError::DeviceFailed { .. }),
+            "the drained cause must be the typed device failure"
+        );
+    }
+
+    #[test]
+    fn test_explicit_stop_leaves_the_error_slot_empty() {
+        let (stream, _receiver, _played) = test_stream();
+        let sink = stream.sink();
+        stream.stop();
+
+        let err = stream
+            .send(vec![1.0_f32; 4])
+            .expect_err("a send after stop() must fail");
+        assert!(matches!(err, DecibriError::SpeakerStreamClosed));
+        assert!(
+            stream.take_last_error().is_none(),
+            "an explicit stop() must never be reported as a device failure"
+        );
+        assert!(
+            sink.take_last_error().is_none(),
+            "an explicit stop() must never be reported as a device failure via a sink"
+        );
+    }
+
+    #[test]
+    fn test_error_slot_is_taken_once_across_stream_and_sinks() {
+        let (stream, _receiver, _played) = test_stream();
+        let sink_a = stream.sink();
+        let sink_b = stream.sink();
+        fail_device(&stream);
+
+        assert!(
+            sink_a.take_last_error().is_some(),
+            "the first observer takes the error"
+        );
+        assert!(
+            sink_b.take_last_error().is_none(),
+            "the slot holds one error and taking it clears it for every holder"
+        );
+        assert!(
+            stream.take_last_error().is_none(),
+            "the stream reads the same slot its sinks do"
         );
     }
 
