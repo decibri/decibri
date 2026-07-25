@@ -305,6 +305,127 @@ def test_sync_iterator_propagates_capture_closed_from_bridge() -> None:
     assert bridge.read_calls == 1
 
 
+def test_sync_read_propagates_device_failed_from_bridge() -> None:
+    """A device failure drained by the bridge reaches the caller as DeviceFailed.
+
+    The wrapper must not translate or swallow it: a disconnect is no longer
+    reported as a closed stream, so ``except MicrophoneStreamClosed`` does not
+    catch it.
+    """
+    from decibri import DecibriError, DeviceFailed, MicrophoneStreamClosed
+
+    class _FailedBridge(_MockBridge):
+        def read(self, timeout_ms: int | None = None) -> bytes | None:
+            raise DeviceFailed("decibri: audio device error: device unplugged")
+
+    d = _make_decibri_with_mock_bridge(_FailedBridge())
+
+    with pytest.raises(DeviceFailed):
+        d.read(timeout_ms=100)
+    # It is still a DecibriError, and it is NOT a closed stream.
+    with pytest.raises(DecibriError):
+        d.read(timeout_ms=100)
+    with pytest.raises(DeviceFailed):
+        try:
+            d.read(timeout_ms=100)
+        except MicrophoneStreamClosed:  # pragma: no cover - must not catch
+            pytest.fail("a device failure must not be caught as MicrophoneStreamClosed")
+
+
+def test_sync_iterator_propagates_device_failed_from_bridge() -> None:
+    """The iterator surface propagates a device failure rather than ending."""
+    from decibri import DeviceFailed
+
+    class _FailedBridge(_MockBridge):
+        def read(self, timeout_ms: int | None = None) -> bytes | None:
+            raise DeviceFailed("decibri: audio device error: device unplugged")
+
+    d = _make_decibri_with_mock_bridge(_FailedBridge())
+
+    with pytest.raises(DeviceFailed):
+        next(iter(d))
+
+
+def test_capture_never_started_is_not_reported_as_a_device_failure() -> None:
+    """A read on a stream that was never started is a closed stream, not a fault.
+
+    Exercises the real bridge: the guard for an inactive capture sits before
+    the read that drains the device-error slot, so it cannot be mislabelled.
+    """
+    from decibri import DeviceFailed, MicrophoneStreamClosed
+
+    d = Microphone()
+    with pytest.raises(MicrophoneStreamClosed):
+        d.read(timeout_ms=100)
+    try:
+        d.read(timeout_ms=100)
+    except DeviceFailed:  # pragma: no cover - must not fire
+        pytest.fail("an inactive capture must not be reported as a device failure")
+    except MicrophoneStreamClosed:
+        pass
+
+
+def test_output_never_started_is_not_reported_as_a_device_failure() -> None:
+    """The playback twin: write() and drain() before start() are closed-stream."""
+    from decibri import DeviceFailed, Speaker, SpeakerStreamClosed
+
+    o = Speaker()
+    for call in (lambda: o.write(b"\x00" * 100), o.drain):
+        with pytest.raises(SpeakerStreamClosed):
+            call()
+        try:
+            call()
+        except DeviceFailed:  # pragma: no cover - must not fire
+            pytest.fail("an inactive speaker must not be reported as a device failure")
+        except SpeakerStreamClosed:
+            pass
+
+
+@pytest.mark.requires_audio_input
+def test_deliberate_stop_is_not_reported_as_a_device_failure() -> None:
+    """An explicit stop() raises the closed-stream error, never DeviceFailed.
+
+    This is the regression the device-failure wiring most risks: the bridge
+    drains its error slot on a failing read, and a deliberate stop leaves that
+    slot empty. Needs a real device, since the slot only exists once a stream
+    has been opened.
+    """
+    from decibri import DeviceFailed, MicrophoneStreamClosed
+
+    d = Microphone()
+    d.start()
+    d.stop()
+
+    with pytest.raises(MicrophoneStreamClosed):
+        d.read(timeout_ms=100)
+    try:
+        d.read(timeout_ms=100)
+    except DeviceFailed:  # pragma: no cover - must not fire
+        pytest.fail("a deliberate stop() must not be reported as a device failure")
+    except MicrophoneStreamClosed:
+        pass
+
+
+@pytest.mark.requires_audio_output
+def test_deliberate_speaker_stop_is_not_reported_as_a_device_failure() -> None:
+    """The playback twin: a write after an explicit stop() is a closed stream."""
+    from decibri import DeviceFailed, Speaker, SpeakerStreamClosed
+
+    o = Speaker()
+    o.start()
+    o.write(b"\x00" * 320)
+    o.stop()
+
+    with pytest.raises(SpeakerStreamClosed):
+        o.write(b"\x00" * 320)
+    try:
+        o.write(b"\x00" * 320)
+    except DeviceFailed:  # pragma: no cover - must not fire
+        pytest.fail("a deliberate stop() must not be reported as a device failure")
+    except SpeakerStreamClosed:
+        pass
+
+
 @pytest.mark.requires_audio_input
 def test_async_read_after_stop_raises_capture_closed() -> None:
     """After await stop(), the next await read() raises MicrophoneStreamClosed."""

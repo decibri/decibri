@@ -687,6 +687,29 @@ fn to_napi_error(e: decibri::error::DecibriError) -> Error {
     Error::new(status, e.to_string())
 }
 
+/// Resolve the cause behind a failed playback operation.
+///
+/// The core reports [`SpeakerStreamClosed`](decibri::error::DecibriError::SpeakerStreamClosed)
+/// for both a deliberate stop and a device that died under it, and stashes the
+/// typed cause in the latter case. `take` drains that slot, and is called only
+/// for the closed-stream error so any other failure is passed through with its
+/// own cause intact. A deliberate stop stashes nothing, so it keeps reporting
+/// the closed-stream error.
+fn speaker_failure_cause<F>(
+    err: decibri::error::DecibriError,
+    take: F,
+) -> decibri::error::DecibriError
+where
+    F: FnOnce() -> Option<decibri::error::DecibriError>,
+{
+    match err {
+        decibri::error::DecibriError::SpeakerStreamClosed => {
+            take().unwrap_or(decibri::error::DecibriError::SpeakerStreamClosed)
+        }
+        other => other,
+    }
+}
+
 // ═══════════════════════════════════════════════════════════════════════════════
 // DecibriOutputBridge: audio playback
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -793,7 +816,9 @@ impl SpeakerParts {
 /// of the stream's crossbeam `Sender` (wrapped in a `SpeakerSink`) and the
 /// already-converted samples. The `cpal::Stream` is not touched here; because the
 /// sink is lock-free, the offloaded `send` cannot block the JS thread's `stop` or
-/// `is_playing`. A closed stream rejects the Promise with `SpeakerStreamClosed`.
+/// `is_playing`. A stopped stream rejects the Promise with `SpeakerStreamClosed`;
+/// a stream the device died under rejects with the stashed `DeviceFailed`, which
+/// the sink reaches through the slot it shares with its stream.
 /// An empty task (no sink) is a no-op for empty writes.
 pub struct WriteTask {
     sink: Option<SpeakerSink>,
@@ -806,7 +831,8 @@ impl Task for WriteTask {
 
     fn compute(&mut self) -> Result<Self::Output> {
         if let (Some(sink), Some(samples)) = (self.sink.as_ref(), self.samples.take()) {
-            sink.send(samples).map_err(to_napi_error)?;
+            sink.send(samples)
+                .map_err(|e| to_napi_error(speaker_failure_cause(e, || sink.take_last_error())))?;
         }
         Ok(())
     }
@@ -822,6 +848,8 @@ impl Task for WriteTask {
 /// because the sink is lock-free, a long drain never blocks the JS thread's
 /// `stop` or `is_playing`. With no stream yet created the sink is `None` and the
 /// drain is a no-op that resolves immediately, matching the synchronous `drain`.
+/// A device that died while audio was still queued rejects the Promise with the
+/// stashed `DeviceFailed`; a deliberate stop stashes nothing and resolves.
 pub struct DrainTask {
     sink: Option<SpeakerSink>,
 }
@@ -833,6 +861,9 @@ impl Task for DrainTask {
     fn compute(&mut self) -> Result<Self::Output> {
         if let Some(sink) = self.sink.as_ref() {
             sink.drain();
+            if let Some(cause) = sink.take_last_error() {
+                return Err(to_napi_error(cause));
+            }
         }
         Ok(())
     }
@@ -910,11 +941,10 @@ impl DecibriOutputBridge {
             SampleFormat::Float32 => sample::f32_le_bytes_to_f32(&buffer),
         };
 
-        self.stream
-            .as_ref()
-            .unwrap()
+        let stream = self.stream.as_ref().unwrap();
+        stream
             .send(samples)
-            .map_err(to_napi_error)
+            .map_err(|e| to_napi_error(speaker_failure_cause(e, || stream.take_last_error())))
     }
 
     /// Non-blocking write: convert the samples and start the stream on the JS
@@ -947,10 +977,20 @@ impl DecibriOutputBridge {
     }
 
     /// Graceful drain: blocks until all queued samples have been played.
+    ///
+    /// Fails when the device died while the audio was still queued: the drain
+    /// returns early once the stream stops running, which covers a deliberate
+    /// stop and a driver failure alike, and only the failure stashes a typed
+    /// cause. An empty slot therefore leaves a normal drain silent.
     #[napi]
-    pub fn drain(&self) {
-        if let Some(stream) = self.stream.as_ref() {
-            stream.drain();
+    pub fn drain(&self) -> Result<()> {
+        let Some(stream) = self.stream.as_ref() else {
+            return Ok(());
+        };
+        stream.drain();
+        match stream.take_last_error() {
+            Some(cause) => Err(to_napi_error(cause)),
+            None => Ok(()),
         }
     }
 

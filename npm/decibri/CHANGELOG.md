@@ -15,6 +15,16 @@ For other decibri packages, see:
 
 - `underrunCount`: a read-only accessor on `Speaker` exposing the core stream's silence-fill counter, in samples. 0 while the producer keeps the queue fed; a rising value means playback is papering over gaps with silence.
 
+### Changed
+
+- Every error that reaches a consumer is a `DecibriError` carrying a `code`. The `Microphone` `'error'` event and the `Speaker` `write()` and `end()` paths previously delivered the raw native error, which reported `name: 'Error'` and the native status string `'GenericFailure'` in `code` for a permission denial, a device loss and a failed open alike, and did not satisfy `instanceof DecibriError`.
+- A playback device that fails mid-stream is reported as `code: 'DEVICE_FAILED'` on the `Speaker` `'error'` event, or as a rejection from `writeAsync()` and `drainAsync()`, instead of the generic closed-stream error. It surfaces on the next write or drain, so a producer that has stopped writing is not told; `isPlaying` goes false immediately either way.
+- `end()` reports a device that failed while the queued tail was still playing, instead of resolving silently. The stream is still stopped and the device released on that path.
+
+### Fixed
+
+- A capture failure raised as `start()` is called (a failed device open, a denied permission) reaches the `'error'` event as a `DecibriError`, instead of escaping as a raw native error.
+
 ## [5.2.2] - 2026-07-25
 
 ### Added

@@ -275,6 +275,25 @@ def test_onnx_backend_failed_is_dedicated_direct_subclass() -> None:
         raise OnnxBackendFailed("backend boom")
 
 
+def test_device_failed_is_not_a_stream_closed_subclass() -> None:
+    """A device failure is reported as ``DeviceFailed``, not as a closed stream.
+
+    Pins the catch-target consequence: code that catches
+    ``MicrophoneStreamClosed`` or ``SpeakerStreamClosed`` to handle a
+    disconnect no longer catches one, and has to catch ``DecibriError`` (or
+    ``DeviceFailed``) instead.
+    """
+    assert not issubclass(DeviceFailed, MicrophoneStreamClosed)
+    assert not issubclass(DeviceFailed, SpeakerStreamClosed)
+    # The reverse also holds: a deliberate stop is not a device failure.
+    assert not issubclass(MicrophoneStreamClosed, DeviceFailed)
+    assert not issubclass(SpeakerStreamClosed, DeviceFailed)
+    # Both remain reachable from the one catch-root a consumer can rely on.
+    for cls in (DeviceFailed, MicrophoneStreamClosed, SpeakerStreamClosed):
+        with pytest.raises(DecibriError):
+            raise cls("boom")
+
+
 def test_new_error_types_importable_from_top_level() -> None:
     """Both are reachable via attribute lookup on the package (not just the
     exceptions submodule), even though they are not in ``__all__``."""

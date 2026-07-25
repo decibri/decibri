@@ -75,6 +75,12 @@ function resolveBundledOrtPath() {
 
 // ─── Microphone (Readable) ──────────────────────────────────────────────────
 
+/**
+ * Failures that reach the consumer arrive on the `'error'` event as a
+ * `DecibriError` carrying a `code`: a failed open or a denied permission when
+ * capture starts, and a device lost mid-capture (`code === 'DEVICE_FAILED'`).
+ * A deliberate `stop()` ends the stream cleanly and raises nothing.
+ */
 class Microphone extends Readable {
   /**
    * @param {import('./decibri').MicrophoneOptions} [options]
@@ -408,39 +414,45 @@ class Microphone extends Readable {
     if (this._started || this._stopped) return;
     this._started = true;
 
-    this._native.start((err, chunk) => {
-      if (err) {
-        this._started = false;
-        // A start()-time failure is delivered here as the raw native error (not
-        // via wrapNativeError), so no decibri `code` is attached on the 'error'
-        // event, as with device-open failures; the dedicated MODEL_LOAD_FAILED
-        // code is reachable through wrapNativeError, not on this streaming path.
-        this.destroy(err);
-        return;
-      }
+    // Both exits from start() reach the consumer on the 'error' event, so both
+    // carry a decibri class and `code`: the synchronous throw below (a failed
+    // device open, a denied permission) and the streaming failure delivered to
+    // the callback (a device lost mid-capture).
+    try {
+      this._native.start((err, chunk) => {
+        if (err) {
+          this._started = false;
+          this.destroy(wrapNativeError(err));
+          return;
+        }
 
-      // On close the native pump flushes the buffered tail; that final data
-      // callback can run after stop() has begun ending the stream. Once the
-      // end-of-stream push(null) has been issued (or the stream was destroyed),
-      // drop any straggler rather than pushing past EOF.
-      if (this._ended || this.destroyed) {
-        return;
-      }
+        // On close the native pump flushes the buffered tail; that final data
+        // callback can run after stop() has begun ending the stream. Once the
+        // end-of-stream push(null) has been issued (or the stream was
+        // destroyed), drop any straggler rather than pushing past EOF.
+        if (this._ended || this.destroyed) {
+          return;
+        }
 
-      // push returns false when the consumer is slow. We can't pause a mic,
-      // but we surface the backpressure warning so callers can react.
-      if (!this.push(chunk)) {
-        this.emit('backpressure');
-      }
+        // push returns false when the consumer is slow. We can't pause a mic,
+        // but we surface the backpressure warning so callers can react.
+        if (!this.push(chunk)) {
+          this.emit('backpressure');
+        }
 
-      if (this._vad) {
-        // Both modes read the score from native: the Silero speech probability
-        // or, in energy mode, the RMS of the pre-enhancement signal. The native
-        // pump computes both on the signal before the opt-in enhancement step,
-        // so enabling enhancement does not change detection in either mode.
-        this._processVadValue(this._native.vadProbability);
-      }
-    });
+        if (this._vad) {
+          // Both modes read the score from native: the Silero speech
+          // probability or, in energy mode, the RMS of the pre-enhancement
+          // signal. The native pump computes both on the signal before the
+          // opt-in enhancement step, so enabling enhancement does not change
+          // detection in either mode.
+          this._processVadValue(this._native.vadProbability);
+        }
+      });
+    } catch (err) {
+      this._started = false;
+      this.destroy(wrapNativeError(err));
+    }
   }
 
   /** @internal Common speech/silence state machine */

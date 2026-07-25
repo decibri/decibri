@@ -10,6 +10,14 @@ const PACKAGE_VERSION = require('../package.json').version;
 
 // ─── Speaker (Writable) ─────────────────────────────────────────────────────
 
+/**
+ * A playback device that fails mid-stream (USB unplug, driver reset) surfaces
+ * on the next write or drain, as a `DecibriError` with `code === 'DEVICE_FAILED'`
+ * on the `'error'` event (or as a rejection from `writeAsync()` / `drainAsync()`).
+ * A producer that has stopped writing is not told; `isPlaying` goes false
+ * immediately either way. A deliberate `stop()` is never reported as a device
+ * failure.
+ */
 class Speaker extends Writable {
   /**
    * @param {import('./decibri').SpeakerOptions} [options]
@@ -143,24 +151,31 @@ class Speaker extends Writable {
       this._native.write(chunk);
       callback();
     } catch (err) {
-      callback(err);
+      callback(wrapNativeError(err));
     }
   }
 
   /** @internal Called by end() after all buffered writes complete. */
   _final(callback) {
+    // end() is terminal: flush all queued audio, then stop. drain() blocks
+    // until everything queued has played (it is a non-terminal flush in the
+    // core), and stop() then ends the stream so isPlaying is false once the
+    // audio has finished. The flush-then-stop order plays the tail to
+    // completion before stopping; reversing it would truncate the audio.
+    // A drain that reports a device failure still has to stop, so the device is
+    // released on the failing path exactly as it is on the clean one.
+    let failure;
     try {
-      // end() is terminal: flush all queued audio, then stop. drain() blocks
-      // until everything queued has played (it is a non-terminal flush in the
-      // core), and stop() then ends the stream so isPlaying is false once the
-      // audio has finished. The flush-then-stop order plays the tail to
-      // completion before stopping; reversing it would truncate the audio.
       this._native.drain();
-      this._native.stop();
-      callback();
     } catch (err) {
-      callback(err);
+      failure = wrapNativeError(err);
     }
+    try {
+      this._native.stop();
+    } catch (err) {
+      failure = failure || wrapNativeError(err);
+    }
+    callback(failure);
   }
 
   /**

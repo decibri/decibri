@@ -324,10 +324,16 @@ class Microphone:
 
     Cleanup and disconnect:
         Mid-stream device disconnect (USB unplug, default-device switch,
-        driver error) is surfaced as a ``MicrophoneStreamClosed`` raised on
-        the next ``read()``. cpal detects the disconnect and closes the
-        underlying stream within roughly 20ms; the wrapper then sees the
-        closed state on its next read attempt and raises.
+        driver error) is surfaced as a ``DeviceFailed`` raised on the next
+        ``read()``, carrying the driver's own cause. cpal detects the
+        disconnect and closes the underlying stream within roughly 20ms; the
+        wrapper then sees the closed state on its next read attempt and
+        raises. ``DeviceFailed`` derives from ``DecibriError``, not from
+        ``MicrophoneStreamClosed``, so catch ``DecibriError`` (or
+        ``DeviceFailed`` itself) to handle a disconnect.
+
+        A deliberate ``stop()`` or ``close()`` is never reported as a device
+        failure: it raises ``MicrophoneStreamClosed`` as before.
 
         Threaded shutdown: calling ``stop()`` from a thread other than
         the one currently blocked inside ``read()`` is safe. It
@@ -898,6 +904,14 @@ class Speaker:
         with Speaker(sample_rate=16000, channels=1) as out:
             out.write(audio_bytes)
             out.drain()
+
+    Disconnect:
+        A playback device that fails mid-stream (USB unplug, driver reset)
+        raises ``DeviceFailed`` from the next ``write()`` or ``drain()``,
+        carrying the driver's own cause. A producer that has stopped writing
+        is not told; ``is_playing`` goes false immediately either way. A
+        deliberate ``stop()`` or ``close()`` is never reported as a device
+        failure: a later ``write()`` raises ``SpeakerStreamClosed`` as before.
     """
 
     def __init__(
