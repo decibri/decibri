@@ -323,6 +323,21 @@ impl CaptureStage {
     /// nothing), and only the conditioned path pays for it: an unconditioned capture
     /// has no chain, so it keeps its zero-cost direct delivery.
     pub(crate) fn run(&mut self, input: &[f32]) -> Result<&[f32], DecibriError> {
+        self.run_normalize(input)?;
+        self.capture_tap();
+        Self::run_segment(&mut self.work, &mut self.scratch, &mut self.transform)?;
+        Ok(&self.work)
+    }
+
+    /// Run one native block through the `normalize` segment alone, returning
+    /// the post-`normalize`, pre-`transform` signal.
+    ///
+    /// Seeds and sanitizes `work` exactly as [`run`](Self::run) does, then
+    /// ping-pongs it across the `normalize` stages only. The returned slice is
+    /// the signal [`run`](Self::run) snapshots into [`tap`](Self::tap), so a
+    /// caller that reads the pre-`transform` signal and never delivers the
+    /// conditioned output takes this instead of a full [`run`](Self::run).
+    pub(crate) fn run_normalize(&mut self, input: &[f32]) -> Result<&[f32], DecibriError> {
         self.work.clear();
         self.work.extend_from_slice(input);
         for sample in self.work.iter_mut() {
@@ -331,8 +346,6 @@ impl CaptureStage {
             }
         }
         Self::run_segment(&mut self.work, &mut self.scratch, &mut self.normalize)?;
-        self.capture_tap();
-        Self::run_segment(&mut self.work, &mut self.scratch, &mut self.transform)?;
         Ok(&self.work)
     }
 
@@ -374,11 +387,9 @@ impl CaptureStage {
     /// which then passes through the `transform` stages. Call once at stream
     /// close, after the last [`run`](Self::run).
     pub(crate) fn flush(&mut self, out: &mut Vec<f32>) -> Result<(), DecibriError> {
-        // `work` carries the inter-stage buffer. It starts empty because there is
-        // no new input at end of stream, only each stage's drained tail; it is
-        // carried unbroken from the `normalize` walk into the `transform` walk.
-        self.work.clear();
-        Self::flush_segment(&mut self.work, &mut self.scratch, &mut self.normalize)?;
+        // `work` is carried unbroken from the `normalize` walk into the
+        // `transform` walk.
+        self.flush_normalize()?;
         // Capture the post-`normalize` tail (the resampler's group-delay tail)
         // before it passes through `transform`, so the tap stays aligned with the
         // delivered output across the close path too.
@@ -386,6 +397,18 @@ impl CaptureStage {
         Self::flush_segment(&mut self.work, &mut self.scratch, &mut self.transform)?;
         out.extend_from_slice(&self.work);
         Ok(())
+    }
+
+    /// Drain the `normalize` segment's end-of-stream tail alone, returning it.
+    ///
+    /// The counterpart of [`run_normalize`](Self::run_normalize) on the close
+    /// path: the resampler's group-delay tail, before it passes through
+    /// `transform`. `work` starts empty because there is no new input at end of
+    /// stream, only each stage's drained tail.
+    pub(crate) fn flush_normalize(&mut self) -> Result<&[f32], DecibriError> {
+        self.work.clear();
+        Self::flush_segment(&mut self.work, &mut self.scratch, &mut self.normalize)?;
+        Ok(&self.work)
     }
 
     /// The post-`normalize`, pre-`transform` signal captured by the most recent
