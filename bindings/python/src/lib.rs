@@ -147,6 +147,7 @@ const EXCEPTION_NAMES: &[&str] = &[
     "StreamStartFailed",
     "VadSampleRateUnsupported",
     "VadThresholdOutOfRange",
+    "ResampleConfigInvalid",
     "FileReadFailed",
     "FileConsumed",
     "FileEngaged",
@@ -201,9 +202,11 @@ fn exception_class<'py>(py: Python<'py>, name: &'static str) -> PyResult<Bound<'
 // ---------------------------------------------------------------------------
 // Error mapping: DecibriError -> PyErr.
 //
-// Covers 40 of the 41 variants explicitly; ResampleConfigInvalid routes to
-// the catch-all `_ =>` arm, which is required anyway because DecibriError is
-// #[non_exhaustive].
+// Every class in decibri.exceptions carries its core variant's name, so the
+// class is chosen by the core's own DecibriError::variant_name(). That match
+// is exhaustive with no catch-all inside crates/decibri, so a variant added
+// there without an identity fails the build; the parity test in
+// tests/test_exceptions.py pins each name to a class in this module.
 //
 // For variants with a `path` field (OrtLoadFailed, OrtPathInvalid,
 // VadModelLoadFailed, ModelLoadFailed), the mapper passes a tuple as the args
@@ -249,222 +252,32 @@ type ExceptionRaiser = Box<dyn FnOnce(Bound<'_, PyType>) -> PyErr>;
 fn to_py_err(py: Python<'_>, err: CoreDecibriError) -> PyErr {
     let msg = err.to_string();
 
-    // Determine which exception class to raise plus the args tuple.
-    // The pure-Python __init__ overrides on OrtLoadFailed, OrtPathInvalid,
-    // and VadModelLoadFailed unpack multi-element tuples into named
-    // attributes; other classes accept a single message string.
-    let (name, raise): (&'static str, ExceptionRaiser) = match err {
-        // Unit variants (15).
-        CoreDecibriError::SampleRateOutOfRange => (
-            "SampleRateOutOfRange",
-            Box::new(move |cls| PyErr::from_type(cls, (msg,))),
-        ),
-        CoreDecibriError::ChannelsOutOfRange => (
-            "ChannelsOutOfRange",
-            Box::new(move |cls| PyErr::from_type(cls, (msg,))),
-        ),
-        CoreDecibriError::MultichannelNotSupported => (
-            "MultichannelNotSupported",
-            Box::new(move |cls| PyErr::from_type(cls, (msg,))),
-        ),
-        CoreDecibriError::FramesPerBufferOutOfRange => (
-            "FramesPerBufferOutOfRange",
-            Box::new(move |cls| PyErr::from_type(cls, (msg,))),
-        ),
-        CoreDecibriError::AgcTargetOutOfRange => (
-            "AgcTargetOutOfRange",
-            Box::new(move |cls| PyErr::from_type(cls, (msg,))),
-        ),
-        CoreDecibriError::LimiterCeilingOutOfRange => (
-            "LimiterCeilingOutOfRange",
-            Box::new(move |cls| PyErr::from_type(cls, (msg,))),
-        ),
-        CoreDecibriError::InvalidFormat => (
-            "InvalidFormat",
-            Box::new(move |cls| PyErr::from_type(cls, (msg,))),
-        ),
-        CoreDecibriError::DeviceIndexOutOfRange => (
-            "DeviceIndexOutOfRange",
-            Box::new(move |cls| PyErr::from_type(cls, (msg,))),
-        ),
-        CoreDecibriError::NoMicrophoneFound => (
-            "NoMicrophoneFound",
-            Box::new(move |cls| PyErr::from_type(cls, (msg,))),
-        ),
-        CoreDecibriError::NoSpeakerFound => (
-            "NoSpeakerFound",
-            Box::new(move |cls| PyErr::from_type(cls, (msg,))),
-        ),
-        CoreDecibriError::NotAnInputDevice => (
-            "NotAnInputDevice",
-            Box::new(move |cls| PyErr::from_type(cls, (msg,))),
-        ),
-        CoreDecibriError::AlreadyRunning => (
-            "AlreadyRunning",
-            Box::new(move |cls| PyErr::from_type(cls, (msg,))),
-        ),
-        CoreDecibriError::PermissionDenied => (
-            "PermissionDenied",
-            Box::new(move |cls| PyErr::from_type(cls, (msg,))),
-        ),
-        CoreDecibriError::MicrophoneStreamClosed => (
-            "MicrophoneStreamClosed",
-            Box::new(move |cls| PyErr::from_type(cls, (msg,))),
-        ),
-        CoreDecibriError::SpeakerStreamClosed => (
-            "SpeakerStreamClosed",
-            Box::new(move |cls| PyErr::from_type(cls, (msg,))),
-        ),
+    // The class is named after the core variant. A variant whose class is not
+    // registered (a core built newer than this binding) falls back to the base
+    // class rather than failing the lookup.
+    let variant = err.variant_name();
+    let name = if EXCEPTION_NAMES.contains(&variant) {
+        variant
+    } else {
+        "DecibriError"
+    };
 
-        // Tuple variants with String (5).
-        CoreDecibriError::MicrophoneNotFound(_) => (
-            "MicrophoneNotFound",
-            Box::new(move |cls| PyErr::from_type(cls, (msg,))),
-        ),
-        CoreDecibriError::SpeakerNotFound(_) => (
-            "SpeakerNotFound",
-            Box::new(move |cls| PyErr::from_type(cls, (msg,))),
-        ),
-        CoreDecibriError::DeviceEnumerationFailed(_) => (
-            "DeviceEnumerationFailed",
-            Box::new(move |cls| PyErr::from_type(cls, (msg,))),
-        ),
-        CoreDecibriError::StreamOpenFailed(_) => (
-            "StreamOpenFailed",
-            Box::new(move |cls| PyErr::from_type(cls, (msg,))),
-        ),
-        CoreDecibriError::StreamStartFailed(_) => (
-            "StreamStartFailed",
-            Box::new(move |cls| PyErr::from_type(cls, (msg,))),
-        ),
-
-        // Tuple variants with primitive (2).
-        CoreDecibriError::VadSampleRateUnsupported(_) => (
-            "VadSampleRateUnsupported",
-            Box::new(move |cls| PyErr::from_type(cls, (msg,))),
-        ),
-        CoreDecibriError::VadThresholdOutOfRange(_) => (
-            "VadThresholdOutOfRange",
-            Box::new(move |cls| PyErr::from_type(cls, (msg,))),
-        ),
-
-        // Offline file source variants (4).
-        CoreDecibriError::FileReadFailed { .. } => (
-            "FileReadFailed",
-            Box::new(move |cls| PyErr::from_type(cls, (msg,))),
-        ),
-        CoreDecibriError::WavInvalid { .. } => (
-            "WavInvalid",
-            Box::new(move |cls| PyErr::from_type(cls, (msg,))),
-        ),
-        CoreDecibriError::VadNotConfigured => (
-            "VadNotConfigured",
-            Box::new(move |cls| PyErr::from_type(cls, (msg,))),
-        ),
-        CoreDecibriError::FileEngaged => (
-            "FileEngaged",
-            Box::new(move |cls| PyErr::from_type(cls, (msg,))),
-        ),
-
-        // Tuple variants with #[source] ort::Error (3).
-        CoreDecibriError::OrtSessionBuildFailed(_) => (
-            "OrtSessionBuildFailed",
-            Box::new(move |cls| PyErr::from_type(cls, (msg,))),
-        ),
-        CoreDecibriError::OrtThreadsConfigFailed(_) => (
-            "OrtThreadsConfigFailed",
-            Box::new(move |cls| PyErr::from_type(cls, (msg,))),
-        ),
-        CoreDecibriError::OrtInferenceFailed(_) => (
-            "OrtInferenceFailed",
-            Box::new(move |cls| PyErr::from_type(cls, (msg,))),
-        ),
-
-        // Struct variants without path (4).
-        CoreDecibriError::MultipleDevicesMatch { .. } => (
-            "MultipleDevicesMatch",
-            Box::new(move |cls| PyErr::from_type(cls, (msg,))),
-        ),
-        CoreDecibriError::OrtInitFailed { .. } => (
-            "OrtInitFailed",
-            Box::new(move |cls| PyErr::from_type(cls, (msg,))),
-        ),
-        CoreDecibriError::OrtTensorCreateFailed { .. } => (
-            "OrtTensorCreateFailed",
-            Box::new(move |cls| PyErr::from_type(cls, (msg,))),
-        ),
-        CoreDecibriError::OrtTensorExtractFailed { .. } => (
-            "OrtTensorExtractFailed",
-            Box::new(move |cls| PyErr::from_type(cls, (msg,))),
-        ),
-
-        // Struct variants with path attribute (4). Multi-element args
-        // tuples that the pure-Python __init__ unpacks into named attributes.
-        CoreDecibriError::OrtLoadFailed { ref path, .. } => {
+    // The pure-Python __init__ overrides on the path-bearing classes unpack
+    // multi-element tuples into named attributes; every other class takes the
+    // message alone.
+    let raise: ExceptionRaiser = match err {
+        CoreDecibriError::OrtLoadFailed { ref path, .. }
+        | CoreDecibriError::VadModelLoadFailed { ref path, .. }
+        | CoreDecibriError::ModelLoadFailed { ref path, .. } => {
             let path_str = path_to_string(path);
-            (
-                "OrtLoadFailed",
-                Box::new(move |cls| PyErr::from_type(cls, (msg, path_str))),
-            )
+            Box::new(move |cls| PyErr::from_type(cls, (msg, path_str)))
         }
         CoreDecibriError::OrtPathInvalid { ref path, reason } => {
             let path_str = path_to_string(path);
             let reason_str = reason.to_string();
-            (
-                "OrtPathInvalid",
-                Box::new(move |cls| PyErr::from_type(cls, (msg, path_str, reason_str))),
-            )
+            Box::new(move |cls| PyErr::from_type(cls, (msg, path_str, reason_str)))
         }
-        CoreDecibriError::VadModelLoadFailed { ref path, .. } => {
-            let path_str = path_to_string(path);
-            (
-                "VadModelLoadFailed",
-                Box::new(move |cls| PyErr::from_type(cls, (msg, path_str))),
-            )
-        }
-        // Model-agnostic counterpart to VadModelLoadFailed: the capture denoise
-        // stage's model file failed to load. Same path-bearing shape.
-        CoreDecibriError::ModelLoadFailed { ref path, .. } => {
-            let path_str = path_to_string(path);
-            (
-                "ModelLoadFailed",
-                Box::new(move |cls| PyErr::from_type(cls, (msg, path_str))),
-            )
-        }
-
-        // ForkAfterOrtInit. Direct DecibriError subclass
-        // (not under OrtError); message-only constructor like the unit
-        // variants. The pid pair is embedded in the Display message; no
-        // separate `init_pid` / `current_pid` Python attributes are
-        // exposed in 0.1.0.
-        CoreDecibriError::ForkAfterOrtInit { .. } => (
-            "ForkAfterOrtInit",
-            Box::new(move |cls| PyErr::from_type(cls, (msg,))),
-        ),
-
-        // DeviceFailed: a runtime device/driver failure during streaming.
-        // Direct DecibriError subclass like the other stream-level variants
-        // (StreamOpenFailed, StreamStartFailed), not under DeviceError (which
-        // is the device-enumeration/selection family). Message-only.
-        CoreDecibriError::DeviceFailed { .. } => (
-            "DeviceFailed",
-            Box::new(move |cls| PyErr::from_type(cls, (msg,))),
-        ),
-
-        // OnnxBackendFailed: a non-ORT ONNX backend failure. Direct
-        // DecibriError subclass (not under OrtError, which is the ORT-specific
-        // family), mirroring ForkAfterOrtInit's deliberate placement.
-        // Message-only.
-        CoreDecibriError::OnnxBackendFailed { .. } => (
-            "OnnxBackendFailed",
-            Box::new(move |cls| PyErr::from_type(cls, (msg,))),
-        ),
-
-        // #[non_exhaustive] catch-all. Fall through to the base class.
-        _ => (
-            "DecibriError",
-            Box::new(move |cls| PyErr::from_type(cls, (msg,))),
-        ),
+        _ => Box::new(move |cls| PyErr::from_type(cls, (msg,))),
     };
 
     match exception_class(py, name) {

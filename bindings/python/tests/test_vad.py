@@ -20,6 +20,7 @@ or Microphone(vad="energy", ...) integration tests using real audio +
 """
 
 import time
+from pathlib import Path
 
 import pytest
 
@@ -384,6 +385,30 @@ def test_vad_energy_mode_end_to_end() -> None:
             assert chunk is not None
         # vad_score is the RMS of the most recent chunk; in [0, 1]
         assert 0.0 <= d.vad_score <= 1.0
+
+
+@pytest.mark.requires_bundled_ort
+def test_silero_missing_model_path_raises_typed_error(tmp_path: Path) -> None:
+    """A model_path that does not exist raises VadModelLoadFailed with .path.
+
+    No device is opened: the detector is built during construction, so this
+    needs ORT but no microphone.
+    """
+    from decibri import DecibriError, OrtError, VadModelLoadFailed
+
+    missing = str(tmp_path / "no-such-decibri-model-b8f2.onnx")
+    with pytest.raises(VadModelLoadFailed) as exc_info:
+        Microphone(
+            sample_rate=16000,
+            channels=1,
+            frames_per_buffer=512,
+            vad="silero",
+            model_path=missing,
+        )
+    err = exc_info.value
+    assert isinstance(err, OrtError)
+    assert isinstance(err, DecibriError)
+    assert "no-such-decibri-model-b8f2.onnx" in err.path
 
 
 @pytest.mark.requires_audio_input

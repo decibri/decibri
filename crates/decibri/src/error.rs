@@ -387,6 +387,209 @@ pub enum DecibriError {
     },
 }
 
+// ── Error identity ─────────────────────────────────────────────────────────
+//
+// One entry per variant drives three things: the variant's own name, its
+// stable code, and one representative instance for the catalog. The generated
+// `code` and `variant_name` matches carry no catch-all arm, so a variant added
+// to the enum without an entry here fails to compile inside this crate.
+// `#[non_exhaustive]` suppresses exhaustiveness checking for downstream crates
+// only; a mapping written outside this crate gets no such protection.
+
+/// A representative `#[source]` payload for a catalog instance.
+fn sample_source() -> Box<dyn std::error::Error + Send + Sync> {
+    Box::new(std::io::Error::other("sample"))
+}
+
+macro_rules! error_identity {
+    ($(
+        $( #[$attr:meta] )*
+        $pattern:pat => $name:literal, $code:literal, $sample:expr ;
+    )*) => {
+        impl DecibriError {
+            /// The variant's own name.
+            ///
+            /// The Python binding's exception classes are named identically,
+            /// so this is the name of the class a Python consumer catches.
+            pub fn variant_name(&self) -> &'static str {
+                match self {
+                    $( $( #[$attr] )* $pattern => $name, )*
+                }
+            }
+
+            /// Stable machine-readable identity for this failure, shared by
+            /// every binding.
+            ///
+            /// SCREAMING_SNAKE of the variant name, with one exception:
+            /// [`Self::OrtPathInvalid`] reports `ORT_LOAD_FAILED`, the same
+            /// code as [`Self::OrtLoadFailed`], because the two are one
+            /// user-facing failure (see [`Self::is_ort_path_error`]).
+            ///
+            /// These values are a frozen surface. Node exposes them as
+            /// `err.code`; Python exposes the same identity as the exception
+            /// class name.
+            pub fn code(&self) -> &'static str {
+                match self {
+                    $( $( #[$attr] )* $pattern => $code, )*
+                }
+            }
+        }
+
+        // An array literal cannot carry a per-element `cfg`, so the entries
+        // are pushed one at a time into a caller-owned vector.
+        fn fill_error_catalog(catalog: &mut Vec<DecibriError>) {
+            $( $( #[$attr] )* catalog.push($sample); )*
+        }
+
+        /// One representative instance of every variant compiled into this
+        /// build, for binding-side coverage tests.
+        ///
+        /// Test support, not a consumer API: the instances carry placeholder
+        /// payloads and the order is the declaration order of the enum.
+        #[doc(hidden)]
+        pub fn error_catalog() -> Vec<DecibriError> {
+            let mut catalog = Vec::new();
+            fill_error_catalog(&mut catalog);
+            catalog
+        }
+    };
+}
+
+error_identity! {
+    DecibriError::SampleRateOutOfRange => "SampleRateOutOfRange", "SAMPLE_RATE_OUT_OF_RANGE",
+        DecibriError::SampleRateOutOfRange;
+    DecibriError::ChannelsOutOfRange => "ChannelsOutOfRange", "CHANNELS_OUT_OF_RANGE",
+        DecibriError::ChannelsOutOfRange;
+    DecibriError::MultichannelNotSupported => "MultichannelNotSupported", "MULTICHANNEL_NOT_SUPPORTED",
+        DecibriError::MultichannelNotSupported;
+    DecibriError::FramesPerBufferOutOfRange => "FramesPerBufferOutOfRange", "FRAMES_PER_BUFFER_OUT_OF_RANGE",
+        DecibriError::FramesPerBufferOutOfRange;
+    DecibriError::AgcTargetOutOfRange => "AgcTargetOutOfRange", "AGC_TARGET_OUT_OF_RANGE",
+        DecibriError::AgcTargetOutOfRange;
+    DecibriError::LimiterCeilingOutOfRange => "LimiterCeilingOutOfRange", "LIMITER_CEILING_OUT_OF_RANGE",
+        DecibriError::LimiterCeilingOutOfRange;
+    DecibriError::InvalidFormat => "InvalidFormat", "INVALID_FORMAT",
+        DecibriError::InvalidFormat;
+
+    DecibriError::MicrophoneNotFound(_) => "MicrophoneNotFound", "MICROPHONE_NOT_FOUND",
+        DecibriError::MicrophoneNotFound("sample".to_string());
+    DecibriError::SpeakerNotFound(_) => "SpeakerNotFound", "SPEAKER_NOT_FOUND",
+        DecibriError::SpeakerNotFound("sample".to_string());
+    DecibriError::MultipleDevicesMatch { .. } => "MultipleDevicesMatch", "MULTIPLE_DEVICES_MATCH",
+        DecibriError::MultipleDevicesMatch {
+            name: "sample".to_string(),
+            matches: "sample".to_string(),
+        };
+    DecibriError::DeviceIndexOutOfRange => "DeviceIndexOutOfRange", "DEVICE_INDEX_OUT_OF_RANGE",
+        DecibriError::DeviceIndexOutOfRange;
+    DecibriError::NoMicrophoneFound => "NoMicrophoneFound", "NO_MICROPHONE_FOUND",
+        DecibriError::NoMicrophoneFound;
+    DecibriError::NoSpeakerFound => "NoSpeakerFound", "NO_SPEAKER_FOUND",
+        DecibriError::NoSpeakerFound;
+    DecibriError::NotAnInputDevice => "NotAnInputDevice", "NOT_AN_INPUT_DEVICE",
+        DecibriError::NotAnInputDevice;
+    DecibriError::DeviceEnumerationFailed(_) => "DeviceEnumerationFailed", "DEVICE_ENUMERATION_FAILED",
+        DecibriError::DeviceEnumerationFailed("sample".to_string());
+
+    DecibriError::AlreadyRunning => "AlreadyRunning", "ALREADY_RUNNING",
+        DecibriError::AlreadyRunning;
+    DecibriError::StreamOpenFailed(_) => "StreamOpenFailed", "STREAM_OPEN_FAILED",
+        DecibriError::StreamOpenFailed("sample".to_string());
+    DecibriError::StreamStartFailed(_) => "StreamStartFailed", "STREAM_START_FAILED",
+        DecibriError::StreamStartFailed("sample".to_string());
+    DecibriError::PermissionDenied => "PermissionDenied", "PERMISSION_DENIED",
+        DecibriError::PermissionDenied;
+    DecibriError::MicrophoneStreamClosed => "MicrophoneStreamClosed", "MICROPHONE_STREAM_CLOSED",
+        DecibriError::MicrophoneStreamClosed;
+    DecibriError::SpeakerStreamClosed => "SpeakerStreamClosed", "SPEAKER_STREAM_CLOSED",
+        DecibriError::SpeakerStreamClosed;
+    DecibriError::DeviceFailed { .. } => "DeviceFailed", "DEVICE_FAILED",
+        DecibriError::DeviceFailed { source: sample_source() };
+
+    #[cfg(feature = "capture")]
+    DecibriError::ResampleConfigInvalid { .. } => "ResampleConfigInvalid", "RESAMPLE_CONFIG_INVALID",
+        DecibriError::ResampleConfigInvalid { in_rate: 44100, out_rate: 16000 };
+
+    DecibriError::VadSampleRateUnsupported(_) => "VadSampleRateUnsupported", "VAD_SAMPLE_RATE_UNSUPPORTED",
+        DecibriError::VadSampleRateUnsupported(44100);
+    DecibriError::VadThresholdOutOfRange(_) => "VadThresholdOutOfRange", "VAD_THRESHOLD_OUT_OF_RANGE",
+        DecibriError::VadThresholdOutOfRange(1.5);
+
+    #[cfg(feature = "capture")]
+    DecibriError::FileReadFailed { .. } => "FileReadFailed", "FILE_READ_FAILED",
+        DecibriError::FileReadFailed {
+            path: PathBuf::from("sample.wav"),
+            source: std::io::Error::other("sample"),
+        };
+    #[cfg(feature = "capture")]
+    DecibriError::WavInvalid { .. } => "WavInvalid", "WAV_INVALID",
+        DecibriError::WavInvalid { reason: "sample" };
+
+    DecibriError::VadNotConfigured => "VadNotConfigured", "VAD_NOT_CONFIGURED",
+        DecibriError::VadNotConfigured;
+    DecibriError::FileEngaged => "FileEngaged", "FILE_ENGAGED",
+        DecibriError::FileEngaged;
+
+    #[cfg(any(feature = "vad", feature = "denoise"))]
+    DecibriError::OrtInitFailed { .. } => "OrtInitFailed", "ORT_INIT_FAILED",
+        DecibriError::OrtInitFailed { source: sample_source() };
+    #[cfg(any(feature = "vad", feature = "denoise"))]
+    DecibriError::OrtLoadFailed { .. } => "OrtLoadFailed", "ORT_LOAD_FAILED",
+        DecibriError::OrtLoadFailed {
+            path: PathBuf::from("sample"),
+            source: sample_source(),
+        };
+    // Shares ORT_LOAD_FAILED with OrtLoadFailed: one user-facing failure, one
+    // identity. The only code shared by two variants.
+    #[cfg(any(feature = "vad", feature = "denoise"))]
+    DecibriError::OrtPathInvalid { .. } => "OrtPathInvalid", "ORT_LOAD_FAILED",
+        DecibriError::OrtPathInvalid {
+            path: PathBuf::from("sample"),
+            reason: "sample",
+        };
+    #[cfg(any(feature = "vad", feature = "denoise"))]
+    DecibriError::OrtSessionBuildFailed(_) => "OrtSessionBuildFailed", "ORT_SESSION_BUILD_FAILED",
+        DecibriError::OrtSessionBuildFailed(sample_source());
+    #[cfg(any(feature = "vad", feature = "denoise"))]
+    DecibriError::OrtThreadsConfigFailed(_) => "OrtThreadsConfigFailed", "ORT_THREADS_CONFIG_FAILED",
+        DecibriError::OrtThreadsConfigFailed(sample_source());
+    #[cfg(any(feature = "vad", feature = "denoise"))]
+    DecibriError::VadModelLoadFailed { .. } => "VadModelLoadFailed", "VAD_MODEL_LOAD_FAILED",
+        DecibriError::VadModelLoadFailed {
+            path: PathBuf::from("sample"),
+            source: sample_source(),
+        };
+    #[cfg(any(feature = "vad", feature = "denoise"))]
+    DecibriError::ModelLoadFailed { .. } => "ModelLoadFailed", "MODEL_LOAD_FAILED",
+        DecibriError::ModelLoadFailed {
+            path: PathBuf::from("sample"),
+            source: sample_source(),
+        };
+    #[cfg(any(feature = "vad", feature = "denoise"))]
+    DecibriError::OrtInferenceFailed(_) => "OrtInferenceFailed", "ORT_INFERENCE_FAILED",
+        DecibriError::OrtInferenceFailed(sample_source());
+    #[cfg(any(feature = "vad", feature = "denoise"))]
+    DecibriError::OrtTensorCreateFailed { .. } => "OrtTensorCreateFailed", "ORT_TENSOR_CREATE_FAILED",
+        DecibriError::OrtTensorCreateFailed {
+            kind: "sample",
+            source: sample_source(),
+        };
+    #[cfg(any(feature = "vad", feature = "denoise"))]
+    DecibriError::OrtTensorExtractFailed { .. } => "OrtTensorExtractFailed", "ORT_TENSOR_EXTRACT_FAILED",
+        DecibriError::OrtTensorExtractFailed {
+            kind: "sample",
+            source: sample_source(),
+        };
+
+    DecibriError::ForkAfterOrtInit { .. } => "ForkAfterOrtInit", "FORK_AFTER_ORT_INIT",
+        DecibriError::ForkAfterOrtInit { init_pid: 1, current_pid: 2 };
+    DecibriError::OnnxBackendFailed { .. } => "OnnxBackendFailed", "ONNX_BACKEND_FAILED",
+        DecibriError::OnnxBackendFailed {
+            backend: "sample",
+            source: sample_source(),
+        };
+}
+
 /// Bridge the capture resampler's construction error into the central error.
 ///
 /// Both `ResamplerError` variants are construction-time; the resampler's steady
@@ -481,6 +684,80 @@ mod tests {
             msg.starts_with("Microphone permission denied. "),
             "frozen prefix must not drift: {msg}"
         );
+    }
+
+    /// SCREAMING_SNAKE of the variant name, computed the way the naming rule
+    /// states it, so a hand-typed code that drifts from its variant fails here.
+    fn screaming_snake(name: &str) -> String {
+        let mut out = String::new();
+        for (i, ch) in name.char_indices() {
+            if i > 0 && ch.is_ascii_uppercase() {
+                out.push('_');
+            }
+            out.push(ch.to_ascii_uppercase());
+        }
+        out
+    }
+
+    /// Every code is SCREAMING_SNAKE of its own variant name, with the single
+    /// documented collapse.
+    #[test]
+    fn codes_follow_the_naming_rule() {
+        for err in error_catalog() {
+            let name = err.variant_name();
+            let expected = if name == "OrtPathInvalid" {
+                "ORT_LOAD_FAILED".to_string()
+            } else {
+                screaming_snake(name)
+            };
+            assert_eq!(err.code(), expected, "code drifted for {name}");
+        }
+    }
+
+    /// The catalog carries each variant once, so a binding-side coverage test
+    /// walking it sees no variant twice and no variant missing.
+    #[test]
+    fn catalog_names_are_unique() {
+        let catalog = error_catalog();
+        let mut names: Vec<&str> = catalog.iter().map(|e| e.variant_name()).collect();
+        let total = names.len();
+        names.sort_unstable();
+        names.dedup();
+        assert_eq!(names.len(), total, "catalog carries a variant twice");
+    }
+
+    /// One code is shared by exactly two variants: the documented
+    /// `OrtPathInvalid` collapse onto `ORT_LOAD_FAILED`. Every other code
+    /// belongs to one variant.
+    #[cfg(any(feature = "vad", feature = "denoise"))]
+    #[test]
+    fn only_the_ort_path_pair_shares_a_code() {
+        let catalog = error_catalog();
+        let shared: Vec<&str> = catalog
+            .iter()
+            .filter(|e| {
+                catalog
+                    .iter()
+                    .filter(|other| other.code() == e.code())
+                    .count()
+                    > 1
+            })
+            .map(|e| e.variant_name())
+            .collect();
+        assert_eq!(shared, ["OrtLoadFailed", "OrtPathInvalid"]);
+    }
+
+    /// Every catalog instance renders a non-empty Display string, which is what
+    /// the binding-side coverage tests classify on.
+    #[test]
+    fn catalog_instances_render() {
+        for err in error_catalog() {
+            assert!(
+                !err.to_string().is_empty(),
+                "empty Display for {}",
+                err.variant_name()
+            );
+        }
     }
 
     /// The `FileEngaged` Display message is matched by prefix in the Node

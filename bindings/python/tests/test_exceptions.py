@@ -1,7 +1,7 @@
 """Exception hierarchy tests.
 
-Covers all 45 exception classes shipped in the public ``decibri`` namespace:
-1 base (DecibriError) + 23 direct subclasses + DeviceError intermediate
+Covers all 46 exception classes shipped in the public ``decibri`` namespace:
+1 base (DecibriError) + 24 direct subclasses + DeviceError intermediate
 + 8 direct DeviceError subclasses + OrtError intermediate + 8 direct
 OrtError subclasses + OrtPathError intermediate + 2 direct OrtPathError
 subclasses.
@@ -58,9 +58,10 @@ from decibri import (
     OrtTensorCreateFailed,
     OrtTensorExtractFailed,
     OrtThreadsConfigFailed,
+    PermissionDenied,
+    ResampleConfigInvalid,
     SpeakerNotFound,
     SpeakerStreamClosed,
-    PermissionDenied,
     SampleRateOutOfRange,
     StreamOpenFailed,
     StreamStartFailed,
@@ -74,13 +75,13 @@ import pytest
 
 
 # ---------------------------------------------------------------------------
-# All 45 classes are reachable and inherit from Exception via DecibriError.
+# All 46 classes are reachable and inherit from Exception via DecibriError.
 # ---------------------------------------------------------------------------
 
 
 ALL_DECIBRI_ERROR_CLASSES = (
     DecibriError,
-    # 23 direct DecibriError subclasses (non-device, non-ORT). DeviceFailed
+    # 24 direct DecibriError subclasses (non-device, non-ORT). DeviceFailed
     # is a runtime device/driver failure (distinct from the DeviceError
     # enumeration/selection family); OnnxBackendFailed is the non-ORT ONNX
     # backend catch-all (distinct from the OrtError family); FileConsumed and
@@ -100,6 +101,7 @@ ALL_DECIBRI_ERROR_CLASSES = (
     StreamStartFailed,
     VadSampleRateUnsupported,
     VadThresholdOutOfRange,
+    ResampleConfigInvalid,
     DeviceFailed,
     OnnxBackendFailed,
     FileConsumed,
@@ -135,12 +137,11 @@ ALL_DECIBRI_ERROR_CLASSES = (
 
 
 def test_class_count() -> None:
-    # 45 total: 1 base + 23 direct + DeviceError + 8 device + OrtError
-    # + 8 ORT direct + OrtPathError + 2 path. The additions over the prior 40
-    # are FileEngaged, raised when a File whose iteration has begun is
-    # analyzed, and four classes the tuple previously omitted: FileReadFailed,
-    # WavInvalid, VadNotConfigured, and ForkAfterOrtInit.
-    assert len(ALL_DECIBRI_ERROR_CLASSES) == 45
+    # 46 total: 1 base + 24 direct + DeviceError + 8 device + OrtError
+    # + 8 ORT direct + OrtPathError + 2 path. The addition over the prior 45
+    # is ResampleConfigInvalid, which gives the last core variant without a
+    # class one of its own.
+    assert len(ALL_DECIBRI_ERROR_CLASSES) == 46
 
 
 def test_all_inherit_from_decibri_error() -> None:
@@ -436,3 +437,70 @@ def test_exception_names_registry_resolves_in_module() -> None:
         assert isinstance(cls, type) and issubclass(cls, py_exc.DecibriError), (
             f"decibri.exceptions.{name} is not a DecibriError subclass"
         )
+
+
+# ---------------------------------------------------------------------------
+# Core variant parity.
+#
+# to_py_err picks the class by the core's DecibriError::variant_name(), so a
+# core variant with no class of that name falls back to the base class and
+# stops being distinguishable. The core's identity table is exhaustive with no
+# catch-all arm, so a new variant fails the Rust build until it is listed
+# there; these tests are what carry that guarantee across into Python. Runs
+# only where the Rust source tree is present (the main pytest suite); the wheel
+# install-test gate does not include this file.
+# ---------------------------------------------------------------------------
+
+
+_CORE_ERROR_RS = (
+    Path(__file__).resolve().parents[3] / "crates" / "decibri" / "src" / "error.rs"
+)
+
+
+def _core_variant_names() -> list[str]:
+    source = _CORE_ERROR_RS.read_text(encoding="utf-8")
+    table = re.search(r"error_identity! \{(.*?)\n\}\n", source, re.DOTALL)
+    assert table is not None, "error_identity! table not found in crates/decibri/src/error.rs"
+    names = re.findall(r'=>\s*"([A-Za-z]+)",\s*"[A-Z0-9_]+"', table.group(1))
+    # Parse sanity: the table is never empty and always carries a known variant.
+    assert names, "no variants parsed from the core identity table"
+    assert "PermissionDenied" in names, "known variant missing from the parsed table"
+    # The count is pinned deliberately and must be updated when a core variant
+    # is added or removed.
+    assert len(names) == 41, (
+        f"parsed {len(names)} variants from the core identity table, expected 41;"
+        " the count is pinned deliberately and must be updated when a core"
+        " variant is added or removed"
+    )
+    return names
+
+
+def test_core_variants_have_exception_classes() -> None:
+    """Every core DecibriError variant names a class in decibri.exceptions."""
+    from decibri import exceptions as py_exc
+
+    for name in _core_variant_names():
+        cls = getattr(py_exc, name, None)
+        assert cls is not None, (
+            f"core variant {name!r} has no matching class in decibri.exceptions"
+        )
+        assert isinstance(cls, type) and issubclass(cls, py_exc.DecibriError), (
+            f"decibri.exceptions.{name} is not a DecibriError subclass"
+        )
+        assert cls is not py_exc.DecibriError, (
+            f"core variant {name!r} resolves to the DecibriError base class,"
+            " not a class of its own"
+        )
+
+
+def test_core_variants_are_in_the_registry() -> None:
+    """Every core variant is registered, so none falls back to the base class."""
+    source = _BINDING_LIB_RS.read_text(encoding="utf-8")
+    registry = re.search(
+        r"const EXCEPTION_NAMES: &\[&str\] = &\[(.*?)\];", source, re.DOTALL
+    )
+    assert registry is not None, "EXCEPTION_NAMES not found in src/lib.rs"
+    registered = set(re.findall(r'"([A-Za-z]+)"', registry.group(1)))
+
+    missing = [name for name in _core_variant_names() if name not in registered]
+    assert not missing, f"core variants absent from EXCEPTION_NAMES: {missing}"

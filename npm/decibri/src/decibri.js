@@ -176,7 +176,9 @@ class Microphone extends Readable {
     // for a clean Node-side RangeError without a round-trip.
     let resolvedDevice = options.device;
     if (typeof options.device === 'number') {
-      const devices = DecibriBridge.devices();
+      // Through the static so an enumeration failure raised while resolving an
+      // index carries the same DeviceError the public listing does.
+      const devices = Microphone.devices();
       if (options.device < 0 || options.device >= devices.length) {
         throw new RangeError('device index out of range. Call Microphone.devices() to list available devices');
       }
@@ -262,11 +264,15 @@ class Microphone extends Readable {
       );
     }
 
+    // The existence pre-check runs before the native bridge is constructed, so
+    // it never passes through wrapNativeError. It raises the same class and
+    // code the deep load failure would, so the detection point differs between
+    // a missing file and an unloadable one but the identity does not.
     let modelPath = undefined;
     if (vadEnabled && vadMode === 'silero') {
       modelPath = options.modelPath || path.join(__dirname, '..', 'models', 'silero_vad.onnx');
       if (!fs.existsSync(modelPath)) {
-        throw new Error(`Silero VAD model not found at ${modelPath}. Ensure the models/ directory is included in your installation.`);
+        throw new OrtError(`Silero VAD model not found at ${modelPath}. Ensure the models/ directory is included in your installation.`, 'VAD_MODEL_LOAD_FAILED');
       }
     }
 
@@ -295,7 +301,7 @@ class Microphone extends Readable {
       }
       denoiseModelPath = path.join(__dirname, '..', 'models', 'fastenhancer_t.onnx');
       if (!fs.existsSync(denoiseModelPath)) {
-        throw new Error(`Denoise model not found at ${denoiseModelPath}. Ensure the models/ directory is included in your installation.`);
+        throw new OrtError(`Denoise model not found at ${denoiseModelPath}. Ensure the models/ directory is included in your installation.`, 'MODEL_LOAD_FAILED');
       }
     }
 
@@ -534,7 +540,11 @@ class Microphone extends Readable {
    * @returns {Array<{index: number, name: string, id: string, maxInputChannels: number, defaultSampleRate: number, isDefault: boolean}>}
    */
   static devices() {
-    return DecibriBridge.devices();
+    try {
+      return DecibriBridge.devices();
+    } catch (err) {
+      throw wrapNativeError(err);
+    }
   }
 
   /**
@@ -717,11 +727,13 @@ class File extends Readable {
       );
     }
 
+    // Same pre-check and same identity as Microphone: a missing model file
+    // reports the class and code its load failure would.
     let modelPath = undefined;
     if (vadEnabled && vadMode === 'silero') {
       modelPath = options.modelPath || path.join(__dirname, '..', 'models', 'silero_vad.onnx');
       if (!fs.existsSync(modelPath)) {
-        throw new Error(`Silero VAD model not found at ${modelPath}. Ensure the models/ directory is included in your installation.`);
+        throw new OrtError(`Silero VAD model not found at ${modelPath}. Ensure the models/ directory is included in your installation.`, 'VAD_MODEL_LOAD_FAILED');
       }
     }
 
@@ -739,7 +751,7 @@ class File extends Readable {
       }
       denoiseModelPath = path.join(__dirname, '..', 'models', 'fastenhancer_t.onnx');
       if (!fs.existsSync(denoiseModelPath)) {
-        throw new Error(`Denoise model not found at ${denoiseModelPath}. Ensure the models/ directory is included in your installation.`);
+        throw new OrtError(`Denoise model not found at ${denoiseModelPath}. Ensure the models/ directory is included in your installation.`, 'MODEL_LOAD_FAILED');
       }
     }
 

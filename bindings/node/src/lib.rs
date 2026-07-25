@@ -471,13 +471,14 @@ impl DecibriBridge {
                     Ok(None) => {
                         // Timeout with no full frame yet: keep waiting.
                     }
-                    Err(_) => {
-                        // The core stream closed (an explicit stop() or a
-                        // device/driver error) and all buffered audio has been
-                        // forwarded. Forward the typed cause to JS when one was
-                        // recorded so the callback raises 'error' rather than
-                        // silently stalling; a clean stop records none.
-                        if let Some(err) = pump_stream.take_last_error() {
+                    Err(e) => {
+                        // The read failed and all buffered audio has been
+                        // forwarded. Forward the typed cause to JS when there
+                        // is one so the callback raises 'error' rather than
+                        // silently stalling; a clean stop has none.
+                        if let Some(err) =
+                            capture_failure_cause(e, || pump_stream.take_last_error())
+                        {
                             tsfn.call(
                                 Err(to_napi_error(err)),
                                 ThreadsafeFunctionCallMode::NonBlocking,
@@ -626,10 +627,17 @@ fn resolve_device_option(device: &Option<serde_json::Value>) -> Result<DeviceSel
 
 fn to_napi_error(e: decibri::error::DecibriError) -> Error {
     use decibri::error::DecibriError::*;
-    // Every variant is listed explicitly so the grep check in our release
-    // procedure can confirm coverage. A trailing `_ =>` arm is required
-    // because `DecibriError` is `#[non_exhaustive]`; it catches future
-    // variants added upstream and maps them to the safe default.
+    // This match picks the napi `Status` only. The error's identity travels in
+    // the Display string, which `wrapNativeError` in npm/decibri/src/errors.js
+    // turns into the JS class and `code`; the catalog test in tests/test-ci.js
+    // pins that table against the core's own `DecibriError::code()`.
+    //
+    // A trailing `_ =>` arm is required because `DecibriError` is
+    // `#[non_exhaustive]` and this is a downstream crate, so the compiler
+    // cannot require full coverage here. The arms below are grouped by whether
+    // the failure is bad caller input or a runtime condition; a variant that
+    // reaches the catch-all gets the same `GenericFailure` the runtime group
+    // gets.
     let status = match &e {
         // Config validation (bad caller input)
         SampleRateOutOfRange
@@ -675,16 +683,65 @@ fn to_napi_error(e: decibri::error::DecibriError) -> Error {
         | ModelLoadFailed { .. }
         | OrtInferenceFailed(_)
         | OrtTensorCreateFailed { .. }
-        | OrtTensorExtractFailed { .. } => Status::GenericFailure,
+        | OrtTensorExtractFailed { .. }
+        | ResampleConfigInvalid { .. }
+        | ForkAfterOrtInit { .. }
+        | OnnxBackendFailed { .. } => Status::GenericFailure,
 
-        // `DecibriError` is `#[non_exhaustive]`. A new variant added upstream
-        // without a corresponding arm here falls through to `GenericFailure`
-        // at runtime rather than failing to compile. Variant coverage was
-        // compiler-enforced during the 3.2.0 refactor by temporarily removing
-        // both `#[non_exhaustive]` and this arm; both have been restored.
+        // Required by `#[non_exhaustive]`; a variant added upstream lands here
+        // with the same status the runtime group carries.
         _ => Status::GenericFailure,
     };
     Error::new(status, e.to_string())
+}
+
+/// Every core error variant compiled into this addon, as a JSON array of
+/// `{ name, code, message }`.
+///
+/// Test support for the coverage check in `tests/test-ci.js`, which asserts
+/// that `wrapNativeError` gives each of these its own identity. A JSON string
+/// rather than an object array so no type is added to the generated TypeScript
+/// definitions; the function itself is hidden from them. Not part of the
+/// documented Node surface.
+#[napi(js_name = "__errorCatalog", skip_typescript)]
+pub fn error_catalog() -> String {
+    let entries: Vec<serde_json::Value> = decibri::error::error_catalog()
+        .into_iter()
+        .map(|e| {
+            serde_json::json!({
+                "name": e.variant_name(),
+                "code": e.code(),
+                "message": e.to_string(),
+            })
+        })
+        .collect();
+    serde_json::Value::Array(entries).to_string()
+}
+
+/// Resolve what, if anything, the consumer should be told about a failed
+/// capture read.
+///
+/// The core reports [`MicrophoneStreamClosed`](decibri::error::DecibriError::MicrophoneStreamClosed)
+/// for both a deliberate stop and a device that died under it, and stashes the
+/// typed cause in the latter case. `take` drains that slot, and is called only
+/// for the closed-stream error, so:
+///
+/// - a deliberate `stop()` stashes nothing and yields `None`, which is what
+///   keeps a clean stop from raising `'error'`;
+/// - a device that died yields the stashed `DeviceFailed`;
+/// - any other read failure (a conditioning stage that errored mid-stream) is
+///   the cause itself and is forwarded with its own identity intact.
+fn capture_failure_cause<F>(
+    err: decibri::error::DecibriError,
+    take: F,
+) -> Option<decibri::error::DecibriError>
+where
+    F: FnOnce() -> Option<decibri::error::DecibriError>,
+{
+    match err {
+        decibri::error::DecibriError::MicrophoneStreamClosed => take(),
+        other => Some(other),
+    }
 }
 
 /// Resolve the cause behind a failed playback operation.

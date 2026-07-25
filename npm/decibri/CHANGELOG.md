@@ -21,9 +21,15 @@ For other decibri packages, see:
 - A playback device that fails mid-stream is reported as `code: 'DEVICE_FAILED'` on the `Speaker` `'error'` event, or as a rejection from `writeAsync()` and `drainAsync()`, instead of the generic closed-stream error. It surfaces on the next write or drain, so a producer that has stopped writing is not told; `isPlaying` goes false immediately either way.
 - `end()` reports a device that failed while the queued tail was still playing, instead of resolving silently. The stream is still stopped and the device released on that path.
 
+- Every failure the core classifies as a `DecibriError` carries its own `code`. Ten failures that reported the generic `'DECIBRI_ERROR'` before now carry a distinct code: `'ALREADY_RUNNING'`, `'STREAM_OPEN_FAILED'`, `'STREAM_START_FAILED'`, `'PERMISSION_DENIED'`, `'MICROPHONE_STREAM_CLOSED'`, `'SPEAKER_STREAM_CLOSED'`, `'RESAMPLE_CONFIG_INVALID'`, `'FILE_READ_FAILED'`, `'WAV_INVALID'` and `'FORK_AFTER_ORT_INIT'`. Every code that existed before keeps its value, and `instanceof DecibriError` is unaffected for these ten. `'DECIBRI_ERROR'` remains the code for a failure decibri has not classified.
+- A bad `agc` target, a bad `limiter` ceiling, and a multichannel `channels` value now raise `RangeError` rather than a `DecibriError` with `code: 'DECIBRI_ERROR'`, matching what the wrapper's own checks already raise for the same inputs.
+
 ### Fixed
 
 - A capture failure raised as `start()` is called (a failed device open, a denied permission) reaches the `'error'` event as a `DecibriError`, instead of escaping as a raw native error.
+- A missing Silero or denoise model file throws an `OrtError` carrying `code: 'VAD_MODEL_LOAD_FAILED'` or `'MODEL_LOAD_FAILED'`, instead of a plain `Error` with no `code` that was not a `DecibriError`. The message is unchanged.
+- `Microphone.devices()` and `Speaker.devices()` report an enumeration failure as a `DeviceError` with `code: 'DEVICE_ENUMERATION_FAILED'`, instead of letting the raw native error escape. The same applies to the enumeration performed when a numeric `device` index is resolved.
+- A conditioning failure during capture (a denoise or VAD stage that errors mid-stream) reaches the `'error'` event with its own code, instead of ending the stream with no event.
 
 ## [5.2.2] - 2026-07-25
 
