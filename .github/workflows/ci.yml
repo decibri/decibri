@@ -89,11 +89,11 @@ jobs:
       #     and doctests under that feature selection.
       #   - The ORT-backed cells run `cargo check --all-targets`, which
       #     type-checks every test target without linking or downloading ONNX
-      #     Runtime. Their tests cannot execute here: `default` pins
-      #     ort-load-dynamic and no ORT dylib is resolvable on a runner, while
-      #     `vad` and `no-vad-full` select no ORT distribution mode, so their
-      #     test binaries do not link. The maximal feature set's tests run in
-      #     the Rust Tests job via the cargo test-decibri alias
+      #     Runtime. All three pin ort-load-dynamic (`vad` and `no-vad-full`
+      #     explicitly, which the distribution-mode guard in lib.rs requires),
+      #     so they compile; their tests cannot execute here because no ORT
+      #     dylib is resolvable on a runner. The maximal feature set's tests
+      #     run in the Rust Tests job via the cargo test-decibri alias
       #     (ort-download-binaries).
       #
       # Exclusions, by design:
@@ -112,8 +112,8 @@ jobs:
           - { name: capture, command: "test", flags: "--no-default-features --features capture" }
           - { name: playback, command: "test", flags: "--no-default-features --features playback" }
           - { name: capture+playback, command: "test", flags: "--no-default-features --features capture,playback" }
-          - { name: vad, command: "check --all-targets", flags: "--no-default-features --features vad" }
-          - { name: no-vad-full, command: "check --all-targets", flags: "--no-default-features --features capture,playback,denoise,gain" }
+          - { name: vad, command: "check --all-targets", flags: "--no-default-features --features vad,ort-load-dynamic" }
+          - { name: no-vad-full, command: "check --all-targets", flags: "--no-default-features --features capture,playback,denoise,gain,ort-load-dynamic" }
     steps:
       - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable

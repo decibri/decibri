@@ -26,6 +26,7 @@ For other decibri packages, see:
 
 - `File::open` opens WAV files using the WAVE_FORMAT_EXTENSIBLE container when their SubFormat GUID names 16-bit PCM or 32-bit IEEE float; they were rejected as an unsupported encoding.
 - `File::open` opens WAV files whose `data` chunk precedes their format chunk; they were rejected as missing the format chunk.
+- Building with `vad` or `denoise` and no ONNX Runtime distribution mode fails at compile time with a message naming the two modes (`ort-load-dynamic`, `ort-download-binaries`), instead of at link with an unresolved `OrtGetApiBase` symbol.
 
 ## [5.2.1] - 2026-07-25
 

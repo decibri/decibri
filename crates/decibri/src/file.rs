@@ -856,10 +856,11 @@ fn parse_wav(bytes: &[u8]) -> Result<WavSource, DecibriError> {
     }
 
     // Walk the chunk list for `fmt ` and `data`, taking the first of each;
-    // RIFF fixes neither their order nor their count. The walk ends once
-    // both are found, so bytes past that point are not examined, exactly as
-    // before for the conventional order. Chunk bodies are padded to an even
-    // byte count in the file.
+    // RIFF fixes neither their order nor their count. Every `fmt ` chunk the
+    // walk meets is validated, and only the first is recorded. The walk ends
+    // once both are found, so bytes past that point are not examined, exactly
+    // as before for the conventional order. Chunk bodies are padded to an
+    // even byte count in the file.
     let mut fmt: Option<(usize, usize)> = None; // body offset, size
     let mut data: Option<(usize, usize)> = None; // body offset, size
     let mut offset = 12usize;
@@ -870,11 +871,13 @@ fn parse_wav(bytes: &[u8]) -> Result<WavSource, DecibriError> {
         if body + size > bytes.len() {
             return Err(invalid("chunk extends past end of file"));
         }
-        if id == b"fmt " && fmt.is_none() {
+        if id == b"fmt " {
             if size < 16 {
                 return Err(invalid("fmt chunk too short"));
             }
-            fmt = Some((body, size));
+            if fmt.is_none() {
+                fmt = Some((body, size));
+            }
         } else if id == b"data" && data.is_none() {
             data = Some((body, size));
         }
@@ -1332,6 +1335,31 @@ mod tests {
         assert_eq!(parsed.samples, expected.samples);
         assert_eq!(parsed.sample_rate, 16000);
         assert_eq!(parsed.channels, 1);
+    }
+
+    /// A malformed duplicate `fmt ` chunk is rejected even though a valid
+    /// first `fmt ` chunk wins: every `fmt ` chunk the walk meets is
+    /// validated, not only the recorded one.
+    #[test]
+    fn short_duplicate_fmt_chunk_is_rejected() {
+        let samples = sine(16000, 0.1);
+        let conventional = wav_bytes(1, 1, 16000, &samples);
+        // Splice a too-short `fmt ` chunk between the valid `fmt ` chunk
+        // (bytes 12..36) and the `data` chunk (bytes 36..), so the walk
+        // meets it before both chunks are found.
+        let mut doubled = conventional[0..36].to_vec();
+        doubled.extend_from_slice(b"fmt ");
+        doubled.extend_from_slice(&8u32.to_le_bytes());
+        doubled.extend_from_slice(&[0u8; 8]);
+        doubled.extend_from_slice(&conventional[36..]);
+
+        let err = parse_wav(&doubled)
+            .err()
+            .expect("a too-short duplicate fmt chunk should be rejected");
+        assert!(matches!(
+            err,
+            DecibriError::WavInvalid { reason } if reason == "fmt chunk too short"
+        ));
     }
 
     /// Bytes after the last chunk the parse needs are not examined: a file

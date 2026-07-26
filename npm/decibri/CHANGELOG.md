@@ -6,8 +6,8 @@ Changes to the decibri npm package, published to npmjs.com. Tags use the `npm-v*
 
 For other decibri packages, see:
 
-- Rust crate: [crates/decibri/CHANGELOG.md](../../crates/decibri/CHANGELOG.md)
-- Python wheel: [bindings/python/CHANGELOG.md](../../bindings/python/CHANGELOG.md)
+- Rust core: [crates/decibri/CHANGELOG.md](../../crates/decibri/CHANGELOG.md)
+- Python package: [bindings/python/CHANGELOG.md](../../bindings/python/CHANGELOG.md)
 
 ## [Unreleased]
 

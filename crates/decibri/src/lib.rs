@@ -162,6 +162,17 @@ compile_error!(
      if you want `ort-download-binaries`, disable default features first."
 );
 
+#[cfg(all(
+    any(feature = "vad", feature = "denoise"),
+    not(feature = "ort-load-dynamic"),
+    not(feature = "ort-download-binaries")
+))]
+compile_error!(
+    "features `vad` and `denoise` require an ONNX Runtime distribution mode; \
+     enable exactly one of `ort-load-dynamic` or `ort-download-binaries`. \
+     The default feature set enables `ort-load-dynamic`."
+);
+
 pub mod error;
 pub mod sample;
 
