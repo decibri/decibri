@@ -22,6 +22,11 @@ For other decibri packages, see:
 - Whole-recording analysis (`File::analyze`, `File::analyse`) is faster: it runs only the channel and rate normalization the detector reads, not the conditioning transform. The report is unchanged, and iterating a `File` still applies conditioning in full.
 - `SpeakerStream::take_last_error` and `MicrophoneStream::take_last_error` document that the slot holds one error and taking it clears it, so the first observer wins. Keep to one draining call site per consumer.
 
+### Fixed
+
+- `File::open` opens WAV files using the WAVE_FORMAT_EXTENSIBLE container when their SubFormat GUID names 16-bit PCM or 32-bit IEEE float; they were rejected as an unsupported encoding.
+- `File::open` opens WAV files whose `data` chunk precedes their format chunk; they were rejected as missing the format chunk.
+
 ## [5.2.1] - 2026-07-25
 
 ### Added
