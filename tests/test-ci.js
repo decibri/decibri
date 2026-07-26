@@ -641,6 +641,94 @@ console.log('--- Group 7c: typed model, resampler, and enumeration failures ---'
 console.log('  Group 7c done\n');
 
 // ═══════════════════════════════════════════════════════════════════════════════
+// Group 7d: the browser entry rejects the same input the same way
+// ═══════════════════════════════════════════════════════════════════════════════
+//
+// One package, one option name, one documented meaning: a value the node entry
+// refuses has to be refused by the browser entry with the same class and the
+// same message. Asserted against both entries in one place so the two cannot
+// drift apart silently. The browser module is plain JS and touches no browser
+// global before start(), so its constructor runs under plain Node here.
+
+console.log('--- Group 7d: browser and node entry validation parity ---');
+
+const { Microphone: BrowserMicrophone } = require(
+  path.join(__dirname, '..', 'npm', 'decibri', 'src', 'browser', 'decibri-browser.js')
+);
+
+const parityCases = [
+  {
+    label: "vad threshold 'high'",
+    options: { vad: { model: 'energy', threshold: 'high' } },
+    type: TypeError,
+    message: 'vad threshold must be a number',
+  },
+  {
+    label: 'vad threshold NaN',
+    options: { vad: { model: 'energy', threshold: NaN } },
+    type: TypeError,
+    message: 'vad threshold must be a number',
+  },
+  {
+    label: 'vad threshold 5',
+    options: { vad: { model: 'energy', threshold: 5 } },
+    type: RangeError,
+    message: 'vad threshold must be between 0 and 1',
+  },
+  {
+    label: "vad holdoffMs '300'",
+    options: { vad: { model: 'energy', holdoffMs: '300' } },
+    type: TypeError,
+    message: 'vad holdoffMs must be a number',
+  },
+  {
+    label: 'vad holdoffMs -1',
+    options: { vad: { model: 'energy', holdoffMs: -1 } },
+    type: RangeError,
+    message: 'vad holdoffMs must be non-negative',
+  },
+  {
+    label: 'sampleRate 0',
+    options: { sampleRate: 0 },
+    type: RangeError,
+    message: 'sample rate must be between 1000 and 384000',
+  },
+  {
+    label: 'sampleRate 500000',
+    options: { sampleRate: 500000 },
+    type: RangeError,
+    message: 'sample rate must be between 1000 and 384000',
+  },
+];
+
+for (const { label, options, type, message } of parityCases) {
+  const thrown = {};
+  for (const [entry, Ctor] of [['node', Microphone], ['browser', BrowserMicrophone]]) {
+    try {
+      new Ctor(options);
+      console.log(`  FAIL: ${entry} entry accepted ${label}`);
+      failed++;
+    } catch (e) {
+      thrown[entry] = e;
+      assert(e instanceof type, `${entry} entry rejects ${label} with a ${type.name}`);
+      assert(e.message === message, `${entry} entry message for ${label} is "${message}" (got "${e.message}")`);
+    }
+  }
+  if (thrown.node && thrown.browser) {
+    assert(
+      thrown.node.constructor === thrown.browser.constructor,
+      `both entries throw the same class for ${label} (${thrown.node.constructor.name} / ${thrown.browser.constructor.name})`
+    );
+    assert(
+      thrown.node.message === thrown.browser.message,
+      `both entries throw the same message for ${label}`
+    );
+  }
+}
+
+console.log('  Group 7d done\n');
+
+// ═══════════════════════════════════════════════════════════════════════════════
 // Group 8: Denoise option (deterministic, no hardware required)
 // ═══════════════════════════════════════════════════════════════════════════════
 //

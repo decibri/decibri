@@ -995,6 +995,27 @@ class File extends Readable {
   }
 
   /**
+   * The rate every delivered chunk carries: the `sampleRate` option, or 16000
+   * when it was not given. Readable for the life of the File, including after
+   * the source is consumed or closed.
+   * @returns {number}
+   */
+  get sampleRate() {
+    return this._native.sampleRate;
+  }
+
+  /**
+   * The source's own rate, taken from the WAV header or from the `inputRate`
+   * passed to `File.buffer`. Differs from `sampleRate` when the source was
+   * resampled. Readable for the life of the File, including after the source
+   * is consumed or closed.
+   * @returns {number}
+   */
+  get inputRate() {
+    return this._native.inputRate;
+  }
+
+  /**
    * Analyze the whole recording for speech. Runs the recording once through
    * the conditioning pass off the event loop and resolves to a `VadReport`:
    * per-window `scores` (`{ start, end, vadScore, isSpeech }`) and merged

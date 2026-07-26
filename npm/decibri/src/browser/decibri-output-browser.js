@@ -100,7 +100,7 @@ class Speaker {
     this._dtype = options.dtype ?? 'int16';
     this._workletUrl = options.workletUrl;
 
-    // ── Validate (mirrors the browser Microphone error style: TypeError) ────
+    // ── Validate ──────────────────────────────────────────────────────────
     if (this._sampleRate < 1000 || this._sampleRate > 384000) {
       throw new TypeError(`sample rate must be between 1000 and 384000, got ${this._sampleRate}`);
     }

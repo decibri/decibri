@@ -473,6 +473,19 @@ export declare class File extends Readable {
   readonly vadScore: number;
 
   /**
+   * The rate every delivered chunk carries: the `sampleRate` option, or
+   * 16000 when it was not given.
+   */
+  readonly sampleRate: number;
+
+  /**
+   * The source's own rate, taken from the WAV header or from the
+   * `inputRate` passed to `File.buffer`. Differs from `sampleRate` when the
+   * source was resampled.
+   */
+  readonly inputRate: number;
+
+  /**
    * Analyze the whole recording for speech, off the event loop. Resolves to
    * a `VadReport` with per-window `scores` and merged speech `segments`,
    * all in seconds of file time. Consumes the source (a `File` is a single

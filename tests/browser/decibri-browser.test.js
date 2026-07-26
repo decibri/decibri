@@ -87,6 +87,16 @@ const { Microphone } = await import('../../npm/decibri/src/browser/decibri-brows
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
+/** The error a call throws, so its class and message can both be asserted. */
+function thrownBy(fn) {
+  try {
+    fn();
+  } catch (err) {
+    return err;
+  }
+  throw new Error('expected the call to throw');
+}
+
 function resetMocks() {
   vi.clearAllMocks();
   mockPortOnMessage.onmessage = null;
@@ -126,8 +136,13 @@ describe('Microphone constructor', () => {
 
 describe('Microphone constructor validation', () => {
   it('throws on invalid sampleRate', () => {
-    expect(() => new Microphone({ sampleRate: 0 })).toThrow('sample rate');
-    expect(() => new Microphone({ sampleRate: 500000 })).toThrow('sample rate');
+    // Out of range is a RangeError carrying the node entry's message, so the
+    // same value is rejected identically in both runtimes.
+    for (const sampleRate of [0, 500000]) {
+      const err = thrownBy(() => new Microphone({ sampleRate }));
+      expect(err).toBeInstanceOf(RangeError);
+      expect(err.message).toBe('sample rate must be between 1000 and 384000');
+    }
   });
 
   it('throws on invalid framesPerBuffer', () => {
@@ -141,12 +156,35 @@ describe('Microphone constructor validation', () => {
   });
 
   it('throws on invalid vad threshold', () => {
-    expect(() => new Microphone({ vad: { model: 'energy', threshold: -1 } })).toThrow('threshold');
-    expect(() => new Microphone({ vad: { model: 'energy', threshold: 2 } })).toThrow('threshold');
+    for (const threshold of [-1, 2]) {
+      const err = thrownBy(() => new Microphone({ vad: { model: 'energy', threshold } }));
+      expect(err).toBeInstanceOf(RangeError);
+      expect(err.message).toBe('vad threshold must be between 0 and 1');
+    }
+  });
+
+  it('throws on a non-numeric vad threshold', () => {
+    // A string threshold compares false against every score, so accepting it
+    // leaves the detector permanently quiet with nothing reported.
+    for (const threshold of ['high', NaN, null, {}]) {
+      const err = thrownBy(() => new Microphone({ vad: { model: 'energy', threshold } }));
+      expect(err).toBeInstanceOf(TypeError);
+      expect(err.message).toBe('vad threshold must be a number');
+    }
   });
 
   it('throws on invalid vad holdoffMs', () => {
-    expect(() => new Microphone({ vad: { model: 'energy', holdoffMs: -100 } })).toThrow('holdoffMs');
+    const err = thrownBy(() => new Microphone({ vad: { model: 'energy', holdoffMs: -100 } }));
+    expect(err).toBeInstanceOf(RangeError);
+    expect(err.message).toBe('vad holdoffMs must be non-negative');
+  });
+
+  it('throws on a non-numeric vad holdoffMs', () => {
+    for (const holdoffMs of ['300', NaN, null, {}]) {
+      const err = thrownBy(() => new Microphone({ vad: { model: 'energy', holdoffMs } }));
+      expect(err).toBeInstanceOf(TypeError);
+      expect(err.message).toBe('vad holdoffMs must be a number');
+    }
   });
 
   it('throws on an unknown vad model', () => {

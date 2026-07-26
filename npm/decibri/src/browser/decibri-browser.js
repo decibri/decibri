@@ -62,15 +62,23 @@ class Microphone extends Emitter {
         throw new TypeError(`Invalid vad model: ${JSON.stringify(vad.model)}. Expected 'energy'.`);
       }
       this._vad = true;
+      // The guards, the error classes and the messages are the node entry's,
+      // so the same option value is rejected the same way in both runtimes.
       if (vad.threshold !== undefined) {
+        if (typeof vad.threshold !== 'number' || Number.isNaN(vad.threshold)) {
+          throw new TypeError('vad threshold must be a number');
+        }
         if (vad.threshold < 0 || vad.threshold > 1) {
-          throw new TypeError(`threshold must be between 0 and 1, got ${vad.threshold}`);
+          throw new RangeError('vad threshold must be between 0 and 1');
         }
         vadThreshold = vad.threshold;
       }
       if (vad.holdoffMs !== undefined) {
+        if (typeof vad.holdoffMs !== 'number' || Number.isNaN(vad.holdoffMs)) {
+          throw new TypeError('vad holdoffMs must be a number');
+        }
         if (vad.holdoffMs < 0) {
-          throw new TypeError(`holdoffMs must be >= 0, got ${vad.holdoffMs}`);
+          throw new RangeError('vad holdoffMs must be non-negative');
         }
         vadHoldoff = vad.holdoffMs;
       }
@@ -95,7 +103,7 @@ class Microphone extends Emitter {
 
     // ── Validate ──────────────────────────────────────────────────────────
     if (this._sampleRate < 1000 || this._sampleRate > 384000) {
-      throw new TypeError(`sample rate must be between 1000 and 384000, got ${this._sampleRate}`);
+      throw new RangeError('sample rate must be between 1000 and 384000');
     }
     if (this._channels < 1 || this._channels > 32) {
       throw new TypeError(`channels must be between 1 and 32, got ${this._channels}`);
