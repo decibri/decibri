@@ -464,13 +464,13 @@ async def test_async_microphone_open_forwards_kwargs() -> None:
     """Kwargs passed to open() reach the underlying constructor."""
     mic = await AsyncMicrophone.open(
         sample_rate=24000,
-        channels=2,
+        channels=1,
         dtype="float32",
         frames_per_buffer=2400,
     )
     text = repr(mic)
     assert "sample_rate=24000" in text
-    assert "channels=2" in text
+    assert "channels=1" in text
     assert "dtype='float32'" in text
     assert "frames_per_buffer=2400" in text
 

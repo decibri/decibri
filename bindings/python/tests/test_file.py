@@ -184,6 +184,40 @@ def test_open_invalid_wav_raises(tmp_path: Path) -> None:
         File(path)
 
 
+def test_missing_model_path_raises_at_construction(tmp_path: Path) -> None:
+    """A model_path that does not exist fails at construction, not at read().
+
+    The File builds its detector on first read, so the path check is the only
+    thing standing between a typo and a failure several calls later. Needs
+    neither the golden fixture nor ORT.
+    """
+    from decibri import VadModelLoadFailed
+
+    missing = str(tmp_path / "no-such-decibri-model-7c5d.onnx")
+    with pytest.raises(VadModelLoadFailed) as exc_info:
+        File.buffer(
+            sine_samples(16000, 0.2),
+            input_rate=16000,
+            vad="silero",
+            model_path=missing,
+        )
+    err = exc_info.value
+    assert isinstance(err, DecibriError)
+    assert "no-such-decibri-model-7c5d.onnx" in err.path
+
+
+def test_missing_model_path_is_ignored_in_energy_mode(tmp_path: Path) -> None:
+    """The path is checked only where it is read: energy mode never loads it."""
+    missing = str(tmp_path / "no-such-decibri-model-2b8f.onnx")
+    file = File.buffer(
+        sine_samples(16000, 0.2),
+        input_rate=16000,
+        vad="energy",
+        model_path=missing,
+    )
+    assert file is not None
+
+
 def test_repr_shows_construction() -> None:
     file = File.buffer([0.0] * 1600, input_rate=16000)
     assert repr(file) == "File(sample_rate=16000, dtype='int16', vad=False)"

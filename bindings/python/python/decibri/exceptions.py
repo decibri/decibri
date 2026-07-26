@@ -4,6 +4,12 @@ This module is the public home for the decibri exception hierarchy. All
 classes are also re-exported at ``decibri.<X>`` for convenience; users
 may import from either path.
 
+decibri raises a DecibriError subclass whenever the core has a name for the
+failure, and a Python built-in when the failure is a wrapper-level argument
+shape the core never sees. An out-of-range agc target raises
+AgcTargetOutOfRange; a malformed vad, denoise or highpass value raises
+ValueError.
+
 43 instance classes plus 3 intermediate parent classes (DeviceError,
 OrtError, OrtPathError) for catch ergonomics, totaling 46 class
 definitions. Single-inheritance hierarchy per CPython convention.

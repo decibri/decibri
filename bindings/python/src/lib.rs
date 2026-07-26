@@ -889,16 +889,22 @@ impl MicrophoneBridge {
         }
 
         // AGC: thread the dBFS target to the core level-control engine. The
-        // wrapper performs the user-facing range check (a ValueError); the core
-        // guards the same range in validate() (the load-bearing backstop, raised
-        // as AgcTargetOutOfRange), so no inline check is needed here.
+        // wrapper performs the user-facing range check (an AgcTargetOutOfRange);
+        // the core guards the same range in validate() below, so no inline check
+        // is needed here.
         capture_config.agc = agc;
 
         // Limiter: thread the dBFS ceiling to the core limiter stage. The wrapper
-        // performs the user-facing range check (a ValueError); the core guards the
-        // same range in validate() (the load-bearing backstop, raised as
-        // LimiterCeilingOutOfRange), so no inline check is needed here.
+        // performs the user-facing range check (a LimiterCeilingOutOfRange); the
+        // core guards the same range in validate() below, so no inline check is
+        // needed here.
         capture_config.limiter = limiter;
+
+        // Value validation runs at construction: a bad sample rate, channel
+        // count, frame size, agc target or limiter ceiling is reported here,
+        // before any model is loaded or any device is touched. Microphone::new
+        // validates again at start().
+        capture_config.validate().map_err(|e| to_py_err(py, e))?;
 
         // VAD construction gate (Option (b)+(h)). The bridge constructs
         // SileroVad only if vad=True AND vad_mode=="silero". The vad_mode
@@ -1191,6 +1197,11 @@ impl SpeakerBridge {
         output_config.sample_rate = sample_rate;
         output_config.channels = channels;
         output_config.device = device_selector;
+
+        // Value validation runs at construction, mirroring MicrophoneBridge: a
+        // bad sample rate or channel count is reported here rather than at
+        // start(). Speaker::new validates again at start().
+        output_config.validate().map_err(|e| to_py_err(py, e))?;
 
         Ok(SpeakerBridge {
             output_config,

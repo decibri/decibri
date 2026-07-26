@@ -26,6 +26,26 @@ from decibri import AsyncMicrophone, Microphone, ModelLoadFailed
 # ---------------------------------------------------------------------------
 
 
+def test_missing_bundled_denoise_model_raises_the_typed_class(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An unresolvable bundled model raises ModelLoadFailed, not ValueError."""
+    import importlib.resources
+
+    from decibri import DecibriError
+
+    def _unresolvable(package: str) -> object:
+        raise ModuleNotFoundError(package)
+
+    monkeypatch.setattr(importlib.resources, "files", _unresolvable)
+
+    with pytest.raises(ModelLoadFailed) as exc_info:
+        Microphone(denoise="fastenhancer-t")
+    err = exc_info.value
+    assert isinstance(err, DecibriError)
+    assert err.path == "decibri/models/fastenhancer_t.onnx"
+
+
 def test_denoise_constructs() -> None:
     """A valid model name constructs; the model loads later, at start()."""
     mic = Microphone(sample_rate=16000, channels=1, denoise="fastenhancer-t")

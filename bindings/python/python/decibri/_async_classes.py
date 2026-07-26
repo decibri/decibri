@@ -61,6 +61,8 @@ from decibri._classes import (
     File,
     Vad,
     VadReport,
+    _BUNDLED_DENOISE_MODEL,
+    _BUNDLED_VAD_MODEL,
     _DEFAULT_VAD_HOLDOFF_MS,
     _VadStateMachine,
     _VALID_DENOISE_MODELS,
@@ -239,6 +241,18 @@ class AsyncMicrophone:
         resolved_model_path: str | None = None
         if model_path is not None:
             resolved_model_path = str(Path(model_path))
+            # A user-supplied path is checked at construction, as in the sync
+            # Microphone, and only when Silero VAD reads it.
+            if (
+                vad_enabled
+                and vad_mode == "silero"
+                and not Path(resolved_model_path).is_file()
+            ):
+                raise exceptions.VadModelLoadFailed(
+                    f"Silero VAD model not found at {resolved_model_path}. "
+                    "Ensure model_path points to an existing ONNX model file.",
+                    resolved_model_path,
+                )
         elif vad_enabled and vad_mode == "silero":
             try:
                 model_resource = (
@@ -253,11 +267,12 @@ class AsyncMicrophone:
                     )
                 resolved_model_path = str(model_resource)
             except (FileNotFoundError, ModuleNotFoundError, AttributeError) as exc:
-                raise ValueError(
+                raise exceptions.VadModelLoadFailed(
                     "model_path was not provided and the bundled Silero "
                     "model could not be located in the installed wheel. "
                     "Ensure the models/ directory was included during "
-                    "installation, or pass model_path explicitly."
+                    "installation, or pass model_path explicitly.",
+                    _BUNDLED_VAD_MODEL,
                 ) from exc
 
         # Validate and resolve denoise. Same logic as sync Microphone: a
@@ -283,10 +298,11 @@ class AsyncMicrophone:
                     )
                 resolved_denoise_model_path = str(denoise_resource)
             except (FileNotFoundError, ModuleNotFoundError, AttributeError) as exc:
-                raise ValueError(
+                raise exceptions.ModelLoadFailed(
                     "the bundled denoise model could not be located in the "
                     "installed wheel. Ensure the models/ directory was included "
-                    "during installation."
+                    "during installation.",
+                    _BUNDLED_DENOISE_MODEL,
                 ) from exc
 
         # Validate high-pass. Same logic as the sync Microphone: a numeric cutoff
@@ -299,16 +315,18 @@ class AsyncMicrophone:
             )
 
         # Validate AGC. Same logic as the sync Microphone: an integer dBFS target
-        # in [-40, -3] (typical -18); absence leaves it off. The Rust core guards
-        # the same range as a backstop.
+        # in [-40, -3] (typical -18); absence leaves it off. The core names this
+        # failure, so the wrapper raises the core's class.
         if agc is not None and not -40 <= agc <= -3:
-            raise ValueError(f"agc must be in [-40, -3]; got {agc}")
+            raise exceptions.AgcTargetOutOfRange(f"agc must be in [-40, -3]; got {agc}")
 
         # Validate the limiter ceiling. Same logic as the sync Microphone: a
         # sample-peak ceiling in dBFS in [-3.0, 0.0] (typical -1.0); absence
-        # leaves it off. The Rust core guards the same range as a backstop.
+        # leaves it off. The core names this failure, so the wrapper raises its class.
         if limiter is not None and not -3.0 <= limiter <= 0.0:
-            raise ValueError(f"limiter must be in [-3.0, 0.0]; got {limiter}")
+            raise exceptions.LimiterCeilingOutOfRange(
+                f"limiter must be in [-3.0, 0.0]; got {limiter}"
+            )
 
         # Resolve the ORT dylib path via the same four-arm priority order
         # the sync wrapper uses (see _ort_resolver.resolve_ort_dylib_path).

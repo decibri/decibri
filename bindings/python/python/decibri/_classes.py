@@ -270,6 +270,11 @@ _VALID_FORMATS = frozenset({"int16", "float32"})
 _VALID_DENOISE_MODELS = frozenset({"fastenhancer-t"})
 _VALID_HIGHPASS = frozenset({80, 100})
 
+# Packaged locations of the bundled models, reported as the ``path`` attribute
+# when the resource cannot be resolved and there is no filesystem path to name.
+_BUNDLED_VAD_MODEL = "decibri/models/silero_vad.onnx"
+_BUNDLED_DENOISE_MODEL = "decibri/models/fastenhancer_t.onnx"
+
 
 class Microphone:
     """Audio capture with VAD policy.
@@ -480,6 +485,19 @@ class Microphone:
         resolved_model_path: str | None = None
         if model_path is not None:
             resolved_model_path = str(Path(model_path))
+            # A user-supplied path is checked at construction, so a path that
+            # does not exist is reported here rather than at the load. Checked
+            # only when Silero VAD reads it; the bridge ignores it otherwise.
+            if (
+                vad_enabled
+                and vad_mode == "silero"
+                and not Path(resolved_model_path).is_file()
+            ):
+                raise exceptions.VadModelLoadFailed(
+                    f"Silero VAD model not found at {resolved_model_path}. "
+                    "Ensure model_path points to an existing ONNX model file.",
+                    resolved_model_path,
+                )
         elif vad_enabled and vad_mode == "silero":
             try:
                 model_resource = (
@@ -498,11 +516,12 @@ class Microphone:
                     )
                 resolved_model_path = str(model_resource)
             except (FileNotFoundError, ModuleNotFoundError, AttributeError) as exc:
-                raise ValueError(
+                raise exceptions.VadModelLoadFailed(
                     "model_path was not provided and the bundled Silero "
                     "model could not be located in the installed wheel. "
                     "Ensure the models/ directory was included during "
-                    "installation, or pass model_path explicitly."
+                    "installation, or pass model_path explicitly.",
+                    _BUNDLED_VAD_MODEL,
                 ) from exc
 
         # Validate and resolve denoise. Closed-set selector mirroring the Silero
@@ -529,10 +548,11 @@ class Microphone:
                     )
                 resolved_denoise_model_path = str(denoise_resource)
             except (FileNotFoundError, ModuleNotFoundError, AttributeError) as exc:
-                raise ValueError(
+                raise exceptions.ModelLoadFailed(
                     "the bundled denoise model could not be located in the "
                     "installed wheel. Ensure the models/ directory was included "
-                    "during installation."
+                    "during installation.",
+                    _BUNDLED_DENOISE_MODEL,
                 ) from exc
 
         # Validate high-pass. Closed growable numeric cutoff selector mirroring
@@ -545,16 +565,18 @@ class Microphone:
             )
 
         # Validate AGC. The target is an integer dBFS level in [-40, -3]
-        # (typical -18); absence leaves it off. Mirrors the Vad threshold range
-        # check; the Rust core guards the same range as a backstop.
+        # (typical -18); absence leaves it off. The core names this failure, so
+        # the wrapper raises the core's class; the core guards the same range.
         if agc is not None and not -40 <= agc <= -3:
-            raise ValueError(f"agc must be in [-40, -3]; got {agc}")
+            raise exceptions.AgcTargetOutOfRange(f"agc must be in [-40, -3]; got {agc}")
 
         # Validate the limiter ceiling. A sample-peak ceiling in dBFS in
-        # [-3.0, 0.0] (typical -1.0); absence leaves it off. Mirrors the agc range
-        # check; the Rust core guards the same range as a backstop.
+        # [-3.0, 0.0] (typical -1.0); absence leaves it off. Mirrors the agc
+        # check: the core names this failure, so the wrapper raises its class.
         if limiter is not None and not -3.0 <= limiter <= 0.0:
-            raise ValueError(f"limiter must be in [-3.0, 0.0]; got {limiter}")
+            raise exceptions.LimiterCeilingOutOfRange(
+                f"limiter must be in [-3.0, 0.0]; got {limiter}"
+            )
 
         # Resolve the ORT dylib path via the four-arm priority order in
         # _ort_resolver. Consulted when an ONNX stage loads (Silero VAD or
@@ -1390,6 +1412,16 @@ class File:
         resolved_model_path: str | None = None
         if model_path is not None:
             resolved_model_path = str(Path(model_path))
+            if (
+                vad_enabled
+                and vad_mode == "silero"
+                and not Path(resolved_model_path).is_file()
+            ):
+                raise exceptions.VadModelLoadFailed(
+                    f"Silero VAD model not found at {resolved_model_path}. "
+                    "Ensure model_path points to an existing ONNX model file.",
+                    resolved_model_path,
+                )
         elif vad_enabled and vad_mode == "silero":
             try:
                 model_resource = (
@@ -1404,11 +1436,12 @@ class File:
                     )
                 resolved_model_path = str(model_resource)
             except (FileNotFoundError, ModuleNotFoundError, AttributeError) as exc:
-                raise ValueError(
+                raise exceptions.VadModelLoadFailed(
                     "model_path was not provided and the bundled Silero "
                     "model could not be located in the installed wheel. "
                     "Ensure the models/ directory was included during "
-                    "installation, or pass model_path explicitly."
+                    "installation, or pass model_path explicitly.",
+                    _BUNDLED_VAD_MODEL,
                 ) from exc
 
         resolved_denoise_model_path: str | None = None
@@ -1430,10 +1463,11 @@ class File:
                     )
                 resolved_denoise_model_path = str(denoise_resource)
             except (FileNotFoundError, ModuleNotFoundError, AttributeError) as exc:
-                raise ValueError(
+                raise exceptions.ModelLoadFailed(
                     "the bundled denoise model could not be located in the "
                     "installed wheel. Ensure the models/ directory was included "
-                    "during installation."
+                    "during installation.",
+                    _BUNDLED_DENOISE_MODEL,
                 ) from exc
 
         if highpass is not None and highpass not in _VALID_HIGHPASS:
@@ -1442,10 +1476,12 @@ class File:
             )
 
         if agc is not None and not -40 <= agc <= -3:
-            raise ValueError(f"agc must be in [-40, -3]; got {agc}")
+            raise exceptions.AgcTargetOutOfRange(f"agc must be in [-40, -3]; got {agc}")
 
         if limiter is not None and not -3.0 <= limiter <= 0.0:
-            raise ValueError(f"limiter must be in [-3.0, 0.0]; got {limiter}")
+            raise exceptions.LimiterCeilingOutOfRange(
+                f"limiter must be in [-3.0, 0.0]; got {limiter}"
+            )
 
         resolved_ort_path: str | None = None
         if (vad_enabled and vad_mode == "silero") or denoise is not None:

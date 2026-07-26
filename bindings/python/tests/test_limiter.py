@@ -7,8 +7,8 @@ behaviour (the absolute-ceiling guarantee, graceful shaping, release) is covered
 by the core Rust tests; these cover the binding surface only.
 
 The limiter ceiling is a float dBFS level in -3.0..0.0 (typical -1.0). Like the
-agc target it is a numeric range, so an out-of-range value is a ``ValueError`` (a
-range violation) at the wrapper.
+agc target the core names this failure, so an out-of-range value is a
+``LimiterCeilingOutOfRange`` at the wrapper, catchable as ``DecibriError``.
 """
 
 from __future__ import annotations
@@ -44,27 +44,50 @@ def test_limiter_range_edges_construct() -> None:
 
 
 def test_limiter_out_of_range_raises() -> None:
-    """A ceiling outside [-3.0, 0.0] is a clear ValueError, below and above."""
-    with pytest.raises(ValueError, match=r"limiter must be in \[-3.0, 0.0\]"):
+    """A ceiling outside [-3.0, 0.0] raises LimiterCeilingOutOfRange, below and above."""
+    with pytest.raises(
+        decibri_exc.LimiterCeilingOutOfRange, match=r"limiter must be in \[-3.0, 0.0\]"
+    ):
         Microphone(limiter=-5.0)
-    with pytest.raises(ValueError, match=r"limiter must be in \[-3.0, 0.0\]"):
+    with pytest.raises(
+        decibri_exc.LimiterCeilingOutOfRange, match=r"limiter must be in \[-3.0, 0.0\]"
+    ):
         Microphone(limiter=1.0)
 
 
 def test_async_limiter_out_of_range_raises() -> None:
-    with pytest.raises(ValueError, match=r"limiter must be in \[-3.0, 0.0\]"):
+    with pytest.raises(
+        decibri_exc.LimiterCeilingOutOfRange, match=r"limiter must be in \[-3.0, 0.0\]"
+    ):
         AsyncMicrophone(limiter=0.5)
 
 
-def test_limiter_ceiling_out_of_range_is_a_dedicated_exception_class() -> None:
-    """The core backstop has its own catchable class in the hierarchy.
+def test_limiter_out_of_range_is_catchable_as_decibri_error() -> None:
+    """The wrapper's range check is catchable through the base class.
 
-    The wrapper raises a plain ``ValueError`` for the friendly path; a raw-bridge
-    consumer that bypasses the wrapper trips the core guard, surfaced as the
-    dedicated ``LimiterCeilingOutOfRange`` (a ``DecibriError`` subclass).
+    The core names this failure, so the wrapper raises the core's class rather
+    than a bare ``ValueError``: ``except DecibriError`` catches a bad limiter
+    ceiling the same way it catches a bad dtype.
     """
     assert issubclass(decibri_exc.LimiterCeilingOutOfRange, decibri_exc.DecibriError)
-    with pytest.raises(decibri_exc.LimiterCeilingOutOfRange):
-        raise decibri_exc.LimiterCeilingOutOfRange(
-            "limiter ceiling must be between -3.0 and 0.0"
+    with pytest.raises(decibri_exc.DecibriError):
+        Microphone(limiter=1.0)
+
+
+def test_limiter_out_of_range_from_the_raw_bridge_raises_the_same_class() -> None:
+    """A raw-bridge consumer that bypasses the wrapper trips the core guard.
+
+    Same class, core message: the wrapper's earlier check does not change the
+    identity a bypassing caller sees.
+    """
+    from decibri import _decibri
+
+    with pytest.raises(decibri_exc.LimiterCeilingOutOfRange) as exc_info:
+        _decibri.MicrophoneBridge(
+            sample_rate=16000,
+            channels=1,
+            frames_per_buffer=1600,
+            format="int16",
+            limiter=1.0,
         )
+    assert str(exc_info.value) == "limiter ceiling must be between -3.0 and 0.0"
