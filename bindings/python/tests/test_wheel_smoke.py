@@ -76,14 +76,30 @@ def test_async_construct() -> None:
 
 
 def test_as_ndarray_construct() -> None:
-    """Microphone(as_ndarray=True) constructs cleanly (verifies rust-numpy bundling).
+    """Microphone(as_ndarray=True) constructs with numpy, or raises without it.
 
-    Construction only; no actual read. The as_ndarray=True flag exercises
-    the rust-numpy code path's presence in the wheel; calling read()
-    would also exercise it but requires audio hardware.
+    Construction only; no actual read. With numpy installed the
+    constructor succeeds; without it (the wheel-install venv, which
+    carries no numpy) the constructor raises the guard's ``ImportError``,
+    so the production install surface verifies the failure is a normal
+    catchable error.
     """
-    d = decibri.Microphone(as_ndarray=True)
-    assert d is not None
+    try:
+        import numpy  # noqa: F401
+
+        numpy_available = True
+    except ImportError:
+        numpy_available = False
+
+    if numpy_available:
+        d = decibri.Microphone(as_ndarray=True)
+        assert d is not None
+    else:
+        with pytest.raises(ImportError) as excinfo:
+            decibri.Microphone(as_ndarray=True)
+        assert str(excinfo.value) == (
+            "numpy is not installed. Install with: pip install decibri[numpy]"
+        )
 
 
 def test_wheel_size_within_budget() -> None:

@@ -276,6 +276,22 @@ _BUNDLED_VAD_MODEL = "decibri/models/silero_vad.onnx"
 _BUNDLED_DENOISE_MODEL = "decibri/models/fastenhancer_t.onnx"
 
 
+def _require_numpy() -> None:
+    """Raise ``ImportError`` when numpy is not installed.
+
+    Called wherever ``as_ndarray=True`` is accepted, before the bridge is
+    constructed, so a missing numpy surfaces as a normal, catchable
+    ``ImportError`` instead of a failure from inside the extension. The
+    message matches the read-path guard's message exactly.
+    """
+    try:
+        import numpy  # noqa: F401
+    except ImportError as exc:
+        raise ImportError(
+            "numpy is not installed. Install with: pip install decibri[numpy]"
+        ) from exc
+
+
 class Microphone:
     """Audio capture with VAD policy.
 
@@ -431,6 +447,12 @@ class Microphone:
             raise exceptions.InvalidFormat(
                 f"dtype must be 'int16' or 'float32'; got {dtype!r}"
             )
+
+        # ndarray output requires numpy at read time; checked here, before
+        # the bridge is constructed, so a missing install raises a catchable
+        # ImportError from the constructor.
+        if as_ndarray:
+            _require_numpy()
 
         # Decompose ``vad`` into the bridge's (enabled, mode) split plus the
         # threshold/holdoff policy values. ``vad`` accepts False (disabled;
@@ -727,10 +749,9 @@ class Microphone:
         so the returned chunk is not inspected for VAD and the return type
         (bytes vs ndarray) does not affect it.
 
-        Raises ``ImportError`` with a clear actionable message if
-        ``as_ndarray=True`` is set but the optional ``numpy`` extra is
-        not installed (i.e. the user did not run
-        ``pip install decibri[numpy]``).
+        ``as_ndarray=True`` requires the optional ``numpy`` extra; a
+        missing numpy raises ``ImportError`` at construction (install
+        with ``pip install decibri[numpy]``).
         """
         try:
             chunk = self._bridge.read(timeout_ms=timeout_ms)
@@ -1375,6 +1396,12 @@ class File:
             raise exceptions.InvalidFormat(
                 f"dtype must be 'int16' or 'float32'; got {dtype!r}"
             )
+
+        # ndarray output requires numpy at read time; checked here, before
+        # the bridge is constructed, so a missing install raises a catchable
+        # ImportError from the constructor.
+        if as_ndarray:
+            _require_numpy()
 
         vad_enabled: bool
         vad_mode: str

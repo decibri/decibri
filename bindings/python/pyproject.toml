@@ -42,14 +42,14 @@ dependencies = [
     "typing-extensions>=4.15",
 ]
 
-# numpy is the optional ndarray-support extra. Users who want
-# `Decibri(numpy=True)` and `output.write(np_array)` install via
-# `pip install decibri[numpy]`. The Rust binary always includes the
-# rust-numpy code paths (compile-time gating adds CI complexity for
-# negligible binary-size savings); calling `numpy=True` without the
-# Python `numpy` package installed raises a clear ImportError at the
-# first PyArray construction. Lower bound 1.20 covers the abi3-py310
-# baseline and matches industry convention (sounddevice, polars).
+# numpy is the optional ndarray-support extra. Users who want ndarray
+# output (`as_ndarray=True`) or who want to pass an ndarray to playback
+# install via `pip install decibri[numpy]`. The Rust binary always
+# includes the rust-numpy code paths, so the extra is a Python
+# dependency only. Requesting ndarray output without the Python `numpy`
+# package installed raises ImportError at construction. Lower bound 1.20
+# covers the abi3-py310 baseline and matches industry convention
+# (sounddevice, polars).
 [project.optional-dependencies]
 numpy = ["numpy>=1.20"]
 
