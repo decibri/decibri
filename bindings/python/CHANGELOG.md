@@ -30,6 +30,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 ### Fixed
 
 - Requesting ndarray output without numpy installed raises `ImportError` (install with `pip install decibri[numpy]`) from the constructor, on every surface accepting `as_ndarray=True`, where an uncatchable `pyo3_runtime.PanicException` was raised from the first `read()`. A plain `except Exception` now catches the failure.
+- `File` and `AsyncFile` open WAV files using the WAVE_FORMAT_EXTENSIBLE container when their samples are 16-bit PCM or 32-bit float; they were rejected as an unsupported encoding.
+- `File` and `AsyncFile` open WAV files whose `data` chunk precedes their format chunk; they were rejected as missing the format chunk.
 
 ## [0.7.2] - 2026-07-25
 

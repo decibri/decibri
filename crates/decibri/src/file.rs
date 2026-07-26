@@ -824,11 +824,25 @@ struct WavSource {
 }
 
 /// Parse a WAV file's bytes: RIFF/WAVE with a `fmt ` chunk describing 16-bit
-/// PCM (format 1) or 32-bit IEEE float (format 3), any channel count, any
-/// rate, followed by a `data` chunk. The minimal reader keeps this path free
-/// of any decode dependency; other encodings are owned by a separate
-/// conversion feature.
+/// PCM (format 1) or 32-bit IEEE float (format 3), plain or carried in a
+/// WAVE_FORMAT_EXTENSIBLE container (format 0xFFFE), any channel count, any
+/// rate, and a `data` chunk before or after the `fmt ` chunk. The minimal
+/// reader keeps this path free of any decode dependency; other encodings are
+/// owned by a separate conversion feature.
 fn parse_wav(bytes: &[u8]) -> Result<WavSource, DecibriError> {
+    /// The SubFormat GUIDs a WAVE_FORMAT_EXTENSIBLE `fmt ` chunk carries for
+    /// the two supported encodings, in file byte order. The two differ only
+    /// in the leading little-endian word; the match is against all sixteen
+    /// bytes, since a GUID sharing only that word names a different format.
+    const SUBTYPE_PCM: [u8; 16] = [
+        0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x10, 0x00, 0x80, 0x00, 0x00, 0xAA, 0x00, 0x38, 0x9B,
+        0x71,
+    ];
+    const SUBTYPE_IEEE_FLOAT: [u8; 16] = [
+        0x03, 0x00, 0x00, 0x00, 0x00, 0x00, 0x10, 0x00, 0x80, 0x00, 0x00, 0xAA, 0x00, 0x38, 0x9B,
+        0x71,
+    ];
+
     fn u16_at(bytes: &[u8], at: usize) -> u16 {
         u16::from_le_bytes([bytes[at], bytes[at + 1]])
     }
@@ -841,42 +855,63 @@ fn parse_wav(bytes: &[u8]) -> Result<WavSource, DecibriError> {
         return Err(invalid("not a RIFF/WAVE file"));
     }
 
-    // Walk the chunk list for `fmt ` and `data`. Chunk bodies are padded to
-    // an even byte count in the file.
-    let mut fmt: Option<(u16, u16, u32, u16)> = None; // format, channels, rate, bits
-    let mut data: Option<(usize, usize)> = None; // offset, length
+    // Walk the chunk list for `fmt ` and `data`, taking the first of each;
+    // RIFF fixes neither their order nor their count. The walk ends once
+    // both are found, so bytes past that point are not examined, exactly as
+    // before for the conventional order. Chunk bodies are padded to an even
+    // byte count in the file.
+    let mut fmt: Option<(usize, usize)> = None; // body offset, size
+    let mut data: Option<(usize, usize)> = None; // body offset, size
     let mut offset = 12usize;
-    while offset + 8 <= bytes.len() {
+    while offset + 8 <= bytes.len() && (fmt.is_none() || data.is_none()) {
         let id = &bytes[offset..offset + 4];
         let size = u32_at(bytes, offset + 4) as usize;
         let body = offset + 8;
         if body + size > bytes.len() {
             return Err(invalid("chunk extends past end of file"));
         }
-        if id == b"fmt " {
+        if id == b"fmt " && fmt.is_none() {
             if size < 16 {
                 return Err(invalid("fmt chunk too short"));
             }
-            fmt = Some((
-                u16_at(bytes, body),
-                u16_at(bytes, body + 2),
-                u32_at(bytes, body + 4),
-                u16_at(bytes, body + 14),
-            ));
-        } else if id == b"data" {
+            fmt = Some((body, size));
+        } else if id == b"data" && data.is_none() {
             data = Some((body, size));
-            break;
         }
         offset = body + size + (size & 1);
     }
 
-    let (format, channels, sample_rate, bits) = fmt.ok_or(invalid("missing fmt chunk"))?;
+    let (fmt_body, fmt_size) = fmt.ok_or(invalid("missing fmt chunk"))?;
     let (data_offset, data_len) = data.ok_or(invalid("missing data chunk"))?;
+    let mut format = u16_at(bytes, fmt_body);
+    let channels = u16_at(bytes, fmt_body + 2);
+    let sample_rate = u32_at(bytes, fmt_body + 4);
+    let bits = u16_at(bytes, fmt_body + 14);
     if channels == 0 {
         return Err(invalid("channel count is zero"));
     }
     if !(1000..=384000).contains(&sample_rate) {
         return Err(DecibriError::SampleRateOutOfRange);
+    }
+
+    // WAVE_FORMAT_EXTENSIBLE: the encoding is named by the extension's
+    // SubFormat GUID, not the format tag. Resolve the tag from an exact
+    // whole-GUID match. A GUID matching neither encoding, or a `fmt ` chunk
+    // without room for one (the 16 header bytes, a declared extension of at
+    // least 22 bytes, and the GUID itself at bytes 24..40), leaves the tag
+    // unresolved for the encoding check below to reject. The chunk walk has
+    // already checked the declared chunk size against the file, so every
+    // read here stays in bounds.
+    if format == 0xFFFE {
+        format = 0;
+        if fmt_size >= 40 && usize::from(u16_at(bytes, fmt_body + 16)) >= 22 {
+            let subformat = &bytes[fmt_body + 24..fmt_body + 40];
+            if subformat == SUBTYPE_PCM {
+                format = 1;
+            } else if subformat == SUBTYPE_IEEE_FLOAT {
+                format = 3;
+            }
+        }
     }
 
     let payload = &bytes[data_offset..data_offset + data_len];
@@ -1108,6 +1143,210 @@ mod tests {
             parse_wav(&eight_bit),
             Err(DecibriError::WavInvalid { .. })
         ));
+    }
+
+    // ── Extensible containers and chunk order ───────────────────────────
+
+    /// The SubFormat GUIDs of the two supported encodings, in file byte
+    /// order, as a WAVE_FORMAT_EXTENSIBLE `fmt ` chunk carries them.
+    const PCM_GUID: [u8; 16] = [
+        0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x10, 0x00, 0x80, 0x00, 0x00, 0xAA, 0x00, 0x38, 0x9B,
+        0x71,
+    ];
+    const IEEE_FLOAT_GUID: [u8; 16] = [
+        0x03, 0x00, 0x00, 0x00, 0x00, 0x00, 0x10, 0x00, 0x80, 0x00, 0x00, 0xAA, 0x00, 0x38, 0x9B,
+        0x71,
+    ];
+
+    /// The exact message a file with an unsupported encoding reports.
+    const UNSUPPORTED_ENCODING: &str = "unsupported encoding; 16-bit PCM or 32-bit float required";
+
+    /// A synthetic WAV byte vector with an arbitrary `fmt ` chunk body,
+    /// followed by a `data` chunk holding `payload`.
+    fn wav_bytes_with_fmt(fmt_body: &[u8], payload: &[u8]) -> Vec<u8> {
+        let padded_fmt = fmt_body.len() + (fmt_body.len() & 1);
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(b"RIFF");
+        bytes.extend_from_slice(&((4 + 8 + padded_fmt + 8 + payload.len()) as u32).to_le_bytes());
+        bytes.extend_from_slice(b"WAVE");
+        bytes.extend_from_slice(b"fmt ");
+        bytes.extend_from_slice(&(fmt_body.len() as u32).to_le_bytes());
+        bytes.extend_from_slice(fmt_body);
+        bytes.resize(bytes.len() + (fmt_body.len() & 1), 0);
+        bytes.extend_from_slice(b"data");
+        bytes.extend_from_slice(&(payload.len() as u32).to_le_bytes());
+        bytes.extend_from_slice(payload);
+        bytes
+    }
+
+    /// The 16 leading bytes of an extensible `fmt ` chunk: tag 0xFFFE with
+    /// the given container bit depth, mono, 16 kHz.
+    fn extensible_fmt_base(bits: u16) -> Vec<u8> {
+        let block_align = bits / 8;
+        let mut body = Vec::new();
+        body.extend_from_slice(&0xFFFEu16.to_le_bytes());
+        body.extend_from_slice(&1u16.to_le_bytes());
+        body.extend_from_slice(&16000u32.to_le_bytes());
+        body.extend_from_slice(&(16000 * u32::from(block_align)).to_le_bytes());
+        body.extend_from_slice(&block_align.to_le_bytes());
+        body.extend_from_slice(&bits.to_le_bytes());
+        body
+    }
+
+    /// A synthetic WAVE_FORMAT_EXTENSIBLE byte vector: a 40-byte `fmt `
+    /// chunk whose SubFormat GUID names the encoding, mono at 16 kHz.
+    fn wav_bytes_extensible(subformat: [u8; 16], bits: u16, samples: &[f32]) -> Vec<u8> {
+        let payload = match bits {
+            16 => sample::f32_to_i16_le_bytes(samples),
+            32 => sample::f32_to_f32_le_bytes(samples),
+            _ => unreachable!("test containers are 16 and 32 bits"),
+        };
+        let mut fmt_body = extensible_fmt_base(bits);
+        fmt_body.extend_from_slice(&22u16.to_le_bytes()); // extension size
+        fmt_body.extend_from_slice(&bits.to_le_bytes()); // valid bits
+        fmt_body.extend_from_slice(&0u32.to_le_bytes()); // channel mask
+        fmt_body.extend_from_slice(&subformat);
+        wav_bytes_with_fmt(&fmt_body, &payload)
+    }
+
+    /// An extensible container with the PCM subformat opens and parses to
+    /// exactly the samples of the plain 16-bit PCM file carrying the same
+    /// body.
+    #[test]
+    fn extensible_pcm_matches_plain_pcm() {
+        let samples = sine(16000, 0.1);
+        let plain = parse_wav(&wav_bytes(1, 1, 16000, &samples)).unwrap();
+        let extensible = parse_wav(&wav_bytes_extensible(PCM_GUID, 16, &samples)).unwrap();
+        assert_eq!(extensible.samples, plain.samples);
+        assert_eq!(extensible.sample_rate, plain.sample_rate);
+        assert_eq!(extensible.channels, plain.channels);
+    }
+
+    /// An extensible container with the IEEE float subformat opens and
+    /// parses to exactly the samples of the plain 32-bit float file carrying
+    /// the same body.
+    #[test]
+    fn extensible_float_matches_plain_float() {
+        let samples = sine(16000, 0.1);
+        let plain = parse_wav(&wav_bytes(3, 1, 16000, &samples)).unwrap();
+        let extensible = parse_wav(&wav_bytes_extensible(IEEE_FLOAT_GUID, 32, &samples)).unwrap();
+        assert_eq!(extensible.samples, plain.samples);
+        assert_eq!(extensible.sample_rate, plain.sample_rate);
+        assert_eq!(extensible.channels, plain.channels);
+    }
+
+    /// An extensible container whose SubFormat GUID matches neither
+    /// supported encoding is rejected, including a GUID sharing the PCM
+    /// leading word whose suffix differs.
+    #[test]
+    fn extensible_unknown_subformat_is_rejected() {
+        let samples = sine(16000, 0.05);
+        let mut near_pcm = PCM_GUID;
+        near_pcm[15] ^= 0xFF;
+        for guid in [near_pcm, [0u8; 16], [0xFFu8; 16]] {
+            let err = parse_wav(&wav_bytes_extensible(guid, 16, &samples))
+                .err()
+                .expect("an unknown subformat should be rejected");
+            assert!(matches!(
+                err,
+                DecibriError::WavInvalid { reason } if reason == UNSUPPORTED_ENCODING
+            ));
+        }
+    }
+
+    /// An extensible `fmt ` chunk without room for the SubFormat GUID is
+    /// rejected rather than read out of range: no extension bytes at all, a
+    /// declared extension of zero, and a declared extension the chunk does
+    /// not actually contain.
+    #[test]
+    fn extensible_short_fmt_is_rejected() {
+        let payload = sample::f32_to_i16_le_bytes(&sine(16000, 0.05));
+
+        // 16-byte fmt chunk: the tag says extensible, the extension is absent.
+        let bare = extensible_fmt_base(16);
+        // 18-byte fmt chunk: an extension size of zero.
+        let mut empty_extension = extensible_fmt_base(16);
+        empty_extension.extend_from_slice(&0u16.to_le_bytes());
+        // 24-byte fmt chunk: the extension size claims 22 bytes the chunk
+        // does not hold.
+        let mut truncated = extensible_fmt_base(16);
+        truncated.extend_from_slice(&22u16.to_le_bytes());
+        truncated.extend_from_slice(&0u32.to_le_bytes());
+
+        for fmt_body in [bare, empty_extension, truncated] {
+            let err = parse_wav(&wav_bytes_with_fmt(&fmt_body, &payload))
+                .err()
+                .expect("a fmt chunk too short for the GUID should be rejected");
+            assert!(matches!(
+                err,
+                DecibriError::WavInvalid { reason } if reason == UNSUPPORTED_ENCODING
+            ));
+        }
+    }
+
+    /// A file whose `data` chunk precedes its `fmt ` chunk opens and yields
+    /// the samples the conventional order yields.
+    #[test]
+    fn data_chunk_before_fmt_parses() {
+        let samples = sine(16000, 0.1);
+        let conventional = wav_bytes(1, 1, 16000, &samples);
+        // The conventional bytes lay out RIFF header (0..12), fmt chunk
+        // (12..36), data chunk (36..); rebuild them with the two chunks
+        // swapped.
+        let mut swapped = conventional[0..12].to_vec();
+        swapped.extend_from_slice(&conventional[36..]);
+        swapped.extend_from_slice(&conventional[12..36]);
+
+        let out_of_order = parse_wav(&swapped).unwrap();
+        let expected = parse_wav(&conventional).unwrap();
+        assert_eq!(out_of_order.samples, expected.samples);
+        assert_eq!(out_of_order.sample_rate, expected.sample_rate);
+        assert_eq!(out_of_order.channels, expected.channels);
+        assert!(!out_of_order.samples.is_empty());
+    }
+
+    /// The conventional chunk order still parses to the same samples: the
+    /// 16-bit body round-trips through the same conversion as before.
+    #[test]
+    fn conventional_order_parses_unchanged() {
+        let samples = sine(16000, 0.1);
+        let parsed = parse_wav(&wav_bytes(1, 1, 16000, &samples)).unwrap();
+        let expected = sample::i16_le_bytes_to_f32(&sample::f32_to_i16_le_bytes(&samples));
+        assert_eq!(parsed.samples, expected);
+        assert_eq!(parsed.sample_rate, 16000);
+        assert_eq!(parsed.channels, 1);
+    }
+
+    /// Duplicate chunks resolve to the first of each: a later `fmt ` or
+    /// `data` chunk does not displace the one already found.
+    #[test]
+    fn duplicate_chunks_take_the_first() {
+        let samples = sine(16000, 0.1);
+        let mut doubled = wav_bytes(1, 1, 16000, &samples);
+        // Append a second fmt chunk at another rate and a second data chunk
+        // with another body.
+        doubled.extend_from_slice(&wav_bytes(1, 1, 8000, &sine(8000, 0.05))[12..]);
+
+        let parsed = parse_wav(&doubled).unwrap();
+        let expected = parse_wav(&wav_bytes(1, 1, 16000, &samples)).unwrap();
+        assert_eq!(parsed.samples, expected.samples);
+        assert_eq!(parsed.sample_rate, 16000);
+        assert_eq!(parsed.channels, 1);
+    }
+
+    /// Bytes after the last chunk the parse needs are not examined: a file
+    /// carrying malformed trailing bytes after its `data` chunk opens
+    /// exactly as it did before the walk handled either order.
+    #[test]
+    fn malformed_bytes_after_data_are_ignored() {
+        let samples = sine(16000, 0.1);
+        let mut trailing = wav_bytes(1, 1, 16000, &samples);
+        trailing.extend_from_slice(b"JUNK");
+        trailing.extend_from_slice(&u32::MAX.to_le_bytes());
+
+        let parsed = parse_wav(&trailing).unwrap();
+        let expected = parse_wav(&wav_bytes(1, 1, 16000, &samples)).unwrap();
+        assert_eq!(parsed.samples, expected.samples);
     }
 
     /// Configuration validation matches the live path: rate, AGC target, and

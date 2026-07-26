@@ -34,6 +34,8 @@ For other decibri packages, see:
 - A missing Silero or denoise model file throws an `OrtError` carrying `code: 'VAD_MODEL_LOAD_FAILED'` or `'MODEL_LOAD_FAILED'`, instead of a plain `Error` with no `code` that was not a `DecibriError`. The message is unchanged.
 - `Microphone.devices()` and `Speaker.devices()` report an enumeration failure as a `DeviceError` with `code: 'DEVICE_ENUMERATION_FAILED'`, instead of letting the raw native error escape. The same applies to the enumeration performed when a numeric `device` index is resolved.
 - A conditioning failure during capture (a denoise or VAD stage that errors mid-stream) reaches the `'error'` event with its own code, instead of ending the stream with no event.
+- `File` opens WAV files using the WAVE_FORMAT_EXTENSIBLE container when their samples are 16-bit PCM or 32-bit float; they were rejected as an unsupported encoding.
+- `File` opens WAV files whose `data` chunk precedes their format chunk; they were rejected as missing the format chunk.
 
 ## [5.2.2] - 2026-07-25
 
