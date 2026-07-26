@@ -1861,6 +1861,11 @@ mod tests {
     /// on the tap does not. This is the energy-mode analogue of
     /// `test_vad_input_returns_pre_transform_signal`, asserted through the RMS
     /// the bindings now compute in native.
+    ///
+    /// Needs the `gain` feature: with it compiled out the AGC transform is
+    /// inert, the delivered level equals the pre-transform level, and the
+    /// divergence assertion cannot hold.
+    #[cfg(feature = "gain")]
     #[test]
     fn test_energy_score_invariant_to_transform() {
         // A quiet sine: AGC boosts it well above its input level, so the
