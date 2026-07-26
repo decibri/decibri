@@ -48,7 +48,11 @@
 //! timeout while the stream is still open, and
 //! `Err(DecibriError::MicrophoneStreamClosed)` once the stream ends.
 //!
-//! ```no_run
+// The example uses Microphone and SileroVad, so it is a compilable doctest
+// only when both `capture` and `vad` are enabled; other feature selections
+// render it as a plain text block instead of compiling it.
+#![cfg_attr(all(feature = "capture", feature = "vad"), doc = "```no_run")]
+#![cfg_attr(not(all(feature = "capture", feature = "vad")), doc = "```text")]
 //! use std::time::Duration;
 //! use decibri::{Microphone, MicrophoneConfig, SileroVad, VadConfig, DecibriError};
 //!
