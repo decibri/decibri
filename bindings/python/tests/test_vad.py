@@ -387,12 +387,11 @@ def test_vad_energy_mode_end_to_end() -> None:
         assert 0.0 <= d.vad_score <= 1.0
 
 
-@pytest.mark.requires_bundled_ort
 def test_silero_missing_model_path_raises_typed_error(tmp_path: Path) -> None:
     """A model_path that does not exist raises VadModelLoadFailed with .path.
 
-    No device is opened: the detector is built during construction, so this
-    needs ORT but no microphone.
+    The existence check runs at construction, before the model is loaded, so
+    this needs neither a microphone nor ORT.
     """
     from decibri import DecibriError, OrtError, VadModelLoadFailed
 
@@ -409,6 +408,64 @@ def test_silero_missing_model_path_raises_typed_error(tmp_path: Path) -> None:
     assert isinstance(err, OrtError)
     assert isinstance(err, DecibriError)
     assert "no-such-decibri-model-b8f2.onnx" in err.path
+
+
+def test_async_silero_missing_model_path_raises_typed_error(tmp_path: Path) -> None:
+    """AsyncMicrophone mirrors the sync existence check."""
+    from decibri import VadModelLoadFailed
+
+    missing = str(tmp_path / "no-such-decibri-model-c4a1.onnx")
+    with pytest.raises(VadModelLoadFailed) as exc_info:
+        AsyncMicrophone(vad="silero", model_path=missing)
+    assert "no-such-decibri-model-c4a1.onnx" in exc_info.value.path
+
+
+def test_missing_model_path_is_ignored_when_silero_is_not_selected(
+    tmp_path: Path,
+) -> None:
+    """The path is checked only where it is read: energy mode never loads it."""
+    missing = str(tmp_path / "no-such-decibri-model-9d3e.onnx")
+    assert Microphone(vad="energy", model_path=missing) is not None
+    assert Microphone(vad=False, model_path=missing) is not None
+
+
+def test_missing_bundled_vad_model_raises_the_typed_class(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An unresolvable bundled model raises VadModelLoadFailed, not ValueError."""
+    import importlib.resources
+
+    from decibri import DecibriError, VadModelLoadFailed
+
+    def _unresolvable(package: str) -> object:
+        raise ModuleNotFoundError(package)
+
+    monkeypatch.setattr(importlib.resources, "files", _unresolvable)
+
+    with pytest.raises(VadModelLoadFailed) as exc_info:
+        Microphone(vad="silero")
+    err = exc_info.value
+    assert isinstance(err, DecibriError)
+    assert err.path == "decibri/models/silero_vad.onnx"
+
+
+def test_wrapper_only_options_still_raise_value_error() -> None:
+    """The other half of the rule: no core name means a Python built-in.
+
+    ``vad``, ``denoise`` and ``highpass`` shape errors have no core variant, so
+    they stay plain ``ValueError`` and are deliberately not DecibriError.
+    """
+    from decibri import DecibriError
+
+    for kwargs in (
+        {"vad": "maybe"},
+        {"vad": True},
+        {"denoise": "nope"},
+        {"highpass": 60},
+    ):
+        with pytest.raises(ValueError) as exc_info:
+            Microphone(**kwargs)  # type: ignore[arg-type]
+        assert not isinstance(exc_info.value, DecibriError)
 
 
 @pytest.mark.requires_audio_input

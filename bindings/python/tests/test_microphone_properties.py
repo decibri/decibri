@@ -16,10 +16,10 @@ Validation layers (mirrors test_config.py docstring):
 - Wrapper-layer validation in _classes.py: dtype string lookup at
   Microphone.__init__ time; raises InvalidFormat with an interpolated
   Python f-string message.
-- Bridge-layer validation in AudioCapture::new via CaptureConfig::validate:
-  fires at Microphone.start() time, BEFORE any cpal device interaction.
-  Runs in CI without audio hardware. Messages from error.rs Display impls
-  (static strings; no value interpolation).
+- Bridge-layer validation via CaptureConfig::validate in the bridge
+  constructor: fires at Microphone.__init__ time, BEFORE any cpal device
+  interaction. Runs in CI without audio hardware. Messages from error.rs
+  Display impls (static strings; no value interpolation).
 
 Hypothesis settings: max_examples=20, deadline=None per test. Total file
 runtime is bounded under 30 seconds on a typical CI runner; combined with
@@ -90,11 +90,8 @@ _invalid_dtype = st.text(min_size=0, max_size=32).filter(
 # ---------------------------------------------------------------------------
 # Section A: invalid inputs route through typed decibri exceptions.
 #
-# Validation point varies by argument:
-#   dtype             -> __init__ time (wrapper layer)
-#   sample_rate       -> .start() time (bridge layer)
-#   channels          -> .start() time (bridge layer)
-#   frames_per_buffer -> .start() time (bridge layer)
+# Every argument validates at __init__ time: dtype at the wrapper layer, the
+# rest at the bridge layer.
 #
 # All four exceptions are subclasses of DecibriError; passing the property
 # is equivalent to "no panic / abort / untyped exception under fuzz".
@@ -104,37 +101,33 @@ _invalid_dtype = st.text(min_size=0, max_size=32).filter(
 @given(sample_rate=_invalid_sample_rate)
 @settings(max_examples=20, deadline=None)
 def test_invalid_sample_rate_property(sample_rate: int) -> None:
-    """Any out-of-range sample_rate raises SampleRateOutOfRange at start()."""
-    mic = Microphone(sample_rate=sample_rate)
+    """Any out-of-range sample_rate raises SampleRateOutOfRange at construction."""
     with pytest.raises(SampleRateOutOfRange):
-        mic.start()
+        Microphone(sample_rate=sample_rate)
 
 
 @given(channels=_multichannel_channels)
 @settings(max_examples=20, deadline=None)
 def test_multichannel_channels_property(channels: int) -> None:
-    """Any channel count above 1 raises MultichannelNotSupported at start()
+    """Any channel count above 1 raises MultichannelNotSupported at construction
     (capture is mono only: the request is rejected, not silently downmixed).
     """
-    mic = Microphone(channels=channels)
     with pytest.raises(MultichannelNotSupported):
-        mic.start()
+        Microphone(channels=channels)
 
 
 def test_zero_channels_is_out_of_range() -> None:
-    """A zero channel count raises the plain ChannelsOutOfRange at start()."""
-    mic = Microphone(channels=0)
+    """A zero channel count raises the plain ChannelsOutOfRange at construction."""
     with pytest.raises(ChannelsOutOfRange):
-        mic.start()
+        Microphone(channels=0)
 
 
 @given(frames_per_buffer=_invalid_frames_per_buffer)
 @settings(max_examples=20, deadline=None)
 def test_invalid_frames_per_buffer_property(frames_per_buffer: int) -> None:
-    """Any out-of-range frames_per_buffer raises FramesPerBufferOutOfRange at start()."""
-    mic = Microphone(frames_per_buffer=frames_per_buffer)
+    """Any out-of-range frames_per_buffer raises FramesPerBufferOutOfRange at construction."""
     with pytest.raises(FramesPerBufferOutOfRange):
-        mic.start()
+        Microphone(frames_per_buffer=frames_per_buffer)
 
 
 @given(dtype=_invalid_dtype)

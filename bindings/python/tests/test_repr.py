@@ -38,14 +38,14 @@ def test_microphone_repr_shows_defaults_and_is_open() -> None:
 def test_microphone_repr_reflects_custom_params() -> None:
     mic = decibri.Microphone(
         sample_rate=24000,
-        channels=2,
+        channels=1,
         dtype="float32",
         frames_per_buffer=2400,
         vad="energy",
     )
     text = repr(mic)
     assert "sample_rate=24000" in text
-    assert "channels=2" in text
+    assert "channels=1" in text
     assert "dtype='float32'" in text
     assert "frames_per_buffer=2400" in text
     assert "vad='energy'" in text

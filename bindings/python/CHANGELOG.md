@@ -22,6 +22,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - A deliberate `stop()` or `close()` is unchanged: it still raises `MicrophoneStreamClosed` or `SpeakerStreamClosed`, and is never reported as a device failure.
 - `Speaker.drain()` and `AsyncSpeaker.drain()` raise `DeviceFailed` when the device failed while the queued audio was still playing, instead of returning normally.
 - A playback device failure surfaces on the next `write()` or `drain()`, so a producer that has stopped writing is not told; `is_playing` goes false immediately either way.
+- **Capture and playback options are validated at construction, where they were validated at `start()`.** A bad `sample_rate`, `channels` or `frames_per_buffer` raises from `Microphone(...)`, `AsyncMicrophone(...)`, `Speaker(...)` and `AsyncSpeaker(...)` rather than from the first `start()`. Code that constructs an invalid instance and handles the failure around `start()` moves that handling to the constructor. `File` already validated at construction and is unchanged.
+- **An out-of-range `agc` or `limiter` raises `AgcTargetOutOfRange` or `LimiterCeilingOutOfRange`, where a builtin `ValueError` was raised before.** Neither derives from `ValueError`, so code catching `ValueError` for these two options catches `DecibriError`, or the class itself, instead. A bad `vad`, `denoise` or `highpass` value still raises `ValueError`.
+- A `model_path` that does not exist is reported at construction. `File(..., vad='silero', model_path=...)` raises `VadModelLoadFailed` from the constructor instead of from the first `read()` or `analyze()`. The path is checked only where Silero VAD reads it, so `vad='energy'` and `vad=False` are unaffected.
+- A bundled model that cannot be located raises `VadModelLoadFailed` or `ModelLoadFailed`, where a builtin `ValueError` was raised before. Both derive from `DecibriError` and carry the model's packaged location in `path`. Code catching `ValueError` for a broken install catches `DecibriError` instead.
 
 ## [0.7.2] - 2026-07-25
 

@@ -6,9 +6,9 @@ rejection) is CI-safe and runs without audio hardware or ORT. The engine's
 temporal behaviour (cold start, convergence, gating) is covered by the core Rust
 tests; these cover the binding surface only.
 
-The agc target is an integer dBFS level in -40..-3 (typical -18). Unlike the
-closed-set highpass/denoise selectors, it is a numeric range, so an out-of-range
-value is a ``ValueError`` (a range violation) at the wrapper.
+The agc target is an integer dBFS level in -40..-3 (typical -18). The core names
+this failure, so an out-of-range value is an ``AgcTargetOutOfRange`` at the
+wrapper, catchable as ``DecibriError``.
 """
 
 from __future__ import annotations
@@ -44,25 +44,50 @@ def test_agc_range_edges_construct() -> None:
 
 
 def test_agc_out_of_range_raises() -> None:
-    """A target outside [-40, -3] is a clear ValueError, below and above."""
-    with pytest.raises(ValueError, match=r"agc must be in \[-40, -3\]"):
+    """A target outside [-40, -3] raises AgcTargetOutOfRange, below and above."""
+    with pytest.raises(
+        decibri_exc.AgcTargetOutOfRange, match=r"agc must be in \[-40, -3\]"
+    ):
         Microphone(agc=-100)
-    with pytest.raises(ValueError, match=r"agc must be in \[-40, -3\]"):
+    with pytest.raises(
+        decibri_exc.AgcTargetOutOfRange, match=r"agc must be in \[-40, -3\]"
+    ):
         Microphone(agc=0)
 
 
 def test_async_agc_out_of_range_raises() -> None:
-    with pytest.raises(ValueError, match=r"agc must be in \[-40, -3\]"):
+    with pytest.raises(
+        decibri_exc.AgcTargetOutOfRange, match=r"agc must be in \[-40, -3\]"
+    ):
         AsyncMicrophone(agc=-41)
 
 
-def test_agc_target_out_of_range_is_a_dedicated_exception_class() -> None:
-    """The core backstop has its own catchable class in the hierarchy.
+def test_agc_out_of_range_is_catchable_as_decibri_error() -> None:
+    """The wrapper's range check is catchable through the base class.
 
-    The wrapper raises a plain ``ValueError`` for the friendly path; a raw-bridge
-    consumer that bypasses the wrapper trips the core guard, surfaced as the
-    dedicated ``AgcTargetOutOfRange`` (a ``DecibriError`` subclass).
+    The core names this failure, so the wrapper raises the core's class rather
+    than a bare ``ValueError``: ``except DecibriError`` catches a bad agc target
+    the same way it catches a bad dtype.
     """
     assert issubclass(decibri_exc.AgcTargetOutOfRange, decibri_exc.DecibriError)
-    with pytest.raises(decibri_exc.AgcTargetOutOfRange):
-        raise decibri_exc.AgcTargetOutOfRange("agc target level must be between -40 and -3")
+    with pytest.raises(decibri_exc.DecibriError):
+        Microphone(agc=0)
+
+
+def test_agc_out_of_range_from_the_raw_bridge_raises_the_same_class() -> None:
+    """A raw-bridge consumer that bypasses the wrapper trips the core guard.
+
+    Same class, core message: the wrapper's earlier check does not change the
+    identity a bypassing caller sees.
+    """
+    from decibri import _decibri
+
+    with pytest.raises(decibri_exc.AgcTargetOutOfRange) as exc_info:
+        _decibri.MicrophoneBridge(
+            sample_rate=16000,
+            channels=1,
+            frames_per_buffer=1600,
+            format="int16",
+            agc=0,
+        )
+    assert str(exc_info.value) == "agc target level must be between -40 and -3"
