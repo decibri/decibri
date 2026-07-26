@@ -14,8 +14,12 @@ For other decibri packages, see:
 ### Added
 
 - `underrunCount`: a read-only accessor on `Speaker` exposing the core stream's silence-fill counter, in samples. 0 while the producer keeps the queue fed; a rising value means playback is papering over gaps with silence.
+- `File.sampleRate` and `File.inputRate`: read-only accessors reporting the rate every delivered chunk carries and the source's own rate, taken from the WAV header or from the `inputRate` passed to `File.buffer`. They differ when the source was resampled, which is the only way a caller learns that it was. Both read for the life of the `File`, including after the source is consumed or closed.
 
 ### Changed
+
+- **The browser build rejects a non-numeric `vad` `threshold` or `holdoffMs`, which it accepted before.** A string, or any other non-number, was stored as given; every later score comparison against it evaluated false, so the detector never fired and nothing reported why. A non-numeric `holdoffMs` reached the silence timer directly. Both now raise a `TypeError`, with the Node build's messages: `vad threshold must be a number` and `vad holdoffMs must be a number`.
+- **The browser build raises `RangeError` where it raised `TypeError` for an out-of-range `threshold`, `holdoffMs` and `sampleRate`, and carries the Node build's messages.** The messages are now `vad threshold must be between 0 and 1`, `vad holdoffMs must be non-negative` and `sample rate must be between 1000 and 384000`; they previously read `threshold must be between 0 and 1, got <value>`, `holdoffMs must be >= 0, got <value>` and `sample rate must be between 1000 and 384000, got <value>`. Code that catches `TypeError` for these three options, or that matches the old message text, needs updating.
 
 - Every error that reaches a consumer is a `DecibriError` carrying a `code`. The `Microphone` `'error'` event and the `Speaker` `write()` and `end()` paths previously delivered the raw native error, which reported `name: 'Error'` and the native status string `'GenericFailure'` in `code` for a permission denial, a device loss and a failed open alike, and did not satisfy `instanceof DecibriError`.
 - A playback device that fails mid-stream is reported as `code: 'DEVICE_FAILED'` on the `Speaker` `'error'` event, or as a rejection from `writeAsync()` and `drainAsync()`, instead of the generic closed-stream error. It surfaces on the next write or drain, so a producer that has stopped writing is not told; `isPlaying` goes false immediately either way.

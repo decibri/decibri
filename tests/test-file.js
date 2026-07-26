@@ -126,6 +126,42 @@ async function fileTests(h) {
   const mean = sum / (conditioned.length / 2) / 32768;
   assert(Math.abs(mean) < 0.05, `dcRemoval conditions the delivered audio (mean ${mean.toFixed(3)})`);
 
+  console.log('File: rate getters');
+
+  // sampleRate is the rate every delivered chunk carries; inputRate is the
+  // source's own rate. They match when nothing was resampled.
+  const rateDefault = new File(wavPath);
+  assert(rateDefault.sampleRate === 16000, `sampleRate defaults to 16000 (got ${rateDefault.sampleRate})`);
+  assert(rateDefault.inputRate === 16000, `inputRate reads the WAV header (got ${rateDefault.inputRate})`);
+  rateDefault.close();
+
+  // A WAV read at a different engine rate: the two getters disagree, which is
+  // the only way a caller learns the source was resampled.
+  const wav48Path = path.join(tmp, 'clip-48k.wav');
+  writeWav(wav48Path, sineSamples(48000, 0.25), 48000);
+  const rateResampled = await File.open(wav48Path, { sampleRate: 16000 });
+  assert(rateResampled.sampleRate === 16000, `sampleRate reports the engine rate (got ${rateResampled.sampleRate})`);
+  assert(rateResampled.inputRate === 48000, `inputRate reports the source rate (got ${rateResampled.inputRate})`);
+
+  // Both survive a full pass and a close, the same as vadScore: the File keeps
+  // answering what it was configured with after the source is gone.
+  await readAll(rateResampled);
+  assert(
+    rateResampled.sampleRate === 16000 && rateResampled.inputRate === 48000,
+    'the rate getters still read after the source is consumed'
+  );
+  rateResampled.close();
+  assert(
+    rateResampled.sampleRate === 16000 && rateResampled.inputRate === 48000,
+    'the rate getters still read after close()'
+  );
+
+  // The buffer path reports the explicit inputRate it was given.
+  const rateBuffered = File.buffer(sineSamples(44100, 0.1), { inputRate: 44100, sampleRate: 22050 });
+  assert(rateBuffered.sampleRate === 22050, `buffer sampleRate is the requested rate (got ${rateBuffered.sampleRate})`);
+  assert(rateBuffered.inputRate === 44100, `buffer inputRate is the declared rate (got ${rateBuffered.inputRate})`);
+  rateBuffered.close();
+
   console.log('File: buffer input enforcement');
 
   // A raw Buffer of bytes is ambiguous and rejected; so is anything that is

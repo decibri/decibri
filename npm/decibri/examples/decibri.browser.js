@@ -108,11 +108,13 @@ var decibri = (function() {
 					if (vad.model !== "energy") throw new TypeError(`Invalid vad model: ${JSON.stringify(vad.model)}. Expected 'energy'.`);
 					this._vad = true;
 					if (vad.threshold !== void 0) {
-						if (vad.threshold < 0 || vad.threshold > 1) throw new TypeError(`threshold must be between 0 and 1, got ${vad.threshold}`);
+						if (typeof vad.threshold !== "number" || Number.isNaN(vad.threshold)) throw new TypeError("vad threshold must be a number");
+						if (vad.threshold < 0 || vad.threshold > 1) throw new RangeError("vad threshold must be between 0 and 1");
 						vadThreshold = vad.threshold;
 					}
 					if (vad.holdoffMs !== void 0) {
-						if (vad.holdoffMs < 0) throw new TypeError(`holdoffMs must be >= 0, got ${vad.holdoffMs}`);
+						if (typeof vad.holdoffMs !== "number" || Number.isNaN(vad.holdoffMs)) throw new TypeError("vad holdoffMs must be a number");
+						if (vad.holdoffMs < 0) throw new RangeError("vad holdoffMs must be non-negative");
 						vadHoldoff = vad.holdoffMs;
 					}
 				} else throw new TypeError(`Invalid vad value: ${JSON.stringify(vad)}. Expected false, 'energy', or a config object { model, threshold, holdoffMs }.`);
@@ -129,7 +131,7 @@ var decibri = (function() {
 				this._echoCancellation = options.echoCancellation ?? true;
 				this._noiseSuppression = options.noiseSuppression ?? true;
 				this._workletUrl = options.workletUrl;
-				if (this._sampleRate < 1e3 || this._sampleRate > 384e3) throw new TypeError(`sample rate must be between 1000 and 384000, got ${this._sampleRate}`);
+				if (this._sampleRate < 1e3 || this._sampleRate > 384e3) throw new RangeError("sample rate must be between 1000 and 384000");
 				if (this._channels < 1 || this._channels > 32) throw new TypeError(`channels must be between 1 and 32, got ${this._channels}`);
 				if (this._framesPerBuffer < 64 || this._framesPerBuffer > 65536) throw new TypeError(`frames per buffer must be between 64 and 65536, got ${this._framesPerBuffer}`);
 				if (this._dtype !== "int16" && this._dtype !== "float32") throw new TypeError("dtype must be 'int16' or 'float32'");
