@@ -64,6 +64,7 @@ from decibri._classes import (
     _BUNDLED_DENOISE_MODEL,
     _BUNDLED_VAD_MODEL,
     _DEFAULT_VAD_HOLDOFF_MS,
+    _require_numpy,
     _VadStateMachine,
     _VALID_DENOISE_MODELS,
     _VALID_FORMATS,
@@ -193,6 +194,12 @@ class AsyncMicrophone:
             raise exceptions.InvalidFormat(
                 f"dtype must be 'int16' or 'float32'; got {dtype!r}"
             )
+
+        # ndarray output requires numpy at read time; checked here, before
+        # the bridge is constructed, so a missing install raises a catchable
+        # ImportError from the constructor.
+        if as_ndarray:
+            _require_numpy()
 
         # Decompose ``vad`` into the bridge's (enabled, mode) split plus the
         # threshold/holdoff policy values. Mirrors Microphone exactly; see
@@ -466,9 +473,9 @@ class AsyncMicrophone:
         thread on the Rust side runs to completion; its result (if any) is
         dropped. The bridge state remains consistent for subsequent reads.
 
-        Raises ``ImportError`` with a clear actionable message if
-        ``as_ndarray=True`` is set but ``numpy`` is not installed (i.e.
-        the user did not run ``pip install decibri[numpy]``).
+        ``as_ndarray=True`` requires the optional ``numpy`` extra; a
+        missing numpy raises ``ImportError`` at construction (install
+        with ``pip install decibri[numpy]``).
         """
         try:
             chunk = await self._bridge.read(timeout_ms=timeout_ms)

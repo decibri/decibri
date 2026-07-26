@@ -27,6 +27,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - A `model_path` that does not exist is reported at construction. `File(..., vad='silero', model_path=...)` raises `VadModelLoadFailed` from the constructor instead of from the first `read()` or `analyze()`. The path is checked only where Silero VAD reads it, so `vad='energy'` and `vad=False` are unaffected.
 - A bundled model that cannot be located raises `VadModelLoadFailed` or `ModelLoadFailed`, where a builtin `ValueError` was raised before. Both derive from `DecibriError` and carry the model's packaged location in `path`. Code catching `ValueError` for a broken install catches `DecibriError` instead.
 
+### Fixed
+
+- Requesting ndarray output without numpy installed raises `ImportError` (install with `pip install decibri[numpy]`) from the constructor, on every surface accepting `as_ndarray=True`, where an uncatchable `pyo3_runtime.PanicException` was raised from the first `read()`. A plain `except Exception` now catches the failure.
+
 ## [0.7.2] - 2026-07-25
 
 ### Added

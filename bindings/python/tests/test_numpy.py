@@ -3,7 +3,8 @@
 Covers: construction with as_ndarray=True (no NotImplementedError),
 bytes-mode regression (default), ndarray return on read, dtype/shape
 correctness, ndarray-accept on write, dtype mismatch rejection, async
-parallel, and the 5-test smoke baseline still passing.
+parallel, the missing-numpy construction guard (absence simulated via
+``sys.modules``), and the 5-test smoke baseline still passing.
 
 By convention, every async test has explicit
 ``@pytest.mark.asyncio``. Hardware-gated tests use the existing
@@ -16,10 +17,15 @@ assertions on synthetic data) don't need hardware markers.
 
 from __future__ import annotations
 
+import struct
+import sys
+import wave
+from pathlib import Path
+
 import numpy as np
 import pytest
 
-from decibri import AsyncMicrophone, AsyncSpeaker, Microphone, Speaker
+from decibri import AsyncFile, AsyncMicrophone, AsyncSpeaker, File, Microphone, Speaker
 
 
 # ---------------------------------------------------------------------------
@@ -173,3 +179,174 @@ async def test_async_write_accepts_ndarray() -> None:
     async with AsyncSpeaker(dtype="int16") as o:
         await o.write(samples)
         await o.drain()
+
+
+# ---------------------------------------------------------------------------
+# Missing-numpy guard (no hardware needed)
+#
+# Absence is simulated per test with a ``None`` entry in ``sys.modules``:
+# any ``import numpy`` then raises ImportError while the module object
+# already imported above (the ``np`` global) stays usable, and pytest's
+# ``monkeypatch`` restores the real entry on teardown, so no state
+# outlives the test. Mirrors the bundled-model tests, which simulate
+# their failure by monkeypatching the resource lookup.
+# ---------------------------------------------------------------------------
+
+_MISSING_NUMPY_MESSAGE = (
+    "numpy is not installed. Install with: pip install decibri[numpy]"
+)
+
+
+def _block_numpy(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Make ``import numpy`` raise ImportError for the current test."""
+    monkeypatch.setitem(sys.modules, "numpy", None)
+
+
+def _write_wav(path: Path, n_samples: int = 8000) -> None:
+    """Write a small silent mono 16-bit PCM WAV via the standard library."""
+    with wave.open(str(path), "wb") as w:
+        w.setnchannels(1)
+        w.setsampwidth(2)
+        w.setframerate(16000)
+        w.writeframes(struct.pack(f"<{n_samples}h", *([0] * n_samples)))
+
+
+def test_missing_numpy_microphone_raises_importerror(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``Microphone(as_ndarray=True)`` without numpy raises ``ImportError``."""
+    _block_numpy(monkeypatch)
+    with pytest.raises(ImportError) as excinfo:
+        Microphone(as_ndarray=True, vad=False)
+    assert str(excinfo.value) == _MISSING_NUMPY_MESSAGE
+
+
+def test_missing_numpy_is_caught_by_except_exception(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The missing-numpy failure is caught by a plain ``except Exception``."""
+    _block_numpy(monkeypatch)
+    try:
+        Microphone(as_ndarray=True, vad=False)
+    except Exception as exc:
+        assert isinstance(exc, ImportError)
+        assert str(exc) == _MISSING_NUMPY_MESSAGE
+    else:
+        pytest.fail("Microphone(as_ndarray=True) did not raise without numpy")
+
+
+def test_missing_numpy_async_microphone_raises_importerror(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``AsyncMicrophone(as_ndarray=True)`` without numpy raises ``ImportError``."""
+    _block_numpy(monkeypatch)
+    with pytest.raises(ImportError) as excinfo:
+        AsyncMicrophone(as_ndarray=True, vad=False)
+    assert str(excinfo.value) == _MISSING_NUMPY_MESSAGE
+
+
+@pytest.mark.asyncio
+async def test_missing_numpy_async_microphone_open_raises_importerror(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``await AsyncMicrophone.open(as_ndarray=True)`` raises ``ImportError``."""
+    _block_numpy(monkeypatch)
+    with pytest.raises(ImportError) as excinfo:
+        await AsyncMicrophone.open(as_ndarray=True, vad=False)
+    assert str(excinfo.value) == _MISSING_NUMPY_MESSAGE
+
+
+def test_missing_numpy_file_surfaces_raise_importerror(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """``File(path)``, ``File.open`` and ``File.buffer`` all raise the guard."""
+    _block_numpy(monkeypatch)
+    path = tmp_path / "clip.wav"
+    _write_wav(path)
+    with pytest.raises(ImportError) as excinfo:
+        File(path, as_ndarray=True)
+    assert str(excinfo.value) == _MISSING_NUMPY_MESSAGE
+    with pytest.raises(ImportError) as excinfo:
+        File.open(path, as_ndarray=True)
+    assert str(excinfo.value) == _MISSING_NUMPY_MESSAGE
+    with pytest.raises(ImportError) as excinfo:
+        File.buffer([0.0] * 1600, input_rate=16000, as_ndarray=True)
+    assert str(excinfo.value) == _MISSING_NUMPY_MESSAGE
+
+
+@pytest.mark.asyncio
+async def test_missing_numpy_async_file_surfaces_raise_importerror(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """``AsyncFile(path)``, ``AsyncFile.open`` and ``AsyncFile.buffer`` raise."""
+    _block_numpy(monkeypatch)
+    path = tmp_path / "clip.wav"
+    _write_wav(path)
+    with pytest.raises(ImportError) as excinfo:
+        AsyncFile(path, as_ndarray=True)
+    assert str(excinfo.value) == _MISSING_NUMPY_MESSAGE
+    with pytest.raises(ImportError) as excinfo:
+        await AsyncFile.open(path, as_ndarray=True)
+    assert str(excinfo.value) == _MISSING_NUMPY_MESSAGE
+    with pytest.raises(ImportError) as excinfo:
+        await AsyncFile.buffer([0.0] * 1600, input_rate=16000, as_ndarray=True)
+    assert str(excinfo.value) == _MISSING_NUMPY_MESSAGE
+
+
+def test_missing_numpy_default_bytes_mode_unaffected(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """``as_ndarray=False`` constructs and reads bytes without numpy."""
+    _block_numpy(monkeypatch)
+    assert Microphone(vad=False) is not None
+    path = tmp_path / "clip.wav"
+    _write_wav(path)
+    chunk = File(path).read()
+    assert isinstance(chunk, bytes)
+    buffered = File.buffer([0.0] * 1600, input_rate=16000).read()
+    assert isinstance(buffered, bytes)
+
+
+# ---------------------------------------------------------------------------
+# With numpy present, the guarded surfaces still work (regression for the
+# guard sitting in front of a working path). File reads need no hardware.
+# ---------------------------------------------------------------------------
+
+
+def test_file_read_returns_ndarray_with_numpy_present(tmp_path: Path) -> None:
+    """``File(path, as_ndarray=True).read()`` returns an int16 ndarray."""
+    path = tmp_path / "clip.wav"
+    _write_wav(path)
+    for file in (File(path, as_ndarray=True), File.open(path, as_ndarray=True)):
+        chunk = file.read()
+        assert isinstance(chunk, np.ndarray)
+        assert chunk.dtype == np.int16
+
+
+def test_file_buffer_read_returns_ndarray_with_numpy_present() -> None:
+    """``File.buffer(..., as_ndarray=True).read()`` returns an ndarray."""
+    chunk = File.buffer([0.0] * 1600, input_rate=16000, as_ndarray=True).read()
+    assert isinstance(chunk, np.ndarray)
+
+
+@pytest.mark.asyncio
+async def test_async_file_read_returns_ndarray_with_numpy_present(
+    tmp_path: Path,
+) -> None:
+    """Every ``AsyncFile`` constructor still yields ndarray reads."""
+    path = tmp_path / "clip.wav"
+    _write_wav(path)
+    for f in (
+        AsyncFile(path, as_ndarray=True),
+        await AsyncFile.open(path, as_ndarray=True),
+        await AsyncFile.buffer([0.0] * 1600, input_rate=16000, as_ndarray=True),
+    ):
+        chunk = await f.read()
+        assert isinstance(chunk, np.ndarray)
+
+
+@pytest.mark.asyncio
+async def test_async_microphone_open_constructs_with_numpy_present() -> None:
+    """``await AsyncMicrophone.open(as_ndarray=True)`` constructs cleanly."""
+    mic = await AsyncMicrophone.open(as_ndarray=True, vad=False)
+    assert mic is not None
