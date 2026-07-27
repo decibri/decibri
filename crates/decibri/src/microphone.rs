@@ -325,6 +325,12 @@ pub struct MicrophoneStream {
     // `reblock_buffer` so it is delivered rather than dropped. Set the first time
     // close is detected with a chain present, under the `reblock_buffer` lock, so
     // the drain runs exactly once. `AtomicBool` keeps the type `Send + Sync`.
+    //
+    // Once set it also closes the chain to further input: the stages hold no
+    // state a later block can continue from, so `next_chunk` / `try_next_chunk`
+    // stop pulling from the channel and `ingest` rejects a block that reaches it
+    // anyway. Stays false for the lifetime of a stream with no chain, which has
+    // nothing to flush and keeps its direct delivery unchanged.
     chain_flushed: AtomicBool,
     // Pre-transform (post-normalize) side channel for the VAD feed. `Some` only
     // when the chain has a `transform` segment, so the delivered output (which is
@@ -410,6 +416,14 @@ impl MicrophoneStream {
             .reblock_buffer
             .lock()
             .unwrap_or_else(PoisonError::into_inner);
+
+        // The chain has already been drained, so the stream is over: deliver what
+        // is buffered and leave the channel alone. Checked before the drain so a
+        // block arriving now is never fed through the emptied chain. Never taken
+        // on the no-chain path, which has nothing to flush.
+        if self.chain_flushed.load(Ordering::Relaxed) {
+            return self.take_block_or_closed(&mut buf, samples);
+        }
 
         // Pull every immediately-available native buffer into the re-block
         // buffer without blocking.
@@ -499,6 +513,14 @@ impl MicrophoneStream {
             .reblock_buffer
             .lock()
             .unwrap_or_else(PoisonError::into_inner);
+
+        // The chain has already been drained, so the stream is over: deliver what
+        // is buffered without waiting on the channel. Checked before the wait so a
+        // block arriving now is never fed through the emptied chain. Never taken
+        // on the no-chain path, which has nothing to flush.
+        if self.chain_flushed.load(Ordering::Relaxed) {
+            return self.take_block_or_closed(&mut buf, samples);
+        }
 
         loop {
             // Fast path: a full block is already buffered.
@@ -607,7 +629,26 @@ impl MicrophoneStream {
     /// enhancement step. The tap holds real-time samples, so a length-changing
     /// transform (denoise) leaves it leading the delivered enhanced output; see
     /// the [`vad_tap`](Self::vad_tap) field and `vad_input` docs.
+    ///
+    /// Rejects the block with [`DecibriError::MicrophoneStreamClosed`] once the
+    /// chain has been flushed. The flushed chain holds no state a further block
+    /// can continue from, so running one through it yields samples that do not
+    /// follow the delivered stream. The callers short-circuit before reaching
+    /// here, so this ends the stream on the already-documented closed signal
+    /// rather than delivering that output.
+    ///
+    /// A debug assertion fires on that rejection: the callers make it
+    /// unreachable, so reaching it means the read-path short-circuit no longer
+    /// holds. Debug builds stop on it; release builds return the error.
     fn ingest(&self, buf: &mut VecDeque<f32>, chunk: AudioChunk) -> Result<(), DecibriError> {
+        let flushed = self.chain_flushed.load(Ordering::Relaxed);
+        debug_assert!(
+            !flushed,
+            "ingest into a flushed chain: the read-path short-circuit failed"
+        );
+        if flushed {
+            return Err(DecibriError::MicrophoneStreamClosed);
+        }
         match &self.capture_stage {
             None => {
                 buf.extend(chunk.data);
@@ -2168,5 +2209,295 @@ mod tests {
             matches!(cfg.validate(), Err(DecibriError::ChannelsOutOfRange)),
             "zero channels stays a plain range error, not a multichannel one"
         );
+    }
+
+    /// A 48 kHz mono device resampled to the 16 kHz target: the chain whose
+    /// stages carry state across blocks, so a block fed after the close-path
+    /// flush would run through emptied stages.
+    fn resample_stage() -> CaptureStage {
+        build_capture_stage(
+            1,
+            1,
+            48_000,
+            16_000,
+            Transforms {
+                dc_removal: false,
+                denoise: None,
+                highpass: None,
+                agc: None,
+                limiter: None,
+            },
+        )
+        .unwrap()
+        .expect("48 kHz mono device -> 16 kHz resample chain")
+    }
+
+    /// Read a stream to exhaustion with `try_next_chunk`, returning every
+    /// delivered sample in order. Stops on the closed signal.
+    fn drain_try(stream: &MicrophoneStream, samples: usize) -> Vec<f32> {
+        let mut out = Vec::new();
+        loop {
+            match stream.try_next_chunk(samples) {
+                Ok(Some(c)) => out.extend_from_slice(&c.data),
+                Ok(None) => break,
+                Err(DecibriError::MicrophoneStreamClosed) => break,
+                Err(e) => panic!("unexpected error: {e}"),
+            }
+        }
+        out
+    }
+
+    /// Read a stream to exhaustion with `next_chunk`, returning every delivered
+    /// sample in order. Stops on the closed signal.
+    fn drain_next(stream: &MicrophoneStream, samples: usize) -> Vec<f32> {
+        let mut out = Vec::new();
+        loop {
+            match stream.next_chunk(samples, Some(Duration::from_millis(60))) {
+                Ok(Some(c)) => out.extend_from_slice(&c.data),
+                Ok(None) => break,
+                Err(DecibriError::MicrophoneStreamClosed) => break,
+                Err(e) => panic!("unexpected error: {e}"),
+            }
+        }
+        out
+    }
+
+    /// A native buffer arriving after the close-path flush is not fed through the
+    /// chain: the delivered stream is exactly what the same capture yields with no
+    /// late buffer at all, down to the sample.
+    ///
+    /// The chain's stages hold their conditioning state between blocks and the
+    /// flush empties it, so running a further block through them resumes from the
+    /// drained state and yields samples that do not continue the stream. The
+    /// driver-error close reaches this sequence: it clears the running flag
+    /// without dropping the platform stream, so the capture channel stays live
+    /// and a buffer already in flight can land after the flush.
+    #[test]
+    fn late_buffer_after_flush_is_not_fed_through_the_chain() {
+        // The native buffer length is deliberately not a multiple of the 3:1
+        // decimation factor, so a resumed chain would land off the decimation
+        // grid as well as starting from emptied filter state.
+        let warm: Vec<f32> = (0..4_801).map(|n| (n as f32 * 0.01).sin()).collect();
+        let late: Vec<f32> = (0..4_800)
+            .map(|n| ((n + 4_801) as f32 * 0.01).sin())
+            .collect();
+        let samples = 320;
+
+        // Reference: the same capture, closed the same way, with no late buffer.
+        let (reference, ref_sender, ref_running) = test_stream_with(Some(resample_stage()), 1);
+        ref_sender.send(make_native_chunk(warm.clone())).unwrap();
+        ref_running.store(false, Ordering::Relaxed);
+        let expected = drain_try(&reference, samples);
+        assert!(
+            reference.chain_flushed.load(Ordering::Relaxed),
+            "the reference read reached the close-path flush"
+        );
+
+        // The same capture, with a native buffer landing after the flush.
+        let (stream, sender, running) = test_stream_with(Some(resample_stage()), 1);
+        sender.send(make_native_chunk(warm)).unwrap();
+        running.store(false, Ordering::Relaxed);
+        let before = drain_try(&stream, samples);
+        assert!(
+            stream.chain_flushed.load(Ordering::Relaxed),
+            "the read reached the close-path flush"
+        );
+
+        sender.send(make_native_chunk(late)).unwrap();
+        let after = drain_try(&stream, samples);
+
+        assert!(
+            after.is_empty(),
+            "a buffer arriving after the flush delivered {} samples",
+            after.len()
+        );
+        assert_eq!(
+            before, expected,
+            "the delivered stream must match the capture with no late buffer"
+        );
+    }
+
+    /// The same guarantee on the blocking read: `next_chunk` does not pull a
+    /// buffer that arrives after the close-path flush.
+    #[test]
+    fn next_chunk_does_not_ingest_after_flush() {
+        let warm: Vec<f32> = (0..4_801).map(|n| (n as f32 * 0.01).sin()).collect();
+        let late: Vec<f32> = (0..4_800)
+            .map(|n| ((n + 4_801) as f32 * 0.01).sin())
+            .collect();
+        let samples = 320;
+
+        let (stream, sender, running) = test_stream_with(Some(resample_stage()), 1);
+        sender.send(make_native_chunk(warm)).unwrap();
+        running.store(false, Ordering::Relaxed);
+        let before = drain_next(&stream, samples);
+        assert!(
+            !before.is_empty() && stream.chain_flushed.load(Ordering::Relaxed),
+            "the read delivered the capture and reached the close-path flush"
+        );
+
+        sender.send(make_native_chunk(late)).unwrap();
+        assert!(
+            matches!(
+                stream.next_chunk(samples, Some(Duration::from_millis(60))),
+                Err(DecibriError::MicrophoneStreamClosed)
+            ),
+            "the stream stays closed rather than delivering the late buffer"
+        );
+    }
+
+    /// The flushed chain rejects a block rather than conditioning it, so a caller
+    /// reaching `ingest` after the flush ends the stream on the closed signal
+    /// instead of delivering output the chain cannot produce.
+    ///
+    /// Both regimes of the guard are pinned here. A debug build stops on the
+    /// assertion, which is why the test expects that panic when
+    /// `debug_assertions` is on; a release build has no assertion and returns
+    /// the error the body asserts.
+    #[test]
+    #[cfg_attr(
+        debug_assertions,
+        should_panic(expected = "ingest into a flushed chain")
+    )]
+    fn ingest_after_flush_is_rejected() {
+        let (stream, _sender, running) = test_stream_with(Some(resample_stage()), 1);
+        running.store(false, Ordering::Relaxed);
+        let mut buf = VecDeque::new();
+        stream.flush_chain(&mut buf).expect("close-path flush");
+        assert!(stream.chain_flushed.load(Ordering::Relaxed));
+
+        let err = stream
+            .ingest(&mut buf, make_native_chunk(vec![0.5; 480]))
+            .expect_err("a flushed chain rejects a further block");
+        assert!(matches!(err, DecibriError::MicrophoneStreamClosed));
+    }
+
+    /// Restarting reads the new capture in full: the flushed state belongs to the
+    /// stream that closed, not to the [`Microphone`] that produced it.
+    ///
+    /// [`Microphone::start`] builds a whole new `MicrophoneStream` for every
+    /// call, so a restart is a second stream over the same configuration, which
+    /// is what this pins. A latch held anywhere outlasting one stream would leave
+    /// the restarted stream short-circuiting on its first read and reporting
+    /// closed, which a consumer cannot tell apart from a stream that genuinely
+    /// ended. The restart is read with `next_chunk`, the method the bindings
+    /// pump.
+    #[test]
+    fn a_restarted_stream_reads_after_the_previous_one_was_flushed() {
+        let block: Vec<f32> = (0..4_801).map(|n| (n as f32 * 0.01).sin()).collect();
+        let samples = 320;
+
+        // First session: fed, closed, and read to exhaustion, so it flushes.
+        let (first, first_sender, first_running) = test_stream_with(Some(resample_stage()), 1);
+        first_sender.send(make_native_chunk(block.clone())).unwrap();
+        first_running.store(false, Ordering::Relaxed);
+        let first_delivered = drain_try(&first, samples);
+        assert!(
+            first.chain_flushed.load(Ordering::Relaxed),
+            "the first session reached the close-path flush"
+        );
+        assert!(!first_delivered.is_empty());
+
+        // The restart, over the same configuration and the same input.
+        let (second, second_sender, second_running) = test_stream_with(Some(resample_stage()), 1);
+        assert!(
+            !second.chain_flushed.load(Ordering::Relaxed),
+            "a restarted stream starts with its chain unflushed"
+        );
+        second_sender.send(make_native_chunk(block)).unwrap();
+        second_running.store(false, Ordering::Relaxed);
+        let second_delivered = drain_next(&second, samples);
+
+        assert!(
+            !second_delivered.is_empty(),
+            "the restarted stream reported closed without delivering its capture"
+        );
+        assert_eq!(
+            second_delivered, first_delivered,
+            "a restarted stream delivers the same capture as the first"
+        );
+    }
+
+    /// A stream opened, fed while running, and closed normally is unaffected: the
+    /// close check that now runs before the drain does not disturb delivery of
+    /// buffers that arrive while the stream is open, and the full delivered stream
+    /// still matches the chain applied directly.
+    #[test]
+    fn open_stream_delivers_every_buffer_then_the_flushed_tail() {
+        let blocks: Vec<Vec<f32>> = (0..4)
+            .map(|b| {
+                (0..1_200)
+                    .map(|n| ((b * 1_200 + n) as f32 * 0.01).sin())
+                    .collect()
+            })
+            .collect();
+        let samples = 320;
+
+        let (stream, sender, running) = test_stream_with(Some(resample_stage()), 1);
+        let mut delivered: Vec<f32> = Vec::new();
+        for block in &blocks {
+            sender.send(make_native_chunk(block.clone())).unwrap();
+            // Read while the stream is open: the reordered check must not
+            // short-circuit here.
+            delivered.extend(drain_try(&stream, samples));
+        }
+        assert!(
+            !stream.chain_flushed.load(Ordering::Relaxed),
+            "an open stream is never flushed"
+        );
+        running.store(false, Ordering::Relaxed);
+        delivered.extend(drain_try(&stream, samples));
+
+        // The same chain applied directly to the same blocks, flushed once.
+        let mut reference = resample_stage();
+        let mut expected: Vec<f32> = Vec::new();
+        for block in &blocks {
+            expected.extend_from_slice(reference.run(block).unwrap());
+        }
+        reference.flush(&mut expected).unwrap();
+
+        assert_eq!(
+            delivered, expected,
+            "an ordinary open-feed-close stream delivers the chain's output unchanged"
+        );
+    }
+
+    /// The close path on a chained stream that was never fed. The flush still
+    /// runs, and a resample chain drains its filter's group-delay tail from the
+    /// state it was built with, so the stream delivers that tail as silence and
+    /// then reports closed. Pinned because it is the same close path the fix
+    /// reorders, and because the tail's length and content are the chain's, not
+    /// this module's.
+    #[test]
+    fn close_without_any_buffer_delivers_only_the_flushed_tail() {
+        let (stream, _sender, running) = test_stream_with(Some(resample_stage()), 1);
+        running.store(false, Ordering::Relaxed);
+
+        let delivered = drain_try(&stream, 320);
+        assert!(
+            stream.chain_flushed.load(Ordering::Relaxed),
+            "the close path flushed the chain"
+        );
+
+        let mut expected = Vec::new();
+        resample_stage().flush(&mut expected).unwrap();
+        assert_eq!(
+            delivered, expected,
+            "a never-fed stream delivers the chain's flushed tail and nothing else"
+        );
+        assert!(
+            delivered.iter().all(|s| *s == 0.0),
+            "the tail of a chain that received no input is silence"
+        );
+
+        // The closed signal repeats, now via the reordered short-circuit.
+        assert!(matches!(
+            stream.try_next_chunk(320),
+            Err(DecibriError::MicrophoneStreamClosed)
+        ));
+        assert!(matches!(
+            stream.next_chunk(320, Some(Duration::from_millis(20))),
+            Err(DecibriError::MicrophoneStreamClosed)
+        ));
     }
 }

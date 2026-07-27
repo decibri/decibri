@@ -8,6 +8,12 @@ For Rust core (`crates/decibri`) and npm package (`npm/decibri`) changes, see [t
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+
+- A conditioned capture no longer returns audio after the stream has closed. A capture whose device rate differed from the requested `sample_rate`, or that had an enhancement step enabled, could return a final burst of samples that do not follow the recording, at up to full scale, when capture ended on a device error or on `stop()`. An unconditioned capture is unaffected.
+
 ## [0.7.3] - 2026-07-27
 
 ### Added

@@ -9,6 +9,12 @@ For other decibri packages, see:
 - npm package: [npm/decibri/CHANGELOG.md](../../npm/decibri/CHANGELOG.md)
 - Python package: [bindings/python/CHANGELOG.md](../../bindings/python/CHANGELOG.md)
 
+## [Unreleased]
+
+### Fixed
+
+- A conditioned capture no longer delivers audio after the stream has closed. A `Microphone` capture whose device rate differed from the requested rate, or that had an enhancement step enabled, could end with a burst of samples that do not follow the recording, at up to full scale, when the stream closed on a device or driver failure or on `stop()`. An unconditioned capture is unaffected.
+
 ## [5.3.0] - 2026-07-27
 
 ### Added
