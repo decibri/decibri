@@ -1,7 +1,7 @@
 """Exception hierarchy tests.
 
-Covers all 46 exception classes shipped in the public ``decibri`` namespace:
-1 base (DecibriError) + 24 direct subclasses + DeviceError intermediate
+Covers all 48 exception classes shipped in the public ``decibri`` namespace:
+1 base (DecibriError) + 26 direct subclasses + DeviceError intermediate
 + 8 direct DeviceError subclasses + OrtError intermediate + 8 direct
 OrtError subclasses + OrtPathError intermediate + 2 direct OrtPathError
 subclasses.
@@ -59,7 +59,9 @@ from decibri import (
     OrtTensorExtractFailed,
     OrtThreadsConfigFailed,
     PermissionDenied,
+    ResampleAfterFlush,
     ResampleConfigInvalid,
+    ResampleFailed,
     SpeakerNotFound,
     SpeakerStreamClosed,
     SampleRateOutOfRange,
@@ -75,13 +77,13 @@ import pytest
 
 
 # ---------------------------------------------------------------------------
-# All 46 classes are reachable and inherit from Exception via DecibriError.
+# All 48 classes are reachable and inherit from Exception via DecibriError.
 # ---------------------------------------------------------------------------
 
 
 ALL_DECIBRI_ERROR_CLASSES = (
     DecibriError,
-    # 24 direct DecibriError subclasses (non-device, non-ORT). DeviceFailed
+    # 26 direct DecibriError subclasses (non-device, non-ORT). DeviceFailed
     # is a runtime device/driver failure (distinct from the DeviceError
     # enumeration/selection family); OnnxBackendFailed is the non-ORT ONNX
     # backend catch-all (distinct from the OrtError family); FileConsumed and
@@ -102,6 +104,8 @@ ALL_DECIBRI_ERROR_CLASSES = (
     VadSampleRateUnsupported,
     VadThresholdOutOfRange,
     ResampleConfigInvalid,
+    ResampleAfterFlush,
+    ResampleFailed,
     DeviceFailed,
     OnnxBackendFailed,
     FileConsumed,
@@ -137,11 +141,11 @@ ALL_DECIBRI_ERROR_CLASSES = (
 
 
 def test_class_count() -> None:
-    # 46 total: 1 base + 24 direct + DeviceError + 8 device + OrtError
-    # + 8 ORT direct + OrtPathError + 2 path. The addition over the prior 45
-    # is ResampleConfigInvalid, which gives the last core variant without a
-    # class one of its own.
-    assert len(ALL_DECIBRI_ERROR_CLASSES) == 46
+    # 48 total: 1 base + 26 direct + DeviceError + 8 device + OrtError
+    # + 8 ORT direct + OrtPathError + 2 path. The additions over the prior 46
+    # are ResampleAfterFlush, the resample chain's fed-after-flush error, and
+    # ResampleFailed, the unrecognised-resampler-error fallback.
+    assert len(ALL_DECIBRI_ERROR_CLASSES) == 48
 
 
 def test_all_inherit_from_decibri_error() -> None:
@@ -467,8 +471,8 @@ def _core_variant_names() -> list[str]:
     assert "PermissionDenied" in names, "known variant missing from the parsed table"
     # The count is pinned deliberately and must be updated when a core variant
     # is added or removed.
-    assert len(names) == 41, (
-        f"parsed {len(names)} variants from the core identity table, expected 41;"
+    assert len(names) == 43, (
+        f"parsed {len(names)} variants from the core identity table, expected 43;"
         " the count is pinned deliberately and must be updated when a core"
         " variant is added or removed"
     )

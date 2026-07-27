@@ -10,8 +10,18 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+### Added
+
+- `ResampleAfterFlush`, a `DecibriError` subclass reported when the resample chain is fed audio after it was flushed. Importable via `decibri.ResampleAfterFlush` or from `decibri.exceptions`. The condition it reports is defensive in the core and not reachable through the Python surface.
+- `ResampleFailed`, a `DecibriError` subclass reported when the resampler returns an error decibri does not recognise. The message forwards the resampler's own text. Importable via `decibri.ResampleFailed` or from `decibri.exceptions`. The condition it reports is defensive in the core and not reachable through the Python surface.
+
+### Changed
+
+- Capture at a device rate other than the requested `sample_rate`, and `File` iteration over a source at another rate, resample faster.
+
 ### Fixed
 
+- The resample stage no longer contributes a tail at close when it processed no audio. A capture that ends before a single buffer arrives, and a `File` over an empty source, each returned that tail as a short run of silence when the input rate and the requested `sample_rate` differed.
 - A conditioned capture no longer returns audio after the stream has closed. A capture whose device rate differed from the requested `sample_rate`, or that had an enhancement step enabled, could return a final burst of samples that do not follow the recording, at up to full scale, when capture ended on a device error or on `stop()`. An unconditioned capture is unaffected.
 
 ## [0.7.3] - 2026-07-27
