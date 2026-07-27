@@ -23,6 +23,7 @@ For other decibri packages, see:
 ### Fixed
 
 - The resample stage no longer contributes a tail at close when it processed no audio. A `Microphone` capture that ends before a single buffer arrives, and a `File` over an empty source, each delivered that tail as a short run of silence when the input rate and the requested rate differed.
+- The denoise stage no longer contributes a tail at close when it processed no audio. With denoise enabled, a `Microphone` capture that ends before a single buffer arrives, and a `File` over an empty source, each delivered 512 samples of silence (32 ms at 16 kHz) that the stream never captured, indistinguishable to a consumer from recorded audio.
 - A conditioned capture no longer delivers audio after the stream has closed. A `Microphone` capture whose device rate differed from the requested rate, or that had an enhancement step enabled, could end with a burst of samples that do not follow the recording, at up to full scale, when the stream closed on a device or driver failure or on `stop()`. An unconditioned capture is unaffected.
 
 ## [5.3.0] - 2026-07-27

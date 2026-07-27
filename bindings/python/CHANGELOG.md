@@ -22,6 +22,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 ### Fixed
 
 - The resample stage no longer contributes a tail at close when it processed no audio. A capture that ends before a single buffer arrives, and a `File` over an empty source, each returned that tail as a short run of silence when the input rate and the requested `sample_rate` differed.
+- The denoise stage no longer contributes a tail at close when it processed no audio. With `denoise` set, a capture that ends before a single buffer arrives, and a `File` over an empty source, each returned 512 samples of silence (32 ms at 16 kHz) that the stream never captured, indistinguishable to a consumer from recorded audio.
 - A conditioned capture no longer returns audio after the stream has closed. A capture whose device rate differed from the requested `sample_rate`, or that had an enhancement step enabled, could return a final burst of samples that do not follow the recording, at up to full scale, when capture ended on a device error or on `stop()`. An unconditioned capture is unaffected.
 
 ## [0.7.3] - 2026-07-27

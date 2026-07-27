@@ -15,9 +15,10 @@
 //! the three updated caches. Frames advance by the hop (256), so consecutive
 //! windows overlap by 512 - 256 = 256 samples, and the caches must be fed back
 //! each call. The stream is left-padded by one (window - hop) = 256-sample
-//! half-window of zeros (the [`accumulator`](Denoise::accumulator) is seeded with
-//! 256 zeros) so the first analysis window is `[zeros(256), samples(256)]`, which
-//! matches how the upstream streaming export initialises its internal buffer. The
+//! half-window of zeros (the [`accumulator`](Denoise::accumulator) takes 256 zeros
+//! when its first sample arrives) so the first analysis window is
+//! `[zeros(256), samples(256)]`, which matches how the upstream streaming export
+//! initialises its internal buffer. The
 //! model therefore introduces 256 samples of algorithmic latency (the output hop
 //! lags its input by window - hop); the capture chain accounts for that latency
 //! as a tap lead, not here.
@@ -56,16 +57,23 @@ const CACHE_REC_LEN: usize = 16 * 20;
 /// Length-changing and latency-introducing: each [`process`](Stage::process)
 /// emits whole 256-sample hops as enough input accumulates, buffering the
 /// remainder, so its output count trails its input by the framing latency until
-/// [`flush`](Stage::flush) drains the tail at close. It runs in the `transform`
-/// segment after the VAD tap, so that latency surfaces as a bounded tap lead and
-/// never reaches the detector.
+/// [`flush`](Stage::flush) drains the tail at close. The tail exists to frame the
+/// audio the stage received, so a stage that received none emits nothing at
+/// flush. It runs in the `transform` segment after the VAD tap, so that latency
+/// surfaces as a bounded tap lead and never reaches the detector.
 pub(crate) struct Denoise {
     /// The model behind the shared ONNX session seam. Loaded from a caller-
     /// supplied path; the crate embeds no model bytes.
     session: Box<dyn OnnxSession>,
-    /// Pending samples not yet consumed by a frame. Seeded with `WINDOW - HOP`
-    /// zeros (the left-pad half-window); each frame consumes `HOP` from the front
-    /// and retains the `WINDOW - HOP`-sample overlap for the next window.
+    /// Pending samples not yet consumed by a frame. Empty until the stage
+    /// receives its first sample, when [`process`](Stage::process) seeds it with
+    /// `WINDOW - HOP` zeros (the left-pad half-window); each frame then consumes
+    /// `HOP` from the front and retains the `WINDOW - HOP`-sample overlap for the
+    /// next window, so once seeded it never empties again until
+    /// [`flush`](Stage::flush) clears it.
+    ///
+    /// Invariant, which [`flush`](Stage::flush) reads: an empty accumulator means
+    /// the stage holds no audio to frame, so it has nothing to drain.
     accumulator: Vec<f32>,
     /// The model's overlap-add tail buffer (`cache_*_0`), carried across calls.
     cache0: Vec<f32>,
@@ -108,9 +116,9 @@ impl Denoise {
 
         Ok(Self {
             session,
-            // Left-pad the stream by one half-window of zeros so the first
-            // analysis window is `[zeros(256), first 256 samples]`.
-            accumulator: vec![0.0; WINDOW - HOP],
+            // Empty until the first sample arrives; `process` lays down the
+            // left-pad half-window then.
+            accumulator: Vec::new(),
             cache0: vec![0.0; CACHE0_LEN],
             cache1: vec![0.0; CACHE_REC_LEN],
             cache2: vec![0.0; CACHE_REC_LEN],
@@ -187,11 +195,29 @@ impl Denoise {
 
 impl Stage for Denoise {
     fn process(&mut self, input: &[f32], out: &mut Vec<f32>) -> Result<(), DecibriError> {
+        if input.is_empty() {
+            return Ok(());
+        }
+        if self.accumulator.is_empty() {
+            // Left-pad the stream by one half-window of zeros so the first
+            // analysis window is `[zeros(256), first 256 samples]`. Laid down on
+            // the first sample rather than at construction, so an accumulator
+            // that is still empty means the stage has received no audio.
+            self.accumulator.resize(WINDOW - HOP, 0.0);
+        }
         self.accumulator.extend_from_slice(input);
         self.drain_ready(out)
     }
 
     fn flush(&mut self, out: &mut Vec<f32>) -> Result<(), DecibriError> {
+        // The tail drains the audio still inside the model's framing, so a stage
+        // holding none contributes nothing. An empty accumulator means either no
+        // sample ever arrived or the tail has already been drained; both emit
+        // nothing here.
+        if self.accumulator.is_empty() {
+            return Ok(());
+        }
+
         // Pad the stream out by one full window of zeros (the upstream offline
         // recipe right-pads by n_fft) so the leftover real samples and the
         // model's overlap-add tail are pushed out as final hops, then drain.
@@ -199,10 +225,10 @@ impl Stage for Denoise {
         self.accumulator.resize(padded_len, 0.0);
         self.drain_ready(out)?;
 
-        // Leave the stage reusable: re-seed the left-pad half-window and zero the
-        // streaming caches, so a subsequent stream starts clean.
+        // Leave the stage reusable: drop the pending samples and zero the
+        // streaming caches, so a subsequent stream starts clean and lays down its
+        // own left-pad on its first sample.
         self.accumulator.clear();
-        self.accumulator.resize(WINDOW - HOP, 0.0);
         self.cache0.fill(0.0);
         self.cache1.fill(0.0);
         self.cache2.fill(0.0);
@@ -308,8 +334,8 @@ mod tests {
         let mut stage = Denoise::new(DenoiseModel::FastEnhancerT, &model_path(), None)
             .expect("bundled FastEnhancer-T model loads");
 
-        // Caches start zeroed and the accumulator carries the left-pad.
-        assert_eq!(stage.accumulator.len(), WINDOW - HOP);
+        // Caches start zeroed and the accumulator is empty until fed.
+        assert!(stage.accumulator.is_empty());
         assert!(stage.cache0.iter().all(|&v| v == 0.0));
 
         let input = noisy(4096);
@@ -363,9 +389,67 @@ mod tests {
             "process + flush deliver at least the whole input"
         );
 
-        // Reusable: caches re-zeroed, accumulator re-seeded with the left-pad.
+        // Reusable: caches re-zeroed, accumulator cleared so the next stream lays
+        // down its own left-pad.
         assert!(stage.cache0.iter().all(|&v| v == 0.0), "caches re-zeroed");
-        assert_eq!(stage.accumulator.len(), WINDOW - HOP, "left-pad re-seeded");
+        assert!(stage.accumulator.is_empty(), "pending samples cleared");
+    }
+
+    /// A stage that received no audio emits nothing at flush: the padding exists
+    /// to frame audio the stage holds, and it holds none. Absolute expectation,
+    /// so a tail of any length fails.
+    #[test]
+    fn unfed_flush_emits_nothing() {
+        let mut stage = Denoise::new(DenoiseModel::FastEnhancerT, &model_path(), None)
+            .expect("bundled FastEnhancer-T model loads");
+
+        let mut tail = Vec::new();
+        stage.flush(&mut tail).expect("flush runs unfed");
+        assert_eq!(
+            tail.len(),
+            0,
+            "an unfed stage emitted {} samples it never received",
+            tail.len()
+        );
+
+        // An empty block is not audio either, and neither is a repeated flush.
+        stage.process(&[], &mut tail).expect("empty block runs");
+        stage.flush(&mut tail).expect("second flush runs");
+        assert_eq!(
+            tail.len(),
+            0,
+            "an empty block still leaves nothing to drain"
+        );
+    }
+
+    /// The regression the gate guards: a stage fed even a fraction of one
+    /// analysis frame still drains that audio at flush. `process` emits nothing
+    /// for 100 samples (well under the 512-sample window), so every delivered
+    /// sample comes from the flush, and the count is exactly the whole hops the
+    /// padded stream forms.
+    #[test]
+    fn a_stage_fed_a_little_audio_still_drains_its_tail() {
+        let mut stage = Denoise::new(DenoiseModel::FastEnhancerT, &model_path(), None)
+            .expect("bundled FastEnhancer-T model loads");
+
+        let mut processed = Vec::new();
+        stage.process(&noisy(100), &mut processed).expect("process");
+        assert_eq!(
+            processed.len(),
+            0,
+            "100 samples do not fill the 512-sample analysis window"
+        );
+
+        let mut tail = Vec::new();
+        stage.flush(&mut tail).expect("flush drains the tail");
+        // Left-pad (256) + 100 real + one window of padding (512) = 868 samples,
+        // which yields floor((868 - 512) / 256) + 1 = 2 whole hops of 256.
+        assert_eq!(tail.len(), 2 * HOP, "the real tail is drained in full");
+        assert!(tail.iter().all(|s| s.is_finite()), "the tail is finite");
+        assert!(
+            tail.iter().any(|&s| s != 0.0),
+            "the tail carries the audio the stage received"
+        );
     }
 
     /// A nonexistent model path surfaces the model-agnostic `ModelLoadFailed`,
