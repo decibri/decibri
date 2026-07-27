@@ -1133,6 +1133,52 @@ mod tests {
         );
     }
 
+    /// An empty source with denoise enabled delivers no samples either: the
+    /// close-path flush of a chain that processed nothing appends nothing, so a
+    /// recording that held no audio yields none.
+    #[cfg(feature = "denoise")]
+    #[test]
+    fn empty_buffer_with_denoise_delivers_nothing() {
+        let config = FileConfig {
+            denoise: Some(DenoiseModel::FastEnhancerT),
+            denoise_model_path: Some(denoise_model_path()),
+            ..FileConfig::default()
+        };
+        let file = File::buffer(Vec::new(), 16000, config).unwrap();
+        assert_eq!(
+            collect(file).len(),
+            0,
+            "an unfed denoise chain contributes no samples at close"
+        );
+    }
+
+    /// A source holding a fraction of one analysis frame still comes back out:
+    /// 100 samples produce no output through the framing, so every delivered
+    /// sample arrives via the close-path flush. The regression that the unfed
+    /// gate must not break, on the `File` path.
+    #[cfg(feature = "denoise")]
+    #[test]
+    fn short_buffer_with_denoise_still_delivers_its_tail() {
+        let config = FileConfig {
+            denoise: Some(DenoiseModel::FastEnhancerT),
+            denoise_model_path: Some(denoise_model_path()),
+            ..FileConfig::default()
+        };
+        // 100 samples at 16 kHz: well under the 512-sample analysis window.
+        let source: Vec<f32> = (0..100)
+            .map(|i| 0.5 * (2.0 * std::f32::consts::PI * 440.0 * i as f32 / 16_000.0).sin())
+            .collect();
+        let file = File::buffer(source, 16000, config).unwrap();
+        let out = collect(file);
+        // Left-pad (256) + 100 real + one window of padding (512) = 868 samples,
+        // which yields two whole 256-sample hops.
+        assert_eq!(out.len(), 512, "the real tail is delivered in full");
+        assert!(
+            out.iter().any(|&s| s != 0.0),
+            "the delivered tail carries the audio the source held"
+        );
+    }
+
     // ── Constructor and parse errors ─────────────────────────────────────
 
     /// A missing file reports the typed read failure with its path.
@@ -1516,7 +1562,7 @@ mod tests {
             .join("silero_vad.onnx")
     }
 
-    #[cfg(all(feature = "vad", feature = "denoise"))]
+    #[cfg(feature = "denoise")]
     fn denoise_model_path() -> PathBuf {
         let manifest_dir = env!("CARGO_MANIFEST_DIR");
         Path::new(manifest_dir)

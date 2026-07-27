@@ -1523,6 +1523,85 @@ mod tests {
         );
     }
 
+    /// A denoise chain that processed nothing drains nothing: closing a stream
+    /// that captured no audio appends no samples, rather than the framing padding
+    /// pushed through an empty model. The absolute expectation is zero, on the
+    /// transform-only chain and on one carrying a `normalize` segment too.
+    #[cfg(feature = "denoise")]
+    #[test]
+    fn unfed_denoise_chain_flush_appends_nothing() {
+        let path = denoise_model_path();
+        let model = DenoiseModel::FastEnhancerT;
+
+        for (channels, native_rate, dc_removal, label) in [
+            (1u16, 16_000u32, false, "denoise only"),
+            (2, 48_000, true, "downmix + resample + dc + denoise"),
+        ] {
+            let mut chain = build_capture_stage(
+                channels,
+                1,
+                native_rate,
+                16_000,
+                Transforms {
+                    dc_removal,
+                    denoise: Some((model, path.as_path(), None)),
+                    highpass: None,
+                    agc: None,
+                    limiter: None,
+                },
+            )
+            .unwrap()
+            .expect("denoise chain");
+
+            let mut tail = Vec::new();
+            chain.flush(&mut tail).expect("flush runs unfed");
+            assert_eq!(
+                tail.len(),
+                0,
+                "{label}: an unfed chain delivered {} samples it never received",
+                tail.len()
+            );
+        }
+    }
+
+    /// A denoise chain fed even a fraction of one analysis frame still delivers
+    /// that audio at close. This is the regression the unfed gate must not break:
+    /// 100 samples produce no output through `run`, so the whole delivery comes
+    /// from the flush.
+    #[cfg(feature = "denoise")]
+    #[test]
+    fn barely_fed_denoise_chain_still_drains_its_tail() {
+        let path = denoise_model_path();
+        let mut chain = build_capture_stage(
+            1,
+            1,
+            16_000,
+            16_000,
+            Transforms {
+                dc_removal: false,
+                denoise: Some((DenoiseModel::FastEnhancerT, path.as_path(), None)),
+                highpass: None,
+                agc: None,
+                limiter: None,
+            },
+        )
+        .unwrap()
+        .expect("denoise chain");
+
+        let out = chain.run(&mono_signal(100)).expect("run").to_vec();
+        assert_eq!(out.len(), 0, "100 samples do not fill one analysis window");
+
+        let mut tail = Vec::new();
+        chain.flush(&mut tail).expect("flush drains the tail");
+        // Left-pad (256) + 100 real + one window of padding (512) = 868 samples,
+        // which yields two whole 256-sample hops.
+        assert_eq!(tail.len(), 512, "the real tail is delivered in full");
+        assert!(
+            tail.iter().any(|&s| s != 0.0),
+            "the tail carries the audio the chain received"
+        );
+    }
+
     /// With denoise in the transform segment, the pre-transform tap LEADS the
     /// delivered enhanced output. The tap is the post-normalize signal at real-
     /// time rate (equal to the mono input length here); the delivered output is

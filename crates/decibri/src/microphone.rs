@@ -2418,6 +2418,82 @@ mod tests {
         );
     }
 
+    /// A denoise-enabled capture that closes before a single buffer arrives
+    /// delivers nothing and reports closed: the close-path flush of a chain that
+    /// received no audio contributes no samples, so a consumer is never handed
+    /// audio the stream did not capture.
+    #[cfg(feature = "denoise")]
+    #[test]
+    fn a_capture_closed_before_any_buffer_delivers_nothing() {
+        let (stream, _sender, running) = test_stream_with(Some(denoise_stage()), 1);
+        running.store(false, Ordering::Relaxed);
+
+        let delivered = drain_try(&stream, 320);
+        assert!(
+            stream.chain_flushed.load(Ordering::Relaxed),
+            "the read reached the close-path flush"
+        );
+        assert_eq!(
+            delivered.len(),
+            0,
+            "a capture that received no buffer delivered {} samples",
+            delivered.len()
+        );
+        assert!(matches!(
+            stream.next_chunk(320, Some(Duration::from_millis(60))),
+            Err(DecibriError::MicrophoneStreamClosed)
+        ));
+    }
+
+    /// A denoise-enabled capture that received even a fraction of one analysis
+    /// frame still delivers that audio at close. The regression the unfed gate
+    /// must not break: 100 samples form no frame, so the whole delivery is the
+    /// flushed tail.
+    #[cfg(feature = "denoise")]
+    #[test]
+    fn a_capture_fed_a_little_audio_still_delivers_its_tail() {
+        let block: Vec<f32> = (0..100).map(|n| (n as f32 * 0.05).sin()).collect();
+
+        let (stream, sender, running) = test_stream_with(Some(denoise_stage()), 1);
+        sender.send(make_native_chunk(block)).unwrap();
+        running.store(false, Ordering::Relaxed);
+
+        let delivered = drain_try(&stream, 320);
+        // Left-pad (256) + 100 real + one window of padding (512) = 868 samples,
+        // which yields two whole 256-sample hops.
+        assert_eq!(delivered.len(), 512, "the real tail is delivered in full");
+        assert!(
+            delivered.iter().any(|&s| s != 0.0),
+            "the delivered tail carries the audio the stream captured"
+        );
+    }
+
+    /// A mono 16 kHz chain whose only stage is denoise, so the `transform`
+    /// segment is exercised with an empty `normalize`.
+    #[cfg(feature = "denoise")]
+    fn denoise_stage() -> CaptureStage {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("..")
+            .join("..")
+            .join("models")
+            .join("fastenhancer_t.onnx");
+        build_capture_stage(
+            1,
+            1,
+            16_000,
+            16_000,
+            Transforms {
+                dc_removal: false,
+                denoise: Some((DenoiseModel::FastEnhancerT, path.as_path(), None)),
+                highpass: None,
+                agc: None,
+                limiter: None,
+            },
+        )
+        .unwrap()
+        .expect("mono 16 kHz denoise chain")
+    }
+
     /// A stream opened, fed while running, and closed normally is unaffected: the
     /// close check that now runs before the drain does not disturb delivery of
     /// buffers that arrive while the stream is open, and the full delivered stream
