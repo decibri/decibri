@@ -9,6 +9,12 @@ For other decibri packages, see:
 - Rust core: [crates/decibri/CHANGELOG.md](../../crates/decibri/CHANGELOG.md)
 - Python package: [bindings/python/CHANGELOG.md](../../bindings/python/CHANGELOG.md)
 
+## [Unreleased]
+
+### Fixed
+
+- A conditioned capture no longer emits `data` after the stream has closed. A capture whose device rate differed from the requested `sampleRate`, or that had an enhancement step enabled, could emit a final burst of samples that do not follow the recording, at up to full scale, when capture ended on a device error or on `stop()`. An unconditioned capture is unaffected.
+
 ## [5.2.3] - 2026-07-27
 
 ### Added
