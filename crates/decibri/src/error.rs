@@ -158,7 +158,7 @@ pub enum DecibriError {
         source: Box<dyn std::error::Error + Send + Sync>,
     },
 
-    // ── Resample config validation ─────────────────────────────────────
+    // ── Resample errors ────────────────────────────────────────────────
     /// The capture resampler could not be constructed for the negotiated
     /// device-native to requested-target sample rate conversion.
     ///
@@ -172,6 +172,30 @@ pub enum DecibriError {
     #[cfg(feature = "capture")]
     #[error("the requested sample rate conversion is not supported by the resampler")]
     ResampleConfigInvalid { in_rate: u32, out_rate: u32 },
+
+    /// The resample chain was fed audio after it was flushed.
+    ///
+    /// Raised on both the capture path and the `File` detector-feed path,
+    /// which share the resample bridge. Both paths stop feeding a flushed
+    /// chain, so this is surfaced defensively. Static message to keep the
+    /// text stable. Deliberately not feature-gated, so the identity table's
+    /// coverage stays unconditional. Additive variant permitted by
+    /// `#[non_exhaustive]`.
+    #[error("the resample chain was fed after it was flushed")]
+    ResampleAfterFlush,
+
+    /// The resampler reported an error decibri does not recognise.
+    ///
+    /// `reason` is the resampler's own message, formatted into the Display
+    /// string so the upstream text reaches the consumer (matching
+    /// [`Self::WavInvalid`]; the leading `resampler error:` prefix is the
+    /// stable part). Every error the pinned resampler release defines maps to
+    /// its own variant, so this is reached only by an error added in a later
+    /// resampler release; surfaced defensively. Deliberately not
+    /// feature-gated, so the identity table's coverage stays unconditional.
+    /// Additive variant permitted by `#[non_exhaustive]`.
+    #[error("resampler error: {reason}")]
+    ResampleFailed { reason: String },
 
     // ── VAD config validation ──────────────────────────────────────────
     /// Payload carries the offending sample rate; not formatted into the
@@ -509,6 +533,10 @@ error_identity! {
     #[cfg(feature = "capture")]
     DecibriError::ResampleConfigInvalid { .. } => "ResampleConfigInvalid", "RESAMPLE_CONFIG_INVALID",
         DecibriError::ResampleConfigInvalid { in_rate: 44100, out_rate: 16000 };
+    DecibriError::ResampleAfterFlush => "ResampleAfterFlush", "RESAMPLE_AFTER_FLUSH",
+        DecibriError::ResampleAfterFlush;
+    DecibriError::ResampleFailed { .. } => "ResampleFailed", "RESAMPLE_FAILED",
+        DecibriError::ResampleFailed { reason: "sample".to_string() };
 
     DecibriError::VadSampleRateUnsupported(_) => "VadSampleRateUnsupported", "VAD_SAMPLE_RATE_UNSUPPORTED",
         DecibriError::VadSampleRateUnsupported(44100);
@@ -590,13 +618,25 @@ error_identity! {
         };
 }
 
-/// Bridge the capture resampler's construction error into the central error.
+/// Bridge the capture resampler's errors into the central error.
 ///
-/// Both `ResamplerError` variants are construction-time; the resampler's steady
-/// `process` path is infallible, so there is no per-chunk error to map.
-/// `RatePairUnsupported` carries the offending rates through; `ZeroSampleRate`
-/// (guarded: the configured target is validated nonzero and the device-native
-/// rate is nonzero) and any future variant route to the same error defensively.
+/// Every error the pinned resampler release defines has its own arm.
+/// `RatePairUnsupported` carries the offending rates through.
+/// `ProcessAfterFlush` is the one steady-path variant and maps to
+/// [`DecibriError::ResampleAfterFlush`], which names audio fed into a flushed
+/// chain on the capture and `File` paths alike; both read paths short-circuit
+/// on the flushed latch and `File` stops advancing once flushed, so no
+/// decibri path reaches it. `ZeroSampleRate` is a rate outside decibri's
+/// validated range, so it maps to [`DecibriError::SampleRateOutOfRange`].
+/// Every rate the `File` path feeds the resampler is validated into
+/// `1000..=384000`, as is the capture target, but the device-native rate is
+/// not, so a backend reporting zero reaches this arm.
+///
+/// The catch-all is reached only by an error added in a later resampler
+/// release. It maps to [`DecibriError::ResampleFailed`], which forwards the
+/// resampler's own message rather than naming a cause decibri cannot know.
+/// A later rate-carrying variant reports its rates in that forwarded
+/// message.
 #[cfg(feature = "capture")]
 impl From<decibri_resampler::ResamplerError> for DecibriError {
     fn from(e: decibri_resampler::ResamplerError) -> Self {
@@ -605,9 +645,10 @@ impl From<decibri_resampler::ResamplerError> for DecibriError {
             ResamplerError::RatePairUnsupported { in_rate, out_rate } => {
                 DecibriError::ResampleConfigInvalid { in_rate, out_rate }
             }
-            _ => DecibriError::ResampleConfigInvalid {
-                in_rate: 0,
-                out_rate: 0,
+            ResamplerError::ProcessAfterFlush => DecibriError::ResampleAfterFlush,
+            ResamplerError::ZeroSampleRate => DecibriError::SampleRateOutOfRange,
+            _ => DecibriError::ResampleFailed {
+                reason: e.to_string(),
             },
         }
     }
@@ -768,5 +809,16 @@ mod tests {
             DecibriError::FileEngaged.to_string(),
             "File iteration has begun; construct a new File to analyze the whole recording"
         );
+    }
+
+    /// `ResampleFailed` forwards the upstream text: the reason is formatted
+    /// into the Display string behind the stable `resampler error:` prefix
+    /// the Node binding classifies on.
+    #[test]
+    fn resample_failed_forwards_the_upstream_text() {
+        let err = DecibriError::ResampleFailed {
+            reason: "sample upstream text".to_string(),
+        };
+        assert_eq!(err.to_string(), "resampler error: sample upstream text");
     }
 }

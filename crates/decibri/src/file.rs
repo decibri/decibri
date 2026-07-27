@@ -641,7 +641,7 @@ impl File {
         }
         #[cfg(feature = "vad")]
         if want_feed {
-            self.push_vad_feed();
+            self.push_vad_feed()?;
         }
         Ok(())
     }
@@ -660,7 +660,7 @@ impl File {
                 self.scratch.extend_from_slice(normalized);
             }
         }
-        self.push_vad_feed();
+        self.push_vad_feed()?;
         Ok(())
     }
 
@@ -674,7 +674,7 @@ impl File {
             let tail = stage.flush_normalize()?;
             self.scratch.extend_from_slice(tail);
         }
-        self.push_vad_feed();
+        self.push_vad_feed()?;
         // Drain the detector-feed resampler's own tail so trailing windows are
         // scored rather than stranded.
         if let Some(resampler) = &mut self.vad_resampler {
@@ -708,7 +708,7 @@ impl File {
         }
         #[cfg(feature = "vad")]
         if want_feed {
-            self.push_vad_feed();
+            self.push_vad_feed()?;
             // Drain the detector-feed resampler's own tail so trailing
             // windows are scored rather than stranded.
             if let Some(resampler) = &mut self.vad_resampler {
@@ -724,20 +724,25 @@ impl File {
     /// Append `scratch` (the pre-conditioning signal at the target rate) to
     /// the detector feed, resampling to the detector rate when the two
     /// differ, and enforce the feed's memory bound.
+    ///
+    /// The detector-feed resampler rejects a block that arrives after its own
+    /// flush. Every caller runs before that flush, so the rejection is
+    /// propagated rather than assumed away.
     #[cfg(feature = "vad")]
-    fn push_vad_feed(&mut self) {
+    fn push_vad_feed(&mut self) -> Result<(), DecibriError> {
         if self.scratch.is_empty() {
-            return;
+            return Ok(());
         }
         match &mut self.vad_resampler {
             Some(resampler) => {
                 let mut out = Vec::new();
-                resampler.process(&self.scratch, &mut out);
+                resampler.process(&self.scratch, &mut out)?;
                 self.vad_queue.extend(out);
             }
             None => self.vad_queue.extend(self.scratch.iter().copied()),
         }
         self.cap_vad_queue();
+        Ok(())
     }
 
     /// Drop the oldest detector-feed samples beyond the memory bound. Only
@@ -1026,7 +1031,7 @@ mod tests {
         let mut resampler = PolyphaseResampler::new(48000, 16000).unwrap();
         let mut expected = Vec::new();
         for block in input.chunks(FEED_FRAMES) {
-            resampler.process(block, &mut expected);
+            resampler.process(block, &mut expected).unwrap();
         }
         resampler.flush(&mut expected);
         assert_eq!(out, expected);
@@ -1109,6 +1114,23 @@ mod tests {
     fn empty_buffer_ends_immediately() {
         let file = File::buffer(Vec::new(), 16000, FileConfig::default()).unwrap();
         assert_eq!(collect(file).len(), 0);
+    }
+
+    /// An empty source at a rate that builds a resample stage delivers no
+    /// samples either: the close-path flush of a chain that processed nothing
+    /// appends nothing, so no audio is invented at the head of the stream.
+    #[test]
+    fn empty_buffer_at_a_resampled_rate_delivers_nothing() {
+        let config = FileConfig {
+            sample_rate: 16000,
+            ..FileConfig::default()
+        };
+        let file = File::buffer(Vec::new(), 48000, config).unwrap();
+        assert_eq!(
+            collect(file).len(),
+            0,
+            "an unfed resample chain contributes no samples at close"
+        );
     }
 
     // ── Constructor and parse errors ─────────────────────────────────────

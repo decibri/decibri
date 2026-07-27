@@ -6,9 +6,9 @@
 //! handles only the Rust-Python boundary, error mapping, and GIL release on
 //! blocking calls.
 //!
-//! Error mapping covers all 41 `DecibriError` variants and surfaces them as
+//! Error mapping covers all 43 `DecibriError` variants and surfaces them as
 //! instances of the pure-Python exception classes in `decibri.exceptions`
-//! (45 class definitions: 1 base + 23 direct subclasses + the DeviceError
+//! (48 class definitions: 1 base + 26 direct subclasses + the DeviceError
 //! catch-target + 8 device subclasses + the OrtError catch-target + 8 direct
 //! ORT subclasses + the OrtPathError catch-target + 2 path-specific ORT
 //! subclasses). This crate looks the classes up by name at first use and
@@ -148,6 +148,8 @@ const EXCEPTION_NAMES: &[&str] = &[
     "VadSampleRateUnsupported",
     "VadThresholdOutOfRange",
     "ResampleConfigInvalid",
+    "ResampleAfterFlush",
+    "ResampleFailed",
     "FileReadFailed",
     "FileConsumed",
     "FileEngaged",

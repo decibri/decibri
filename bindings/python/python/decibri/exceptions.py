@@ -10,13 +10,13 @@ shape the core never sees. An out-of-range agc target raises
 AgcTargetOutOfRange; a malformed vad, denoise or highpass value raises
 ValueError.
 
-43 instance classes plus 3 intermediate parent classes (DeviceError,
-OrtError, OrtPathError) for catch ergonomics, totaling 46 class
+45 instance classes plus 3 intermediate parent classes (DeviceError,
+OrtError, OrtPathError) for catch ergonomics, totaling 48 class
 definitions. Single-inheritance hierarchy per CPython convention.
 
 Hierarchy:
     DecibriError
-    + 24 direct subclasses (config + runtime errors that don't involve
+    + 26 direct subclasses (config + runtime errors that don't involve
       device enumeration or ORT, including DeviceFailed and OnnxBackendFailed)
     + DeviceError (intermediate; no instances; catches device-related)
         + 8 direct device subclasses (MicrophoneNotFound, SpeakerNotFound,
@@ -193,6 +193,25 @@ class ResampleConfigInvalid(DecibriError):
     Defensive: every rate pair the configuration validator accepts is within
     the resampler's range, so this is not reachable from the Python surface.
     It exists so the core's variant has a class here like every other.
+    """
+
+
+class ResampleAfterFlush(DecibriError):
+    """Raised when the resample chain is fed audio after it was flushed.
+
+    Defensive: the capture and File paths stop feeding a chain once it is
+    flushed, so this is not reachable from the Python surface. It exists so
+    the core's variant has a class here like every other.
+    """
+
+
+class ResampleFailed(DecibriError):
+    """Raised when the resampler reports an error decibri does not recognise.
+
+    The message forwards the resampler's own text. Defensive: every error the
+    pinned resampler release defines maps to its own class, so this is not
+    reachable from the Python surface. It exists so the core's variant has a
+    class here like every other.
     """
 
 

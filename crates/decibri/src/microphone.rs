@@ -1555,14 +1555,14 @@ mod tests {
         // Ground truth: a bare resampler fed the whole input, then one flush.
         let mut reference = PolyphaseResampler::new(48_000, 16_000).unwrap();
         let mut expected = Vec::new();
-        reference.process(&input, &mut expected);
+        reference.process(&input, &mut expected).unwrap();
         reference.flush(&mut expected);
 
         // The process-only count (no flush) shows the tail is a real contribution
         // that the resample path dropped before this drain existed.
         let mut process_only = PolyphaseResampler::new(48_000, 16_000).unwrap();
         let mut process_out = Vec::new();
-        process_only.process(&input, &mut process_out);
+        process_only.process(&input, &mut process_out).unwrap();
 
         let stage = build_capture_stage(
             1,
@@ -1875,7 +1875,7 @@ mod tests {
         // process then flush (no DC removal).
         let mut resampler = PolyphaseResampler::new(48_000, 16_000).unwrap();
         let mut expected_norm = Vec::new();
-        resampler.process(&input, &mut expected_norm);
+        resampler.process(&input, &mut expected_norm).unwrap();
         resampler.flush(&mut expected_norm);
 
         assert_eq!(
@@ -2463,13 +2463,13 @@ mod tests {
     }
 
     /// The close path on a chained stream that was never fed. The flush still
-    /// runs, and a resample chain drains its filter's group-delay tail from the
-    /// state it was built with, so the stream delivers that tail as silence and
-    /// then reports closed. Pinned because it is the same close path the fix
-    /// reorders, and because the tail's length and content are the chain's, not
-    /// this module's.
+    /// runs, and a resample stage that processed no audio contributes nothing
+    /// to it, so the stream delivers no samples and then reports closed.
+    /// Pinned because it is the same close path the flush ordering depends on,
+    /// and because the tail's length and content are the chain's, not this
+    /// module's.
     #[test]
-    fn close_without_any_buffer_delivers_only_the_flushed_tail() {
+    fn close_without_any_buffer_delivers_nothing_from_the_resample_stage() {
         let (stream, _sender, running) = test_stream_with(Some(resample_stage()), 1);
         running.store(false, Ordering::Relaxed);
 
@@ -2483,11 +2483,7 @@ mod tests {
         resample_stage().flush(&mut expected).unwrap();
         assert_eq!(
             delivered, expected,
-            "a never-fed stream delivers the chain's flushed tail and nothing else"
-        );
-        assert!(
-            delivered.iter().all(|s| *s == 0.0),
-            "the tail of a chain that received no input is silence"
+            "a never-fed stream delivers exactly what the chain's flush appends"
         );
 
         // The closed signal repeats, now via the reordered short-circuit.

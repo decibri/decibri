@@ -97,9 +97,10 @@ struct ResampleStage(PolyphaseResampler);
 
 impl Stage for ResampleStage {
     fn process(&mut self, input: &[f32], out: &mut Vec<f32>) -> Result<(), DecibriError> {
-        // The resampler appends to `out` and is infallible once constructed
-        // (rates are validated at construction); wrap it as `Ok(())`.
-        self.0.process(input, out);
+        // The resampler appends to `out`. Its one steady-path error rejects a
+        // block that arrives after the flush; the callers stop feeding a flushed
+        // chain, so it is propagated rather than assumed away.
+        self.0.process(input, out)?;
         Ok(())
     }
 
@@ -845,9 +846,16 @@ mod tests {
         );
     }
 
-    /// The `From<ResamplerError>` bridge maps the resampler's construction error
-    /// onto `DecibriError::ResampleConfigInvalid`, carrying the rate pair from
-    /// `RatePairUnsupported` and folding the guarded `ZeroSampleRate` defensively.
+    /// The `From<ResamplerError>` bridge gives each resampler failure its own
+    /// decibri identity through an explicit arm: `RatePairUnsupported`
+    /// carries its rate pair into `ResampleConfigInvalid`, the steady-path
+    /// `ProcessAfterFlush` becomes `ResampleAfterFlush` rather than a stream
+    /// error, and the rate-less `ZeroSampleRate` becomes
+    /// `SampleRateOutOfRange` with no invented rate pair. The unknown-error
+    /// fallback (`ResampleFailed`) is not constructible here: the pinned
+    /// resampler release defines exactly these three variants, so no
+    /// unrecognised value exists to feed the bridge. Its message forwarding
+    /// is pinned in `error::tests`.
     #[test]
     fn resampler_error_bridges_to_decibri_error() {
         use decibri_resampler::ResamplerError;
@@ -863,8 +871,10 @@ mod tests {
                 out_rate: 9
             }
         ));
+        let fed_after_flush: DecibriError = ResamplerError::ProcessAfterFlush.into();
+        assert!(matches!(fed_after_flush, DecibriError::ResampleAfterFlush));
         let zero: DecibriError = ResamplerError::ZeroSampleRate.into();
-        assert!(matches!(zero, DecibriError::ResampleConfigInvalid { .. }));
+        assert!(matches!(zero, DecibriError::SampleRateOutOfRange));
     }
 
     /// `build_capture_stage` propagates a resampler construction failure as
@@ -908,7 +918,7 @@ mod tests {
         // Ground truth: a bare resampler, whole input then a single flush.
         let mut reference = PolyphaseResampler::new(48_000, 16_000).unwrap();
         let mut expected = Vec::new();
-        reference.process(&input, &mut expected);
+        reference.process(&input, &mut expected).unwrap();
         reference.flush(&mut expected);
 
         // The chain: process the whole input via run(), then flush() the tail.
@@ -946,6 +956,67 @@ mod tests {
             process_only + tail.len(),
             "the flushed tail is appended after the process output, nothing reordered"
         );
+    }
+
+    /// A resampling chain that has processed nothing drains nothing: closing a
+    /// stream that captured no audio appends no samples at all, rather than a
+    /// tail of the filter's initial state.
+    #[test]
+    fn flush_without_input_appends_nothing() {
+        let mut chain = resampling_chain();
+        let mut tail = Vec::new();
+        chain.flush(&mut tail).expect("flush runs unfed");
+        assert!(
+            tail.is_empty(),
+            "an unfed resampling chain drains no samples, got {}",
+            tail.len()
+        );
+    }
+
+    /// Flushing a resampling chain a second time appends nothing: the tail is
+    /// drained once and is not re-emitted.
+    #[test]
+    fn repeated_flush_appends_nothing() {
+        let input: Vec<f32> = (0..24_000).map(|n| (n as f32 * 0.01).sin()).collect();
+        let mut chain = resampling_chain();
+        chain.run(&input).expect("process runs");
+
+        let mut first = Vec::new();
+        chain
+            .flush(&mut first)
+            .expect("first flush drains the tail");
+        assert!(
+            !first.is_empty(),
+            "the resampler holds a group-delay tail to drain"
+        );
+
+        let mut second = Vec::new();
+        chain.flush(&mut second).expect("second flush runs");
+        assert!(
+            second.is_empty(),
+            "a repeated flush appends no samples, got {}",
+            second.len()
+        );
+    }
+
+    /// A 48000 to 16000 mono chain with no conditioning: the rate pair builds a
+    /// [`ResampleStage`], which a matched pair would omit.
+    fn resampling_chain() -> CaptureStage {
+        build_capture_stage(
+            1,
+            1,
+            48_000,
+            16_000,
+            Transforms {
+                dc_removal: false,
+                denoise: None,
+                highpass: None,
+                agc: None,
+                limiter: None,
+            },
+        )
+        .unwrap()
+        .expect("48k mono -> resample chain")
     }
 
     /// `Downmix` is stateless, so its trait-default `flush` appends nothing: a
@@ -1104,7 +1175,7 @@ mod tests {
         let mono = sample::downmix_to_mono(&input, 2);
         let mut resampler = PolyphaseResampler::new(48_000, 16_000).unwrap();
         let mut resampled = Vec::new();
-        resampler.process(&mono, &mut resampled);
+        resampler.process(&mono, &mut resampled).unwrap();
         resampler.flush(&mut resampled);
         let mut dc = DcBlocker::new();
         let mut expected = resampled.clone();
@@ -1219,7 +1290,7 @@ mod tests {
         let mono = sample::downmix_to_mono(&input, 2);
         let mut resampler = PolyphaseResampler::new(48_000, 16_000).unwrap();
         let mut expected_norm = Vec::new();
-        resampler.process(&mono, &mut expected_norm);
+        resampler.process(&mono, &mut expected_norm).unwrap();
         assert_eq!(
             tap, expected_norm,
             "the tap is exactly the post-normalize (pre-transform) signal"

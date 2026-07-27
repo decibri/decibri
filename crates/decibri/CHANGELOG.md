@@ -11,8 +11,18 @@ For other decibri packages, see:
 
 ## [Unreleased]
 
+### Added
+
+- `DecibriError::ResampleAfterFlush`, reported when the resample chain is fed audio after it was flushed, on the capture and `File` paths alike. Defensive: decibri stops feeding a flushed chain, so the condition is not reachable through the public surface.
+- `DecibriError::ResampleFailed`, reported when the resampler returns an error decibri does not recognise. The message forwards the resampler's own text. Defensive: every error the pinned resampler release defines has its own variant, so the condition is not reachable through the public surface.
+
+### Changed
+
+- The capture and `File` resample path is faster to construct and faster per block. `decibri-resampler` moves from 0.2 to 0.4. Each resampler instance holds two to three times the memory it did, depending on the rate pair: coefficients and history are stored as f64, and the history is longer.
+
 ### Fixed
 
+- The resample stage no longer contributes a tail at close when it processed no audio. A `Microphone` capture that ends before a single buffer arrives, and a `File` over an empty source, each delivered that tail as a short run of silence when the input rate and the requested rate differed.
 - A conditioned capture no longer delivers audio after the stream has closed. A `Microphone` capture whose device rate differed from the requested rate, or that had an enhancement step enabled, could end with a burst of samples that do not follow the recording, at up to full scale, when the stream closed on a device or driver failure or on `stop()`. An unconditioned capture is unaffected.
 
 ## [5.3.0] - 2026-07-27

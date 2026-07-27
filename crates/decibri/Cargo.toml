@@ -62,7 +62,7 @@ crossbeam-channel = { workspace = true, optional = true }
 ort = { workspace = true, optional = true }
 # Capture-path resampler: converts a device's native sample rate to the
 # requested target rate. Optional, pulled by the `capture` feature only.
-decibri-resampler = { version = "0.2", optional = true }
+decibri-resampler = { version = "0.4", optional = true }
 # System-loader probe for the ORT pre-check under `ort-load-dynamic`: verifies
 # the runtime library is resolvable before `ort::init()` runs, turning a
 # potential hang into a clean typed error. Already in the tree via `ort`

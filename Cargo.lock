@@ -245,12 +245,11 @@ dependencies = [
 
 [[package]]
 name = "decibri-resampler"
-version = "0.2.0"
+version = "0.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2021658007fe9fa58b0fe7b4feb0f89c0ad3ffdd43d311c8cdef58dc7178fb7f"
+checksum = "83e7ba28719e4975f1b2ee6fc544a2ca97a8e0e1e7aa0349f33646af6500d5c2"
 dependencies = [
  "thiserror 2.0.18",
- "tracing",
 ]
 
 [[package]]
