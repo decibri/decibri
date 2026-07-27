@@ -72,7 +72,7 @@ from decibri.exceptions import (
     WavInvalid,
 )
 
-__version__ = "0.7.2"
+__version__ = "0.7.3"
 
 
 def input_devices() -> list[MicrophoneInfo]:
