@@ -9,6 +9,12 @@ For other decibri packages, see:
 - npm package: [npm/decibri/CHANGELOG.md](../../npm/decibri/CHANGELOG.md)
 - Python package: [bindings/python/CHANGELOG.md](../../bindings/python/CHANGELOG.md)
 
+## [5.4.1] - 2026-07-28
+
+### Changed
+
+- The ONNX session path no longer allocates per inference, and the `onnx` module documentation no longer claims the design avoids an `ndarray` dependency.
+
 ## [5.4.0] - 2026-07-28
 
 ### Added
