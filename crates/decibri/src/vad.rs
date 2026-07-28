@@ -363,14 +363,12 @@ mod tests {
                     (
                         "output".to_string(),
                         OnnxOutputTensor {
-                            shape: vec![1, 1],
                             data: OnnxTensorOwned::F32(self.output.clone()),
                         },
                     ),
                     (
                         "stateN".to_string(),
                         OnnxOutputTensor {
-                            shape: vec![2, 1, 128],
                             data: OnnxTensorOwned::F32(self.state_n.clone()),
                         },
                     ),
