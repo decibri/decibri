@@ -19,16 +19,17 @@ name = "_decibri"
 crate-type = ["cdylib"]
 
 [dependencies]
-# Dual path+version dep: path wins for workspace dev (no crates.io round-trip),
-# version pins for eventual registry publish if we ever ship this standalone.
-# Matches the polars-style convention.
+# Path dependency, matching `bindings/node/Cargo.toml`. Both bindings are
+# terminal crates consumed by their packaging tool from within the workspace,
+# so the path is the only resolution that runs and no version requirement is
+# carried.
 #
 # IMPORTANT: do NOT add a `features = [...]` override here without matching
 # changes in `bindings/node/Cargo.toml`. Cargo's workspace resolver unifies
 # features across both bindings silently; diverging overrides produce a build
 # that neither binding tests in isolation. Both bindings inherit decibri's
 # default features (capture, playback, vad, denoise, gain, ort-load-dynamic).
-decibri = { version = "5.4", path = "../../crates/decibri" }
+decibri = { path = "../../crates/decibri" }
 
 # PyO3 0.29 line (MSRV 1.83, below the workspace 1.88 floor, so headroom is
 # preserved). Bumped from 0.28 to take the RUSTSEC-2026-0176 and -0177 fixes,
