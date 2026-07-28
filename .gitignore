@@ -67,3 +67,4 @@ bindings/python/python/decibri/_decibri.dylib
 # Stray napi-generated JS in the crate dir (the npm package ships npm/decibri/index.*)
 bindings/node/index.js
 bindings/node/index.d.ts
+bindings/python/docs/PUBLISH.md

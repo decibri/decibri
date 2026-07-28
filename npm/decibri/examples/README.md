@@ -71,10 +71,15 @@ npx localtunnel --port 8080
 ### Regenerating the browser bundle
 
 `decibri.browser.js` is generated from the package's browser entry
-(`../src/browser/index.js`) with rolldown, the bundler used to produce the
-checked-in build. Regenerate it after changing the browser source so the
-bundle stays in sync:
+(`npm/decibri/src/browser/index.js`) with rolldown, the bundler used to produce
+the checked-in build. Regenerate it after changing the browser source so the
+bundle stays in sync.
+
+Run the command from the repository root, with both paths repo-root relative.
+Run from anywhere else and the bundle still builds, but it records the module
+paths relative to that directory instead. The `--banner` flag carries the
+generated file's first line:
 
 ```bash
-npx rolldown ../src/browser/index.js --format iife --name decibri --file decibri.browser.js
+npx rolldown npm/decibri/src/browser/index.js --format iife --name decibri --file npm/decibri/examples/decibri.browser.js --banner "// decibri browser bundle. GENERATED from src/browser/index.js. Do not edit by hand; see examples/README.md to regenerate."
 ```

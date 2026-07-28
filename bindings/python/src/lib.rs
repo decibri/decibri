@@ -618,7 +618,7 @@ fn numpy_smoke(py: Python<'_>) -> Bound<'_, PyArray1<i16>> {
 //   - active: Mutex<Option<ActiveCapture>> (the open Microphone plus an
 //     Arc<MicrophoneStream>; None until start(), cleared by stop())
 //   - vad: Mutex<Option<SileroVad>> (None unless constructor's vad=True AND
-//     vad_mode=="silero"; per VAD Option (b)+(h) decision)
+//     vad_mode=="silero")
 //   - energy_vad: bool (vad=True AND vad_mode=="energy"; mutually exclusive
 //     with `vad`. read() computes the energy RMS on the pre-enhancement tap)
 //   - last_vad_probability: AtomicU32 (most recent score as f32 bits: the
@@ -910,10 +910,10 @@ impl MicrophoneBridge {
         // validates again at start().
         capture_config.validate().map_err(|e| to_py_err(py, e))?;
 
-        // VAD construction gate (Option (b)+(h)). The bridge constructs
-        // SileroVad only if vad=True AND vad_mode=="silero". The vad_mode
-        // string is otherwise inert at this layer; the wrapper validates and
-        // dispatches mode policy.
+        // VAD construction gate. The bridge constructs SileroVad only if
+        // vad=True AND vad_mode=="silero". The vad_mode string is otherwise
+        // inert at this layer; the wrapper validates and dispatches mode
+        // policy.
         let vad_instance = if vad && vad_mode == "silero" {
             let mp = model_path.ok_or_else(|| {
                 PyValueError::new_err("model_path is required when vad=True and vad_mode='silero'")
