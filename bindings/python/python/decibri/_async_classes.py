@@ -452,10 +452,9 @@ class AsyncMicrophone:
 
         Return type:
         - When ``as_ndarray=False`` (default), returns ``bytes``.
-        - When ``as_ndarray=True``, returns a ``numpy.ndarray`` with
-          dtype matching the configured ``dtype`` and shape matching
-          the channel count (1-D mono, 2-D ``(N, channels)``
-          multi-channel).
+        - When ``as_ndarray=True``, returns a 1-D ``numpy.ndarray`` with
+          dtype matching the configured ``dtype``. Capture is mono, so
+          the array is always 1-D.
 
         Use ``read_with_metadata()`` to receive a typed ``Chunk`` with
         ``.data``, ``.timestamp``, ``.sequence``, ``.is_speaking``, and

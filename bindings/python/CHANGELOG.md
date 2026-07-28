@@ -8,6 +8,14 @@ For Rust core (`crates/decibri`) and npm package (`npm/decibri`) changes, see [t
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Changed
+
+- **`File.buffer` and `AsyncFile.buffer` reject a numpy array that is not one channel.** An interleaved multichannel array was accepted and its channels were spliced into a single channel, so an `(800, 2)` stereo array became 1600 mono samples: twice the expected duration, pitched down, with the two channels alternating sample by sample. Nothing indicated it. An array with more than one axis longer than 1 now raises `ValueError`; select a single channel or mix down to mono before passing it. A mono array carrying a redundant axis, `(N, 1)` or `(1, N)`, is still accepted and delivers exactly the samples the equivalent 1-D array delivers.
+- **`File.buffer` and `AsyncFile.buffer` reject a numpy array whose dtype is not floating-point.** An `int16` array of PCM was cast value for value, delivering samples around 32768 times full scale. A non-floating dtype now raises `ValueError`; convert with `samples.astype(numpy.float32)`, scaling integer PCM into `[-1.0, 1.0]` first. A `float64` array is unaffected and still narrows to `float32`, matching a list of Python floats.
+- `Microphone.read`, `AsyncMicrophone.read` and `record_to_file` no longer document a multichannel result. Capture is mono, so an `as_ndarray=True` read returns a 1-D array and `channels` accepts only 1. `File.buffer` documents what it accepts, and `File` documents that a multichannel WAV is downmixed to mono.
+
 ## [0.7.4] - 2026-07-28
 
 ### Added
