@@ -11,6 +11,7 @@ test_exceptions, test_error_messages, and test_lifecycle.
 """
 
 import ast
+import importlib.metadata
 import importlib.resources
 from pathlib import Path
 
@@ -74,7 +75,12 @@ def test_version_info_fields() -> None:
     info = _decibri.MicrophoneBridge.version()
     assert info.decibri == "5.4.0"
     assert info.audio_backend == "cpal 0.17"
-    assert info.binding == "0.7.4"
+    # binding is derived from the [project] version in pyproject.toml by
+    # bindings/python/build.rs, and the installed distribution's metadata
+    # version comes from that same key via maturin. Comparing the two checks
+    # the derived value against its source rather than against a literal that
+    # has to be hand-edited at every release.
+    assert info.binding == importlib.metadata.version("decibri")
 
 
 def test_version_info_is_frozen() -> None:
