@@ -121,3 +121,34 @@ def test_async_speaker_repr_shows_defaults_and_is_playing() -> None:
     assert "channels=1" in text
     assert "dtype='int16'" in text
     assert "is_playing=False" in text
+
+
+# ---------------------------------------------------------------------------
+# Extension classes: module path
+#
+# A pyclass declared without a module attribute reports ``builtins`` in its
+# repr and pickles against the wrong path. Every class the extension exports
+# carries it, so the check is a sweep rather than a spot check.
+# ---------------------------------------------------------------------------
+
+
+def test_extension_classes_report_their_module() -> None:
+    from decibri import _decibri
+
+    exported = [
+        getattr(_decibri, name)
+        for name in _decibri.__all__
+        if isinstance(getattr(_decibri, name), type)
+    ]
+    assert len(exported) == 8
+    for cls in exported:
+        assert cls.__module__ == "decibri._decibri", cls.__name__
+
+
+def test_file_bridge_repr_reports_its_module() -> None:
+    """The bridge instance repr names the extension module, not builtins."""
+    file = decibri.File.buffer([0.0] * 16, input_rate=16000)
+    try:
+        assert repr(file._bridge).startswith("<decibri._decibri.FileBridge object")
+    finally:
+        file.close()

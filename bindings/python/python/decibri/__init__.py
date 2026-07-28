@@ -128,7 +128,9 @@ def record_to_file(
     sample_rate : int, optional
         Capture sample rate in Hz. Default 16000.
     channels : int, optional
-        Number of input channels. Default 1 (mono).
+        Number of input channels. Capture is mono, so 1 (the default) is
+        the only accepted value; a higher value raises
+        ``MultichannelNotSupported``.
     device : int | str | None, optional
         Input device selector. ``None`` (default) uses the system
         default input. Pass an integer index from ``input_devices()``

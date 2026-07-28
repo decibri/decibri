@@ -732,10 +732,9 @@ class Microphone:
 
         Return type:
         - When ``as_ndarray=False`` (default), returns ``bytes``.
-        - When ``as_ndarray=True``, returns a ``numpy.ndarray`` with
+        - When ``as_ndarray=True``, returns a 1-D ``numpy.ndarray`` with
           dtype matching the configured ``dtype`` (np.int16 or
-          np.float32) and shape matching the channel count (1-D for
-          mono, 2-D ``(N, channels)`` for multi-channel).
+          np.float32). Capture is mono, so the array is always 1-D.
 
         Use ``read_with_metadata()`` to receive a typed ``Chunk`` with
         ``.data``, ``.timestamp``, ``.sequence``, ``.is_speaking``, and
@@ -1297,7 +1296,8 @@ class File:
     ) -> None:
         """Open a WAV file as an offline source.
 
-        The input rate and channel count come from the WAV header;
+        The input rate and channel count come from the WAV header; a
+        multichannel file is downmixed, so the delivered stream is mono.
         ``sample_rate`` is the target output rate, the same meaning it has
         on ``Microphone``. Supports 16-bit PCM and 32-bit float WAV files;
         other formats are handled elsewhere, keeping this path
@@ -1351,10 +1351,14 @@ class File:
     ) -> "File":
         """Wrap in-memory samples as an offline source.
 
-        ``samples`` is a list of floats or a numpy ndarray of f32 mono
-        samples in ``[-1.0, 1.0]``. Raw samples carry no header, so
-        ``input_rate`` (their native rate) is required; ``sample_rate``
-        stays the target output rate.
+        ``samples`` is a list of floats or a numpy ndarray of mono
+        samples in ``[-1.0, 1.0]``. An ndarray must be one channel with a
+        floating dtype: a redundant axis (``(N, 1)`` or ``(1, N)``) is
+        accepted, an array with more than one axis longer than 1 raises
+        ``ValueError``, and a non-floating dtype (int16 PCM, for example)
+        raises ``ValueError`` rather than being cast. Raw samples carry no
+        header, so ``input_rate`` (their native rate) is required;
+        ``sample_rate`` stays the target output rate.
         """
         self = object.__new__(cls)
         self._init_common(
@@ -1555,6 +1559,22 @@ class File:
                 if not isinstance(samples, np.ndarray):
                     raise TypeError(
                         "samples must be a list of floats or a numpy ndarray"
+                    )
+                # One channel means at most one axis longer than 1: a
+                # redundant axis squeezes away without reordering, while a
+                # second long axis carries channels the C-order flatten
+                # below would splice into the sample stream.
+                if sum(1 for length in samples.shape if length > 1) > 1:
+                    raise ValueError(
+                        "samples must be one channel; got an array of shape "
+                        f"{samples.shape}. Select a single channel or mix "
+                        "down to mono before passing it."
+                    )
+                if not np.issubdtype(samples.dtype, np.floating):
+                    raise ValueError(
+                        f"samples must have a floating dtype; got {samples.dtype}. "
+                        "Convert with samples.astype(numpy.float32), scaling "
+                        "integer PCM to [-1.0, 1.0]."
                     )
                 samples = np.ascontiguousarray(samples, dtype=np.float32).tobytes()
             self._bridge = _decibri.FileBridge.buffer(

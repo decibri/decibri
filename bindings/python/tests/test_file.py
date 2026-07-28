@@ -19,6 +19,7 @@ import math
 import struct
 import wave
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -170,6 +171,103 @@ def test_buffer_rejects_other_types() -> None:
     """Anything but a list of floats or an ndarray is rejected clearly."""
     with pytest.raises(TypeError, match="list of floats or a numpy ndarray"):
         File.buffer("not samples", input_rate=16000)  # type: ignore[arg-type]
+
+
+# ---------------------------------------------------------------------------
+# buffer: one channel, floating dtype
+#
+# Every rejection below is paired with a control asserting the accepted form
+# of the same input still works, so a guard that rejected everything would
+# fail the module rather than pass it.
+# ---------------------------------------------------------------------------
+
+
+def buffer_f32(samples: Any) -> bytes:
+    """Read a buffer source back as raw f32 bytes: no resample, no chain."""
+    return read_all(
+        File.buffer(samples, input_rate=16000, sample_rate=16000, dtype="float32")
+    )
+
+
+def test_buffer_1d_delivers_the_samples_it_was_given() -> None:
+    """The intended 1-D form round-trips sample for sample."""
+    np = pytest.importorskip("numpy")
+    mono = np.asarray(sine_samples(16000, 0.05), dtype=np.float32)
+    assert buffer_f32(mono) == mono.tobytes()
+
+
+def test_buffer_rejects_multichannel_array() -> None:
+    """An interleaved stereo array is rejected, not spliced into one channel."""
+    np = pytest.importorskip("numpy")
+    mono = np.asarray(sine_samples(16000, 0.05), dtype=np.float32)
+    stereo = np.stack([mono, mono + 0.25], axis=1)
+    assert stereo.shape == (800, 2)
+
+    with pytest.raises(ValueError, match=r"must be one channel.*\(800, 2\)"):
+        File.buffer(stereo, input_rate=16000)
+
+    # Control: one channel of that same array is accepted, and delivers that
+    # channel's samples rather than the interleaved pair.
+    assert buffer_f32(stereo[:, 0]) == mono.tobytes()
+
+
+def test_buffer_rejects_more_than_two_dimensions() -> None:
+    """A second axis longer than 1 is rejected whatever the rank."""
+    np = pytest.importorskip("numpy")
+    mono = np.asarray(sine_samples(16000, 0.05), dtype=np.float32)
+
+    with pytest.raises(ValueError, match="must be one channel"):
+        File.buffer(mono.reshape(2, 20, 20), input_rate=16000)
+
+    # Control: the same 800 samples as one channel are accepted.
+    assert buffer_f32(mono) == mono.tobytes()
+
+
+def test_buffer_accepts_redundant_axis_unchanged() -> None:
+    """(N, 1) and (1, N) are one channel and deliver the 1-D samples exactly.
+
+    Several audio libraries return a mono recording with a redundant axis.
+    Asserting equality (not just the sample count) catches a squeeze that
+    reordered the samples.
+    """
+    np = pytest.importorskip("numpy")
+    mono = np.asarray(sine_samples(16000, 0.05), dtype=np.float32)
+    expected = mono.tobytes()
+
+    assert buffer_f32(mono.reshape(-1, 1)) == expected
+    assert buffer_f32(mono.reshape(1, -1)) == expected
+
+
+def test_buffer_accepts_non_contiguous_view() -> None:
+    """A strided view is copied, not read across the gaps between elements."""
+    np = pytest.importorskip("numpy")
+    mono = np.asarray(sine_samples(16000, 0.05), dtype=np.float32)
+    right = mono + 0.25
+    channel = np.stack([mono, right], axis=1)[:, 1]
+    assert not channel.flags["C_CONTIGUOUS"]
+
+    assert buffer_f32(channel) == right.tobytes()
+
+
+def test_buffer_rejects_non_floating_dtype() -> None:
+    """Integer PCM is rejected rather than cast to a full-scale float."""
+    np = pytest.importorskip("numpy")
+    mono = np.asarray(sine_samples(16000, 0.05), dtype=np.float32)
+    pcm = (mono * 32767.0).astype(np.int16)
+
+    with pytest.raises(ValueError, match="floating dtype; got int16"):
+        File.buffer(pcm, input_rate=16000)
+
+    # Control: the same audio scaled back into range is accepted.
+    scaled = pcm.astype(np.float32) / 32768.0
+    assert buffer_f32(scaled) == scaled.tobytes()
+
+
+def test_buffer_accepts_float64_like_a_list_of_floats() -> None:
+    """float64 narrows to f32, matching what a list of Python floats does."""
+    np = pytest.importorskip("numpy")
+    values = sine_samples(16000, 0.05)
+    assert buffer_f32(np.asarray(values, dtype=np.float64)) == buffer_f32(values)
 
 
 def test_open_missing_file_raises() -> None:
