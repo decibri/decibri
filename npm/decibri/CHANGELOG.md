@@ -9,6 +9,12 @@ For other decibri packages, see:
 - Rust core: [crates/decibri/CHANGELOG.md](../../crates/decibri/CHANGELOG.md)
 - Python package: [bindings/python/CHANGELOG.md](../../bindings/python/CHANGELOG.md)
 
+## [5.2.5] - 2026-07-28
+
+### Changed
+
+- The packaged addon is rebuilt from the current core, and the bundle regenerate command in `examples/README.md` reproduces the committed file.
+
 ## [5.2.4] - 2026-07-28
 
 ### Added
