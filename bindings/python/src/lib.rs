@@ -322,6 +322,8 @@ fn parse_sample_format(s: &str) -> Result<BindingSampleFormat, CoreDecibriError>
 // ---------------------------------------------------------------------------
 // VersionInfo: surfaces decibri Rust core version, cpal version, and binding
 // version via three string fields. Constructed by MicrophoneBridge::version().
+// The binding version comes from the `[project]` version in pyproject.toml,
+// read at compile time by build.rs.
 // ---------------------------------------------------------------------------
 
 #[pyclass(module = "decibri._decibri", frozen)]
@@ -348,7 +350,7 @@ fn build_version_info() -> VersionInfo {
     VersionInfo {
         decibri: env!("CARGO_PKG_VERSION").to_string(),
         audio_backend: format!("cpal {}", CPAL_VERSION),
-        binding: "0.7.4".to_string(),
+        binding: env!("DECIBRI_PYTHON_VERSION").to_string(),
     }
 }
 
