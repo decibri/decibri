@@ -9,8 +9,8 @@ Three sections:
    the blocking next_chunk call, allowing other Python threads to run.
    Marked requires_audio_input.
 
-The GIL test uses a probabilistic counter floor; see test docstring for the
-floor reasoning and the Windows 15ms timer-resolution gotcha.
+The GIL test compares a background thread's progress during a blocking read
+against its progress during a sleep, which releases the GIL by definition.
 """
 
 import threading
@@ -174,22 +174,23 @@ def test_close_resets_vad_state() -> None:
 # Section 3: GIL-release correctness.
 #
 # Pattern: a background daemon thread increments a counter and sleeps 1ms in
-# a tight loop. The main thread calls Microphone.read() with a 500ms timeout.
-# If the binding's read() correctly wraps next_chunk in py.detach(...) (the
-# PyO3 0.28 GIL-release primitive), the background thread runs freely
-# during the blocking next_chunk and the counter advances substantially.
-# If GIL release is removed, the background thread can only run between
-# Python bytecodes; while next_chunk holds the C-level GIL the background
-# thread blocks on its post-sleep GIL acquisition.
+# a tight loop. The main thread issues one read() whose chunk spans a second
+# of audio, then sleeps for a shorter baseline window. read() wraps the
+# blocking next_chunk in py.detach(...) (the PyO3 GIL-release primitive), so
+# the background thread runs throughout the park and the counter advances at
+# its natural rate. While next_chunk holds the C-level GIL the background
+# thread blocks on its post-sleep GIL acquisition and advances only once the
+# read returns, which is one increment for the whole window.
 #
-# The test asserts counter > 50 over 500ms. With GIL released and 1ms sleep
-# granularity, expected counter ~500. With Windows' default 15ms timer
-# resolution, expected counter ~33. Floor of 50 is wide enough that any
-# value below indicates GIL was held; any value above indicates release.
-#
-# Floor reasoning summary: the gap between the two regimes (PASS ~33-500
-# vs FAIL <5) is large; any floor in [10, 100] discriminates. 50 chosen
-# as comfortable middle ground tolerant of Windows scheduler jitter.
+# The assertion compares the counter's rate during the read against its rate
+# during the baseline sleep, both measured in the same run. It therefore
+# carries no constant tied to how long the read parks, to the platform's
+# sleep granularity, or to the machine's speed. Two invariants a maintainer
+# must keep: the read has to be a single call, since a loop of shorter reads
+# hands the background thread one increment per read boundary and closes the
+# gap between the two regimes, and the baseline has to follow the read, since
+# a pause before it fills the capture buffer and the read then returns
+# without parking.
 # ---------------------------------------------------------------------------
 
 
@@ -197,10 +198,10 @@ def test_close_resets_vad_state() -> None:
 def test_read_releases_gil() -> None:
     """Microphone.read() releases the GIL during its blocking next_chunk call.
 
-    This is a PROBABILISTIC test relying on background-thread scheduling.
-    Floor of counter > 50 chosen for Windows 15ms timer-resolution tolerance
-    while still discriminating decisively from the GIL-held regime where the
-    background thread cannot advance past its first iteration.
+    A background thread advances at essentially the same rate during a
+    parked read() as it does during a sleep. The rates are measured rather
+    than assumed, so the assertion holds whatever the read's park duration
+    turns out to be.
     """
     counter = [0]
     stop_flag = threading.Event()
@@ -210,24 +211,43 @@ def test_read_releases_gil() -> None:
             counter[0] += 1
             time.sleep(0.001)
 
-    d = Microphone(sample_rate=16000, channels=1, frames_per_buffer=512)
+    # A chunk of one second of audio. The core re-blocks to exactly this
+    # size, so the single read below parks for about a second.
+    d = Microphone(sample_rate=16000, channels=1, frames_per_buffer=16000)
     d.start()
     try:
         worker = threading.Thread(target=background_worker, daemon=True)
         worker.start()
-        # Allow worker to attempt running while read() blocks.
-        # First read drains any pre-buffered chunks; second read is more
-        # likely to actually block waiting for audio. Both should release
-        # the GIL during the wait.
-        d.read(timeout_ms=500)
-        d.read(timeout_ms=500)
+
+        read_ticks_start = counter[0]
+        read_start = time.perf_counter()
+        d.read(timeout_ms=5000)
+        read_ms = (time.perf_counter() - read_start) * 1000.0
+        read_ticks = counter[0] - read_ticks_start
+
+        base_ticks_start = counter[0]
+        base_start = time.perf_counter()
+        time.sleep(0.15)
+        base_ms = (time.perf_counter() - base_start) * 1000.0
+        base_ticks = counter[0] - base_ticks_start
     finally:
         stop_flag.set()
+        worker.join(timeout=1.0)
         d.stop()
 
-    assert counter[0] > 50, (
-        f"counter only reached {counter[0]} during 1000ms of read() blocking; "
-        f"GIL may not be released (expected > 50 even on Windows 15ms timer)"
+    read_rate = read_ticks / read_ms
+    base_rate = base_ticks / base_ms
+
+    # The baseline is the yardstick, so a stalled one makes the comparison
+    # meaningless rather than merely generous.
+    assert base_rate > 0, (
+        f"background thread made no progress during a {base_ms:.0f}ms sleep; "
+        f"the baseline is unusable"
+    )
+    assert read_rate > base_rate / 2, (
+        f"background thread advanced at {read_rate:.4f} ticks/ms during a "
+        f"{read_ms:.0f}ms read against {base_rate:.4f} ticks/ms during a "
+        f"{base_ms:.0f}ms sleep; read() holds the GIL while it parks"
     )
 
 
