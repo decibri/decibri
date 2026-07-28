@@ -14,8 +14,11 @@
 //! The trait surface mirrors the four operations [`crate::vad`] performs
 //! against an `ort` session: builder construction, input tensor creation, run,
 //! and output tensor extraction. The closed-enum [`OnnxTensorData`] /
-//! [`OnnxTensorOwned`] design avoids an `ndarray` dependency and keeps the VAD
-//! hot path (~50 calls per second) free of tensor-type vtable dispatch.
+//! [`OnnxTensorOwned`] design passes tensors as plain slices instead of through
+//! ort's `ndarray` integration, and keeps the VAD hot path (~50 calls per
+//! second) free of tensor-type vtable dispatch. `ndarray` itself still compiles
+//! into the tree, force-enabled by ort's `std` feature; see the `ort` dependency
+//! comment in the workspace `Cargo.toml`.
 //!
 //! # Backend selection
 //!
@@ -457,13 +460,7 @@ pub(crate) struct OnnxOutputs {
 }
 
 /// One owned named output.
-///
-/// `shape` is part of the trait API (workloads with dynamic-shape outputs
-/// need it) but is unused by Silero VAD's known-shape outputs. Kept
-/// allowed-dead until a non-Silero consumer reads it.
 pub(crate) struct OnnxOutputTensor {
-    #[allow(dead_code)]
-    pub shape: Vec<i64>,
     pub data: OnnxTensorOwned,
 }
 
@@ -739,28 +736,29 @@ mod ort_impl {
 
             for (name, view) in inputs.items.iter() {
                 let kind = known_kind(name);
-                let shape: Vec<i64> = view.shape.to_vec();
                 let value: SessionInputValue<'_> = match &view.data {
                     OnnxTensorData::F32(slice) => {
-                        let tensor = Tensor::from_array((shape, slice.to_vec())).map_err(|e| {
-                            DecibriError::OrtTensorCreateFailed {
-                                kind,
-                                source: Box::new(e),
-                            }
-                        })?;
+                        let tensor =
+                            Tensor::from_array((view.shape, slice.to_vec())).map_err(|e| {
+                                DecibriError::OrtTensorCreateFailed {
+                                    kind,
+                                    source: Box::new(e),
+                                }
+                            })?;
                         tensor.into()
                     }
                     OnnxTensorData::I64(slice) => {
-                        let tensor = Tensor::from_array((shape, slice.to_vec())).map_err(|e| {
-                            DecibriError::OrtTensorCreateFailed {
-                                kind,
-                                source: Box::new(e),
-                            }
-                        })?;
+                        let tensor =
+                            Tensor::from_array((view.shape, slice.to_vec())).map_err(|e| {
+                                DecibriError::OrtTensorCreateFailed {
+                                    kind,
+                                    source: Box::new(e),
+                                }
+                            })?;
                         tensor.into()
                     }
                 };
-                input_pairs.push((Cow::Owned((*name).to_string()), value));
+                input_pairs.push((Cow::Borrowed(*name), value));
             }
 
             let outputs = self
@@ -768,34 +766,31 @@ mod ort_impl {
                 .run(input_pairs)
                 .map_err(|e| DecibriError::OrtInferenceFailed(Box::new(e)))?;
 
-            let names: Vec<String> = outputs.keys().map(|k| k.to_string()).collect();
-            let mut tensors: Vec<(String, OnnxOutputTensor)> = Vec::with_capacity(names.len());
-            for name in names {
-                let kind = known_kind(&name);
-                let value = &outputs[name.as_str()];
+            let mut tensors: Vec<(String, OnnxOutputTensor)> = Vec::with_capacity(outputs.len());
+            for name in outputs.keys() {
+                let kind = known_kind(name);
+                let value = &outputs[name];
                 let dtype = value.dtype().tensor_type();
                 let owned = match dtype {
                     Some(TensorElementType::Float32) => {
-                        let (shape, data) = value.try_extract_tensor::<f32>().map_err(|e| {
+                        let (_, data) = value.try_extract_tensor::<f32>().map_err(|e| {
                             DecibriError::OrtTensorExtractFailed {
                                 kind,
                                 source: Box::new(e),
                             }
                         })?;
                         OnnxOutputTensor {
-                            shape: shape.to_vec(),
                             data: OnnxTensorOwned::F32(data.to_vec()),
                         }
                     }
                     Some(TensorElementType::Int64) => {
-                        let (shape, data) = value.try_extract_tensor::<i64>().map_err(|e| {
+                        let (_, data) = value.try_extract_tensor::<i64>().map_err(|e| {
                             DecibriError::OrtTensorExtractFailed {
                                 kind,
                                 source: Box::new(e),
                             }
                         })?;
                         OnnxOutputTensor {
-                            shape: shape.to_vec(),
                             data: OnnxTensorOwned::I64(data.to_vec()),
                         }
                     }
@@ -809,7 +804,7 @@ mod ort_impl {
                         });
                     }
                 };
-                tensors.push((name, owned));
+                tensors.push((name.to_string(), owned));
             }
 
             Ok(OnnxOutputs { tensors })
@@ -988,7 +983,6 @@ mod tests {
             let mut tensors = Vec::with_capacity(self.canned_outputs.len());
             for (name, t) in self.canned_outputs.iter() {
                 let cloned = OnnxOutputTensor {
-                    shape: t.shape.clone(),
                     data: match &t.data {
                         OnnxTensorOwned::F32(v) => OnnxTensorOwned::F32(v.clone()),
                         OnnxTensorOwned::I64(v) => OnnxTensorOwned::I64(v.clone()),
@@ -1005,7 +999,6 @@ mod tests {
         let canned = vec![(
             "output".to_string(),
             OnnxOutputTensor {
-                shape: vec![1, 1],
                 data: OnnxTensorOwned::F32(vec![0.42]),
             },
         )];
@@ -1044,7 +1037,6 @@ mod tests {
         let outputs = session.run(inputs).expect("MockSession should succeed");
         assert_eq!(outputs.tensors.len(), 1);
         let probe = outputs.get("output").expect("output present");
-        assert_eq!(probe.shape, vec![1, 1]);
         match &probe.data {
             OnnxTensorOwned::F32(v) => assert_eq!(v.as_slice(), &[0.42f32]),
             OnnxTensorOwned::I64(_) => panic!("expected F32"),
@@ -1057,7 +1049,6 @@ mod tests {
             tensors: vec![(
                 "output".to_string(),
                 OnnxOutputTensor {
-                    shape: vec![1],
                     data: OnnxTensorOwned::F32(vec![1.0]),
                 },
             )],
