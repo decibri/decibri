@@ -340,25 +340,37 @@ const VAD_TAP_BOUND_SECS: usize = 2;
 /// Memory bound for the far-end echo-cancellation reference queue, in seconds of
 /// audio at the declared reference rate. The caller pushes played audio into the
 /// queue with [`MicrophoneStream::push_aec_reference`] and the canceller drains
-/// everything queued at the head of each block, so the queue only ever holds
-/// what was pushed since the previous block: one second is an order of magnitude
-/// above the interval between blocks at every buffer size the configuration
-/// accepts.
+/// everything queued at the head of each block, so a caller feeding in step with
+/// the capture never fills more than one block of it.
 ///
-/// The bound is also what caps how far the far-end feed can run ahead of the
-/// capture in one drain. The canceller learns the lead its caller keeps and
-/// re-anchors when the lead steps outside it, and it holds several seconds of
-/// far-end history to serve that lead from, so a queue that stays well inside
-/// that depth keeps the lead a small, steady figure rather than one that jumps by
-/// the length of whatever the caller handed over. A caller that pushes a whole
-/// synthesized utterance in one call therefore has samples discarded and counted
-/// by [`MicrophoneStream::aec_reference_dropped`]; the reference is pushed as it
-/// is played, not as it is produced.
+/// What the bound is sized for is the caller who does not feed in step: one that
+/// hands over a whole synthesized utterance in a single call. The queue holds
+/// that push whole up to this many seconds, and the canceller then reads it as
+/// the capture catches up.
 ///
-/// At 16 kHz the queue holds 16000 samples, 64 KB; at 48 kHz, 48000 samples,
-/// 192 KB.
+/// The size comes from the canceller's own limit on how far the far-end feed may
+/// run ahead of the capture. It serves a lead out of its far-end history, which
+/// spans its echo-delay window plus its adaptive tail plus a fixed slack; past
+/// that depth the lead is unservable, the canceller re-anchors onto a frontier
+/// the capture has not reached, and cancellation stops for the rest of the
+/// stream. The shallowest history any configuration decibri accepts can produce
+/// is 4266 ms (the canceller's 250 ms echo-delay window, the shortest tail
+/// [`MicrophoneConfig::aec_tail_ms`] accepts, and four seconds of slack).
+/// Measured against that configuration, a lead of 4000 ms still cancels intact,
+/// 4200 ms begins to starve, and 4400 ms is the unservable cliff. Two seconds is
+/// half the shallowest depth, so one push of the full bound cannot approach the
+/// cliff even when the previous one has not yet been consumed.
+///
+/// A push larger than the bound is truncated at its newest end and the discarded
+/// samples are counted by [`MicrophoneStream::aec_reference_dropped`]. The time
+/// they occupied is still represented: the drain supplies silence for every
+/// near-end sample the caller did not cover, so the cost is the cancellation of
+/// the discarded span alone.
+///
+/// At 16 kHz the queue holds 32000 samples, 128 KB; at 48 kHz, 96000 samples,
+/// 384 KB.
 #[cfg(all(feature = "capture", feature = "aec"))]
-pub(crate) const AEC_REFERENCE_BOUND_SECS: usize = 1;
+pub(crate) const AEC_REFERENCE_BOUND_SECS: usize = 2;
 
 /// An open capture stream you pull [`AudioChunk`]s from.
 ///
@@ -900,17 +912,24 @@ impl MicrophoneStream {
     /// `reference` is mono `f32` at
     /// [`MicrophoneConfig::aec_reference_sample_rate`] (the capture
     /// [`sample_rate`](MicrophoneConfig::sample_rate) when that is unset), in
-    /// played order and including any silence the renderer inserted: the
-    /// canceller aligns it against the captured signal, so a gap that is not
-    /// represented moves the alignment. Push it as it is played, not as it is
-    /// produced.
+    /// played order. Push it as it is played, not as it is produced: the
+    /// canceller aligns it against the captured signal, so a caller running
+    /// further ahead of the capture than the canceller can search cancels
+    /// nothing.
+    ///
+    /// Silence between what is played need not be pushed. A caller that stops
+    /// pushing has said that nothing is playing, and decibri supplies the
+    /// silence that means, counted by
+    /// [`aec_reference_silence`](Self::aec_reference_silence). Pushing the
+    /// silence explicitly is equivalent, not better.
     ///
     /// Never blocks on the canceller and never fails, so it may be called from a
     /// renderer callback or a socket handler. The queue is bounded (see
     /// `AEC_REFERENCE_BOUND_SECS`); samples that do not fit are discarded from
     /// the newest end and counted by
     /// [`aec_reference_dropped`](Self::aec_reference_dropped), leaving what
-    /// remains a contiguous run in played order.
+    /// remains a contiguous run in played order and the time the discarded
+    /// samples occupied represented as silence.
     ///
     /// A no-op on a stream with echo cancellation off.
     ///
@@ -925,10 +944,16 @@ impl MicrophoneStream {
     }
 
     /// Total number of far-end reference samples discarded because the queue was
-    /// full. Stays 0 while the reference is pushed as it plays; a rising count
-    /// means reference audio arrived faster than the capture consumed it and the
-    /// canceller has a hole in its far-end timeline. 0 on a stream with echo
+    /// full, at the declared reference rate. Stays 0 while the reference is
+    /// pushed as it plays; a rising count means a single push exceeded the
+    /// queue's bound, so that much of the played signal never reached the
+    /// canceller and the echo of it cannot be removed. 0 on a stream with echo
     /// cancellation off.
+    ///
+    /// The span the discarded samples occupied is still represented, as silence,
+    /// so the canceller's alignment survives a discard rather than being moved
+    /// by it: what a rising count costs is the cancellation of that span, not of
+    /// the rest of the stream.
     ///
     /// Distinct from [`AecMetrics::reference_dropped`](decibri_aec::AecMetrics::reference_dropped),
     /// which counts what the canceller's own far-end history overwrote after this
@@ -940,6 +965,29 @@ impl MicrophoneStream {
             .map_or(0, |queue| queue.dropped())
     }
 
+    /// Total number of far-end reference samples decibri supplied as silence
+    /// because the caller had pushed none for them, at the capture
+    /// [`sample_rate`](Self::sample_rate). 0 on a stream with echo cancellation
+    /// off.
+    ///
+    /// An accounting figure, not a fault. The canceller reads one far-end sample
+    /// for every near-end sample it cancels, and while nothing is playing the
+    /// far end is silence, so a stream with occasional playback spends most of
+    /// its length here. What it makes visible is the caller: a count that tracks
+    /// the whole length of the stream means nothing was ever pushed, and a count
+    /// that climbs while the caller believes it is playing means the reference
+    /// is not reaching this stream.
+    ///
+    /// Read with [`AecMetrics::reference_starved`](decibri_aec::AecMetrics::reference_starved),
+    /// which counts near-end samples the canceller could find no far-end sample
+    /// for at all. That one stays at 0 while this one carries the shortfall.
+    #[cfg(feature = "aec")]
+    pub fn aec_reference_silence(&self) -> u64 {
+        self.aec_reference
+            .as_ref()
+            .map_or(0, |queue| queue.silence())
+    }
+
     /// The echo canceller's transport and cancellation metrics, or `None` on a
     /// stream with echo cancellation off.
     ///
@@ -948,6 +996,14 @@ impl MicrophoneStream {
     /// reference: none was pushed, it is not at the declared rate, or it is not
     /// the signal that produced the echo. `reference_reanchors` climbing is the
     /// canceller recovering its alignment after a break in either stream.
+    ///
+    /// `reference_starved` reports near-end samples the canceller could find no
+    /// far-end sample for. decibri keeps the far-end stream level with the
+    /// capture, so this stays at 0 on a stream whose caller simply stops
+    /// pushing; the shortfall is reported by
+    /// [`aec_reference_silence`](Self::aec_reference_silence) instead. A
+    /// non-zero count here means the caller ran further ahead of the capture
+    /// than the canceller's far-end history reaches.
     ///
     /// # Thread safety
     /// Takes the capture chain's lock, which the chain holds for the duration of
@@ -2776,9 +2832,10 @@ mod tests {
     }
 
     /// The stream's push method reaches the queue the chain's canceller drains,
-    /// the discard count is reachable from the stream, and the canceller's metrics
-    /// are too. Regression: a push that lands in a queue nothing reads, and a
-    /// discard count or a metrics read with no path out to a consumer.
+    /// the discard and substituted-silence counts are reachable from the stream,
+    /// and the canceller's metrics are too. Regression: a push that lands in a
+    /// queue nothing reads, and a discard count, a silence count, or a metrics
+    /// read with no path out to a consumer.
     #[cfg(feature = "aec")]
     #[test]
     fn the_stream_reaches_the_reference_queue_and_the_metrics() {
@@ -2816,17 +2873,38 @@ mod tests {
             "the samples past the queue's bound are counted through the stream"
         );
 
+        assert_eq!(
+            stream.aec_reference_silence(),
+            0,
+            "a stream that has processed no capture has substituted no silence"
+        );
+        let mut buf = VecDeque::new();
+        stream
+            .ingest(&mut buf, make_native_chunk(vec![0.1; 320]))
+            .expect("the chain conditions one block");
+        assert_eq!(
+            stream.aec_reference_silence(),
+            320 - 4,
+            "the drain covers the near-end samples the four queued reference \
+             samples did not"
+        );
+
         let metrics = stream.aec_metrics().expect("the stream reports metrics");
         assert_eq!(
             metrics.reference_reanchors, 0,
-            "a stream that processed nothing has re-anchored nothing"
+            "a stream that processed one block has re-anchored nothing"
+        );
+        assert_eq!(
+            metrics.reference_starved, 0,
+            "a far end kept level with the capture starves nothing"
         );
 
         // A stream with echo cancellation off answers without a queue: the push is
-        // a no-op, the count is zero, and there are no metrics.
+        // a no-op, both counts are zero, and there are no metrics.
         let (plain, _sender, _running) = test_stream_with(None, 1);
         plain.push_aec_reference(&[0.1, 0.2]);
         assert_eq!(plain.aec_reference_dropped(), 0);
+        assert_eq!(plain.aec_reference_silence(), 0);
         assert!(plain.aec_metrics().is_none());
     }
 }
