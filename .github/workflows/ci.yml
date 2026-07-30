@@ -114,6 +114,12 @@ jobs:
           - { name: capture+playback, command: "test", flags: "--no-default-features --features capture,playback" }
           - { name: vad, command: "check --all-targets", flags: "--no-default-features --features vad,ort-load-dynamic" }
           - { name: no-vad-full, command: "check --all-targets", flags: "--no-default-features --features capture,playback,denoise,gain,ort-load-dynamic" }
+          # Echo cancellation without ORT. `test` rather than `check`, because the
+          # canceller needs no ONNX Runtime, so the AEC tests can actually run
+          # here; every other cell that compiles `aec` either has no ORT-free
+          # test target or only type-checks, so this is the one cell that
+          # executes them.
+          - { name: capture+aec, command: "test", flags: "--no-default-features --features capture,aec" }
     steps:
       - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable

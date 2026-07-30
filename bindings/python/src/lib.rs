@@ -147,6 +147,8 @@ const EXCEPTION_NAMES: &[&str] = &[
     "StreamStartFailed",
     "VadSampleRateUnsupported",
     "VadThresholdOutOfRange",
+    "AecSampleRateUnsupported",
+    "AecConfigInvalid",
     "ResampleConfigInvalid",
     "ResampleAfterFlush",
     "ResampleFailed",

@@ -187,6 +187,23 @@ class VadThresholdOutOfRange(DecibriError):
     """Raised when vad_threshold is not in the [0.0, 1.0] range."""
 
 
+class AecSampleRateUnsupported(DecibriError):
+    """Raised when echo cancellation is enabled with an unsupported sample rate.
+
+    The canceller supports 8000 to 48000 Hz, narrower than the range sample_rate
+    otherwise accepts, so a rate that is valid for a plain capture is rejected
+    once echo cancellation is on.
+    """
+
+
+class AecConfigInvalid(DecibriError):
+    """Raised when the echo canceller rejects its configuration.
+
+    Carries the canceller's own message, which names the window it enforces or
+    the string that named no model.
+    """
+
+
 class ResampleConfigInvalid(DecibriError):
     """Raised when a capture sample rate conversion is unsupported.
 

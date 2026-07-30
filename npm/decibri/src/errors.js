@@ -82,6 +82,7 @@ const RANGE_PREFIXES = [
   'limiter ceiling must be between',
   'Silero VAD only supports',
   'VAD threshold must be between',
+  'echo cancellation only supports',
   'device index out of range',
   'analysis requires VAD',
 ];
@@ -126,6 +127,7 @@ const BASE_CODES = [
   ['the requested sample rate conversion is not supported', 'RESAMPLE_CONFIG_INVALID'],
   ['the resample chain was fed after it was flushed', 'RESAMPLE_AFTER_FLUSH'],
   ['resampler error:', 'RESAMPLE_FAILED'],
+  ['echo canceller configuration error:', 'AEC_CONFIG_INVALID'],
   ['Failed to read audio file', 'FILE_READ_FAILED'],
   ['invalid WAV file:', 'WAV_INVALID'],
   ['ONNX Runtime was initialized in pid', 'FORK_AFTER_ORT_INIT'],

@@ -71,6 +71,8 @@ from decibri.exceptions import (
     VadNotConfigured,
     VadSampleRateUnsupported,
     VadThresholdOutOfRange,
+    AecSampleRateUnsupported,
+    AecConfigInvalid,
     WavInvalid,
 )
 

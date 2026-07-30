@@ -380,6 +380,10 @@ impl File {
                 highpass: config.highpass,
                 agc: config.agc,
                 limiter: config.limiter,
+                // The offline path has no far-end reference to cancel against, so
+                // echo cancellation is not offered on it.
+                #[cfg(feature = "aec")]
+                aec: None,
             },
         )?;
 

@@ -208,6 +208,33 @@ pub enum DecibriError {
     #[error("VAD threshold must be between 0.0 and 1.0")]
     VadThresholdOutOfRange(f32),
 
+    // ── Echo-cancellation config validation ────────────────────────────
+    /// Echo cancellation was requested with a capture sample rate outside the
+    /// window the canceller supports.
+    ///
+    /// decibri's own accepted range (`1000..=384000`) is wider at both ends
+    /// than the canceller's `8000..=48000`, so this rejects a rate that is
+    /// valid for a capture without echo cancellation. Payload carries the
+    /// offending rate; not formatted into the Display string to keep the
+    /// message text stable (matching [`Self::VadSampleRateUnsupported`]).
+    /// Deliberately not feature-gated, so the identity table's coverage stays
+    /// unconditional. Additive variant permitted by `#[non_exhaustive]`.
+    #[error("echo cancellation only supports sample rates 8000 to 48000")]
+    AecSampleRateUnsupported(u32),
+
+    /// The echo canceller rejected its configuration at construction.
+    ///
+    /// `reason` is the canceller's own message, formatted into the Display
+    /// string so the upstream text reaches the consumer (matching
+    /// [`Self::ResampleFailed`]; the leading `echo canceller configuration
+    /// error:` prefix is the stable part). It carries the canceller's
+    /// filter-tail, echo-delay and search-delay window rejections, its
+    /// unknown-model rejection, and any error a later canceller release adds.
+    /// Deliberately not feature-gated, so the identity table's coverage stays
+    /// unconditional. Additive variant permitted by `#[non_exhaustive]`.
+    #[error("echo canceller configuration error: {reason}")]
+    AecConfigInvalid { reason: String },
+
     // ── Offline file source errors ─────────────────────────────────────
     /// An offline audio file could not be read from disk.
     ///
@@ -543,6 +570,11 @@ error_identity! {
     DecibriError::VadThresholdOutOfRange(_) => "VadThresholdOutOfRange", "VAD_THRESHOLD_OUT_OF_RANGE",
         DecibriError::VadThresholdOutOfRange(1.5);
 
+    DecibriError::AecSampleRateUnsupported(_) => "AecSampleRateUnsupported", "AEC_SAMPLE_RATE_UNSUPPORTED",
+        DecibriError::AecSampleRateUnsupported(96000);
+    DecibriError::AecConfigInvalid { .. } => "AecConfigInvalid", "AEC_CONFIG_INVALID",
+        DecibriError::AecConfigInvalid { reason: "sample".to_string() };
+
     #[cfg(feature = "capture")]
     DecibriError::FileReadFailed { .. } => "FileReadFailed", "FILE_READ_FAILED",
         DecibriError::FileReadFailed {
@@ -650,6 +682,46 @@ impl From<decibri_resampler::ResamplerError> for DecibriError {
             _ => DecibriError::ResampleFailed {
                 reason: e.to_string(),
             },
+        }
+    }
+}
+
+/// Bridge the capture echo canceller's errors into the central error.
+///
+/// Every error the pinned canceller release defines has its own arm.
+/// `SampleRateOutOfRange` is the one a decibri configuration can reach through
+/// its own validated range, so it maps to
+/// [`DecibriError::AecSampleRateUnsupported`], which carries the offending rate
+/// through and keeps the same message a caller sees from
+/// [`crate::microphone::MicrophoneConfig::validate`].
+///
+/// The remaining four are construction-time configuration rejections whose own
+/// messages name the window enforced (`TailOutOfRange`,
+/// `EchoDelayOutOfRange`, `SearchDelayOutOfRange`) or the string that named no
+/// model (`UnknownModel`). They map to [`DecibriError::AecConfigInvalid`],
+/// which forwards that message: it is more precise than any text decibri could
+/// author, and for the unknown model it is the only text that can list the
+/// models a caller may select.
+///
+/// The catch-all is reached only by an error added in a later canceller
+/// release. It maps to the same variant on the same terms, forwarding the
+/// canceller's own message rather than naming a cause decibri cannot know.
+#[cfg(feature = "aec")]
+impl From<decibri_aec::AecError> for DecibriError {
+    fn from(e: decibri_aec::AecError) -> Self {
+        use decibri_aec::AecError;
+        // Rendered before the match so every forwarding arm carries the
+        // upstream text unchanged.
+        let reason = e.to_string();
+        match e {
+            AecError::SampleRateOutOfRange { requested } => {
+                DecibriError::AecSampleRateUnsupported(requested)
+            }
+            AecError::TailOutOfRange { .. } => DecibriError::AecConfigInvalid { reason },
+            AecError::EchoDelayOutOfRange { .. } => DecibriError::AecConfigInvalid { reason },
+            AecError::SearchDelayOutOfRange { .. } => DecibriError::AecConfigInvalid { reason },
+            AecError::UnknownModel { .. } => DecibriError::AecConfigInvalid { reason },
+            _ => DecibriError::AecConfigInvalid { reason },
         }
     }
 }
@@ -820,5 +892,52 @@ mod tests {
             reason: "sample upstream text".to_string(),
         };
         assert_eq!(err.to_string(), "resampler error: sample upstream text");
+    }
+
+    /// Every variant the pinned echo canceller release defines reaches the variant
+    /// intended for it, and every forwarding arm carries the canceller's own
+    /// message through unchanged. Regression: a variant routed to the wrong
+    /// decibri variant, and a decibri-authored message replacing text that names
+    /// the window enforced or the models a caller may select.
+    #[cfg(feature = "aec")]
+    #[test]
+    fn every_aec_error_reaches_its_intended_variant() {
+        use decibri_aec::AecError;
+
+        let rate = DecibriError::from(AecError::SampleRateOutOfRange { requested: 96_000 });
+        assert!(
+            matches!(rate, DecibriError::AecSampleRateUnsupported(96_000)),
+            "an out-of-window rate carries the rate through, got {rate:?}"
+        );
+        assert_eq!(
+            rate.to_string(),
+            "echo cancellation only supports sample rates 8000 to 48000",
+            "the rate variant keeps decibri's own stable message"
+        );
+
+        let forwarding = [
+            AecError::TailOutOfRange { requested_ms: 4 },
+            AecError::EchoDelayOutOfRange { requested_ms: 4 },
+            AecError::SearchDelayOutOfRange {
+                requested_ms: 4,
+                fine_window_ms: 250,
+            },
+            AecError::UnknownModel {
+                requested: "tao".to_string(),
+            },
+        ];
+        for err in forwarding {
+            let upstream = err.to_string();
+            let converted = DecibriError::from(err);
+            assert!(
+                matches!(converted, DecibriError::AecConfigInvalid { .. }),
+                "a configuration rejection reaches AecConfigInvalid, got {converted:?}"
+            );
+            assert_eq!(
+                converted.to_string(),
+                format!("echo canceller configuration error: {upstream}"),
+                "the canceller's own message is forwarded unchanged"
+            );
+        }
     }
 }

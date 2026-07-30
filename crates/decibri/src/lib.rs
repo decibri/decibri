@@ -29,6 +29,7 @@
 //! | `capture`               | on      | Microphone input stream support              |
 //! | `playback`              | on      | Speaker output stream support                |
 //! | `vad`                   | on      | Silero voice-activity detection (pulls `ort`)|
+//! | `aec`                   | on      | Acoustic echo cancellation on the capture path|
 //! | `ort-load-dynamic`      | on      | ONNX Runtime loaded at runtime from a path   |
 //! | `ort-download-binaries` | off     | ONNX Runtime downloaded at build time        |
 //!
@@ -268,5 +269,12 @@ pub use device::{input_devices, output_devices, DeviceSelector, MicrophoneInfo, 
 
 #[cfg(feature = "vad")]
 pub use vad::{SileroVad, VadConfig, VadResult};
+
+// The echo canceller's own types, re-exported so a consumer selects a model and
+// reads the canceller's metrics without naming `decibri-aec` as a dependency.
+// Re-exported rather than mirrored: the model set is deliberately open, so a
+// decibri-side copy of it would be a second place to update.
+#[cfg(feature = "aec")]
+pub use decibri_aec::{AecMetrics, AecModel, Suppression};
 
 pub use error::DecibriError;

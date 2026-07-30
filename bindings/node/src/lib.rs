@@ -649,6 +649,7 @@ fn to_napi_error(e: decibri::error::DecibriError) -> Error {
         | InvalidFormat
         | VadSampleRateUnsupported(_)
         | VadThresholdOutOfRange(_)
+        | AecSampleRateUnsupported(_)
         | WavInvalid { .. }
         | VadNotConfigured => Status::InvalidArg,
 
@@ -685,6 +686,7 @@ fn to_napi_error(e: decibri::error::DecibriError) -> Error {
         | OrtTensorCreateFailed { .. }
         | OrtTensorExtractFailed { .. }
         | ResampleConfigInvalid { .. }
+        | AecConfigInvalid { .. }
         | ForkAfterOrtInit { .. }
         | OnnxBackendFailed { .. } => Status::GenericFailure,
 

@@ -215,9 +215,19 @@ version = "5.4.1"
 dependencies = [
  "cpal",
  "crossbeam-channel",
+ "decibri-aec",
  "decibri-resampler",
  "libloading",
  "ort",
+ "thiserror 2.0.18",
+]
+
+[[package]]
+name = "decibri-aec"
+version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8c082148c8441fc7db2c9c31aeb69842cf754ef9b8a853b40e086a2f383860fd"
+dependencies = [
  "thiserror 2.0.18",
 ]
 

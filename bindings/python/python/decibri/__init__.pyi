@@ -61,6 +61,8 @@ from decibri.exceptions import VadModelLoadFailed as VadModelLoadFailed
 from decibri.exceptions import VadNotConfigured as VadNotConfigured
 from decibri.exceptions import VadSampleRateUnsupported as VadSampleRateUnsupported
 from decibri.exceptions import VadThresholdOutOfRange as VadThresholdOutOfRange
+from decibri.exceptions import AecSampleRateUnsupported as AecSampleRateUnsupported
+from decibri.exceptions import AecConfigInvalid as AecConfigInvalid
 from decibri.exceptions import WavInvalid as WavInvalid
 
 __version__: str

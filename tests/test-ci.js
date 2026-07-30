@@ -455,6 +455,7 @@ const BUILTIN_VARIANTS = [
   'DeviceIndexOutOfRange',
   'VadSampleRateUnsupported',
   'VadThresholdOutOfRange',
+  'AecSampleRateUnsupported',
   'VadNotConfigured',
 ];
 
