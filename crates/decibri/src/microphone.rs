@@ -1382,21 +1382,9 @@ mod tests {
     #[test]
     fn test_mono_device_builds_no_chain() {
         assert!(
-            build_capture_stage(
-                1,
-                1,
-                16000,
-                16000,
-                Transforms {
-                    dc_removal: false,
-                    denoise: None,
-                    highpass: None,
-                    agc: None,
-                    limiter: None,
-                }
-            )
-            .unwrap()
-            .is_none(),
+            build_capture_stage(1, 1, 16000, 16000, Transforms::default())
+                .unwrap()
+                .is_none(),
             "a mono device at the target rate needs no normalize chain"
         );
         let (stream, _sender, _running) = test_stream();
@@ -1412,20 +1400,7 @@ mod tests {
     /// tail is delivered.
     #[test]
     fn test_downmix_chain_yields_correct_mono() {
-        let stage = build_capture_stage(
-            2,
-            1,
-            16000,
-            16000,
-            Transforms {
-                dc_removal: false,
-                denoise: None,
-                highpass: None,
-                agc: None,
-                limiter: None,
-            },
-        )
-        .unwrap();
+        let stage = build_capture_stage(2, 1, 16000, 16000, Transforms::default()).unwrap();
         assert!(stage.is_some(), "a stereo device gets a downmix chain");
         let (stream, sender, running) = test_stream_with(stage, 1); // output is mono
 
@@ -1473,21 +1448,9 @@ mod tests {
     /// count tracks the 1:3 rate ratio (48 kHz -> 16 kHz).
     #[test]
     fn test_resample_chain_delivers_exact_blocks_at_target_rate() {
-        let stage = build_capture_stage(
-            1,
-            1,
-            48_000,
-            16_000,
-            Transforms {
-                dc_removal: false,
-                denoise: None,
-                highpass: None,
-                agc: None,
-                limiter: None,
-            },
-        )
-        .unwrap()
-        .expect("48k mono -> resample chain");
+        let stage = build_capture_stage(1, 1, 48_000, 16_000, Transforms::default())
+            .unwrap()
+            .expect("48k mono -> resample chain");
         // test_stream_with stamps the stream at 16 kHz (the target), mono.
         let (stream, sender, running) = test_stream_with(Some(stage), 1);
 
@@ -1564,21 +1527,9 @@ mod tests {
         let mut process_out = Vec::new();
         process_only.process(&input, &mut process_out).unwrap();
 
-        let stage = build_capture_stage(
-            1,
-            1,
-            48_000,
-            16_000,
-            Transforms {
-                dc_removal: false,
-                denoise: None,
-                highpass: None,
-                agc: None,
-                limiter: None,
-            },
-        )
-        .unwrap()
-        .expect("48k mono -> resample chain");
+        let stage = build_capture_stage(1, 1, 48_000, 16_000, Transforms::default())
+            .unwrap()
+            .expect("48k mono -> resample chain");
         let (stream, sender, running) = test_stream_with(Some(stage), 1);
         sender.send(make_native_chunk(input)).unwrap();
         drop(sender);
@@ -1652,10 +1603,7 @@ mod tests {
             16_000,
             Transforms {
                 dc_removal: enhancement,
-                denoise: None,
-                highpass: None,
-                agc: None,
-                limiter: None,
+                ..Default::default()
             },
         )
         .unwrap()
@@ -1704,21 +1652,9 @@ mod tests {
     /// throughout and a binding feeds VAD the delivered chunk exactly as before.
     #[test]
     fn test_vad_input_none_when_no_transform() {
-        let stage = build_capture_stage(
-            2,
-            1,
-            16_000,
-            16_000,
-            Transforms {
-                dc_removal: false,
-                denoise: None,
-                highpass: None,
-                agc: None,
-                limiter: None,
-            },
-        )
-        .unwrap()
-        .expect("stereo -> downmix-only chain");
+        let stage = build_capture_stage(2, 1, 16_000, 16_000, Transforms::default())
+            .unwrap()
+            .expect("stereo -> downmix-only chain");
         let (stream, sender, running) = test_stream_with(Some(stage), 1);
         assert!(
             stream.vad_input(4).is_none(),
@@ -1770,10 +1706,7 @@ mod tests {
             16_000,
             Transforms {
                 dc_removal: enhancement,
-                denoise: None,
-                highpass: None,
-                agc: None,
-                limiter: None,
+                ..Default::default()
             },
         )
         .unwrap()
@@ -1840,10 +1773,7 @@ mod tests {
             16_000,
             Transforms {
                 dc_removal: enhancement,
-                denoise: None,
-                highpass: None,
-                agc: None,
-                limiter: None,
+                ..Default::default()
             },
         )
         .unwrap()
@@ -1945,13 +1875,7 @@ mod tests {
             (crate::sample::rms(&pre), crate::sample::rms(&delivered))
         };
 
-        let off = Transforms {
-            dc_removal: false,
-            denoise: None,
-            highpass: None,
-            agc: None,
-            limiter: None,
-        };
+        let off = Transforms::default();
         let (baseline, baseline_delivered) = run(off);
         // No transform: the tap is inactive, so the pre feed IS the delivered
         // chunk and the two scores coincide.
@@ -1964,11 +1888,8 @@ mod tests {
         // while the delivered RMS shifts sharply (the pre-fix delivered-chunk
         // path would have diverged, since AGC boosts the quiet input).
         let agc = Transforms {
-            dc_removal: false,
-            denoise: None,
-            highpass: None,
             agc: Some(-18),
-            limiter: None,
+            ..Default::default()
         };
         let (agc_pre, agc_delivered) = run(agc);
         assert!(
@@ -1983,11 +1904,8 @@ mod tests {
 
         // High-pass active: same invariance on the tap.
         let hp = Transforms {
-            dc_removal: false,
-            denoise: None,
             highpass: Some(HighpassFilter::Hz80),
-            agc: None,
-            limiter: None,
+            ..Default::default()
         };
         let (hp_pre, _) = run(hp);
         assert!(
@@ -1998,10 +1916,7 @@ mod tests {
         // DC removal active: same invariance on the tap.
         let dc = Transforms {
             dc_removal: true,
-            denoise: None,
-            highpass: None,
-            agc: None,
-            limiter: None,
+            ..Default::default()
         };
         let (dc_pre, _) = run(dc);
         assert!(
@@ -2215,21 +2130,9 @@ mod tests {
     /// stages carry state across blocks, so a block fed after the close-path
     /// flush would run through emptied stages.
     fn resample_stage() -> CaptureStage {
-        build_capture_stage(
-            1,
-            1,
-            48_000,
-            16_000,
-            Transforms {
-                dc_removal: false,
-                denoise: None,
-                highpass: None,
-                agc: None,
-                limiter: None,
-            },
-        )
-        .unwrap()
-        .expect("48 kHz mono device -> 16 kHz resample chain")
+        build_capture_stage(1, 1, 48_000, 16_000, Transforms::default())
+            .unwrap()
+            .expect("48 kHz mono device -> 16 kHz resample chain")
     }
 
     /// Read a stream to exhaustion with `try_next_chunk`, returning every
@@ -2483,11 +2386,8 @@ mod tests {
             16_000,
             16_000,
             Transforms {
-                dc_removal: false,
                 denoise: Some((DenoiseModel::FastEnhancerT, path.as_path(), None)),
-                highpass: None,
-                agc: None,
-                limiter: None,
+                ..Default::default()
             },
         )
         .unwrap()

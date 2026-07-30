@@ -1056,10 +1056,7 @@ mod tests {
             16000,
             Transforms {
                 dc_removal: true,
-                denoise: None,
-                highpass: None,
-                agc: None,
-                limiter: None,
+                ..Default::default()
             },
         )
         .unwrap()

@@ -463,6 +463,13 @@ impl CaptureStage {
 /// bundled into one argument so that adding a capability is a new field rather
 /// than another positional parameter. The fields map one-to-one to the transform
 /// stages, listed in chain order.
+///
+/// [`Default`] is every field off, the configuration that pushes no transform
+/// stage at all, so a caller names only what it enables. A field added here must
+/// have an off state that is its type's own default, or the derive stops being
+/// correct and the impl has to be written out; `default_is_the_all_off_literal`
+/// holds that line.
+#[derive(Default)]
 pub(crate) struct Transforms<'a> {
     /// Remove a constant DC offset (the [`DcBlocker`]).
     pub dc_removal: bool,
@@ -638,10 +645,7 @@ mod tests {
                 16_000,
                 Transforms {
                     dc_removal: off,
-                    denoise: None,
-                    highpass: None,
-                    agc: None,
-                    limiter: None,
+                    ..Default::default()
                 }
             )
             .unwrap()
@@ -657,10 +661,7 @@ mod tests {
                 16_000,
                 Transforms {
                     dc_removal: off,
-                    denoise: None,
-                    highpass: None,
-                    agc: None,
-                    limiter: None,
+                    ..Default::default()
                 }
             )
             .unwrap()
@@ -675,10 +676,7 @@ mod tests {
                 16_000,
                 Transforms {
                     dc_removal: off,
-                    denoise: None,
-                    highpass: None,
-                    agc: None,
-                    limiter: None,
+                    ..Default::default()
                 }
             )
             .unwrap()
@@ -694,10 +692,7 @@ mod tests {
                 16_000,
                 Transforms {
                     dc_removal: off,
-                    denoise: None,
-                    highpass: None,
-                    agc: None,
-                    limiter: None,
+                    ..Default::default()
                 }
             )
             .unwrap()
@@ -713,10 +708,7 @@ mod tests {
                 16_000,
                 Transforms {
                     dc_removal: off,
-                    denoise: None,
-                    highpass: None,
-                    agc: None,
-                    limiter: None,
+                    ..Default::default()
                 }
             )
             .unwrap()
@@ -741,10 +733,7 @@ mod tests {
             16_000,
             Transforms {
                 dc_removal: on,
-                denoise: None,
-                highpass: None,
-                agc: None,
-                limiter: None,
+                ..Default::default()
             },
         )
         .unwrap()
@@ -767,10 +756,7 @@ mod tests {
             16_000,
             Transforms {
                 dc_removal: on,
-                denoise: None,
-                highpass: None,
-                agc: None,
-                limiter: None,
+                ..Default::default()
             },
         )
         .unwrap()
@@ -785,21 +771,9 @@ mod tests {
     /// pure downmix.
     #[test]
     fn downmix_chain_averages_to_mono() {
-        let mut chain = build_capture_stage(
-            2,
-            1,
-            16_000,
-            16_000,
-            Transforms {
-                dc_removal: false,
-                denoise: None,
-                highpass: None,
-                agc: None,
-                limiter: None,
-            },
-        )
-        .unwrap()
-        .expect("stereo -> downmix chain");
+        let mut chain = build_capture_stage(2, 1, 16_000, 16_000, Transforms::default())
+            .unwrap()
+            .expect("stereo -> downmix chain");
         // Two stereo frames: (0.5, 0.3) -> 0.4, (0.4, 0.6) -> 0.5.
         let out = chain.run(&[0.5, 0.3, 0.4, 0.6]).expect("downmix runs");
         assert_eq!(out.len(), 2, "stereo input halves to mono");
@@ -814,21 +788,9 @@ mod tests {
     /// filter's startup ramp, since this `process`-only path does not flush).
     #[test]
     fn resample_chain_changes_rate_and_count() {
-        let mut chain = build_capture_stage(
-            1,
-            1,
-            48_000,
-            16_000,
-            Transforms {
-                dc_removal: false,
-                denoise: None,
-                highpass: None,
-                agc: None,
-                limiter: None,
-            },
-        )
-        .unwrap()
-        .expect("48k mono -> resample chain");
+        let mut chain = build_capture_stage(1, 1, 48_000, 16_000, Transforms::default())
+            .unwrap()
+            .expect("48k mono -> resample chain");
         let input: Vec<f32> = (0..24_000).map(|n| (n as f32 * 0.01).sin()).collect();
         let out = chain.run(&input).expect("resample runs").to_vec();
         // Downsampling 1:3 from 24000 input is at most 8000 output samples and,
@@ -883,19 +845,7 @@ mod tests {
     /// cap to exercise the `?` bridge end to end.
     #[test]
     fn build_capture_stage_surfaces_unsupported_rate_pair() {
-        let result = build_capture_stage(
-            1,
-            1,
-            316_800_000,
-            16_000,
-            Transforms {
-                dc_removal: false,
-                denoise: None,
-                highpass: None,
-                agc: None,
-                limiter: None,
-            },
-        );
+        let result = build_capture_stage(1, 1, 316_800_000, 16_000, Transforms::default());
         assert!(
             matches!(result, Err(DecibriError::ResampleConfigInvalid { .. })),
             "an enormous native rate exceeds the resampler's filter cap"
@@ -922,21 +872,9 @@ mod tests {
         reference.flush(&mut expected);
 
         // The chain: process the whole input via run(), then flush() the tail.
-        let mut chain = build_capture_stage(
-            1,
-            1,
-            48_000,
-            16_000,
-            Transforms {
-                dc_removal: false,
-                denoise: None,
-                highpass: None,
-                agc: None,
-                limiter: None,
-            },
-        )
-        .unwrap()
-        .expect("48k mono -> resample chain");
+        let mut chain = build_capture_stage(1, 1, 48_000, 16_000, Transforms::default())
+            .unwrap()
+            .expect("48k mono -> resample chain");
         let mut got = chain.run(&input).expect("process runs").to_vec();
         let process_only = got.len();
         let mut tail = Vec::new();
@@ -1002,21 +940,9 @@ mod tests {
     /// A 48000 to 16000 mono chain with no conditioning: the rate pair builds a
     /// [`ResampleStage`], which a matched pair would omit.
     fn resampling_chain() -> CaptureStage {
-        build_capture_stage(
-            1,
-            1,
-            48_000,
-            16_000,
-            Transforms {
-                dc_removal: false,
-                denoise: None,
-                highpass: None,
-                agc: None,
-                limiter: None,
-            },
-        )
-        .unwrap()
-        .expect("48k mono -> resample chain")
+        build_capture_stage(1, 1, 48_000, 16_000, Transforms::default())
+            .unwrap()
+            .expect("48k mono -> resample chain")
     }
 
     /// `Downmix` is stateless, so its trait-default `flush` appends nothing: a
@@ -1024,21 +950,9 @@ mod tests {
     /// samples (the unchanged downmix-only path).
     #[test]
     fn downmix_only_flush_is_empty() {
-        let mut chain = build_capture_stage(
-            2,
-            1,
-            16_000,
-            16_000,
-            Transforms {
-                dc_removal: false,
-                denoise: None,
-                highpass: None,
-                agc: None,
-                limiter: None,
-            },
-        )
-        .unwrap()
-        .expect("stereo -> downmix chain");
+        let mut chain = build_capture_stage(2, 1, 16_000, 16_000, Transforms::default())
+            .unwrap()
+            .expect("stereo -> downmix chain");
         let _ = chain.run(&[0.5, 0.3, 0.4, 0.6]).expect("downmix runs");
         let mut tail = Vec::new();
         chain
@@ -1055,21 +969,9 @@ mod tests {
     /// no DC step, and the output is exactly the downmix.
     #[test]
     fn transform_off_leaves_segment_empty_and_output_unchanged() {
-        let mut chain = build_capture_stage(
-            2,
-            1,
-            16_000,
-            16_000,
-            Transforms {
-                dc_removal: false,
-                denoise: None,
-                highpass: None,
-                agc: None,
-                limiter: None,
-            },
-        )
-        .unwrap()
-        .expect("stereo -> downmix chain");
+        let mut chain = build_capture_stage(2, 1, 16_000, 16_000, Transforms::default())
+            .unwrap()
+            .expect("stereo -> downmix chain");
         assert!(
             chain.transform.is_empty(),
             "enhancement off leaves the transform segment empty"
@@ -1098,10 +1000,7 @@ mod tests {
             16_000,
             Transforms {
                 dc_removal: on,
-                denoise: None,
-                highpass: None,
-                agc: None,
-                limiter: None,
+                ..Default::default()
             },
         )
         .unwrap()
@@ -1132,10 +1031,7 @@ mod tests {
             16_000,
             Transforms {
                 dc_removal: on,
-                denoise: None,
-                highpass: None,
-                agc: None,
-                limiter: None,
+                ..Default::default()
             },
         )
         .unwrap()
@@ -1189,10 +1085,7 @@ mod tests {
             16_000,
             Transforms {
                 dc_removal: on,
-                denoise: None,
-                highpass: None,
-                agc: None,
-                limiter: None,
+                ..Default::default()
             },
         )
         .unwrap()
@@ -1222,21 +1115,9 @@ mod tests {
     /// already is the post-normalize signal), and `has_transform` is false.
     #[test]
     fn run_skips_tap_when_no_transform() {
-        let mut chain = build_capture_stage(
-            2,
-            1,
-            16_000,
-            16_000,
-            Transforms {
-                dc_removal: false,
-                denoise: None,
-                highpass: None,
-                agc: None,
-                limiter: None,
-            },
-        )
-        .unwrap()
-        .expect("stereo -> downmix-only chain");
+        let mut chain = build_capture_stage(2, 1, 16_000, 16_000, Transforms::default())
+            .unwrap()
+            .expect("stereo -> downmix-only chain");
         assert!(
             !chain.has_transform(),
             "a downmix-only chain has no transform"
@@ -1263,10 +1144,7 @@ mod tests {
             16_000,
             Transforms {
                 dc_removal: on,
-                denoise: None,
-                highpass: None,
-                agc: None,
-                limiter: None,
+                ..Default::default()
             },
         )
         .unwrap()
@@ -1325,10 +1203,7 @@ mod tests {
             16_000,
             Transforms {
                 dc_removal: on,
-                denoise: None,
-                highpass: None,
-                agc: None,
-                limiter: None,
+                ..Default::default()
             },
         )
         .unwrap()
@@ -1416,9 +1291,7 @@ mod tests {
             Transforms {
                 dc_removal: true,
                 denoise: Some((model, path.as_path(), None)),
-                highpass: None,
-                agc: None,
-                limiter: None,
+                ..Default::default()
             },
         )
         .unwrap()
@@ -1439,11 +1312,8 @@ mod tests {
             16_000,
             16_000,
             Transforms {
-                dc_removal: false,
                 denoise: Some((model, path.as_path(), None)),
-                highpass: None,
-                agc: None,
-                limiter: None,
+                ..Default::default()
             },
         )
         .unwrap()
@@ -1455,21 +1325,9 @@ mod tests {
         );
 
         assert!(
-            build_capture_stage(
-                1,
-                1,
-                16_000,
-                16_000,
-                Transforms {
-                    dc_removal: false,
-                    denoise: None,
-                    highpass: None,
-                    agc: None,
-                    limiter: None,
-                }
-            )
-            .unwrap()
-            .is_none(),
+            build_capture_stage(1, 1, 16_000, 16_000, Transforms::default())
+                .unwrap()
+                .is_none(),
             "denoise off and nothing else: no chain, byte-identical passthrough"
         );
     }
@@ -1490,11 +1348,8 @@ mod tests {
             16_000,
             16_000,
             Transforms {
-                dc_removal: false,
                 denoise: Some((DenoiseModel::FastEnhancerT, path.as_path(), None)),
-                highpass: None,
-                agc: None,
-                limiter: None,
+                ..Default::default()
             },
         )
         .unwrap()
@@ -1545,9 +1400,7 @@ mod tests {
                 Transforms {
                     dc_removal,
                     denoise: Some((model, path.as_path(), None)),
-                    highpass: None,
-                    agc: None,
-                    limiter: None,
+                    ..Default::default()
                 },
             )
             .unwrap()
@@ -1578,11 +1431,8 @@ mod tests {
             16_000,
             16_000,
             Transforms {
-                dc_removal: false,
                 denoise: Some((DenoiseModel::FastEnhancerT, path.as_path(), None)),
-                highpass: None,
-                agc: None,
-                limiter: None,
+                ..Default::default()
             },
         )
         .unwrap()
@@ -1621,11 +1471,8 @@ mod tests {
             16_000,
             16_000,
             Transforms {
-                dc_removal: false,
                 denoise: Some((DenoiseModel::FastEnhancerT, path.as_path(), None)),
-                highpass: None,
-                agc: None,
-                limiter: None,
+                ..Default::default()
             },
         )
         .unwrap()
@@ -1683,10 +1530,7 @@ mod tests {
             16_000,
             Transforms {
                 dc_removal: true,
-                denoise: None,
-                highpass: None,
-                agc: None,
-                limiter: None,
+                ..Default::default()
             },
         )
         .unwrap()
@@ -1704,10 +1548,7 @@ mod tests {
             16_000,
             Transforms {
                 dc_removal: true,
-                denoise: None,
-                highpass: None,
-                agc: None,
-                limiter: None,
+                ..Default::default()
             },
         )
         .unwrap()
@@ -1758,10 +1599,7 @@ mod tests {
             16_000,
             Transforms {
                 dc_removal: true,
-                denoise: None,
-                highpass: None,
-                agc: None,
-                limiter: None,
+                ..Default::default()
             },
         )
         .unwrap()
@@ -1787,11 +1625,8 @@ mod tests {
             16_000,
             16_000,
             Transforms {
-                dc_removal: false,
                 denoise: Some((DenoiseModel::FastEnhancerT, path.as_path(), None)),
-                highpass: None,
-                agc: None,
-                limiter: None,
+                ..Default::default()
             },
         )
         .unwrap()
@@ -1827,11 +1662,8 @@ mod tests {
             16_000,
             16_000,
             Transforms {
-                dc_removal: false,
-                denoise: None,
                 highpass: Some(filter),
-                agc: None,
-                limiter: None,
+                ..Default::default()
             },
         )
         .unwrap()
@@ -1883,11 +1715,8 @@ mod tests {
             16_000,
             16_000,
             Transforms {
-                dc_removal: false,
-                denoise: None,
                 highpass: Some(HighpassFilter::Hz80),
-                agc: None,
-                limiter: None,
+                ..Default::default()
             },
         )
         .unwrap()
@@ -1968,11 +1797,8 @@ mod tests {
                 16_000,
                 16_000,
                 Transforms {
-                    dc_removal: false,
-                    denoise: None,
                     highpass: Some(HighpassFilter::Hz80),
-                    agc: None,
-                    limiter: None,
+                    ..Default::default()
                 },
             )
             .unwrap()
@@ -1986,11 +1812,8 @@ mod tests {
             16_000,
             16_000,
             Transforms {
-                dc_removal: false,
-                denoise: None,
                 highpass: Some(HighpassFilter::Hz80),
-                agc: None,
-                limiter: None,
+                ..Default::default()
             },
         )
         .unwrap()
@@ -2019,39 +1842,15 @@ mod tests {
     #[test]
     fn highpass_off_builds_no_stage() {
         assert!(
-            build_capture_stage(
-                1,
-                1,
-                16_000,
-                16_000,
-                Transforms {
-                    dc_removal: false,
-                    denoise: None,
-                    highpass: None,
-                    agc: None,
-                    limiter: None,
-                }
-            )
-            .unwrap()
-            .is_none(),
+            build_capture_stage(1, 1, 16_000, 16_000, Transforms::default())
+                .unwrap()
+                .is_none(),
             "high-pass off and nothing else: no chain, byte-identical passthrough"
         );
 
-        let downmix_only = build_capture_stage(
-            2,
-            1,
-            16_000,
-            16_000,
-            Transforms {
-                dc_removal: false,
-                denoise: None,
-                highpass: None,
-                agc: None,
-                limiter: None,
-            },
-        )
-        .unwrap()
-        .expect("stereo -> downmix chain");
+        let downmix_only = build_capture_stage(2, 1, 16_000, 16_000, Transforms::default())
+            .unwrap()
+            .expect("stereo -> downmix chain");
         assert!(
             downmix_only.transform.is_empty(),
             "high-pass off pushes no transform stage, not a transparent filter"
@@ -2063,11 +1862,8 @@ mod tests {
             16_000,
             16_000,
             Transforms {
-                dc_removal: false,
-                denoise: None,
                 highpass: Some(HighpassFilter::Hz80),
-                agc: None,
-                limiter: None,
+                ..Default::default()
             },
         )
         .unwrap()
@@ -2096,10 +1892,8 @@ mod tests {
             16_000,
             Transforms {
                 dc_removal: true,
-                denoise: None,
                 highpass: Some(HighpassFilter::Hz80),
-                agc: None,
-                limiter: None,
+                ..Default::default()
             },
         )
         .unwrap()
@@ -2122,11 +1916,8 @@ mod tests {
             16_000,
             16_000,
             Transforms {
-                dc_removal: false,
-                denoise: None,
                 highpass: Some(HighpassFilter::Hz80),
-                agc: None,
-                limiter: None,
+                ..Default::default()
             },
         )
         .unwrap()
@@ -2144,10 +1935,8 @@ mod tests {
             16_000,
             Transforms {
                 dc_removal: true,
-                denoise: None,
                 highpass: Some(HighpassFilter::Hz80),
-                agc: None,
-                limiter: None,
+                ..Default::default()
             },
         )
         .unwrap()
@@ -2188,8 +1977,7 @@ mod tests {
                 dc_removal: true,
                 denoise: Some((DenoiseModel::FastEnhancerT, path.as_path(), None)),
                 highpass: Some(HighpassFilter::Hz80),
-                agc: None,
-                limiter: None,
+                ..Default::default()
             },
         )
         .unwrap()
@@ -2224,39 +2012,15 @@ mod tests {
     #[test]
     fn agc_off_builds_no_stage() {
         assert!(
-            build_capture_stage(
-                1,
-                1,
-                16_000,
-                16_000,
-                Transforms {
-                    dc_removal: false,
-                    denoise: None,
-                    highpass: None,
-                    agc: None,
-                    limiter: None,
-                }
-            )
-            .unwrap()
-            .is_none(),
+            build_capture_stage(1, 1, 16_000, 16_000, Transforms::default())
+                .unwrap()
+                .is_none(),
             "AGC off and nothing else: no chain, byte-identical passthrough"
         );
 
-        let downmix_only = build_capture_stage(
-            2,
-            1,
-            16_000,
-            16_000,
-            Transforms {
-                dc_removal: false,
-                denoise: None,
-                highpass: None,
-                agc: None,
-                limiter: None,
-            },
-        )
-        .unwrap()
-        .expect("stereo -> downmix chain");
+        let downmix_only = build_capture_stage(2, 1, 16_000, 16_000, Transforms::default())
+            .unwrap()
+            .expect("stereo -> downmix chain");
         assert!(
             downmix_only.transform.is_empty(),
             "AGC off pushes no transform stage, not a transparent stage"
@@ -2268,11 +2032,8 @@ mod tests {
             16_000,
             16_000,
             Transforms {
-                dc_removal: false,
-                denoise: None,
-                highpass: None,
                 agc: Some(-18),
-                limiter: None,
+                ..Default::default()
             },
         )
         .unwrap()
@@ -2302,10 +2063,9 @@ mod tests {
             16_000,
             Transforms {
                 dc_removal: true,
-                denoise: None,
                 highpass: Some(HighpassFilter::Hz80),
                 agc: Some(-18),
-                limiter: None,
+                ..Default::default()
             },
         )
         .unwrap()
@@ -2330,11 +2090,8 @@ mod tests {
             16_000,
             16_000,
             Transforms {
-                dc_removal: false,
-                denoise: None,
-                highpass: None,
                 agc: Some(-18),
-                limiter: None,
+                ..Default::default()
             },
         )
         .unwrap()
@@ -2352,10 +2109,9 @@ mod tests {
             16_000,
             Transforms {
                 dc_removal: true,
-                denoise: None,
                 highpass: Some(HighpassFilter::Hz80),
                 agc: Some(-18),
-                limiter: None,
+                ..Default::default()
             },
         )
         .unwrap()
@@ -2381,11 +2137,8 @@ mod tests {
             16_000,
             16_000,
             Transforms {
-                dc_removal: false,
-                denoise: None,
-                highpass: None,
                 agc: Some(-18),
-                limiter: None,
+                ..Default::default()
             },
         )
         .unwrap()
@@ -2434,39 +2187,15 @@ mod tests {
     #[test]
     fn limiter_off_builds_no_stage() {
         assert!(
-            build_capture_stage(
-                1,
-                1,
-                16_000,
-                16_000,
-                Transforms {
-                    dc_removal: false,
-                    denoise: None,
-                    highpass: None,
-                    agc: None,
-                    limiter: None
-                }
-            )
-            .unwrap()
-            .is_none(),
+            build_capture_stage(1, 1, 16_000, 16_000, Transforms::default())
+                .unwrap()
+                .is_none(),
             "limiter off and nothing else: no chain, byte-identical passthrough"
         );
 
-        let downmix_only = build_capture_stage(
-            2,
-            1,
-            16_000,
-            16_000,
-            Transforms {
-                dc_removal: false,
-                denoise: None,
-                highpass: None,
-                agc: None,
-                limiter: None,
-            },
-        )
-        .unwrap()
-        .expect("stereo -> downmix chain");
+        let downmix_only = build_capture_stage(2, 1, 16_000, 16_000, Transforms::default())
+            .unwrap()
+            .expect("stereo -> downmix chain");
         assert!(
             downmix_only.transform.is_empty(),
             "limiter off pushes no transform stage, not a transparent stage"
@@ -2478,11 +2207,8 @@ mod tests {
             16_000,
             16_000,
             Transforms {
-                dc_removal: false,
-                denoise: None,
-                highpass: None,
-                agc: None,
                 limiter: Some(-1.0),
+                ..Default::default()
             },
         )
         .unwrap()
@@ -2512,10 +2238,10 @@ mod tests {
             16_000,
             Transforms {
                 dc_removal: true,
-                denoise: None,
                 highpass: Some(HighpassFilter::Hz80),
                 agc: Some(-18),
                 limiter: Some(-1.0),
+                ..Default::default()
             },
         )
         .unwrap()
@@ -2540,11 +2266,8 @@ mod tests {
             16_000,
             16_000,
             Transforms {
-                dc_removal: false,
-                denoise: None,
-                highpass: None,
-                agc: None,
                 limiter: Some(-1.0),
+                ..Default::default()
             },
         )
         .unwrap()
@@ -2562,10 +2285,10 @@ mod tests {
             16_000,
             Transforms {
                 dc_removal: true,
-                denoise: None,
                 highpass: Some(HighpassFilter::Hz80),
                 agc: Some(-18),
                 limiter: Some(-1.0),
+                ..Default::default()
             },
         )
         .unwrap()
@@ -2593,11 +2316,8 @@ mod tests {
             16_000,
             16_000,
             Transforms {
-                dc_removal: false,
-                denoise: None,
-                highpass: None,
-                agc: None,
                 limiter: Some(ceiling_db),
+                ..Default::default()
             },
         )
         .unwrap()
@@ -2670,10 +2390,10 @@ mod tests {
                 sr,
                 Transforms {
                     dc_removal: dc,
-                    denoise: None,
                     highpass,
                     agc,
                     limiter,
+                    ..Default::default()
                 },
             )
             .unwrap()
@@ -2742,10 +2462,10 @@ mod tests {
             sr,
             Transforms {
                 dc_removal: true,
-                denoise: None,
                 highpass: Some(HighpassFilter::Hz80),
                 agc: Some(-18),
                 limiter: Some(-1.0),
+                ..Default::default()
             },
         )
         .unwrap()
@@ -2779,11 +2499,8 @@ mod tests {
             16_000,
             16_000,
             Transforms {
-                dc_removal: false,
                 denoise: Some((DenoiseModel::FastEnhancerT, path.as_path(), None)),
-                highpass: None,
-                agc: None,
-                limiter: None,
+                ..Default::default()
             },
         )
         .unwrap()
@@ -2803,6 +2520,39 @@ mod tests {
         assert!(
             out.iter().map(|s| s * s).sum::<f32>() > 0.0,
             "the denoise stream was silenced after the glitch"
+        );
+    }
+
+    /// The derived [`Default`] for [`Transforms`] is the all-off configuration,
+    /// field for field. Every elided field elsewhere in the crate resolves to a
+    /// value pinned here, so the literal below stays exhaustive: a field added to
+    /// the struct without a line here fails to compile.
+    #[test]
+    fn default_is_the_all_off_literal() {
+        let all_off = Transforms {
+            dc_removal: false,
+            denoise: None,
+            highpass: None,
+            agc: None,
+            limiter: None,
+        };
+        let default = Transforms::default();
+        assert_eq!(
+            default.dc_removal, all_off.dc_removal,
+            "the default must not remove DC"
+        );
+        assert_eq!(
+            default.denoise, all_off.denoise,
+            "the default must not denoise"
+        );
+        assert_eq!(
+            default.highpass, all_off.highpass,
+            "the default must not high-pass"
+        );
+        assert_eq!(default.agc, all_off.agc, "the default must not apply AGC");
+        assert_eq!(
+            default.limiter, all_off.limiter,
+            "the default must not limit"
         );
     }
 }
