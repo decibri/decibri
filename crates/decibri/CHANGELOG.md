@@ -14,13 +14,16 @@ For other decibri packages, see:
 ### Added
 
 - `aec` feature, on by default: acoustic echo cancellation on the capture path. `MicrophoneConfig::aec` names the canceller model, with `aec_tail_ms`, `aec_suppression` and `aec_reference_sample_rate` for the rest. The stage runs last in the normalize segment, on the mono signal at the target rate and before the pre-transform detector tap, so a detector reads the echo-removed signal.
-- `MicrophoneStream::push_aec_reference`, which queues the far-end audio the canceller cancels against. Mono `f32` at `aec_reference_sample_rate`, in played order. It never blocks and never fails; samples that do not fit the bounded queue are discarded from the newest end and counted by `MicrophoneStream::aec_reference_dropped`. decibri converts the reference to the capture rate when the declared rate differs.
+- `MicrophoneStream::push_aec_reference`, which queues the far-end audio the canceller cancels against. Mono `f32` at `aec_reference_sample_rate`, in played order. It never blocks and never fails; samples that do not fit the bounded queue are discarded from the newest end and counted by `MicrophoneStream::aec_reference_dropped`. decibri converts the reference to the capture rate when the declared rate differs. Silence between what is played need not be pushed: decibri keeps the far-end stream level with the capture, so a caller that stops pushing between utterances keeps cancelling.
+- `MicrophoneStream::aec_reference_silence`, the count of far-end samples decibri supplied in the caller's place, at the capture sample rate. A stream where it tracks the whole length never had a reference pushed to it.
 - `MicrophoneStream::aec_metrics`, the canceller's transport and cancellation metrics.
 - `AecMetrics`, `AecModel` and `Suppression` re-exported from `decibri-aec`.
 - `DecibriError::AecSampleRateUnsupported`, reported when echo cancellation is enabled with a capture sample rate outside 8000 to 48000, which is narrower than the range `sample_rate` otherwise accepts.
 - `DecibriError::AecConfigInvalid`, reported when the echo canceller rejects its configuration. The message forwards the canceller's own text.
 
 With no reference pushed, an echo-cancelling capture delivers the captured audio unchanged.
+
+The reference queue holds two seconds at the declared reference rate, so a whole synthesized utterance handed over in one call is held whole. A push past the bound costs the cancellation of the discarded span alone: the time it occupied is represented as silence, so the canceller keeps its alignment for the rest of the stream.
 
 ## [5.4.1] - 2026-07-28
 

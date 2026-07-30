@@ -159,6 +159,12 @@ impl Stage for ResampleStage {
 /// ([`MicrophoneStream::overrun_count`](crate::microphone::MicrophoneStream::overrun_count)),
 /// so a stall that truncates one stream truncates the other at the same point in
 /// the timeline instead of moving them apart.
+///
+/// The samples a truncation discards are lost, but the TIME they occupied is
+/// not: the drain keeps the far-end stream level with the capture by supplying
+/// silence for every near-end sample the caller did not cover (see
+/// [`AecStage::fill_reference_to`]), so a discarded span costs the cancellation
+/// of that span alone rather than moving every later sample off its alignment.
 #[cfg(feature = "aec")]
 pub(crate) struct AecReferenceRing {
     /// Samples pushed and not yet drained, in played order. Never longer than
@@ -171,6 +177,11 @@ pub(crate) struct AecReferenceRing {
     /// Samples discarded because the queue was full, read via
     /// [`dropped`](Self::dropped).
     dropped: AtomicU64,
+    /// Samples of silence the drain supplied in the caller's place, at the
+    /// capture target rate, read via [`silence`](Self::silence). Recorded here
+    /// rather than on the stage so the accessor reaches it without taking the
+    /// capture chain's lock, as [`dropped`](Self::dropped) does.
+    silence: AtomicU64,
 }
 
 #[cfg(feature = "aec")]
@@ -181,6 +192,7 @@ impl AecReferenceRing {
             queued: Mutex::new(Vec::with_capacity(capacity)),
             capacity,
             dropped: AtomicU64::new(0),
+            silence: AtomicU64::new(0),
         }
     }
 
@@ -218,6 +230,18 @@ impl AecReferenceRing {
     /// queue.
     pub(crate) fn dropped(&self) -> u64 {
         self.dropped.load(Ordering::Relaxed)
+    }
+
+    /// Record `count` far-end samples the drain supplied as silence because the
+    /// caller had pushed none for them.
+    fn record_silence(&self, count: u64) {
+        self.silence.fetch_add(count, Ordering::Relaxed);
+    }
+
+    /// Samples of silence the drain supplied in the caller's place, at the
+    /// capture target rate, for the lifetime of the queue.
+    pub(crate) fn silence(&self) -> u64 {
+        self.silence.load(Ordering::Relaxed)
     }
 }
 
@@ -257,6 +281,13 @@ pub(crate) struct AecSettings {
 /// the caller had pushed by the time that block ran. The engine re-blocks
 /// internally, so a call may append fewer or more samples than it consumed and
 /// the totals balance after [`flush`](Stage::flush).
+///
+/// The drain then tops the far-end stream up with silence to the near-end
+/// frontier, so the two streams advance together whatever the caller does. That
+/// is the played signal, not a substitute for it: while nothing is playing the
+/// far end IS silence, and a caller who pushes nothing is saying so. Without the
+/// top-up a caller who pauses leaves the far-end frontier permanently behind the
+/// capture, which the engine can only read as a reference that never arrives.
 #[cfg(feature = "aec")]
 struct AecStage {
     /// The canceller, constructed at the capture target rate.
@@ -274,6 +305,17 @@ struct AecStage {
     reference_resampler: Option<PolyphaseResampler>,
     /// The drained reference at the target rate, when a resampler runs.
     resampled: Vec<f32>,
+    /// Zeros handed to the engine when the caller's reference falls short of the
+    /// capture. Reused across blocks; one block's worth is its high-water mark,
+    /// because [`fill_reference_to`](Self::fill_reference_to) restores the
+    /// far-ahead-of-near invariant every block and so never has more than one
+    /// block to make up.
+    silence: Vec<f32>,
+    /// Far-end samples handed to the engine, at the capture target rate. Held
+    /// against `near_seen` to size the silence top-up.
+    far_fed: u64,
+    /// Near-end samples handed to the engine, at the capture target rate.
+    near_seen: u64,
     /// Whether any near-end sample has reached [`process`](Stage::process). A
     /// stage that received none holds no framing carry, so it emits nothing at
     /// [`flush`](Stage::flush) rather than a tail assembled out of nothing.
@@ -331,6 +373,9 @@ impl AecStage {
             drained: Vec::new(),
             reference_resampler,
             resampled: Vec::new(),
+            silence: Vec::new(),
+            far_fed: 0,
+            near_seen: 0,
             received_near: false,
         })
     }
@@ -347,10 +392,43 @@ impl AecStage {
                 self.resampled.clear();
                 resampler.process(&self.drained, &mut self.resampled)?;
                 self.aec.feed_reference(&self.resampled);
+                self.far_fed += self.resampled.len() as u64;
             }
-            None => self.aec.feed_reference(&self.drained),
+            None => {
+                self.aec.feed_reference(&self.drained);
+                self.far_fed += self.drained.len() as u64;
+            }
         }
         Ok(())
+    }
+
+    /// Feed silence until the far-end stream reaches `near_frontier`, the
+    /// near-end sample count this block ends at.
+    ///
+    /// The engine reads one far-end sample for every near-end sample it cancels,
+    /// and takes the far-end frontier as the caller's statement of what has
+    /// played. A caller who pushes nothing has stated that nothing played, and
+    /// the far-end signal for that span is zero, so the engine is handed exactly
+    /// that. A caller feeding in step covers every sample itself and nothing is
+    /// added; a caller who pushed AHEAD of the capture stays ahead, because the
+    /// top-up only ever makes up a shortfall and never advances the frontier
+    /// past what the caller established.
+    ///
+    /// The shortfall is at most one block: the invariant this restores holds
+    /// entering the call, so the far end can only have fallen behind by the
+    /// near-end samples added since.
+    fn fill_reference_to(&mut self, near_frontier: u64) {
+        let fill = near_frontier.saturating_sub(self.far_fed);
+        if fill == 0 {
+            return;
+        }
+        let fill = fill as usize;
+        if self.silence.len() < fill {
+            self.silence.resize(fill, 0.0);
+        }
+        self.aec.feed_reference(&self.silence[..fill]);
+        self.far_fed += fill as u64;
+        self.reference.record_silence(fill as u64);
     }
 }
 
@@ -358,8 +436,11 @@ impl AecStage {
 impl Stage for AecStage {
     fn process(&mut self, input: &[f32], out: &mut Vec<f32>) -> Result<(), DecibriError> {
         // The reference goes in first, so the far-end frontier this block is
-        // cancelled against is everything the caller had pushed by now.
+        // cancelled against is everything the caller had pushed by now, and the
+        // top-up then covers whatever of this block the caller left uncovered.
         self.feed_reference()?;
+        self.fill_reference_to(self.near_seen + input.len() as u64);
+        self.near_seen += input.len() as u64;
         if !input.is_empty() {
             self.received_near = true;
         }
@@ -3232,6 +3313,250 @@ mod tests {
         assert!(
             removed >= 20.0,
             "a reference declared at another rate must be converted and cancel (removed {removed:.1} dB)"
+        );
+    }
+
+    /// A caller that stops pushing while nothing is playing keeps cancelling
+    /// afterwards, at the level it reached before the pause.
+    ///
+    /// The far end goes silent for three seconds in the middle of the stream and
+    /// the caller pushes nothing across it, which is what a synthesis pipeline
+    /// that stops between utterances does. Regression: a drain that hands the
+    /// engine nothing when the queue is empty, which leaves the far-end frontier
+    /// permanently behind the capture. Measured against that regression, the
+    /// stream below starves 190,416 of its 256,000 near-end samples and delivers
+    /// -0.01 dB after the pause instead of the level asserted here, and it never
+    /// recovers for the rest of the call.
+    #[cfg(feature = "aec")]
+    #[test]
+    fn aec_cancels_after_the_caller_stops_pushing() {
+        const RATE: usize = 16_000;
+        const DELAY: usize = 400;
+        const ECHO_GAIN: f32 = 0.25;
+        const SECONDS: usize = 12;
+        const PAUSE_AT: usize = 4;
+        const PAUSE: usize = 3;
+
+        // The far end is silent across the pause either way. The two runs differ
+        // only in whether the caller pushes that silence itself or stops pushing
+        // and leaves decibri to supply it, which is the whole of the change.
+        let mut far = far_noise(SECONDS * RATE);
+        for sample in far[PAUSE_AT * RATE..(PAUSE_AT + PAUSE) * RATE].iter_mut() {
+            *sample = 0.0;
+        }
+        let mut near = vec![0.0f32; far.len()];
+        for i in DELAY..near.len() {
+            near[i] = ECHO_GAIN * far[i - DELAY];
+        }
+
+        let run = |push_the_silence: bool| {
+            let queue = Arc::new(AecReferenceRing::new(2 * RATE));
+            let mut chain = aec_chain(1, RATE as u32, RATE as u32, false, &queue, RATE as u32);
+            let mut out = Vec::new();
+            for (block, piece) in near.chunks(320).enumerate() {
+                let at = block * 320;
+                let paused = at >= PAUSE_AT * RATE && at < (PAUSE_AT + PAUSE) * RATE;
+                if push_the_silence || !paused {
+                    queue.push(&far[at..at + piece.len()]);
+                }
+                out.extend_from_slice(chain.run(piece).expect("run"));
+            }
+            chain.flush(&mut out).expect("flush");
+            (out, chain.aec_metrics().expect("metrics"), queue.silence())
+        };
+
+        let (pushed, _, pushed_silence) = run(true);
+        let (unpushed, metrics, silence) = run(false);
+
+        // The engine is handed the same far-end samples in the same order at the
+        // same points in the capture, so the two streams are the same stream.
+        assert_eq!(
+            unpushed, pushed,
+            "a caller that stops pushing must get what a caller pushing the \
+             silence itself gets"
+        );
+
+        let window = (SECONDS - 1) * RATE..(SECONDS - 1) * RATE + RATE / 2;
+        let removed = rms_db(&near[window.clone()]) - rms_db(&unpushed[window]);
+        assert!(
+            removed >= 30.0,
+            "the canceller must still remove at least 30 dB after a pause \
+             (removed {removed:.1} dB)"
+        );
+
+        // The far end was kept level with the capture across the pause, so the
+        // engine found a far-end sample for every near-end sample and needed no
+        // re-anchor to recover an alignment it never lost.
+        assert_eq!(
+            metrics.reference_starved, 0,
+            "a paused caller must not starve the canceller"
+        );
+        assert_eq!(
+            metrics.reference_reanchors, 0,
+            "a paused caller must not force the canceller to re-anchor"
+        );
+        assert_eq!(
+            silence,
+            (PAUSE * RATE) as u64,
+            "the silence decibri supplied is exactly the span the caller did not"
+        );
+        assert_eq!(
+            pushed_silence, 0,
+            "a caller pushing every block leaves nothing for decibri to supply"
+        );
+    }
+
+    /// A caller that hands over a whole utterance in a single call, larger than
+    /// the queue's previous one-second bound, locks and cancels.
+    ///
+    /// The push is 1.5 seconds, made once the stream is already running, which is
+    /// where a talk-back application's first playback falls. Regression: a bound
+    /// that truncates an ordinary utterance push, and an alignment that is built
+    /// against a far-end frontier the caller was not asked to keep level.
+    /// Measured against that regression this stream never locks at all:
+    /// `delay_samples` stays `None` for its whole length.
+    #[cfg(feature = "aec")]
+    #[test]
+    fn aec_locks_on_a_reference_handed_over_a_whole_utterance_at_a_time() {
+        const RATE: usize = 16_000;
+        const DELAY: usize = 400;
+        const ECHO_GAIN: f32 = 0.25;
+        const SECONDS: usize = 12;
+        // 1.5 s: larger than the one second the queue used to hold, and inside
+        // the two seconds it holds now.
+        const UTTERANCE: usize = 24_000;
+
+        let mut far = far_noise(SECONDS * RATE);
+        // Nothing plays for the first second, so the first push lands on a stream
+        // that has already anchored.
+        for sample in far[..RATE].iter_mut() {
+            *sample = 0.0;
+        }
+        let mut near = vec![0.0f32; far.len()];
+        for i in DELAY..near.len() {
+            near[i] = ECHO_GAIN * far[i - DELAY];
+        }
+
+        let queue = Arc::new(AecReferenceRing::new(2 * RATE));
+        let mut chain = aec_chain(1, RATE as u32, RATE as u32, false, &queue, RATE as u32);
+        let mut out = Vec::new();
+        // Each utterance is handed over in one call the moment the previous one
+        // has finished playing, so the far-end frontier and the capture time of
+        // the push are the same figure.
+        let mut frontier = RATE;
+        for (block, piece) in near.chunks(320).enumerate() {
+            if block * 320 >= frontier && frontier < far.len() {
+                let end = (frontier + UTTERANCE).min(far.len());
+                queue.push(&far[frontier..end]);
+                frontier = end;
+            }
+            out.extend_from_slice(chain.run(piece).expect("run"));
+        }
+        chain.flush(&mut out).expect("flush");
+
+        assert_eq!(
+            queue.dropped(),
+            0,
+            "an utterance-sized push must fit the queue whole"
+        );
+        let metrics = chain.aec_metrics().expect("a canceller reports metrics");
+        assert!(
+            metrics.delay_samples.is_some(),
+            "a caller that pushes an utterance at a time must still lock"
+        );
+        assert_eq!(
+            metrics.reference_starved, 0,
+            "a push the queue held whole starves nothing"
+        );
+
+        let window = (SECONDS - 1) * RATE..(SECONDS - 1) * RATE + RATE / 2;
+        let removed = rms_db(&near[window.clone()]) - rms_db(&out[window]);
+        assert!(
+            removed >= 30.0,
+            "an utterance-at-a-time caller must still cancel (removed {removed:.1} dB)"
+        );
+    }
+
+    /// A push larger than the queue can hold costs the cancellation of the span
+    /// it discarded and nothing else.
+    ///
+    /// The discarded samples are counted, and the span they occupied is handed to
+    /// the engine as silence, so every later sample keeps the alignment it had.
+    /// Regression: a discard that shortens the far-end timeline instead of
+    /// blanking part of it, which moves every sample after it and ends
+    /// cancellation for the rest of the call rather than for the discarded span.
+    #[cfg(feature = "aec")]
+    #[test]
+    fn an_oversized_reference_push_costs_only_the_span_it_discarded() {
+        const RATE: usize = 16_000;
+        const DELAY: usize = 400;
+        const ECHO_GAIN: f32 = 0.25;
+        const SECONDS: usize = 12;
+        const CAPACITY: usize = 2 * RATE;
+        // Three seconds handed over at once against a two-second queue, so one
+        // second of every push is discarded.
+        const UTTERANCE: usize = 3 * RATE;
+
+        let mut far = far_noise(SECONDS * RATE);
+        for sample in far[..RATE].iter_mut() {
+            *sample = 0.0;
+        }
+        let mut near = vec![0.0f32; far.len()];
+        for i in DELAY..near.len() {
+            near[i] = ECHO_GAIN * far[i - DELAY];
+        }
+
+        let queue = Arc::new(AecReferenceRing::new(CAPACITY));
+        let mut chain = aec_chain(1, RATE as u32, RATE as u32, false, &queue, RATE as u32);
+        let mut out = Vec::new();
+        let mut frontier = RATE;
+        for (block, piece) in near.chunks(320).enumerate() {
+            if block * 320 >= frontier && frontier < far.len() {
+                let end = (frontier + UTTERANCE).min(far.len());
+                queue.push(&far[frontier..end]);
+                frontier = end;
+            }
+            out.extend_from_slice(chain.run(piece).expect("run"));
+        }
+        chain.flush(&mut out).expect("flush");
+
+        // Pushes land at 1 s, 4 s, 7 s and 10 s. The first three hand over three
+        // seconds each, of which the queue keeps two, so each discards one
+        // second; the fourth has only the stream's last two seconds left to push
+        // and fits whole.
+        assert_eq!(
+            queue.dropped(),
+            3 * (UTTERANCE - CAPACITY) as u64,
+            "the samples past the bound are counted"
+        );
+        let metrics = chain.aec_metrics().expect("a canceller reports metrics");
+        assert!(
+            metrics.delay_samples.is_some(),
+            "a discard must not cost the canceller its lock"
+        );
+        assert_eq!(
+            metrics.reference_starved, 0,
+            "the discarded span is handed over as silence, so nothing starves"
+        );
+
+        // Inside the second push's kept span (4 s to 6 s), converged and with the
+        // reference intact.
+        let kept = 5 * RATE..5 * RATE + RATE / 2;
+        let removed = rms_db(&near[kept.clone()]) - rms_db(&out[kept]);
+        assert!(
+            removed >= 30.0,
+            "the span the queue held must still cancel (removed {removed:.1} dB)"
+        );
+
+        // Inside the same push's discarded span (6 s to 7 s), where the engine was
+        // handed silence and there is nothing to cancel against. Pinned so the
+        // cost of a discard stays bounded to the span it discarded rather than
+        // being assumed to be.
+        let discarded = 6 * RATE + RATE / 4..6 * RATE + RATE * 3 / 4;
+        let unremoved = rms_db(&near[discarded.clone()]) - rms_db(&out[discarded]);
+        assert!(
+            unremoved.abs() < 3.0,
+            "the discarded span passes through (level moved {unremoved:.1} dB)"
         );
     }
 
