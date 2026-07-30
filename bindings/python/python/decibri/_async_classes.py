@@ -57,6 +57,8 @@ else:
 
 from decibri import _decibri, exceptions
 from decibri._classes import (
+    Aec,
+    AecMetrics,
     Chunk,
     File,
     Vad,
@@ -151,6 +153,7 @@ class AsyncMicrophone:
         agc: int | None = None,
         limiter: float | None = None,
         dc_removal: bool = False,
+        aec: str | Aec | None = None,
     ) -> None:
         """Construct an AsyncMicrophone audio capture instance.
 
@@ -335,6 +338,37 @@ class AsyncMicrophone:
                 f"limiter must be in [-3.0, 0.0]; got {limiter}"
             )
 
+        # Decompose ``aec`` into the bridge's flat fields. Same logic as the
+        # sync Microphone: None (off; default), a model-name shorthand such as
+        # "tau", or an Aec config object (which self-validates its tuning
+        # fields). The model NAME is not checked against a list here: the
+        # canceller owns that set, so the bridge parses it and an unknown name
+        # raises AecConfigInvalid carrying the canceller's own message.
+        aec_model: str | None
+        aec_tail_ms: int | None
+        aec_suppression: str | None
+        aec_reference_sample_rate: int | None
+        if aec is None:
+            aec_model = None
+            aec_tail_ms = None
+            aec_suppression = None
+            aec_reference_sample_rate = None
+        elif isinstance(aec, Aec):
+            aec_model = aec.model
+            aec_tail_ms = aec.tail_ms
+            aec_suppression = aec.suppression
+            aec_reference_sample_rate = aec.reference_sample_rate
+        elif isinstance(aec, str):
+            aec_model = aec
+            aec_tail_ms = None
+            aec_suppression = None
+            aec_reference_sample_rate = None
+        else:
+            raise ValueError(
+                f"Invalid aec value: {aec!r}. "
+                "Expected None, a model name such as 'tau', or an Aec config object."
+            )
+
         # Resolve the ORT dylib path via the same four-arm priority order
         # the sync wrapper uses (see _ort_resolver.resolve_ort_dylib_path).
         # Lazy import: only loaded when an ONNX stage (Silero VAD or denoise)
@@ -368,6 +402,10 @@ class AsyncMicrophone:
             agc=agc,
             limiter=limiter,
             dc_removal=dc_removal,
+            aec=aec_model,
+            aec_tail_ms=aec_tail_ms,
+            aec_suppression=aec_suppression,
+            aec_reference_sample_rate=aec_reference_sample_rate,
         )
 
         self._vad_enabled = vad_enabled
@@ -583,6 +621,48 @@ class AsyncMicrophone:
         if not self._vad_enabled:
             return 0.0
         return self._vad.vad_score
+
+    # -----------------------------------------------------------------------
+    # Echo cancellation surface
+    # -----------------------------------------------------------------------
+
+    def push_aec_reference(self, samples: SampleData) -> None:
+        """Queue far-end reference audio for the echo canceller.
+
+        Deliberately a plain method, not a coroutine: the push never blocks
+        (a bounded queue behind a short critical section), so a renderer
+        callback calls it without awaiting, and the sync and async capture
+        surfaces share one contract. Everything else matches
+        ``Microphone.push_aec_reference``: mono samples at the declared
+        ``reference_sample_rate``, in played order, as ``bytes`` or a
+        ``numpy.ndarray`` with dtype matching this microphone's ``dtype``;
+        never raises on a full queue; a push while capture is not running,
+        or with the ``aec`` parameter unset, is a no-op.
+        """
+        self._bridge.push_aec_reference(samples)
+
+    async def aec_metrics(self) -> AecMetrics | None:
+        """The echo canceller's metrics, or ``None`` when the ``aec``
+        parameter is unset or capture is not running.
+
+        Awaitable because the read serializes against block processing on
+        the capture chain's lock; the wait runs off the event loop. See
+        ``AecMetrics`` for the fields and the diagnostic signatures they
+        carry.
+        """
+        raw = await self._bridge.aec_metrics()
+        if raw is None:
+            return None
+        return AecMetrics(
+            delay_samples=raw[0],
+            erle_db=raw[1],
+            double_talk=raw[2],
+            reference_starved=raw[3],
+            acquisition_parked=raw[4],
+            reference_reanchors=raw[5],
+            reference_dropped=raw[6],
+            reference_silence=raw[7],
+        )
 
     # -----------------------------------------------------------------------
     # Static methods

@@ -90,6 +90,26 @@ pub struct DecibriOptions {
     /// at or below the ceiling, catching a peak the AGC would let through. Pure
     /// DSP: no bundled file and no model path, like `agc`.
     pub limiter: Option<f64>,
+    /// Echo canceller model name. The accepted set is owned by the canceller
+    /// (`AecModel::from_str`); today it is `'tau'`. Absent leaves echo
+    /// cancellation off. The JS wrapper resolves both public forms (the string
+    /// shorthand and the `AecOptions` object) into this field and the three
+    /// below. Pure DSP: no bundled file and no model path, like `highpass`.
+    pub aec: Option<String>,
+    /// Echo canceller filter tail in milliseconds: an integer in `16..=500`.
+    /// Absent takes the canceller's own default. Consulted only when `aec`
+    /// names a model.
+    pub aec_tail_ms: Option<u32>,
+    /// Residual-suppression policy for the echo canceller: `'conservative'` or
+    /// `'off'`. Absent takes the canceller's own default. Consulted only when
+    /// `aec` names a model.
+    pub aec_suppression: Option<String>,
+    /// Sample rate in Hz of the far-end reference pushed through
+    /// `pushAecReference`, in `1000..=384000`. Absent means the reference is
+    /// already at the capture rate; when it names a different rate, the core
+    /// converts the reference before the canceller sees it. Consulted only
+    /// when `aec` names a model.
+    pub aec_reference_sample_rate: Option<u32>,
 }
 
 /// Native bridge class exposed to Node.js via napi-rs.
@@ -247,6 +267,57 @@ fn build_microphone_parts(options: Option<DecibriOptions>) -> Result<MicrophoneP
             ));
         }
         config.limiter = Some(ceiling as f32);
+    }
+
+    // Echo canceller. The model string parses through the canceller's own
+    // boundary (`AecModel::from_str`), so the accepted set lives in one place
+    // and an unknown name carries the canceller's own message; it is not a
+    // hardcoded list here the way `denoise` and `highpass` are. The tail and
+    // reference-rate checks mirror the JS wrapper's RangeErrors as the native
+    // backstop, like `agc`; the suppression set is the canceller's two-value
+    // policy enum. The capture-rate window (8000..=48000 with AEC on) is
+    // guarded by the core's validate(), reached through `Microphone::new`
+    // below. The three tuning fields are consulted only when `aec` names a
+    // model, matching the core config's contract.
+    if let Some(name) = opts.aec.as_deref() {
+        let model: decibri::AecModel = name.parse().map_err(|e| {
+            Error::new(
+                Status::InvalidArg,
+                decibri::error::DecibriError::from(e).to_string(),
+            )
+        })?;
+        config.aec = Some(model);
+        if let Some(tail) = opts.aec_tail_ms {
+            if !(16..=500).contains(&tail) {
+                return Err(Error::new(
+                    Status::InvalidArg,
+                    "aec tailMs must be between 16 and 500",
+                ));
+            }
+            config.aec_tail_ms = Some(tail as u16);
+        }
+        if let Some(policy) = opts.aec_suppression.as_deref() {
+            let suppression = match policy {
+                "conservative" => decibri::Suppression::Conservative,
+                "off" => decibri::Suppression::Off,
+                other => {
+                    return Err(Error::new(
+                        Status::InvalidArg,
+                        format!("aec suppression must be 'conservative' or 'off'; got '{other}'"),
+                    ))
+                }
+            };
+            config.aec_suppression = Some(suppression);
+        }
+        if let Some(rate) = opts.aec_reference_sample_rate {
+            if !(1000..=384000).contains(&rate) {
+                return Err(Error::new(
+                    Status::InvalidArg,
+                    "aec referenceSampleRate must be between 1000 and 384000",
+                ));
+            }
+            config.aec_reference_sample_rate = Some(rate);
+        }
     }
 
     let capture = Microphone::new(config).map_err(to_napi_error)?;
@@ -547,6 +618,46 @@ impl DecibriBridge {
         self.stream.as_ref().map_or(0, |s| s.overrun_count()) as f64
     }
 
+    /// Queue far-end reference audio for the echo canceller. `buffer` is mono
+    /// PCM bytes in the bridge's configured format, at the declared reference
+    /// rate, in played order. Never blocks and never fails: a full queue
+    /// discards and counts rather than erroring, and a push with no active
+    /// stream (not started, stopped, or echo cancellation off) is a no-op.
+    #[napi]
+    pub fn push_aec_reference(&self, buffer: Buffer) {
+        let Some(stream) = self.stream.as_ref() else {
+            return;
+        };
+        if buffer.is_empty() {
+            return;
+        }
+        let samples = match self.format {
+            SampleFormat::Int16 => sample::i16_le_bytes_to_f32(&buffer),
+            SampleFormat::Float32 => sample::f32_le_bytes_to_f32(&buffer),
+        };
+        stream.push_aec_reference(&samples);
+    }
+
+    /// The echo canceller's transport and cancellation metrics, merged with the
+    /// reference queue's own counters, or `null` when no stream is active or
+    /// echo cancellation is off. Counters are returned as f64 (exact JS numbers
+    /// for any realistic count), matching the `overrunCount` getter.
+    #[napi]
+    pub fn aec_metrics(&self) -> Option<AecMetricsJs> {
+        let stream = self.stream.as_ref()?;
+        let metrics = stream.aec_metrics()?;
+        Some(AecMetricsJs {
+            delay_samples: metrics.delay_samples.map(|s| s as f64),
+            erle_db: f64::from(metrics.canceller.erle_db),
+            double_talk: metrics.canceller.double_talk,
+            reference_starved: metrics.reference_starved as f64,
+            acquisition_parked: metrics.acquisition_parked as f64,
+            reference_reanchors: metrics.reference_reanchors as f64,
+            reference_dropped: stream.aec_reference_dropped() as f64,
+            reference_silence: stream.aec_reference_silence() as f64,
+        })
+    }
+
     /// List all available audio input devices.
     #[napi]
     pub fn devices() -> Result<Vec<DeviceInfoJs>> {
@@ -593,6 +704,45 @@ pub struct DeviceInfoJs {
 pub struct VersionInfoJs {
     pub decibri: String,
     pub audio_backend: String,
+}
+
+/// Echo-cancellation metrics returned to JS by `aecMetrics()`. One object
+/// carries the canceller's own report and the reference queue's counters, so a
+/// caller reads one surface for the whole diagnosis.
+#[napi(object)]
+pub struct AecMetricsJs {
+    /// The active delay alignment in samples, or `null` while the estimator is
+    /// still searching. Staying `null` while `acquisitionParked` climbs is the
+    /// signature of a canceller with no usable reference: none pushed, not at
+    /// the declared rate, or not the signal that produced the echo.
+    pub delay_samples: Option<f64>,
+    /// Smoothed echo-return-loss-enhancement estimate in dB: how much echo the
+    /// canceller is currently removing. 0 before the filter has converged.
+    pub erle_db: f64,
+    /// Whether the double-talk detector currently believes the near-end talker
+    /// is active; adaptation is held while true.
+    pub double_talk: bool,
+    /// Near-end samples the canceller could find no far-end sample for while an
+    /// alignment was active. The core keeps the far-end stream level with the
+    /// capture, so this stays 0 for a caller who simply stops pushing; a
+    /// non-zero count means the caller ran further ahead of the capture than
+    /// the canceller's far-end history reaches.
+    pub reference_starved: f64,
+    /// Near-end samples processed while no delay alignment was active: the
+    /// searching span, not a transport failure.
+    pub acquisition_parked: f64,
+    /// Times the canceller inferred a capture discontinuity and rebuilt its
+    /// alignment from the reference frontier.
+    pub reference_reanchors: f64,
+    /// Far-end samples discarded because a single push exceeded the reference
+    /// queue's bound, at the declared reference rate. The span they occupied is
+    /// still represented as silence, so a discard costs the cancellation of
+    /// that span alone.
+    pub reference_dropped: f64,
+    /// Far-end samples the core supplied as silence because the caller had
+    /// pushed none for them, at the capture rate. An accounting figure, not a
+    /// fault: while nothing is playing, the far end is silence.
+    pub reference_silence: f64,
 }
 
 // ── Helpers ──────────────────────────────────────────────────────────────────

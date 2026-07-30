@@ -80,6 +80,8 @@ const RANGE_PREFIXES = [
   'frames per buffer must be between',
   'agc target level must be between',
   'limiter ceiling must be between',
+  'aec tailMs must be between',
+  'aec referenceSampleRate must be between',
   'Silero VAD only supports',
   'VAD threshold must be between',
   'echo cancellation only supports',
@@ -90,6 +92,7 @@ const RANGE_PREFIXES = [
 const TYPE_PREFIXES = [
   "dtype must be 'int16' or 'float32'",
   "format must be 'int16' or 'float32'",
+  'aec suppression must be',
 ];
 
 const DEVICE_CODES = [

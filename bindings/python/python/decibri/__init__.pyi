@@ -3,6 +3,8 @@
 from decibri._async_classes import AsyncFile as AsyncFile
 from decibri._async_classes import AsyncMicrophone as AsyncMicrophone
 from decibri._async_classes import AsyncSpeaker as AsyncSpeaker
+from decibri._classes import Aec as Aec
+from decibri._classes import AecMetrics as AecMetrics
 from decibri._classes import Chunk as Chunk
 from decibri._classes import File as File
 from decibri._classes import Microphone as Microphone
