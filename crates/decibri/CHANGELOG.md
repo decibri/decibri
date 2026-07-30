@@ -9,6 +9,19 @@ For other decibri packages, see:
 - npm package: [npm/decibri/CHANGELOG.md](../../npm/decibri/CHANGELOG.md)
 - Python package: [bindings/python/CHANGELOG.md](../../bindings/python/CHANGELOG.md)
 
+## [Unreleased]
+
+### Added
+
+- `aec` feature, on by default: acoustic echo cancellation on the capture path. `MicrophoneConfig::aec` names the canceller model, with `aec_tail_ms`, `aec_suppression` and `aec_reference_sample_rate` for the rest. The stage runs last in the normalize segment, on the mono signal at the target rate and before the pre-transform detector tap, so a detector reads the echo-removed signal.
+- `MicrophoneStream::push_aec_reference`, which queues the far-end audio the canceller cancels against. Mono `f32` at `aec_reference_sample_rate`, in played order. It never blocks and never fails; samples that do not fit the bounded queue are discarded from the newest end and counted by `MicrophoneStream::aec_reference_dropped`. decibri converts the reference to the capture rate when the declared rate differs.
+- `MicrophoneStream::aec_metrics`, the canceller's transport and cancellation metrics.
+- `AecMetrics`, `AecModel` and `Suppression` re-exported from `decibri-aec`.
+- `DecibriError::AecSampleRateUnsupported`, reported when echo cancellation is enabled with a capture sample rate outside 8000 to 48000, which is narrower than the range `sample_rate` otherwise accepts.
+- `DecibriError::AecConfigInvalid`, reported when the echo canceller rejects its configuration. The message forwards the canceller's own text.
+
+With no reference pushed, an echo-cancelling capture delivers the captured audio unchanged.
+
 ## [5.4.1] - 2026-07-28
 
 ### Changed

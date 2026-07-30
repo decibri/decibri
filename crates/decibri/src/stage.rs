@@ -3,15 +3,17 @@
 //! A [`CaptureStage`] conditions raw device capture into the canonical format the
 //! consumer receives, running between the cpal callback's native buffers and the
 //! exact-size reblock in [`crate::microphone`]. The chain has two segments. The
-//! `normalize` segment holds up to two stages: [`Downmix`], which averages a
+//! `normalize` segment holds up to three stages: [`Downmix`], which averages a
 //! multichannel device down to mono, then [`ResampleStage`], which converts the
-//! device's native sample rate to the requested target rate. Downmix runs first
-//! so the resampler receives mono, the format it expects. The optional
-//! `transform` segment runs after `normalize`, holding the conditioning a
-//! consumer opts into: the same-length [`DcBlocker`] DC-removal step, then the
-//! framed, length-changing denoise stage. A `transform` stage need not preserve
-//! length (denoise re-blocks and introduces latency), which is why the VAD tap
-//! is snapshotted before this segment runs.
+//! device's native sample rate to the requested target rate, then the echo
+//! canceller, which removes the echo of caller-supplied far-end audio. Downmix
+//! runs first so the resampler receives mono, the format it expects; the echo
+//! canceller runs last so it receives mono at the target rate, the only format
+//! it accepts. The optional `transform` segment runs after `normalize`, holding
+//! the conditioning a consumer opts into: the same-length [`DcBlocker`]
+//! DC-removal step, then the framed, length-changing denoise stage. A
+//! `transform` stage need not preserve length (denoise re-blocks and introduces
+//! latency), which is why the VAD tap is snapshotted before this segment runs.
 //!
 //! Each [`Stage`] reads one block of interleaved f32 samples and writes its
 //! output, so stages compose by ping-ponging two buffers. At stream close the
@@ -22,7 +24,13 @@
 //! enabled), keeping the capture path on its zero-cost direct path.
 
 use std::path::Path;
+#[cfg(feature = "aec")]
+use std::sync::atomic::{AtomicU64, Ordering};
+#[cfg(feature = "aec")]
+use std::sync::{Arc, Mutex, PoisonError};
 
+#[cfg(feature = "aec")]
+use decibri_aec::{Aec, AecConfig, AecMetrics, AecModel, Suppression};
 use decibri_resampler::{PolyphaseResampler, Resampler};
 
 use crate::error::DecibriError;
@@ -61,6 +69,16 @@ pub(crate) trait Stage: Send {
     /// conditioning stages.
     fn latency_samples(&self) -> usize {
         0
+    }
+
+    /// The echo canceller's transport and cancellation metrics, when this stage
+    /// holds a canceller.
+    ///
+    /// `None` for every other stage, so [`CaptureStage::aec_metrics`] finds the
+    /// one stage that answers without downcasting a boxed trait object.
+    #[cfg(feature = "aec")]
+    fn aec_metrics(&self) -> Option<AecMetrics> {
+        None
     }
 }
 
@@ -117,6 +135,272 @@ impl Stage for ResampleStage {
         // the output rate, and is zero when the rates match and the resampler is
         // a passthrough.
         self.0.latency_samples()
+    }
+}
+
+/// The far-end reference queue: the bounded hand-off between the caller's push
+/// and the [`AecStage`] that drains it.
+///
+/// The caller pushes played audio through
+/// [`MicrophoneStream::push_aec_reference`](crate::microphone::MicrophoneStream::push_aec_reference);
+/// the stage drains everything queued at the head of each block. Both sides hold
+/// an [`Arc`] of the same queue, so the push never reaches through the capture
+/// chain's own lock and never waits on the canceller.
+///
+/// The queue is bounded in samples, sized in seconds at the declared reference
+/// rate by the caller (see
+/// [`AEC_REFERENCE_BOUND_SECS`](crate::microphone::AEC_REFERENCE_BOUND_SECS)).
+/// A push that does not fit is truncated at its NEWEST end and the discarded
+/// samples are counted: what remains is a contiguous run in played order that
+/// continues exactly where the canceller's far stream left off, and the deficit
+/// lands at the newest end rather than as a hole between samples already fed and
+/// samples still queued. It matches the capture channel's own contract, which
+/// also discards the newest buffer and counts it
+/// ([`MicrophoneStream::overrun_count`](crate::microphone::MicrophoneStream::overrun_count)),
+/// so a stall that truncates one stream truncates the other at the same point in
+/// the timeline instead of moving them apart.
+#[cfg(feature = "aec")]
+pub(crate) struct AecReferenceRing {
+    /// Samples pushed and not yet drained, in played order. Never longer than
+    /// `capacity`. Behind a `Mutex` so both sides reach it under a shared
+    /// `&self`; the drain holds the lock only for a buffer swap, so a push waits
+    /// on another push at worst and never on the canceller.
+    queued: Mutex<Vec<f32>>,
+    /// Bound on `queued`, in samples at the declared reference rate.
+    capacity: usize,
+    /// Samples discarded because the queue was full, read via
+    /// [`dropped`](Self::dropped).
+    dropped: AtomicU64,
+}
+
+#[cfg(feature = "aec")]
+impl AecReferenceRing {
+    /// A queue bounded at `capacity` samples.
+    pub(crate) fn new(capacity: usize) -> Self {
+        Self {
+            queued: Mutex::new(Vec::with_capacity(capacity)),
+            capacity,
+            dropped: AtomicU64::new(0),
+        }
+    }
+
+    /// Append `reference` in played order, discarding whatever does not fit from
+    /// the newest end and counting it.
+    ///
+    /// Never blocks on the canceller and never fails, so a caller may push from
+    /// a renderer callback or a socket handler.
+    pub(crate) fn push(&self, reference: &[f32]) {
+        let taken = {
+            let mut queued = self.queued.lock().unwrap_or_else(PoisonError::into_inner);
+            let room = self.capacity.saturating_sub(queued.len());
+            let taken = reference.len().min(room);
+            queued.extend_from_slice(&reference[..taken]);
+            taken
+        };
+        let dropped = reference.len() - taken;
+        if dropped > 0 {
+            self.dropped.fetch_add(dropped as u64, Ordering::Relaxed);
+        }
+    }
+
+    /// Move everything queued into `out`, leaving the queue empty.
+    ///
+    /// `out` is cleared first and its buffer is left in the queue's place, so the
+    /// two buffers alternate and neither reallocates once both have reached their
+    /// high-water length.
+    fn drain_into(&self, out: &mut Vec<f32>) {
+        out.clear();
+        let mut queued = self.queued.lock().unwrap_or_else(PoisonError::into_inner);
+        std::mem::swap(&mut *queued, out);
+    }
+
+    /// Samples discarded because the queue was full, for the lifetime of the
+    /// queue.
+    pub(crate) fn dropped(&self) -> u64 {
+        self.dropped.load(Ordering::Relaxed)
+    }
+}
+
+/// Echo-cancellation settings [`build_capture_stage`] builds the [`AecStage`]
+/// from, carried in [`Transforms`].
+///
+/// `tail_ms` and `suppression` are `None` when the caller named no value, in
+/// which case the canceller's own default stands: decibri names neither number
+/// itself, so the two cannot drift apart from the values the canceller
+/// documents.
+#[cfg(feature = "aec")]
+pub(crate) struct AecSettings {
+    /// The canceller model to run.
+    pub model: AecModel,
+    /// Adaptive filter tail length in milliseconds; `None` takes the
+    /// canceller's default.
+    pub tail_ms: Option<u16>,
+    /// Residual-suppression policy; `None` takes the canceller's default.
+    pub suppression: Option<Suppression>,
+    /// The rate the caller declares its pushed reference is at. Converted to the
+    /// capture target rate on the drain side when the two differ.
+    pub reference_rate: u32,
+    /// The queue the caller pushes into and this stage drains.
+    pub reference: Arc<AecReferenceRing>,
+}
+
+/// Cancel the echo of caller-supplied far-end audio out of the captured signal.
+///
+/// [`build_capture_stage`] pushes this last in the `normalize` segment, after
+/// [`Downmix`] and [`ResampleStage`], so the canceller receives mono at the
+/// target rate: the only format it accepts, and the rate its engine is
+/// constructed at. Running before the VAD tap is taken means the detector reads
+/// the echo-removed signal rather than the raw capture.
+///
+/// Each [`process`](Stage::process) drains the reference queue into the engine
+/// before cancelling the near-end block, so the far-end frontier is everything
+/// the caller had pushed by the time that block ran. The engine re-blocks
+/// internally, so a call may append fewer or more samples than it consumed and
+/// the totals balance after [`flush`](Stage::flush).
+#[cfg(feature = "aec")]
+struct AecStage {
+    /// The canceller, constructed at the capture target rate.
+    aec: Aec,
+    /// The shared queue the caller pushes far-end audio into.
+    reference: Arc<AecReferenceRing>,
+    /// Reference samples drained this block, at the declared reference rate.
+    /// Retained across blocks so the swap in
+    /// [`AecReferenceRing::drain_into`] reuses one buffer.
+    drained: Vec<f32>,
+    /// Converts the drained reference to the capture target rate. `Some` only
+    /// when the declared reference rate differs from the target rate. The
+    /// resampler is mono-only and the reference is mono, so it needs no downmix
+    /// ahead of it.
+    reference_resampler: Option<PolyphaseResampler>,
+    /// The drained reference at the target rate, when a resampler runs.
+    resampled: Vec<f32>,
+    /// Whether any near-end sample has reached [`process`](Stage::process). A
+    /// stage that received none holds no framing carry, so it emits nothing at
+    /// [`flush`](Stage::flush) rather than a tail assembled out of nothing.
+    received_near: bool,
+}
+
+#[cfg(feature = "aec")]
+impl AecStage {
+    /// Build the stage for a capture at `target_rate`.
+    ///
+    /// The engine is constructed at `target_rate`, which is the rate the signal
+    /// reaching this stage carries. Returns an error when the canceller rejects
+    /// the configuration (bridged by `From<AecError>`) or when the reference
+    /// rate pair is one the resampler cannot serve.
+    fn new(settings: AecSettings, target_rate: u32) -> Result<Self, DecibriError> {
+        let AecSettings {
+            model,
+            tail_ms,
+            suppression,
+            reference_rate,
+            reference,
+        } = settings;
+
+        // `AecConfig` is `#[non_exhaustive]`, so it is built from its own default
+        // and assigned field by field. Leaving `tail_ms` and `suppression`
+        // unassigned when the caller named no value keeps the canceller's
+        // defaults as the single source of those two numbers. `delay_hint_ms` is
+        // never assigned: the hint is measured from the reference frontier as the
+        // caller's own feeding establishes it, not from an absolute platform
+        // latency, so no value decibri or its caller could supply would be
+        // correct.
+        let mut config = AecConfig::default();
+        config.sample_rate = target_rate;
+        config.model = model;
+        if let Some(tail_ms) = tail_ms {
+            config.tail_ms = tail_ms;
+        }
+        if let Some(suppression) = suppression {
+            config.suppression = suppression;
+        }
+        let aec = Aec::new(config)?;
+
+        // Converting on the drain side keeps the caller's push to a copy into the
+        // queue, so the thread that produced the audio pays nothing for the
+        // conversion.
+        let reference_resampler = if reference_rate != target_rate {
+            Some(PolyphaseResampler::new(reference_rate, target_rate)?)
+        } else {
+            None
+        };
+
+        Ok(Self {
+            aec,
+            reference,
+            drained: Vec::new(),
+            reference_resampler,
+            resampled: Vec::new(),
+            received_near: false,
+        })
+    }
+
+    /// Drain the reference queue into the engine, converting to the target rate
+    /// first when the declared rate differs.
+    fn feed_reference(&mut self) -> Result<(), DecibriError> {
+        self.reference.drain_into(&mut self.drained);
+        if self.drained.is_empty() {
+            return Ok(());
+        }
+        match &mut self.reference_resampler {
+            Some(resampler) => {
+                self.resampled.clear();
+                resampler.process(&self.drained, &mut self.resampled)?;
+                self.aec.feed_reference(&self.resampled);
+            }
+            None => self.aec.feed_reference(&self.drained),
+        }
+        Ok(())
+    }
+}
+
+#[cfg(feature = "aec")]
+impl Stage for AecStage {
+    fn process(&mut self, input: &[f32], out: &mut Vec<f32>) -> Result<(), DecibriError> {
+        // The reference goes in first, so the far-end frontier this block is
+        // cancelled against is everything the caller had pushed by now.
+        self.feed_reference()?;
+        if !input.is_empty() {
+            self.received_near = true;
+        }
+        // The engine appends its output in step with the near-end samples that
+        // produced it. Its `latency_samples` is a buffering budget, not an index
+        // offset, so nothing here shifts the output by it.
+        self.aec.process(input, out)?;
+        Ok(())
+    }
+
+    fn flush(&mut self, out: &mut Vec<f32>) -> Result<(), DecibriError> {
+        // A stage that never saw near-end audio holds no framing carry, so it
+        // emits nothing rather than a tail with no source.
+        if !self.received_near {
+            return Ok(());
+        }
+        // The reference still queued, then the reference resampler's own
+        // group-delay tail, both before the engine drains: the far end is
+        // complete when the near end's carry comes out.
+        self.feed_reference()?;
+        if let Some(resampler) = &mut self.reference_resampler {
+            self.resampled.clear();
+            resampler.flush(&mut self.resampled);
+            if !self.resampled.is_empty() {
+                self.aec.feed_reference(&self.resampled);
+            }
+        }
+        self.aec.flush(out)?;
+        Ok(())
+    }
+
+    fn latency_samples(&self) -> usize {
+        // Forward the engine's own constant framing figure. It is the amount by
+        // which the emitted count trails the consumed count, which is what this
+        // trait reports, and it is summed only across the `transform` segment
+        // that this stage is not part of.
+        self.aec.latency_samples()
+    }
+
+    fn aec_metrics(&self) -> Option<AecMetrics> {
+        Some(self.aec.metrics())
     }
 }
 
@@ -431,10 +715,18 @@ impl CaptureStage {
     /// post-conditioning output trails the post-normalize signal the
     /// [`tap`](Self::tap) holds. The `normalize` stages are excluded on purpose:
     /// they run before the tap is taken, so their delay (the resampler's group
-    /// delay) reaches the tap and the delivered output alike and does not
-    /// separate them.
+    /// delay, the echo canceller's framing) reaches the tap and the delivered
+    /// output alike and does not separate them.
     pub(crate) fn transform_latency(&self) -> usize {
         self.transform.iter().map(|s| s.latency_samples()).sum()
+    }
+
+    /// The echo canceller's metrics, or `None` when the chain has no canceller.
+    ///
+    /// The canceller is a `normalize` stage, so only that segment is walked.
+    #[cfg(feature = "aec")]
+    pub(crate) fn aec_metrics(&self) -> Option<AecMetrics> {
+        self.normalize.iter().find_map(|stage| stage.aec_metrics())
     }
 
     /// Drain one segment's tail, carrying `work` across its stages. At each stage
@@ -459,12 +751,13 @@ impl CaptureStage {
     }
 }
 
-/// The opt-in conditioning [`build_capture_stage`] applies after normalization,
-/// bundled into one argument so that adding a capability is a new field rather
-/// than another positional parameter. The fields map one-to-one to the transform
-/// stages, listed in chain order.
+/// The opt-in processing [`build_capture_stage`] applies, bundled into one
+/// argument so that adding a capability is a new field rather than another
+/// positional parameter. The first five fields map one-to-one to the transform
+/// stages, listed in chain order; `aec` maps to the last stage of the
+/// `normalize` segment.
 ///
-/// [`Default`] is every field off, the configuration that pushes no transform
+/// [`Default`] is every field off, the configuration that pushes no optional
 /// stage at all, so a caller names only what it enables. A field added here must
 /// have an off state that is its type's own default, or the derive stops being
 /// correct and the impl has to be written out; `default_is_the_all_off_literal`
@@ -484,6 +777,15 @@ pub(crate) struct Transforms<'a> {
     /// Limiter ceiling in dBFS (the [`crate::gain::Limiter`] stage); `None` leaves
     /// it off. Honoured only with the `gain` feature.
     pub limiter: Option<f32>,
+    /// Echo-cancellation settings with the shared far-end reference queue;
+    /// `None` leaves echo cancellation off.
+    ///
+    /// The one field here whose stage lands in `normalize` rather than
+    /// `transform`: it rides in this bundle because that keeps a new capability
+    /// a field on one struct instead of a parameter on
+    /// [`build_capture_stage`]'s signature.
+    #[cfg(feature = "aec")]
+    pub aec: Option<AecSettings>,
 }
 
 /// Build the capture stage chain that normalizes a device to the output format
@@ -492,7 +794,10 @@ pub(crate) struct Transforms<'a> {
 /// Pushes [`Downmix`] when the device delivers more channels than the output
 /// target (averaging down to the target, which is mono here), then
 /// [`ResampleStage`] when the device's `native_rate` differs from `target_rate`
-/// (converting the captured audio to the requested rate). When `dc_removal` is
+/// (converting the captured audio to the requested rate), then the
+/// [`AecStage`] when `aec` names settings (and the `aec` feature is compiled
+/// in), last in the `normalize` segment so the canceller receives mono at the
+/// target rate and the VAD tap carries the echo-removed signal. When `dc_removal` is
 /// set, pushes the [`DcBlocker`] into the `transform` segment; when `denoise` is
 /// `Some((model, model_path, ort_library_path))` (and the `denoise` feature is
 /// compiled in), pushes the framed denoise stage immediately after it, loading
@@ -511,8 +816,10 @@ pub(crate) struct Transforms<'a> {
 /// enabled), leaving the capture path on its direct, zero-cost reblock.
 ///
 /// Returns an error when the resampler rejects the rate pair at construction (as
-/// above), or when the denoise model fails to load (a
-/// [`DecibriError::ModelLoadFailed`]).
+/// above), when the denoise model fails to load (a
+/// [`DecibriError::ModelLoadFailed`]), or when the echo canceller rejects its
+/// configuration (a [`DecibriError::AecSampleRateUnsupported`] for a target rate
+/// outside its window, a [`DecibriError::AecConfigInvalid`] otherwise).
 pub(crate) fn build_capture_stage(
     device_channels: u16,
     target_channels: u16,
@@ -528,6 +835,8 @@ pub(crate) fn build_capture_stage(
         highpass,
         agc,
         limiter,
+        #[cfg(feature = "aec")]
+        aec,
     } = transforms;
 
     let mut normalize: Vec<Box<dyn Stage>> = Vec::new();
@@ -542,6 +851,17 @@ pub(crate) fn build_capture_stage(
         // DecibriError::ResampleConfigInvalid via From<ResamplerError>.
         let resampler = PolyphaseResampler::new(native_rate, target_rate)?;
         normalize.push(Box::new(ResampleStage(resampler)));
+    }
+
+    // Echo cancellation runs LAST in the normalize segment, after the downmix
+    // and the resample, so the canceller receives mono at the target rate: the
+    // only channel count it accepts, and the rate its engine is constructed at.
+    // Nothing runs between it and the VAD tap, so the detector reads the
+    // echo-removed signal. The order is pinned by this push position and
+    // `build_orders_aec_last_in_normalize`.
+    #[cfg(feature = "aec")]
+    if let Some(settings) = aec {
+        normalize.push(Box::new(AecStage::new(settings, target_rate)?));
     }
 
     let mut transform: Vec<Box<dyn Stage>> = Vec::new();
@@ -1264,7 +1584,7 @@ mod tests {
 
     /// A deterministic mono voiced signal (a single tone); the content does not
     /// matter for these structural tests, only that frames form.
-    #[cfg(feature = "denoise")]
+    #[cfg(any(feature = "denoise", feature = "aec"))]
     fn mono_signal(n: usize) -> Vec<f32> {
         (0..n)
             .map(|i| 0.3 * (2.0 * std::f32::consts::PI * 180.0 * i as f32 / 16_000.0).sin())
@@ -2535,6 +2855,8 @@ mod tests {
             highpass: None,
             agc: None,
             limiter: None,
+            #[cfg(feature = "aec")]
+            aec: None,
         };
         let default = Transforms::default();
         assert_eq!(
@@ -2554,5 +2876,558 @@ mod tests {
             default.limiter, all_off.limiter,
             "the default must not limit"
         );
+        #[cfg(feature = "aec")]
+        assert!(
+            default.aec.is_none() && all_off.aec.is_none(),
+            "the default must not cancel echo"
+        );
+    }
+
+    // ── Echo cancellation ──────────────────────────────────────────────
+    //
+    // Every case below builds its chain through `build_capture_stage`, so the
+    // stage's position in the chain is part of what is exercised rather than
+    // something the test arranges for itself.
+
+    /// Deterministic broadband noise in `[-0.5, 0.5)`. The canceller's delay
+    /// search is correlation-based, so it needs far-end material with an
+    /// unambiguous peak; sustained periodic material has none. A 64-bit linear
+    /// congruential generator, so the sequence is identical on every platform and
+    /// every run and a failure is reproducible.
+    #[cfg(feature = "aec")]
+    fn far_noise(n: usize) -> Vec<f32> {
+        let mut state: u64 = 0x2545_F491_4F6C_DD1D;
+        (0..n)
+            .map(|_| {
+                state = state
+                    .wrapping_mul(6_364_136_223_846_793_005)
+                    .wrapping_add(1_442_695_040_888_963_407);
+                ((state >> 33) as f32 / 2_147_483_648.0) - 0.5
+            })
+            .collect()
+    }
+
+    /// Root-mean-square level of `samples` in dBFS, floored so an exactly silent
+    /// buffer is a finite number rather than negative infinity.
+    #[cfg(feature = "aec")]
+    fn rms_db(samples: &[f32]) -> f32 {
+        let mean_square = samples.iter().map(|&s| s * s).sum::<f32>() / samples.len().max(1) as f32;
+        10.0 * mean_square.max(1e-20).log10()
+    }
+
+    /// Echo-cancellation settings sharing `queue` with the caller side, at the
+    /// canceller's own defaults for everything the tests do not vary.
+    #[cfg(feature = "aec")]
+    fn aec_settings(queue: &Arc<AecReferenceRing>, reference_rate: u32) -> AecSettings {
+        AecSettings {
+            model: AecModel::default(),
+            tail_ms: None,
+            suppression: None,
+            reference_rate,
+            reference: Arc::clone(queue),
+        }
+    }
+
+    /// A chain with echo cancellation on, sharing `queue`.
+    #[cfg(feature = "aec")]
+    fn aec_chain(
+        device_channels: u16,
+        native_rate: u32,
+        target_rate: u32,
+        dc_removal: bool,
+        queue: &Arc<AecReferenceRing>,
+        reference_rate: u32,
+    ) -> CaptureStage {
+        build_capture_stage(
+            device_channels,
+            1,
+            native_rate,
+            target_rate,
+            Transforms {
+                dc_removal,
+                aec: Some(aec_settings(queue, reference_rate)),
+                ..Default::default()
+            },
+        )
+        .expect("the chain builds")
+        .expect("echo cancellation builds a chain")
+    }
+
+    /// Run `input` through `chain` in `block`-sized pieces and then flush,
+    /// returning everything the chain delivered across the whole stream.
+    #[cfg(feature = "aec")]
+    fn whole_stream(chain: &mut CaptureStage, input: &[f32], block: usize) -> Vec<f32> {
+        let mut out = Vec::new();
+        for piece in input.chunks(block) {
+            out.extend_from_slice(chain.run(piece).expect("run"));
+        }
+        chain.flush(&mut out).expect("flush");
+        out
+    }
+
+    /// The golden TTS recording, decoded through the offline path (which owns the
+    /// crate's WAV reader) at the recording's own rate with every conditioning
+    /// option off, so the samples delivered are the recording itself.
+    #[cfg(feature = "aec")]
+    fn golden_recording() -> Vec<f32> {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests")
+            .join("assets")
+            .join("vad-golden-tts-speech-16k.wav");
+        crate::file::File::open(path, crate::file::FileConfig::default())
+            .expect("the golden recording opens")
+            .flat_map(|chunk| chunk.expect("the golden recording decodes").data)
+            .collect()
+    }
+
+    /// Echo cancellation enabled with no reference ever pushed delivers the same
+    /// samples, bit for bit, as echo cancellation off. With an all-zero far end
+    /// the canceller's estimate is exactly zero, so its error signal is the
+    /// near-end input unchanged and its residual suppressor never arms.
+    ///
+    /// This is the state most streams are in most of the time, so it is the
+    /// load-bearing case: it exercises the stage being present, drained every
+    /// block, and inert. Regression: a stage that is not inert, or a drain that
+    /// feeds the engine something when the caller pushed nothing.
+    #[cfg(feature = "aec")]
+    #[test]
+    fn aec_without_a_reference_is_bit_identical_to_aec_off() {
+        // The canceller alone: the chain is the stage and nothing else, so echo
+        // cancellation off builds no chain at all and its delivery IS the input.
+        let mono = mono_signal(9_600);
+        for block in [320, 1_600, 4_801] {
+            let queue = Arc::new(AecReferenceRing::new(16_000));
+            let mut chain = aec_chain(1, 16_000, 16_000, false, &queue, 16_000);
+            assert_eq!(
+                whole_stream(&mut chain, &mono, block),
+                mono,
+                "an unfed canceller must deliver its input unchanged (block {block})"
+            );
+        }
+
+        // The canceller inside a full chain: a stereo 48 kHz device down to mono
+        // 16 kHz with DC removal, so the stage sits between the resampler and the
+        // conditioning exactly as it does in production.
+        let stereo: Vec<f32> = mono_signal(19_200)
+            .iter()
+            .enumerate()
+            .map(|(i, &s)| if i % 2 == 0 { s } else { s * 0.5 + 0.01 })
+            .collect();
+        for block in [320, 1_600, 4_800] {
+            let queue = Arc::new(AecReferenceRing::new(16_000));
+            let mut with = aec_chain(2, 48_000, 16_000, true, &queue, 16_000);
+            let mut without = build_capture_stage(
+                2,
+                1,
+                48_000,
+                16_000,
+                Transforms {
+                    dc_removal: true,
+                    ..Default::default()
+                },
+            )
+            .expect("the chain builds")
+            .expect("downmix and resample build a chain");
+            assert_eq!(
+                whole_stream(&mut with, &stereo, block),
+                whole_stream(&mut without, &stereo, block),
+                "an unfed canceller must not perturb a full chain (block {block})"
+            );
+        }
+    }
+
+    /// The same inert-stage invariant on real speech rather than a synthetic
+    /// tone: the golden TTS recording through an echo-cancelling chain with no
+    /// reference is delivered bit for bit as the chain without one delivers it.
+    /// Regression: an invariant that holds on a synthetic signal and not on the
+    /// material the pinned detector anchors are measured against.
+    #[cfg(feature = "aec")]
+    #[test]
+    fn aec_without_a_reference_is_bit_identical_on_the_golden_recording() {
+        let recording = golden_recording();
+        assert!(
+            recording.len() > 100_000,
+            "the golden recording decoded to {} samples",
+            recording.len()
+        );
+
+        let queue = Arc::new(AecReferenceRing::new(16_000));
+        let mut with = aec_chain(1, 48_000, 16_000, true, &queue, 16_000);
+        let mut without = build_capture_stage(
+            1,
+            1,
+            48_000,
+            16_000,
+            Transforms {
+                dc_removal: true,
+                ..Default::default()
+            },
+        )
+        .expect("the chain builds")
+        .expect("resample builds a chain");
+        assert_eq!(
+            whole_stream(&mut with, &recording, 1_600),
+            whole_stream(&mut without, &recording, 1_600),
+            "an unfed canceller must not perturb real speech"
+        );
+    }
+
+    /// A synthetic echo of the pushed reference is cancelled. The whole stream is
+    /// echo, so what the chain delivers IS the residual, and the measurement is
+    /// the level the chain removed. Regression: a reference that never reaches the
+    /// engine, whether from an unwired drain, a drain ordered after the near-end
+    /// block, or a conversion that discards it.
+    #[cfg(feature = "aec")]
+    #[test]
+    fn aec_cancels_a_synthetic_echo_of_its_reference() {
+        const RATE: usize = 16_000;
+        const DELAY: usize = 400;
+        const ECHO_GAIN: f32 = 0.25;
+        let far = far_noise(6 * RATE);
+        let mut near = vec![0.0f32; far.len()];
+        for i in DELAY..near.len() {
+            near[i] = ECHO_GAIN * far[i - DELAY];
+        }
+
+        let queue = Arc::new(AecReferenceRing::new(RATE));
+        let mut chain = aec_chain(1, RATE as u32, RATE as u32, false, &queue, RATE as u32);
+        // Each block's reference is pushed immediately before the block it echoes
+        // into, the interleaving a caller pushing as it plays produces.
+        let mut out = Vec::new();
+        for (piece, reference) in near.chunks(320).zip(far.chunks(320)) {
+            queue.push(reference);
+            out.extend_from_slice(chain.run(piece).expect("run"));
+        }
+        chain.flush(&mut out).expect("flush");
+        assert_eq!(
+            queue.dropped(),
+            0,
+            "a reference pushed in step with the capture must not overflow the queue"
+        );
+
+        // Measured past the delay search and the filter's convergence, and inside
+        // a single stationary region so the measurement does not depend on where
+        // the engine's own re-anchor at lock falls.
+        let window = 3 * RATE..3 * RATE + RATE / 2;
+        let removed = rms_db(&near[window.clone()]) - rms_db(&out[window]);
+        assert!(
+            removed >= 30.0,
+            "the canceller must remove at least 30 dB of the echo (removed {removed:.1} dB)"
+        );
+
+        // The alignment it reached is reported, so a chain that cancels by some
+        // other route than a locked delay does not pass silently.
+        let metrics = chain.aec_metrics().expect("a canceller reports metrics");
+        assert!(
+            metrics.delay_samples.is_some(),
+            "the canceller must report the alignment it locked onto"
+        );
+    }
+
+    /// The canceller is constructed at the target rate and receives the signal
+    /// after the resampler, so a reference declared at the target rate cancels an
+    /// echo that was present in the device's native-rate capture. Regression: the
+    /// stage drifting ahead of the resampler in the normalize segment, where it
+    /// would be handed native-rate audio and cancel nothing.
+    #[cfg(feature = "aec")]
+    #[test]
+    fn aec_runs_after_the_resampler() {
+        const TARGET: usize = 16_000;
+        const NATIVE: usize = 48_000;
+        const DELAY: usize = 1_200;
+        const ECHO_GAIN: f32 = 0.25;
+
+        // The reference is at the target rate; the echo it produced is in the
+        // device's native-rate capture, so the test upsamples it to build one.
+        let far = far_noise(4 * TARGET);
+        let mut far_native = Vec::new();
+        let mut upsampler =
+            PolyphaseResampler::new(TARGET as u32, NATIVE as u32).expect("rate pair");
+        upsampler.process(&far, &mut far_native).expect("upsample");
+        upsampler.flush(&mut far_native);
+
+        let mut near = vec![0.0f32; far_native.len()];
+        for i in DELAY..near.len() {
+            near[i] = ECHO_GAIN * far_native[i - DELAY];
+        }
+
+        let queue = Arc::new(AecReferenceRing::new(TARGET));
+        let mut chain = aec_chain(
+            1,
+            NATIVE as u32,
+            TARGET as u32,
+            false,
+            &queue,
+            TARGET as u32,
+        );
+        let mut out = Vec::new();
+        for (piece, reference) in near.chunks(960).zip(far.chunks(320)) {
+            queue.push(reference);
+            out.extend_from_slice(chain.run(piece).expect("run"));
+        }
+        chain.flush(&mut out).expect("flush");
+
+        // The echo as it stands after the resampler, which is what the canceller
+        // had to remove: the same chain with echo cancellation off.
+        let mut plain =
+            build_capture_stage(1, 1, NATIVE as u32, TARGET as u32, Transforms::default())
+                .expect("the chain builds")
+                .expect("resample builds a chain");
+        let echo_at_target = whole_stream(&mut plain, &near, 960);
+
+        let window = 2 * TARGET..3 * TARGET;
+        let removed = rms_db(&echo_at_target[window.clone()]) - rms_db(&out[window]);
+        assert!(
+            removed >= 20.0,
+            "a target-rate reference must cancel the resampled echo (removed {removed:.1} dB)"
+        );
+    }
+
+    /// A reference declared at a rate other than the capture target is converted
+    /// by decibri before the canceller sees it, and still cancels. Regression: a
+    /// mis-rated reference, which the canceller cannot detect and which cancels
+    /// nothing while reporting no error.
+    #[cfg(feature = "aec")]
+    #[test]
+    fn aec_resamples_a_reference_declared_at_another_rate() {
+        const TARGET: usize = 16_000;
+        const REFERENCE: usize = 48_000;
+        const DELAY: usize = 400;
+        const ECHO_GAIN: f32 = 0.25;
+
+        // The caller plays at 48 kHz and declares that rate; the echo reaches a
+        // 16 kHz capture, so the test downsamples to build one.
+        let far = far_noise(4 * REFERENCE);
+        let mut far_at_target = Vec::new();
+        let mut downsampler =
+            PolyphaseResampler::new(REFERENCE as u32, TARGET as u32).expect("rate pair");
+        downsampler
+            .process(&far, &mut far_at_target)
+            .expect("downsample");
+        downsampler.flush(&mut far_at_target);
+
+        let mut near = vec![0.0f32; far_at_target.len()];
+        for i in DELAY..near.len() {
+            near[i] = ECHO_GAIN * far_at_target[i - DELAY];
+        }
+
+        let queue = Arc::new(AecReferenceRing::new(REFERENCE));
+        let mut chain = aec_chain(
+            1,
+            TARGET as u32,
+            TARGET as u32,
+            false,
+            &queue,
+            REFERENCE as u32,
+        );
+        let mut out = Vec::new();
+        for (piece, reference) in near.chunks(320).zip(far.chunks(960)) {
+            queue.push(reference);
+            out.extend_from_slice(chain.run(piece).expect("run"));
+        }
+        chain.flush(&mut out).expect("flush");
+
+        let window = 2 * TARGET..3 * TARGET;
+        let removed = rms_db(&near[window.clone()]) - rms_db(&out[window]);
+        assert!(
+            removed >= 20.0,
+            "a reference declared at another rate must be converted and cancel (removed {removed:.1} dB)"
+        );
+    }
+
+    /// A chain whose canceller received no near-end audio emits nothing at flush,
+    /// whether or not a reference was pushed. Regression: the phantom tail, where
+    /// a stage that never processed a sample assembles one at close out of its own
+    /// padding.
+    #[cfg(feature = "aec")]
+    #[test]
+    fn aec_emits_nothing_at_flush_without_near_audio() {
+        for pushed in [0usize, 4_000] {
+            let queue = Arc::new(AecReferenceRing::new(16_000));
+            let mut chain = aec_chain(1, 16_000, 16_000, false, &queue, 16_000);
+            if pushed > 0 {
+                queue.push(&far_noise(pushed));
+            }
+            let mut tail = Vec::new();
+            chain.flush(&mut tail).expect("flush");
+            assert!(
+                tail.is_empty(),
+                "a canceller with no near-end audio must emit nothing at flush (pushed {pushed})"
+            );
+        }
+    }
+
+    /// The reference queue keeps the oldest contiguous run in played order,
+    /// discards from the newest end when it is full, and counts what it discarded.
+    /// Regression: unbounded growth on a caller that pushes faster than the
+    /// capture consumes, and a hole punched between samples already fed to the
+    /// canceller and samples still queued, which moves the alignment rather than
+    /// shortening the reference.
+    #[cfg(feature = "aec")]
+    #[test]
+    fn reference_queue_keeps_the_oldest_run_and_counts_what_it_dropped() {
+        let queue = AecReferenceRing::new(8);
+        queue.push(&[1.0, 2.0, 3.0, 4.0, 5.0]);
+        assert_eq!(queue.dropped(), 0, "a push that fits discards nothing");
+
+        queue.push(&[6.0, 7.0, 8.0, 9.0, 10.0]);
+        assert_eq!(
+            queue.dropped(),
+            2,
+            "the samples past the bound are discarded and counted"
+        );
+
+        let mut drained = Vec::new();
+        queue.drain_into(&mut drained);
+        assert_eq!(
+            drained,
+            vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0],
+            "what remains is the oldest contiguous run, in played order"
+        );
+
+        // A drained queue takes its full capacity again, and the count is
+        // cumulative across drains.
+        queue.push(&[0.5f32; 11]);
+        assert_eq!(
+            queue.dropped(),
+            5,
+            "the discard count accumulates across drains"
+        );
+        drained.clear();
+        queue.drain_into(&mut drained);
+        assert_eq!(drained.len(), 8, "the bound holds after a drain");
+    }
+
+    /// With the canceller in the normalize segment and a same-length conditioning
+    /// stage after it, the detector tap and the delivered output stay in lockstep
+    /// across the whole stream, including through the canceller's own re-anchor at
+    /// delay lock, which shortens the delivered stream once. Regression: the
+    /// canceller landing on the far side of the tap, where its re-blocking would
+    /// separate the two and the detector's input would stop corresponding to the
+    /// audio delivered.
+    #[cfg(feature = "aec")]
+    #[test]
+    fn aec_leaves_the_tap_in_lockstep_with_the_delivered_output() {
+        const RATE: usize = 16_000;
+        const DELAY: usize = 400;
+        let far = far_noise(4 * RATE);
+        let mut near = vec![0.0f32; far.len()];
+        for i in DELAY..near.len() {
+            near[i] = 0.25 * far[i - DELAY];
+        }
+
+        let queue = Arc::new(AecReferenceRing::new(RATE));
+        // DC removal is same-length, so without the canceller the tap and the
+        // delivered output advance one for one; the canceller must not change that.
+        let mut chain = aec_chain(1, RATE as u32, RATE as u32, true, &queue, RATE as u32);
+        assert!(
+            chain.has_transform(),
+            "DC removal builds a transform segment, so a tap is captured"
+        );
+
+        let mut tapped = 0usize;
+        let mut delivered = 0usize;
+        for (piece, reference) in near.chunks(320).zip(far.chunks(320)) {
+            queue.push(reference);
+            delivered += chain.run(piece).expect("run").len();
+            tapped += chain.tap().len();
+            assert_eq!(
+                tapped, delivered,
+                "the tap and the delivered output advance together"
+            );
+        }
+        let mut tail = Vec::new();
+        chain.flush(&mut tail).expect("flush");
+        assert_eq!(
+            tapped + chain.tap().len(),
+            delivered + tail.len(),
+            "the tap and the delivered output stay in lockstep through close"
+        );
+    }
+
+    /// Echo cancellation alone leaves the chain with no transform segment, so no
+    /// detector tap is allocated and the delivered output already is the
+    /// echo-removed signal a detector should read. It also adds nothing to the
+    /// transform latency, because it is a normalize stage. Regression: the stage
+    /// landing in the transform segment, which would put the tap ahead of the
+    /// canceller and feed the detector the echo it was enabled to remove.
+    #[cfg(feature = "aec")]
+    #[test]
+    fn aec_only_chain_leaves_the_tap_inactive_and_adds_no_transform_latency() {
+        let queue = Arc::new(AecReferenceRing::new(16_000));
+        let mut chain = aec_chain(1, 16_000, 16_000, false, &queue, 16_000);
+        assert!(
+            !chain.has_transform(),
+            "echo cancellation alone builds no transform segment"
+        );
+        assert_eq!(
+            chain.transform_latency(),
+            0,
+            "a normalize stage adds no transform latency"
+        );
+        chain.run(&mono_signal(1_600)).expect("run");
+        assert!(
+            chain.tap().is_empty(),
+            "no tap is captured without a transform segment"
+        );
+    }
+
+    /// The chain reports the canceller's metrics, and only the chain that holds
+    /// one. Regression: a metrics accessor that answers from the wrong segment or
+    /// silently reports nothing once the stage is present.
+    #[cfg(feature = "aec")]
+    #[test]
+    fn aec_metrics_come_from_the_chain_that_holds_the_canceller() {
+        let plain = build_capture_stage(2, 1, 16_000, 16_000, Transforms::default())
+            .expect("the chain builds")
+            .expect("downmix builds a chain");
+        assert!(
+            plain.aec_metrics().is_none(),
+            "a chain with no canceller reports no metrics"
+        );
+
+        let queue = Arc::new(AecReferenceRing::new(16_000));
+        let mut chain = aec_chain(1, 16_000, 16_000, false, &queue, 16_000);
+        chain.run(&mono_signal(1_600)).expect("run");
+        let metrics = chain.aec_metrics().expect("a canceller reports metrics");
+        assert_eq!(
+            metrics.delay_samples, None,
+            "no reference was pushed, so no alignment was found"
+        );
+        assert!(
+            metrics.acquisition_parked > 0,
+            "the far-end read is parked while no reference flows"
+        );
+    }
+
+    /// An unknown model name is rejected by the canceller's own parse, and the
+    /// rejection names the models a caller may select. Regression: a copy of the
+    /// model list inside decibri, which is a second place to update when the set
+    /// grows and a place for the two to disagree.
+    #[cfg(feature = "aec")]
+    #[test]
+    fn an_unknown_aec_model_name_is_rejected_by_the_cancellers_parse() {
+        let err = "tao"
+            .parse::<AecModel>()
+            .expect_err("an unknown model name must not parse");
+        let converted = DecibriError::from(err);
+        assert!(
+            matches!(converted, DecibriError::AecConfigInvalid { .. }),
+            "an unknown model reaches AecConfigInvalid, got {converted:?}"
+        );
+        let message = converted.to_string();
+        assert!(
+            message.contains("'tao'") && message.contains("'tau'"),
+            "the rejection names the received string and the available models: {message}"
+        );
+
+        // Every publicly selectable name parses, so the set decibri delegates to
+        // is the set the canceller publishes.
+        for name in AecModel::PUBLIC_MODEL_NAMES {
+            assert!(
+                name.parse::<AecModel>().is_ok(),
+                "the published model name {name} must parse"
+            );
+        }
     }
 }

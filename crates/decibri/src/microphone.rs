@@ -33,6 +33,8 @@ use crate::device::DeviceSelector;
 use crate::error::DecibriError;
 #[cfg(feature = "capture")]
 use crate::stage::{build_capture_stage, CaptureStage, Transforms};
+#[cfg(all(feature = "capture", feature = "aec"))]
+use crate::stage::{AecReferenceRing, AecSettings};
 
 /// Single-channel speech-enhancement (denoise) model selector.
 ///
@@ -158,6 +160,44 @@ pub struct MicrophoneConfig {
     /// transform chain, after the level-control step, honoured only when the
     /// `gain` feature is compiled in. Pure DSP: no model, no path.
     pub limiter: Option<f32>,
+    /// Acoustic echo canceller model to run on the captured audio, removing the
+    /// echo of far-end audio the caller pushes through
+    /// [`MicrophoneStream::push_aec_reference`]. `None` (the default) leaves echo
+    /// cancellation off.
+    ///
+    /// Runs last in the normalize segment, on the mono signal at the target
+    /// rate, before the pre-transform detector tap: with it on, the detector
+    /// reads the echo-removed signal. Requires
+    /// [`sample_rate`](Self::sample_rate) in `8000..=48000`, narrower than the
+    /// range that field otherwise accepts; a rate outside it is rejected by
+    /// [`validate`](Self::validate). Honoured only when the `aec` feature is
+    /// compiled in. Pure DSP: no model file, no path.
+    ///
+    /// With no reference pushed, the canceller's estimate is zero and the
+    /// captured audio passes through unchanged.
+    #[cfg(feature = "aec")]
+    pub aec: Option<decibri_aec::AecModel>,
+    /// Adaptive filter tail length in milliseconds for the echo canceller.
+    /// Range: 16 to 500. `None` (the default) takes the canceller's own default,
+    /// so the number lives in one place. Consulted only when
+    /// [`aec`](Self::aec) names a model.
+    #[cfg(feature = "aec")]
+    pub aec_tail_ms: Option<u16>,
+    /// Residual-suppression policy for the echo canceller. `None` (the default)
+    /// takes the canceller's own default. Consulted only when
+    /// [`aec`](Self::aec) names a model.
+    #[cfg(feature = "aec")]
+    pub aec_suppression: Option<decibri_aec::Suppression>,
+    /// Sample rate in Hz of the far-end reference the caller pushes through
+    /// [`MicrophoneStream::push_aec_reference`]. `None` (the default) means the
+    /// reference is already at [`sample_rate`](Self::sample_rate). When it names
+    /// a different rate, decibri converts the reference before the canceller
+    /// sees it: the canceller reads one rate for both streams, and a reference
+    /// at the wrong rate cancels nothing and reports no error, so the
+    /// conversion is decibri's rather than the caller's. Range: 1000 to 384000.
+    /// Consulted only when [`aec`](Self::aec) names a model.
+    #[cfg(feature = "aec")]
+    pub aec_reference_sample_rate: Option<u32>,
 }
 
 impl Default for MicrophoneConfig {
@@ -174,14 +214,22 @@ impl Default for MicrophoneConfig {
             highpass: None,
             agc: None,
             limiter: None,
+            #[cfg(feature = "aec")]
+            aec: None,
+            #[cfg(feature = "aec")]
+            aec_tail_ms: None,
+            #[cfg(feature = "aec")]
+            aec_suppression: None,
+            #[cfg(feature = "aec")]
+            aec_reference_sample_rate: None,
         }
     }
 }
 
 impl MicrophoneConfig {
     /// Validate the configuration: sample rate, channel count, buffer size, the
-    /// AGC target, and the limiter ceiling (each when set) must fall within the
-    /// supported ranges.
+    /// AGC target, the limiter ceiling, and the echo-cancellation rates (each
+    /// when set) must fall within the supported ranges.
     pub fn validate(&self) -> Result<(), DecibriError> {
         if !(1000..=384000).contains(&self.sample_rate) {
             return Err(DecibriError::SampleRateOutOfRange);
@@ -218,6 +266,26 @@ impl MicrophoneConfig {
         if let Some(ceiling) = self.limiter {
             if !(-3.0..=0.0).contains(&ceiling) {
                 return Err(DecibriError::LimiterCeilingOutOfRange);
+            }
+        }
+        // The echo canceller accepts a narrower rate window than the range
+        // checked above, so a target rate that is valid for a plain capture is
+        // rejected here once echo cancellation is on. Checked after the general
+        // range check, so a rate outside decibri's own range still reports that.
+        // The window mirrors the one the canceller enforces at construction;
+        // `aec_window_matches_the_cancellers_own` holds the two together.
+        #[cfg(feature = "aec")]
+        if self.aec.is_some() {
+            if !(8000..=48000).contains(&self.sample_rate) {
+                return Err(DecibriError::AecSampleRateUnsupported(self.sample_rate));
+            }
+            // The declared reference rate is converted to the target rate, so it
+            // has to be a rate decibri resamples from at all. Guarded here rather
+            // than left to the resampler, so it reads as the rate error it is.
+            if let Some(rate) = self.aec_reference_sample_rate {
+                if !(1000..=384000).contains(&rate) {
+                    return Err(DecibriError::SampleRateOutOfRange);
+                }
             }
         }
         Ok(())
@@ -268,6 +336,29 @@ const CAPTURE_CHANNEL_CAPACITY: usize = 64;
 /// the delivered output (as it does once a length-changing denoise stage runs).
 #[cfg(feature = "capture")]
 const VAD_TAP_BOUND_SECS: usize = 2;
+
+/// Memory bound for the far-end echo-cancellation reference queue, in seconds of
+/// audio at the declared reference rate. The caller pushes played audio into the
+/// queue with [`MicrophoneStream::push_aec_reference`] and the canceller drains
+/// everything queued at the head of each block, so the queue only ever holds
+/// what was pushed since the previous block: one second is an order of magnitude
+/// above the interval between blocks at every buffer size the configuration
+/// accepts.
+///
+/// The bound is also what caps how far the far-end feed can run ahead of the
+/// capture in one drain. The canceller learns the lead its caller keeps and
+/// re-anchors when the lead steps outside it, and it holds several seconds of
+/// far-end history to serve that lead from, so a queue that stays well inside
+/// that depth keeps the lead a small, steady figure rather than one that jumps by
+/// the length of whatever the caller handed over. A caller that pushes a whole
+/// synthesized utterance in one call therefore has samples discarded and counted
+/// by [`MicrophoneStream::aec_reference_dropped`]; the reference is pushed as it
+/// is played, not as it is produced.
+///
+/// At 16 kHz the queue holds 16000 samples, 64 KB; at 48 kHz, 48000 samples,
+/// 192 KB.
+#[cfg(all(feature = "capture", feature = "aec"))]
+pub(crate) const AEC_REFERENCE_BOUND_SECS: usize = 1;
 
 /// An open capture stream you pull [`AudioChunk`]s from.
 ///
@@ -356,6 +447,13 @@ pub struct MicrophoneStream {
     // `vad_input` cannot grow memory without limit. Never reached while a VAD
     // actively drains the tap, so it does not perturb alignment.
     vad_tap_cap: usize,
+    // The far-end reference queue shared with the chain's echo-cancellation
+    // stage. `Some` only when echo cancellation is on. Held here as well as in
+    // the stage so [`push_aec_reference`](Self::push_aec_reference) reaches it
+    // without taking `capture_stage`'s lock, which the chain holds for the
+    // duration of every block.
+    #[cfg(feature = "aec")]
+    aec_reference: Option<Arc<AecReferenceRing>>,
 }
 
 #[cfg(feature = "capture")]
@@ -797,6 +895,72 @@ impl MicrophoneStream {
         self.overruns.load(Ordering::Relaxed)
     }
 
+    /// Queue far-end reference audio for the echo canceller.
+    ///
+    /// `reference` is mono `f32` at
+    /// [`MicrophoneConfig::aec_reference_sample_rate`] (the capture
+    /// [`sample_rate`](MicrophoneConfig::sample_rate) when that is unset), in
+    /// played order and including any silence the renderer inserted: the
+    /// canceller aligns it against the captured signal, so a gap that is not
+    /// represented moves the alignment. Push it as it is played, not as it is
+    /// produced.
+    ///
+    /// Never blocks on the canceller and never fails, so it may be called from a
+    /// renderer callback or a socket handler. The queue is bounded (see
+    /// `AEC_REFERENCE_BOUND_SECS`); samples that do not fit are discarded from
+    /// the newest end and counted by
+    /// [`aec_reference_dropped`](Self::aec_reference_dropped), leaving what
+    /// remains a contiguous run in played order.
+    ///
+    /// A no-op on a stream with echo cancellation off.
+    ///
+    /// # Thread safety
+    /// May be called from any thread, and from a different thread than the one
+    /// reading chunks. It does not take the capture chain's lock.
+    #[cfg(feature = "aec")]
+    pub fn push_aec_reference(&self, reference: &[f32]) {
+        if let Some(queue) = &self.aec_reference {
+            queue.push(reference);
+        }
+    }
+
+    /// Total number of far-end reference samples discarded because the queue was
+    /// full. Stays 0 while the reference is pushed as it plays; a rising count
+    /// means reference audio arrived faster than the capture consumed it and the
+    /// canceller has a hole in its far-end timeline. 0 on a stream with echo
+    /// cancellation off.
+    ///
+    /// Distinct from [`AecMetrics::reference_dropped`](decibri_aec::AecMetrics::reference_dropped),
+    /// which counts what the canceller's own far-end history overwrote after this
+    /// queue handed it over.
+    #[cfg(feature = "aec")]
+    pub fn aec_reference_dropped(&self) -> u64 {
+        self.aec_reference
+            .as_ref()
+            .map_or(0, |queue| queue.dropped())
+    }
+
+    /// The echo canceller's transport and cancellation metrics, or `None` on a
+    /// stream with echo cancellation off.
+    ///
+    /// `acquisition_parked` climbing while `delay_samples` stays `None` and
+    /// `erle_db` stays at zero is the signature of a canceller with no usable
+    /// reference: none was pushed, it is not at the declared rate, or it is not
+    /// the signal that produced the echo. `reference_reanchors` climbing is the
+    /// canceller recovering its alignment after a break in either stream.
+    ///
+    /// # Thread safety
+    /// Takes the capture chain's lock, which the chain holds for the duration of
+    /// each block, so a read serializes against block processing.
+    #[cfg(feature = "aec")]
+    pub fn aec_metrics(&self) -> Option<decibri_aec::AecMetrics> {
+        self.capture_stage
+            .as_ref()?
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .aec_metrics()
+    }
+
     /// Stop capturing audio and release the device.
     ///
     /// Flips the running flag, then drops the held stream, so the OS releases
@@ -888,6 +1052,29 @@ impl Microphone {
             .denoise
             .zip(self.config.denoise_model_path.as_deref())
             .map(|(model, path)| (model, path, self.config.ort_library_path.as_deref()));
+        // The far-end reference queue is created here rather than inside the
+        // chain, because both the chain's stage and the stream's push method hold
+        // it: the stage drains it under the chain's lock, the push method must not
+        // wait on that lock. Sized in seconds at the rate the caller declares its
+        // reference is at, which is the rate the queued samples carry.
+        #[cfg(feature = "aec")]
+        let (aec, aec_reference) = match self.config.aec {
+            Some(model) => {
+                let reference_rate = self.config.aec_reference_sample_rate.unwrap_or(target_rate);
+                let reference = Arc::new(AecReferenceRing::new(
+                    reference_rate as usize * AEC_REFERENCE_BOUND_SECS,
+                ));
+                let settings = AecSettings {
+                    model,
+                    tail_ms: self.config.aec_tail_ms,
+                    suppression: self.config.aec_suppression,
+                    reference_rate,
+                    reference: Arc::clone(&reference),
+                };
+                (Some(settings), Some(reference))
+            }
+            None => (None, None),
+        };
         let capture_stage = build_capture_stage(
             channels,
             target_channels,
@@ -899,6 +1086,8 @@ impl Microphone {
                 highpass: self.config.highpass,
                 agc: self.config.agc,
                 limiter: self.config.limiter,
+                #[cfg(feature = "aec")]
+                aec,
             },
         )?;
         let output_channels = if channels > target_channels {
@@ -996,6 +1185,8 @@ impl Microphone {
             chain_flushed: AtomicBool::new(false),
             vad_tap,
             vad_tap_cap,
+            #[cfg(feature = "aec")]
+            aec_reference,
         })
     }
 }
@@ -1008,6 +1199,22 @@ mod tests {
     /// Construct a synthetic `MicrophoneStream` with no underlying cpal device,
     /// the given stage chain, and the given output channel count. Returns the
     /// stream plus test-side handles to inject native chunks and flip running.
+    /// As [`test_stream_with`], with the far-end reference queue the stream's push
+    /// method feeds wired to the one the chain's canceller drains.
+    #[cfg(feature = "aec")]
+    fn test_stream_with_reference(
+        capture_stage: Option<CaptureStage>,
+        channels: u16,
+        aec_reference: Arc<AecReferenceRing>,
+    ) -> (MicrophoneStream, Sender<AudioChunk>, Arc<AtomicBool>) {
+        let (stream, sender, running) = test_stream_with(capture_stage, channels);
+        let stream = MicrophoneStream {
+            aec_reference: Some(aec_reference),
+            ..stream
+        };
+        (stream, sender, running)
+    }
+
     fn test_stream_with(
         capture_stage: Option<CaptureStage>,
         channels: u16,
@@ -1031,6 +1238,8 @@ mod tests {
             vad_tap,
             vad_tap_cap: 16000 * VAD_TAP_BOUND_SECS,
             chain_flushed: AtomicBool::new(false),
+            #[cfg(feature = "aec")]
+            aec_reference: None,
         };
         (stream, sender, running)
     }
@@ -2471,5 +2680,153 @@ mod tests {
             stream.next_chunk(320, Some(Duration::from_millis(20))),
             Err(DecibriError::MicrophoneStreamClosed)
         ));
+    }
+
+    // ── Echo cancellation ──────────────────────────────────────────────
+
+    /// The rate window `validate` enforces is exactly the one the canceller
+    /// enforces at construction. decibri names the window itself so the
+    /// rejection arrives at configuration time rather than at stream start, which
+    /// makes it a second copy; this holds the two together. Regression: the copy
+    /// drifting from the canceller's own range, which would either reject a rate
+    /// that works or accept one that fails later.
+    #[cfg(feature = "aec")]
+    #[test]
+    fn aec_window_matches_the_cancellers_own() {
+        for rate in [7_999u32, 8_000, 16_000, 44_100, 48_000, 48_001] {
+            let config = MicrophoneConfig {
+                sample_rate: rate,
+                aec: Some(decibri_aec::AecModel::default()),
+                ..Default::default()
+            };
+
+            let mut engine_config = decibri_aec::AecConfig::default();
+            engine_config.sample_rate = rate;
+            let engine_accepts = decibri_aec::Aec::new(engine_config).is_ok();
+
+            assert_eq!(
+                config.validate().is_ok(),
+                engine_accepts,
+                "validate must accept exactly the rates the canceller accepts (rate {rate})"
+            );
+        }
+    }
+
+    /// A target rate outside the canceller's window is rejected with the variant
+    /// that names echo cancellation, not the general sample-rate variant: the rate
+    /// is one a capture without echo cancellation accepts, so the message has to
+    /// say which of the two is refusing it. Regression: reusing
+    /// `SampleRateOutOfRange`, whose message names a range the rate is inside.
+    #[cfg(feature = "aec")]
+    #[test]
+    fn aec_rejects_an_out_of_window_target_rate_by_name() {
+        let mut config = MicrophoneConfig {
+            sample_rate: 96_000,
+            aec: Some(decibri_aec::AecModel::default()),
+            ..Default::default()
+        };
+        assert!(
+            matches!(
+                config.validate(),
+                Err(DecibriError::AecSampleRateUnsupported(96_000))
+            ),
+            "an out-of-window target rate is rejected by name"
+        );
+
+        // The same rate without echo cancellation stays valid.
+        config.aec = None;
+        assert!(
+            config.validate().is_ok(),
+            "the rate is only out of range for the canceller"
+        );
+
+        // A rate outside decibri's own range still reports that, so the general
+        // check keeps precedence.
+        config.sample_rate = 500_000;
+        config.aec = Some(decibri_aec::AecModel::default());
+        assert!(
+            matches!(config.validate(), Err(DecibriError::SampleRateOutOfRange)),
+            "a rate outside decibri's own range reports that first"
+        );
+    }
+
+    /// A declared reference rate outside the range decibri resamples from is
+    /// rejected at configuration time. Regression: the rejection surfacing later
+    /// as a resampler construction failure, which names a rate pair rather than
+    /// the field the caller set.
+    #[cfg(feature = "aec")]
+    #[test]
+    fn aec_rejects_a_reference_rate_outside_the_resampled_range() {
+        let mut config = MicrophoneConfig {
+            aec: Some(decibri_aec::AecModel::default()),
+            ..Default::default()
+        };
+        for rate in [999u32, 384_001] {
+            config.aec_reference_sample_rate = Some(rate);
+            assert!(
+                matches!(config.validate(), Err(DecibriError::SampleRateOutOfRange)),
+                "a reference rate of {rate} is rejected"
+            );
+        }
+        config.aec_reference_sample_rate = Some(24_000);
+        assert!(
+            config.validate().is_ok(),
+            "a reference rate inside the range is accepted"
+        );
+    }
+
+    /// The stream's push method reaches the queue the chain's canceller drains,
+    /// the discard count is reachable from the stream, and the canceller's metrics
+    /// are too. Regression: a push that lands in a queue nothing reads, and a
+    /// discard count or a metrics read with no path out to a consumer.
+    #[cfg(feature = "aec")]
+    #[test]
+    fn the_stream_reaches_the_reference_queue_and_the_metrics() {
+        let queue = Arc::new(crate::stage::AecReferenceRing::new(4));
+        let chain = build_capture_stage(
+            1,
+            1,
+            16_000,
+            16_000,
+            Transforms {
+                aec: Some(AecSettings {
+                    model: decibri_aec::AecModel::default(),
+                    tail_ms: None,
+                    suppression: None,
+                    reference_rate: 16_000,
+                    reference: Arc::clone(&queue),
+                }),
+                ..Default::default()
+            },
+        )
+        .expect("the chain builds")
+        .expect("echo cancellation builds a chain");
+        let (stream, _sender, _running) =
+            test_stream_with_reference(Some(chain), 1, Arc::clone(&queue));
+
+        assert_eq!(
+            stream.aec_reference_dropped(),
+            0,
+            "nothing is discarded before anything is pushed"
+        );
+        stream.push_aec_reference(&[0.1, 0.2, 0.3, 0.4, 0.5, 0.6]);
+        assert_eq!(
+            stream.aec_reference_dropped(),
+            2,
+            "the samples past the queue's bound are counted through the stream"
+        );
+
+        let metrics = stream.aec_metrics().expect("the stream reports metrics");
+        assert_eq!(
+            metrics.reference_reanchors, 0,
+            "a stream that processed nothing has re-anchored nothing"
+        );
+
+        // A stream with echo cancellation off answers without a queue: the push is
+        // a no-op, the count is zero, and there are no metrics.
+        let (plain, _sender, _running) = test_stream_with(None, 1);
+        plain.push_aec_reference(&[0.1, 0.2]);
+        assert_eq!(plain.aec_reference_dropped(), 0);
+        assert!(plain.aec_metrics().is_none());
     }
 }

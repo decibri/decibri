@@ -24,6 +24,8 @@ from pathlib import Path
 
 import decibri
 from decibri import (
+    AecConfigInvalid,
+    AecSampleRateUnsupported,
     AgcTargetOutOfRange,
     AlreadyRunning,
     MicrophoneStreamClosed,
@@ -77,13 +79,13 @@ import pytest
 
 
 # ---------------------------------------------------------------------------
-# All 48 classes are reachable and inherit from Exception via DecibriError.
+# All 50 classes are reachable and inherit from Exception via DecibriError.
 # ---------------------------------------------------------------------------
 
 
 ALL_DECIBRI_ERROR_CLASSES = (
     DecibriError,
-    # 26 direct DecibriError subclasses (non-device, non-ORT). DeviceFailed
+    # 28 direct DecibriError subclasses (non-device, non-ORT). DeviceFailed
     # is a runtime device/driver failure (distinct from the DeviceError
     # enumeration/selection family); OnnxBackendFailed is the non-ORT ONNX
     # backend catch-all (distinct from the OrtError family); FileConsumed and
@@ -103,6 +105,8 @@ ALL_DECIBRI_ERROR_CLASSES = (
     StreamStartFailed,
     VadSampleRateUnsupported,
     VadThresholdOutOfRange,
+    AecSampleRateUnsupported,
+    AecConfigInvalid,
     ResampleConfigInvalid,
     ResampleAfterFlush,
     ResampleFailed,
@@ -141,11 +145,11 @@ ALL_DECIBRI_ERROR_CLASSES = (
 
 
 def test_class_count() -> None:
-    # 48 total: 1 base + 26 direct + DeviceError + 8 device + OrtError
-    # + 8 ORT direct + OrtPathError + 2 path. The additions over the prior 46
-    # are ResampleAfterFlush, the resample chain's fed-after-flush error, and
-    # ResampleFailed, the unrecognised-resampler-error fallback.
-    assert len(ALL_DECIBRI_ERROR_CLASSES) == 48
+    # 50 total: 1 base + 28 direct + DeviceError + 8 device + OrtError
+    # + 8 ORT direct + OrtPathError + 2 path. The additions over the prior 48
+    # are AecSampleRateUnsupported, the echo canceller's narrower rate window,
+    # and AecConfigInvalid, its configuration-rejection fallback.
+    assert len(ALL_DECIBRI_ERROR_CLASSES) == 50
 
 
 def test_all_inherit_from_decibri_error() -> None:
@@ -471,8 +475,8 @@ def _core_variant_names() -> list[str]:
     assert "PermissionDenied" in names, "known variant missing from the parsed table"
     # The count is pinned deliberately and must be updated when a core variant
     # is added or removed.
-    assert len(names) == 43, (
-        f"parsed {len(names)} variants from the core identity table, expected 43;"
+    assert len(names) == 45, (
+        f"parsed {len(names)} variants from the core identity table, expected 45;"
         " the count is pinned deliberately and must be updated when a core"
         " variant is added or removed"
     )
