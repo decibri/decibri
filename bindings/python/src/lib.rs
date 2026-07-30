@@ -786,7 +786,136 @@ impl MicrophoneBridge {
     fn binding_format(&self) -> BindingSampleFormat {
         self.format
     }
+
+    /// Raise `TypeError` when an ndarray's dtype does not match the configured
+    /// format. The same check `SpeakerBridge::require_format` applies to a
+    /// write, worded for the capture class.
+    fn require_format(
+        &self,
+        expected: BindingSampleFormat,
+        ndarray_dtype_name: &str,
+        ndarray_shape_name: &str,
+    ) -> PyResult<()> {
+        if self.format == expected {
+            Ok(())
+        } else {
+            let configured = match self.format {
+                BindingSampleFormat::Int16 => "int16",
+                BindingSampleFormat::Float32 => "float32",
+            };
+            Err(PyTypeError::new_err(format!(
+                "format='{configured}' configured but {ndarray_shape_name} ndarray \
+                 dtype is {ndarray_dtype_name}; convert with arr.astype(np.{configured}) \
+                 or construct Microphone with format='{ndarray_dtype_name}'"
+            )))
+        }
+    }
+
+    /// Queue converted far-end reference samples on the live stream, a no-op
+    /// with no active stream. GIL-free: callable from any thread, including a
+    /// Tokio worker.
+    fn push_aec_reference_f32(&self, samples: &[f32]) {
+        let stream = {
+            let guard = lock_recover(&self.active);
+            guard.as_ref().map(|active| Arc::clone(&active.stream))
+        };
+        if let Some(stream) = stream {
+            stream.push_aec_reference(samples);
+        }
+    }
+
+    /// Read the echo canceller's metrics plus the reference queue's counters
+    /// as one flat tuple, or `None` with no active stream or with echo
+    /// cancellation off. GIL-free, so the async bridge calls it from
+    /// `spawn_blocking` without attaching.
+    fn aec_metrics_raw(&self) -> Option<AecMetricsTuple> {
+        let stream = {
+            let guard = lock_recover(&self.active);
+            guard.as_ref().map(|active| Arc::clone(&active.stream))
+        }?;
+        let metrics = stream.aec_metrics()?;
+        Some((
+            metrics.delay_samples.map(|s| s as u64),
+            metrics.canceller.erle_db,
+            metrics.canceller.double_talk,
+            metrics.reference_starved,
+            metrics.acquisition_parked,
+            metrics.reference_reanchors,
+            stream.aec_reference_dropped(),
+            stream.aec_reference_silence(),
+        ))
+    }
+
+    /// Convert one pushed reference input into f32 samples, dispatching on the
+    /// input type exactly as `SpeakerBridge::write` does: bytes in the wire
+    /// format, then 1-D and 2-D ndarrays with dtype matching the configured
+    /// format. Validation runs regardless of capture state, so a bad input
+    /// raises the same `TypeError` whether or not the stream is live.
+    fn extract_aec_reference(
+        &self,
+        py: Python<'_>,
+        samples: &Bound<'_, PyAny>,
+    ) -> PyResult<Vec<f32>> {
+        if let Ok(byte_slice) = samples.extract::<&[u8]>() {
+            let owned: Vec<u8> = byte_slice.to_vec();
+            return Ok(match self.format {
+                BindingSampleFormat::Int16 => py.detach(|| i16_le_bytes_to_f32(&owned)),
+                BindingSampleFormat::Float32 => py.detach(|| f32_le_bytes_to_f32(&owned)),
+            });
+        }
+
+        if let Ok(arr) = samples.cast::<PyArray1<i16>>() {
+            self.require_format(BindingSampleFormat::Int16, "int16", "1-D")?;
+            let readonly = arr.readonly();
+            let slice = readonly
+                .as_slice()
+                .map_err(|e| PyValueError::new_err(format!("ndarray must be C-contiguous: {e}")))?;
+            let owned: Vec<i16> = slice.to_vec();
+            return Ok(py.detach(|| owned.iter().map(|&s| s as f32 / 32768.0).collect()));
+        }
+
+        if let Ok(arr) = samples.cast::<PyArray1<f32>>() {
+            self.require_format(BindingSampleFormat::Float32, "float32", "1-D")?;
+            let readonly = arr.readonly();
+            let slice = readonly
+                .as_slice()
+                .map_err(|e| PyValueError::new_err(format!("ndarray must be C-contiguous: {e}")))?;
+            return Ok(slice.to_vec());
+        }
+
+        if let Ok(arr) = samples.cast::<PyArray2<i16>>() {
+            self.require_format(BindingSampleFormat::Int16, "int16", "2-D")?;
+            let readonly = arr.readonly();
+            let slice = readonly.as_slice().map_err(|e| {
+                PyValueError::new_err(format!("2-D ndarray must be C-contiguous: {e}"))
+            })?;
+            let owned: Vec<i16> = slice.to_vec();
+            return Ok(py.detach(|| owned.iter().map(|&s| s as f32 / 32768.0).collect()));
+        }
+
+        if let Ok(arr) = samples.cast::<PyArray2<f32>>() {
+            self.require_format(BindingSampleFormat::Float32, "float32", "2-D")?;
+            let readonly = arr.readonly();
+            let slice = readonly.as_slice().map_err(|e| {
+                PyValueError::new_err(format!("2-D ndarray must be C-contiguous: {e}"))
+            })?;
+            return Ok(slice.to_vec());
+        }
+
+        Err(PyTypeError::new_err(
+            "samples must be bytes or numpy.ndarray with dtype matching the \
+             configured format (int16 or float32); the reference is mono",
+        ))
+    }
 }
+
+/// Owned bundle of the echo canceller's metrics plus the reference queue's
+/// counters, in the field order the Python wrapper's `AecMetrics` dataclass
+/// takes them: (delay_samples, erle_db, double_talk, reference_starved,
+/// acquisition_parked, reference_reanchors, reference_dropped,
+/// reference_silence). Every field is `Send + 'static`, so it crosses the
+/// `spawn_blocking` boundary.
+type AecMetricsTuple = (Option<u64>, f32, bool, u64, u64, u64, u64, u64);
 
 #[pymethods]
 impl MicrophoneBridge {
@@ -810,6 +939,10 @@ impl MicrophoneBridge {
         agc = None,
         limiter = None,
         dc_removal = false,
+        aec = None,
+        aec_tail_ms = None,
+        aec_suppression = None,
+        aec_reference_sample_rate = None,
     ))]
     #[allow(clippy::too_many_arguments)]
     fn new(
@@ -832,6 +965,10 @@ impl MicrophoneBridge {
         agc: Option<i8>,
         limiter: Option<f32>,
         dc_removal: bool,
+        aec: Option<String>,
+        aec_tail_ms: Option<u16>,
+        aec_suppression: Option<String>,
+        aec_reference_sample_rate: Option<u32>,
     ) -> PyResult<Self> {
         let parsed_format = parse_sample_format(&format).map_err(|e| to_py_err(py, e))?;
         let device_selector = build_device_selector(device.as_ref())?;
@@ -906,10 +1043,52 @@ impl MicrophoneBridge {
         // needed here.
         capture_config.limiter = limiter;
 
+        // Echo canceller. The model string parses through the canceller's own
+        // boundary (AecModel::from_str), so the accepted set lives in one place
+        // and an unknown name is raised as AecConfigInvalid carrying the
+        // canceller's own message; it is not a hardcoded list here the way
+        // denoise and highpass are. The tail check is this layer's eager
+        // backstop, using the message the canceller itself reports for the same
+        // range at start(); the suppression set is the canceller's two-value
+        // policy enum, checked like highpass. The reference rate and the
+        // capture-rate window (8000..=48000 with AEC on) are guarded by
+        // validate() below. The three tuning fields are consulted only when
+        // `aec` names a model, matching the core config's contract.
+        if let Some(name) = aec.as_deref() {
+            let model: decibri::AecModel = name
+                .parse()
+                .map_err(|e| to_py_err(py, CoreDecibriError::from(e)))?;
+            capture_config.aec = Some(model);
+            if let Some(tail) = aec_tail_ms {
+                if !(16..=500).contains(&tail) {
+                    return Err(raise_named(
+                        py,
+                        "AecConfigInvalid",
+                        "echo canceller configuration error: filter tail must \
+                         be between 16 and 500 milliseconds",
+                    ));
+                }
+                capture_config.aec_tail_ms = Some(tail);
+            }
+            if let Some(policy) = aec_suppression.as_deref() {
+                let suppression = match policy {
+                    "conservative" => decibri::Suppression::Conservative,
+                    "off" => decibri::Suppression::Off,
+                    other => {
+                        return Err(PyValueError::new_err(format!(
+                            "aec suppression must be 'conservative' or 'off'; got '{other}'"
+                        )))
+                    }
+                };
+                capture_config.aec_suppression = Some(suppression);
+            }
+            capture_config.aec_reference_sample_rate = aec_reference_sample_rate;
+        }
+
         // Value validation runs at construction: a bad sample rate, channel
-        // count, frame size, agc target or limiter ceiling is reported here,
-        // before any model is loaded or any device is touched. Microphone::new
-        // validates again at start().
+        // count, frame size, agc target, limiter ceiling, or echo-cancellation
+        // rate is reported here, before any model is loaded or any device is
+        // touched. Microphone::new validates again at start().
         capture_config.validate().map_err(|e| to_py_err(py, e))?;
 
         // VAD construction gate. The bridge constructs SileroVad only if
@@ -1069,6 +1248,33 @@ impl MicrophoneBridge {
             Some(active) => active.stream.overrun_count(),
             None => 0,
         }
+    }
+
+    /// Queue far-end reference audio for the echo canceller: mono samples at
+    /// the declared reference rate, in played order. Accepts the same input
+    /// shapes `SpeakerBridge::write` accepts (bytes in the wire format, or a
+    /// numpy ndarray with dtype matching the configured format).
+    ///
+    /// Never blocks and never fails on a full queue: samples that do not fit
+    /// are discarded and counted. A push with no active stream (not started,
+    /// stopped, or echo cancellation off) is a no-op; a bad input type raises
+    /// `TypeError` regardless of capture state.
+    fn push_aec_reference(&self, py: Python<'_>, samples: &Bound<'_, PyAny>) -> PyResult<()> {
+        let samples_f32 = self.extract_aec_reference(py, samples)?;
+        py.detach(|| self.push_aec_reference_f32(&samples_f32));
+        Ok(())
+    }
+
+    /// The echo canceller's transport and cancellation metrics plus the
+    /// reference queue's counters as one flat tuple (see `AecMetricsTuple`
+    /// for the field order), or `None` when no stream is active or echo
+    /// cancellation is off. The wrapper shapes the tuple into the public
+    /// `AecMetrics` dataclass.
+    fn aec_metrics(&self, py: Python<'_>) -> Option<AecMetricsTuple> {
+        // The read takes the capture chain's lock, which the chain holds for
+        // the duration of each block; detach so a concurrent read() is not
+        // stalled behind the GIL for that span.
+        py.detach(|| self.aec_metrics_raw())
     }
 
     #[staticmethod]
@@ -1431,6 +1637,10 @@ impl AsyncMicrophoneBridge {
         agc = None,
         limiter = None,
         dc_removal = false,
+        aec = None,
+        aec_tail_ms = None,
+        aec_suppression = None,
+        aec_reference_sample_rate = None,
     ))]
     #[allow(clippy::too_many_arguments)]
     fn new(
@@ -1453,6 +1663,10 @@ impl AsyncMicrophoneBridge {
         agc: Option<i8>,
         limiter: Option<f32>,
         dc_removal: bool,
+        aec: Option<String>,
+        aec_tail_ms: Option<u16>,
+        aec_suppression: Option<String>,
+        aec_reference_sample_rate: Option<u32>,
     ) -> PyResult<Self> {
         let inner = MicrophoneBridge::new(
             py,
@@ -1474,6 +1688,10 @@ impl AsyncMicrophoneBridge {
             agc,
             limiter,
             dc_removal,
+            aec,
+            aec_tail_ms,
+            aec_suppression,
+            aec_reference_sample_rate,
         )?;
         Ok(AsyncMicrophoneBridge {
             inner: Arc::new(inner),
@@ -1592,6 +1810,32 @@ impl AsyncMicrophoneBridge {
     fn vad_holdoff_ms<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
         let inner = Arc::clone(&self.inner);
         future_into_py(py, async move { Ok(inner.vad_holdoff_ms()) })
+    }
+
+    /// Queue far-end reference audio for the echo canceller. Deliberately a
+    /// plain method rather than a coroutine: the push never blocks (a bounded
+    /// queue behind a short critical section), so a renderer callback calls it
+    /// without awaiting, and the sync and async capture surfaces share one
+    /// contract. Accepts the same input shapes the sync bridge accepts.
+    fn push_aec_reference(&self, py: Python<'_>, samples: &Bound<'_, PyAny>) -> PyResult<()> {
+        let samples_f32 = self.inner.extract_aec_reference(py, samples)?;
+        py.detach(|| self.inner.push_aec_reference_f32(&samples_f32));
+        Ok(())
+    }
+
+    /// Awaitable echo-canceller metrics: the read serializes against block
+    /// processing on the capture chain's lock, so it runs on a blocking worker
+    /// like the other awaitable methods. Resolves to the same flat tuple the
+    /// sync bridge returns, or `None`.
+    fn aec_metrics<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        let inner = Arc::clone(&self.inner);
+        future_into_py(py, async move {
+            tokio::task::spawn_blocking(move || -> PyResult<Option<AecMetricsTuple>> {
+                Ok(inner.aec_metrics_raw())
+            })
+            .await
+            .map_err(|e| PyRuntimeError::new_err(format!("spawn_blocking failed: {e}")))?
+        })
     }
 
     #[staticmethod]

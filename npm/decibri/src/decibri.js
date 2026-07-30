@@ -342,6 +342,68 @@ class Microphone extends Readable {
       throw new RangeError('limiter ceiling must be between -3.0 and 0.0');
     }
 
+    // ── Validate AEC ─────────────────────────────────────────────────────────
+
+    // Echo cancellation: the 'tau' shorthand names the model, or an
+    // { model, tailMs, suppression, referenceSampleRate } object tunes it;
+    // absence leaves it off. The model name is deliberately NOT checked
+    // against a list here: the canceller owns the accepted set, so the native
+    // layer parses it (AecModel::from_str) and an unknown name is rejected by
+    // the native constructor with the canceller's own message (a DecibriError
+    // with code 'AEC_CONFIG_INVALID'). The three tuning fields are checked
+    // here with the same RangeError / TypeError classes the other
+    // conditioning options use; the native layer backstops the same checks.
+    // The capture-rate window (8000..=48000 with AEC on) is guarded by the
+    // core, surfacing as a RangeError from the native constructor.
+    const aec = options.aec;
+    let aecModel;
+    let aecTailMs;
+    let aecSuppression;
+    let aecReferenceSampleRate;
+    if (aec !== undefined) {
+      if (typeof aec === 'string') {
+        aecModel = aec;
+      } else if (aec !== null && typeof aec === 'object' && !Array.isArray(aec)) {
+        const { model, tailMs, suppression, referenceSampleRate } = aec;
+        if (typeof model !== 'string') {
+          throw new TypeError(
+            `Invalid aec model: ${JSON.stringify(model)}. Expected a model name string such as 'tau'.`
+          );
+        }
+        aecModel = model;
+        if (tailMs !== undefined) {
+          if (typeof tailMs !== 'number' || Number.isNaN(tailMs)) {
+            throw new TypeError('aec tailMs must be a number');
+          }
+          if (tailMs < 16 || tailMs > 500) {
+            throw new RangeError('aec tailMs must be between 16 and 500');
+          }
+          aecTailMs = tailMs;
+        }
+        if (suppression !== undefined) {
+          if (suppression !== 'conservative' && suppression !== 'off') {
+            throw new TypeError(
+              `aec suppression must be 'conservative' or 'off'; got ${JSON.stringify(suppression)}`
+            );
+          }
+          aecSuppression = suppression;
+        }
+        if (referenceSampleRate !== undefined) {
+          if (typeof referenceSampleRate !== 'number' || Number.isNaN(referenceSampleRate)) {
+            throw new TypeError('aec referenceSampleRate must be a number');
+          }
+          if (referenceSampleRate < 1000 || referenceSampleRate > 384000) {
+            throw new RangeError('aec referenceSampleRate must be between 1000 and 384000');
+          }
+          aecReferenceSampleRate = referenceSampleRate;
+        }
+      } else {
+        throw new TypeError(
+          `Invalid aec value: ${JSON.stringify(aec)}. Expected a model name such as 'tau', or a config object { model, tailMs, suppression, referenceSampleRate }.`
+        );
+      }
+    }
+
     // Internal plumbing: inject the bundled ORT dylib path into the napi
     // constructor whenever an ONNX stage loads (Silero VAD or denoise). If
     // resolution fails (unknown platform, platform package not installed), this
@@ -377,6 +439,10 @@ class Microphone extends Readable {
         highpass,
         agc,
         limiter,
+        aec: aecModel,
+        aecTailMs,
+        aecSuppression,
+        aecReferenceSampleRate,
       },
     };
   }
@@ -533,6 +599,67 @@ class Microphone extends Readable {
    */
   get overrunCount() {
     return this._native.overrunCount;
+  }
+
+  /**
+   * Queue far-end reference audio for the echo canceller: the audio being
+   * played out, pushed as it is played, in played order. Accepts the same
+   * input shapes `Speaker.write` accepts (a `Buffer`, any TypedArray, or a
+   * `DataView` of PCM bytes in this microphone's `dtype`), mono, at the
+   * declared `referenceSampleRate` (the capture rate when unset).
+   *
+   * Never blocks and never throws on a full queue: samples that do not fit
+   * are discarded and counted by `aecMetrics().referenceDropped`, and the
+   * span they occupied is represented as silence. Silence between played
+   * audio need not be pushed; a caller that stops pushing has said nothing is
+   * playing. A push while capture is not running, or with the `aec` option
+   * unset, is a no-op.
+   *
+   * @param {Buffer | NodeJS.ArrayBufferView} data PCM samples in the
+   *   configured `dtype`.
+   */
+  pushAecReference(data) {
+    let buf;
+    if (Buffer.isBuffer(data)) {
+      buf = data;
+    } else if (ArrayBuffer.isView(data)) {
+      // Any TypedArray or DataView: view the same bytes, no copy, exactly as
+      // the stream machinery normalizes a typed-array write to a Speaker.
+      buf = Buffer.from(data.buffer, data.byteOffset, data.byteLength);
+    } else {
+      throw new TypeError(
+        'pushAecReference requires a Buffer, TypedArray, or DataView of PCM samples in the configured dtype'
+      );
+    }
+    this._native.pushAecReference(buf);
+  }
+
+  /**
+   * The echo canceller's transport and cancellation metrics, merged with the
+   * reference queue's counters, or `null` when the `aec` option is unset or
+   * capture is not running.
+   *
+   * `delaySamples` staying `null` while `acquisitionParked` climbs is the
+   * signature of a canceller with no usable reference: none pushed, not at
+   * the declared rate, or not the signal that produced the echo. A climbing
+   * `referenceDropped` means single pushes are exceeding the reference
+   * queue's bound.
+   *
+   * @returns {import('./decibri').AecMetrics | null}
+   */
+  aecMetrics() {
+    const m = this._native.aecMetrics();
+    if (m === null || m === undefined) return null;
+    return {
+      delaySamples: m.delaySamples ?? null,
+      erleDb: m.erleDb,
+      doubleTalk: m.doubleTalk,
+      referenceStarved: m.referenceStarved,
+      acquisitionParked: m.acquisitionParked,
+      referenceReanchors: m.referenceReanchors,
+      referenceDropped: m.referenceDropped,
+      referenceSilence: m.referenceSilence,
+    };
   }
 
   /**

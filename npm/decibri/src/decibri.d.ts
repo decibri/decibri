@@ -61,6 +61,108 @@ export interface VadOptions {
   holdoffMs?: number;
 }
 
+/**
+ * Acoustic echo cancellation config object, passed on the `aec` option to tune
+ * the canceller. The bare `aec: 'tau'` shorthand selects the model with its
+ * defaults; pass this object to override them.
+ *
+ * The canceller's behaviour while a lost delay alignment is being reacquired
+ * is fixed: decibri applies the canceller's graded output transition and does
+ * not expose a setting for it.
+ */
+export interface AecOptions {
+  /**
+   * Which echo canceller model to run. The accepted set is owned by the
+   * canceller and grows the way `denoise` grows; today it is `'tau'`, a
+   * classical adaptive canceller with no model file. An unknown name is
+   * rejected with the canceller's own message naming the accepted set.
+   */
+  model: 'tau';
+
+  /**
+   * Adaptive filter tail length in milliseconds: how much echo delay spread
+   * the canceller can model.
+   * @default the canceller's own default (200)
+   * @range 16 to 500
+   */
+  tailMs?: number;
+
+  /**
+   * Residual echo suppression policy. `'conservative'` attenuates the residual
+   * echo the linear canceller leaves behind while keeping the near-end voice
+   * intact; `'off'` delivers the linear canceller output as-is.
+   * @default 'conservative'
+   */
+  suppression?: 'conservative' | 'off';
+
+  /**
+   * Sample rate in Hz of the far-end reference pushed through
+   * `pushAecReference`. When it names a rate other than `sampleRate`, decibri
+   * converts the reference before the canceller sees it: a reference at an
+   * undeclared different rate cancels nothing and reports no error, so the
+   * conversion is decibri's rather than the caller's.
+   * @default the capture `sampleRate`
+   * @range 1000 to 384000
+   */
+  referenceSampleRate?: number;
+}
+
+/**
+ * The echo canceller's transport and cancellation metrics, returned by
+ * `Microphone.aecMetrics()`. One object carries the canceller's own report and
+ * the reference queue's counters.
+ */
+export interface AecMetrics {
+  /**
+   * The active delay alignment in samples, or `null` while the estimator is
+   * still searching. Staying `null` while `acquisitionParked` climbs is the
+   * signature of a canceller with no usable reference: none pushed, not at the
+   * declared rate, or not the signal that produced the echo.
+   */
+  delaySamples: number | null;
+  /**
+   * Smoothed echo-return-loss-enhancement estimate in dB: how much echo the
+   * canceller is currently removing. 0 before the filter has converged.
+   */
+  erleDb: number;
+  /**
+   * Whether the double-talk detector currently believes the near-end talker is
+   * active; adaptation is held while true.
+   */
+  doubleTalk: boolean;
+  /**
+   * Near-end samples the canceller could find no far-end sample for while an
+   * alignment was active. decibri keeps the far-end stream level with the
+   * capture, so this stays 0 for a caller who simply stops pushing; a non-zero
+   * count means the caller ran further ahead of the capture than the
+   * canceller's far-end history reaches.
+   */
+  referenceStarved: number;
+  /**
+   * Near-end samples processed while no delay alignment was active: the
+   * searching span, not a transport failure.
+   */
+  acquisitionParked: number;
+  /**
+   * Times the canceller inferred a capture discontinuity and rebuilt its
+   * alignment from the reference frontier.
+   */
+  referenceReanchors: number;
+  /**
+   * Far-end samples discarded because a single push exceeded the reference
+   * queue's bound, at the declared reference rate. The span they occupied is
+   * still represented as silence, so a discard costs the cancellation of that
+   * span alone.
+   */
+  referenceDropped: number;
+  /**
+   * Far-end samples decibri supplied as silence because the caller had pushed
+   * none for them, at the capture rate. An accounting figure, not a fault:
+   * while nothing is playing, the far end is silence.
+   */
+  referenceSilence: number;
+}
+
 /** Constructor options for `Microphone`. */
 export interface MicrophoneOptions extends ReadableOptions {
   /**
@@ -186,6 +288,26 @@ export interface MicrophoneOptions extends ReadableOptions {
    * @default undefined
    */
   limiter?: number;
+
+  /**
+   * Acoustic echo cancellation applied to the captured audio, removing the
+   * echo of far-end audio the caller pushes through `pushAecReference`. The
+   * `'tau'` shorthand names the model; an `AecOptions` object tunes it. Omit
+   * to leave echo cancellation off (the default), which keeps the capture
+   * path unchanged.
+   *
+   * Runs before the detector tap: with it on, `vadScore` and the `speech` /
+   * `silence` events read the echo-removed signal, so playback stops
+   * triggering detection. Requires `sampleRate` in 8000 to 48000, narrower
+   * than the range the option otherwise accepts. With no reference pushed,
+   * the captured audio passes through unchanged.
+   *
+   * Native capture only: the browser entry does not take this option, because
+   * browser capture already carries the platform's own echo cancellation
+   * through its `echoCancellation` constraint, on by default.
+   * @default undefined
+   */
+  aec?: 'tau' | AecOptions;
 }
 
 /**
@@ -244,6 +366,27 @@ export declare class Microphone extends Readable {
    * means audio is being dropped to bound memory.
    */
   readonly overrunCount: number;
+
+  /**
+   * Queue far-end reference audio for the echo canceller: the audio being
+   * played out, pushed as it is played, in played order. Accepts the same
+   * input shapes `Speaker.write` accepts (a `Buffer`, any TypedArray, or a
+   * `DataView` of PCM bytes in this microphone's `dtype`), mono, at the
+   * declared `referenceSampleRate` (the capture rate when unset).
+   *
+   * Never blocks and never throws on a full queue: samples that do not fit
+   * are discarded and counted by `aecMetrics().referenceDropped`. Silence
+   * between played audio need not be pushed. A push while capture is not
+   * running, or with the `aec` option unset, is a no-op.
+   */
+  pushAecReference(data: Buffer | NodeJS.ArrayBufferView): void;
+
+  /**
+   * The echo canceller's transport and cancellation metrics, merged with the
+   * reference queue's counters, or `null` when the `aec` option is unset or
+   * capture is not running.
+   */
+  aecMetrics(): AecMetrics | null;
 
   /** List all available audio input devices. */
   static devices(): MicrophoneInfo[];

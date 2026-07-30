@@ -9,6 +9,8 @@ constructors (``decibri.Microphone(...)`` / ``decibri.Speaker(...)``).
 
 from decibri._async_classes import AsyncFile, AsyncMicrophone, AsyncSpeaker
 from decibri._classes import (
+    Aec,
+    AecMetrics,
     Chunk,
     File,
     Microphone,
@@ -244,6 +246,9 @@ __all__ = [
     "Chunk",
     # Voice-activity-detection config object
     "Vad",
+    # Echo-cancellation config object and metrics report
+    "Aec",
+    "AecMetrics",
     # Whole-recording analysis report types
     "VadReport",
     "VadWindow",

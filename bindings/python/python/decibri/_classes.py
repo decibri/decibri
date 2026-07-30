@@ -62,6 +62,8 @@ from decibri._decibri import MicrophoneInfo, SpeakerInfo, VersionInfo
 __all__ = [
     "Chunk",
     "Vad",
+    "Aec",
+    "AecMetrics",
     "Microphone",
     "Speaker",
     "File",
@@ -172,6 +174,148 @@ class Vad:
 
 
 # ---------------------------------------------------------------------------
+# Aec: named echo-cancellation config object.
+#
+# Bundles the echo canceller model selector with its tuning fields, the
+# named-config-object shape a multi-parameter capability uses, beside ``Vad``.
+# Pass it as ``Microphone(aec=Aec(model="tau", tail_ms=200))``; the bare
+# ``Microphone(aec="tau")`` shorthand keeps the canceller's defaults. Unlike
+# ``Vad``, the model set is NOT validated here: the canceller owns that set,
+# so the bridge parses the name (AecModel::from_str) when the capture object
+# is constructed and an unknown name raises ``AecConfigInvalid`` naming the
+# accepted set.
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True, slots=True)
+class Aec:
+    """Acoustic echo cancellation configuration.
+
+    Pass an instance on the ``aec`` parameter of ``Microphone`` /
+    ``AsyncMicrophone`` to tune the canceller. The bare ``aec="tau"``
+    shorthand selects the model with its defaults; an ``Aec`` object is the
+    way to override them.
+
+    The canceller's behaviour while a lost delay alignment is being
+    reacquired is fixed: decibri applies the canceller's graded output
+    transition and does not expose a setting for it.
+
+    Attributes:
+        model: Which echo canceller to run. Today the set is ``"tau"``, a
+            classical adaptive canceller with no model file. The accepted
+            set is owned by the canceller and checked when the capture
+            object is constructed, so a future model is an additive choice;
+            an unknown name raises ``AecConfigInvalid`` naming the accepted
+            set.
+        tail_ms: Adaptive filter tail length in milliseconds: how much echo
+            delay spread the canceller can model. Range 16 to 500. ``None``
+            (the default) takes the canceller's own default (200).
+        suppression: Residual echo suppression policy. ``"conservative"``
+            attenuates the residual echo the linear canceller leaves behind
+            while keeping the near-end voice intact; ``"off"`` delivers the
+            linear canceller output as-is. ``None`` (the default) takes the
+            canceller's own default (``"conservative"``).
+        reference_sample_rate: Sample rate in Hz of the far-end reference
+            pushed through ``push_aec_reference``. When it names a rate
+            other than the capture ``sample_rate``, decibri converts the
+            reference before the canceller sees it: a reference at an
+            undeclared different rate cancels nothing and reports no error,
+            so the conversion is decibri's rather than the caller's. Range
+            1000 to 384000. ``None`` (the default) means the reference is
+            already at the capture rate.
+
+    Example:
+        Microphone(aec=Aec(model="tau", tail_ms=200, reference_sample_rate=24000))
+    """
+
+    model: str = "tau"
+    tail_ms: int | None = None
+    suppression: str | None = None
+    reference_sample_rate: int | None = None
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.model, str):
+            raise ValueError(
+                f"Invalid aec model: {self.model!r}. "
+                "Expected a model name such as 'tau'."
+            )
+        if self.tail_ms is not None and not 16 <= self.tail_ms <= 500:
+            raise exceptions.AecConfigInvalid(
+                f"tail_ms must be in [16, 500]; got {self.tail_ms}"
+            )
+        if (
+            self.suppression is not None
+            and self.suppression not in _VALID_AEC_SUPPRESSION
+        ):
+            raise ValueError(
+                f"Invalid aec suppression: {self.suppression!r}. "
+                "Expected 'conservative' or 'off'."
+            )
+        if self.reference_sample_rate is not None and not (
+            1000 <= self.reference_sample_rate <= 384000
+        ):
+            raise exceptions.SampleRateOutOfRange(
+                f"reference_sample_rate must be in [1000, 384000]; "
+                f"got {self.reference_sample_rate}"
+            )
+
+
+@dataclass(frozen=True, slots=True)
+class AecMetrics:
+    """The echo canceller's transport and cancellation metrics.
+
+    Returned by ``Microphone.aec_metrics()`` /
+    ``AsyncMicrophone.aec_metrics()``. One object carries the canceller's own
+    report and the reference queue's counters, so a caller reads one surface
+    for the whole diagnosis.
+
+    ``delay_samples`` staying ``None`` while ``acquisition_parked`` climbs is
+    the signature of a canceller with no usable reference: none pushed, not
+    at the declared rate, or not the signal that produced the echo. A
+    climbing ``reference_dropped`` means single pushes are exceeding the
+    reference queue's bound.
+
+    Attributes:
+        delay_samples: The active delay alignment in samples, or ``None``
+            while the estimator is still searching.
+        erle_db: Smoothed echo-return-loss-enhancement estimate in dB: how
+            much echo the canceller is currently removing. 0 before the
+            filter has converged.
+        double_talk: Whether the double-talk detector currently believes the
+            near-end talker is active; adaptation is held while ``True``.
+        reference_starved: Near-end samples the canceller could find no
+            far-end sample for while an alignment was active. decibri keeps
+            the far-end stream level with the capture, so this stays 0 for a
+            caller who simply stops pushing; a non-zero count means the
+            caller ran further ahead of the capture than the canceller's
+            far-end history reaches.
+        acquisition_parked: Near-end samples processed while no delay
+            alignment was active: the searching span, not a transport
+            failure.
+        reference_reanchors: Times the canceller inferred a capture
+            discontinuity and rebuilt its alignment from the reference
+            frontier.
+        reference_dropped: Far-end samples discarded because a single push
+            exceeded the reference queue's bound, at the declared reference
+            rate. The span they occupied is still represented as silence, so
+            a discard costs the cancellation of that span alone.
+        reference_silence: Far-end samples decibri supplied as silence
+            because the caller had pushed none for them, at the capture
+            rate. An accounting figure, not a fault: while nothing is
+            playing, the far end is silence.
+    """
+
+    delay_samples: int | None
+    erle_db: float
+    double_talk: bool
+    reference_starved: int
+    acquisition_parked: int
+    reference_reanchors: int
+    reference_dropped: int
+    reference_silence: int
+
+
+# ---------------------------------------------------------------------------
 # VAD policy state machine.
 #
 # Encapsulates the threshold + holdoff logic that the Rust bridge does NOT do.
@@ -269,6 +413,10 @@ _VALID_MODES = frozenset({"silero", "energy"})
 _VALID_FORMATS = frozenset({"int16", "float32"})
 _VALID_DENOISE_MODELS = frozenset({"fastenhancer-t"})
 _VALID_HIGHPASS = frozenset({80, 100})
+# The canceller's residual-suppression policies. A closed two-value set the
+# bindings map to the canceller's enum; the MODEL set, by contrast, is owned by
+# the canceller and never copied here.
+_VALID_AEC_SUPPRESSION = frozenset({"conservative", "off"})
 
 # Packaged locations of the bundled models, reported as the ``path`` attribute
 # when the resource cannot be resolved and there is no filesystem path to name.
@@ -341,6 +489,16 @@ class Microphone:
     in the chain, after the AGC step; omit it (the default ``None``) to leave the
     level untouched.
 
+    The ``aec`` parameter enables acoustic echo cancellation on the captured
+    audio, removing the echo of far-end audio pushed through
+    ``push_aec_reference``; pass ``"tau"`` or an ``Aec`` config object. It
+    runs before the detector tap, so with it on, ``vad_score`` and
+    ``is_speaking`` read the echo-removed signal and playback stops
+    triggering detection. Requires ``sample_rate`` in 8000 to 48000, narrower
+    than the range the parameter otherwise accepts. With no reference pushed,
+    the captured audio passes through unchanged; omit it (the default
+    ``None``) to leave echo cancellation off.
+
     This class is synchronous. For async iteration, use ``AsyncMicrophone``.
 
     Cleanup and disconnect:
@@ -383,6 +541,7 @@ class Microphone:
         agc: int | None = None,
         limiter: float | None = None,
         dc_removal: bool = False,
+        aec: str | Aec | None = None,
     ) -> None:
         """Construct a Microphone audio capture instance.
 
@@ -600,6 +759,38 @@ class Microphone:
                 f"limiter must be in [-3.0, 0.0]; got {limiter}"
             )
 
+        # Decompose ``aec`` into the bridge's flat fields. ``aec`` accepts None
+        # (off; default), a model-name shorthand such as "tau", or an Aec
+        # config object (which self-validates its tuning fields at
+        # construction). The model NAME is deliberately not checked against a
+        # list here: the canceller owns that set, so the bridge parses it
+        # (AecModel::from_str) below and an unknown name raises
+        # AecConfigInvalid carrying the canceller's own message.
+        aec_model: str | None
+        aec_tail_ms: int | None
+        aec_suppression: str | None
+        aec_reference_sample_rate: int | None
+        if aec is None:
+            aec_model = None
+            aec_tail_ms = None
+            aec_suppression = None
+            aec_reference_sample_rate = None
+        elif isinstance(aec, Aec):
+            aec_model = aec.model
+            aec_tail_ms = aec.tail_ms
+            aec_suppression = aec.suppression
+            aec_reference_sample_rate = aec.reference_sample_rate
+        elif isinstance(aec, str):
+            aec_model = aec
+            aec_tail_ms = None
+            aec_suppression = None
+            aec_reference_sample_rate = None
+        else:
+            raise ValueError(
+                f"Invalid aec value: {aec!r}. "
+                "Expected None, a model name such as 'tau', or an Aec config object."
+            )
+
         # Resolve the ORT dylib path via the four-arm priority order in
         # _ort_resolver. Consulted when an ONNX stage loads (Silero VAD or
         # denoise); energy mode and vad=False with no denoise never load ORT, so
@@ -640,6 +831,10 @@ class Microphone:
             agc=agc,
             limiter=limiter,
             dc_removal=dc_removal,
+            aec=aec_model,
+            aec_tail_ms=aec_tail_ms,
+            aec_suppression=aec_suppression,
+            aec_reference_sample_rate=aec_reference_sample_rate,
         )
 
         self._vad_enabled = vad_enabled
@@ -875,6 +1070,50 @@ class Microphone:
         value means audio is being dropped to bound memory.
         """
         return self._bridge.overrun_count
+
+    # -----------------------------------------------------------------------
+    # Echo cancellation surface
+    # -----------------------------------------------------------------------
+
+    def push_aec_reference(self, samples: SampleData) -> None:
+        """Queue far-end reference audio for the echo canceller.
+
+        ``samples`` is the audio being played out, pushed as it is played, in
+        played order: mono, at the declared ``reference_sample_rate`` (the
+        capture ``sample_rate`` when unset), as ``bytes`` or a
+        ``numpy.ndarray``, the same input shapes ``Speaker.write`` accepts,
+        with dtype matching this microphone's ``dtype``.
+
+        Never blocks and never raises on a full queue: samples that do not
+        fit are discarded and counted by ``aec_metrics().reference_dropped``,
+        and the span they occupied is represented as silence. Silence between
+        played audio need not be pushed; a caller that stops pushing has said
+        nothing is playing. A push while capture is not running, or with the
+        ``aec`` parameter unset, is a no-op. A bad input type raises
+        ``TypeError`` regardless of capture state.
+        """
+        self._bridge.push_aec_reference(samples)
+
+    def aec_metrics(self) -> AecMetrics | None:
+        """The echo canceller's metrics, or ``None`` when the ``aec``
+        parameter is unset or capture is not running.
+
+        See ``AecMetrics`` for the fields and the diagnostic signatures they
+        carry.
+        """
+        raw = self._bridge.aec_metrics()
+        if raw is None:
+            return None
+        return AecMetrics(
+            delay_samples=raw[0],
+            erle_db=raw[1],
+            double_talk=raw[2],
+            reference_starved=raw[3],
+            acquisition_parked=raw[4],
+            reference_reanchors=raw[5],
+            reference_dropped=raw[6],
+            reference_silence=raw[7],
+        )
 
     # -----------------------------------------------------------------------
     # Static methods

@@ -981,6 +981,250 @@ try {
 console.log('  Group 8e done\n');
 
 // ═══════════════════════════════════════════════════════════════════════════════
+// Group 8f: AEC option (deterministic, no hardware required)
+// ═══════════════════════════════════════════════════════════════════════════════
+//
+// The echo canceller is pure DSP (no bundled file, no ONNX, no ORT), so the
+// option validation, the reference-push input contract, and the metrics-off
+// path are fully CI-safe. The canceller is built at start() like the other
+// stages; its cancellation behaviour is covered by the core Rust tests. The
+// model set is owned by the canceller (AecModel::from_str in the native
+// layer), so the unknown-model cases assert the canceller's own message text:
+// a wrapper-side copy of the list would break them the day the set grows.
+
+console.log('--- Group 8f: AEC option ---');
+
+// The short form names the model and constructs; the canceller is built at
+// start(). Catches the option failing to reach the native config.
+try {
+  const m = new Microphone({ sampleRate: 16000, channels: 1, aec: 'tau' });
+  assert(m instanceof Microphone, "aec: 'tau' constructs");
+  m.stop();
+} catch (e) {
+  console.log(`  FAIL: aec 'tau' construction rejected: ${e.message}`);
+  failed++;
+}
+
+// The object form constructs with every field at a boundary value, both ends.
+// Catches an off-by-one in any of the three range checks, and a suppression
+// value dropped on the way to the native config.
+try {
+  const low = new Microphone({
+    sampleRate: 16000,
+    channels: 1,
+    aec: { model: 'tau', tailMs: 16, suppression: 'off', referenceSampleRate: 1000 },
+  });
+  assert(low instanceof Microphone, 'aec object form constructs at the low boundaries');
+  low.stop();
+  const high = new Microphone({
+    sampleRate: 16000,
+    channels: 1,
+    aec: { model: 'tau', tailMs: 500, suppression: 'conservative', referenceSampleRate: 384000 },
+  });
+  assert(high instanceof Microphone, 'aec object form constructs at the high boundaries');
+  high.stop();
+} catch (e) {
+  console.log(`  FAIL: aec object-form construction rejected: ${e.message}`);
+  failed++;
+}
+
+// An unknown model is rejected by the canceller's own parse, so the error
+// carries the canceller's message naming the accepted set, wrapped as a
+// DecibriError with the AEC_CONFIG_INVALID code. Catches the model list being
+// copied into the wrapper and drifting from the canceller's.
+try {
+  const m = new Microphone({ aec: 'tao' });
+  m.stop();
+  console.log('  FAIL: unknown aec model accepted');
+  failed++;
+} catch (e) {
+  assert(e instanceof DecibriError, 'unknown aec model is a DecibriError');
+  assert(
+    e.code === 'AEC_CONFIG_INVALID',
+    `unknown aec model code is AEC_CONFIG_INVALID (got ${e.code})`
+  );
+  assert(
+    e.message.includes("model must be one of: 'tau'; got 'tao'"),
+    'unknown aec model message carries the canceller text'
+  );
+}
+
+// The same delegation holds through the object form.
+assertThrows(
+  () => new Microphone({ aec: { model: 'speex' } }),
+  DecibriError,
+  "model must be one of: 'tau'; got 'speex'"
+);
+
+// tailMs outside 16..500 is a RangeError, below and above (the boundary
+// values were accepted above); a non-number is a TypeError. Catches the range
+// check missing from the wrapper.
+assertThrows(
+  () => new Microphone({ aec: { model: 'tau', tailMs: 15 } }),
+  RangeError,
+  'aec tailMs must be between 16 and 500'
+);
+assertThrows(
+  () => new Microphone({ aec: { model: 'tau', tailMs: 501 } }),
+  RangeError,
+  'aec tailMs must be between 16 and 500'
+);
+assertThrows(
+  () => new Microphone({ aec: { model: 'tau', tailMs: 'long' } }),
+  TypeError,
+  'aec tailMs must be a number'
+);
+
+// suppression outside the two-policy set is a TypeError naming the set.
+assertThrows(
+  () => new Microphone({ aec: { model: 'tau', suppression: 'aggressive' } }),
+  TypeError,
+  "aec suppression must be 'conservative' or 'off'"
+);
+
+// referenceSampleRate outside 1000..384000 is a RangeError, below and above;
+// a non-number is a TypeError.
+assertThrows(
+  () => new Microphone({ aec: { model: 'tau', referenceSampleRate: 999 } }),
+  RangeError,
+  'aec referenceSampleRate must be between 1000 and 384000'
+);
+assertThrows(
+  () => new Microphone({ aec: { model: 'tau', referenceSampleRate: 384001 } }),
+  RangeError,
+  'aec referenceSampleRate must be between 1000 and 384000'
+);
+assertThrows(
+  () => new Microphone({ aec: { model: 'tau', referenceSampleRate: 'high' } }),
+  TypeError,
+  'aec referenceSampleRate must be a number'
+);
+
+// A non-string model in the object form, and a non-option aec value, are
+// TypeErrors from the wrapper before any native work.
+assertThrows(() => new Microphone({ aec: { model: 42 } }), TypeError, 'Invalid aec model');
+assertThrows(() => new Microphone({ aec: true }), TypeError, 'Invalid aec value');
+assertThrows(() => new Microphone({ aec: ['tau'] }), TypeError, 'Invalid aec value');
+
+// AEC narrows the accepted capture rate to the canceller's own window: a rate
+// fine without AEC is rejected with it on, from the core through the native
+// constructor, and the window's boundary rates construct. Catches the window
+// check disappearing from the construction path.
+assertThrows(
+  () => new Microphone({ sampleRate: 96000, aec: 'tau' }),
+  RangeError,
+  'echo cancellation only supports sample rates 8000 to 48000'
+);
+try {
+  const plain = new Microphone({ sampleRate: 96000, channels: 1 });
+  assert(plain instanceof Microphone, 'sampleRate 96000 still constructs without aec');
+  plain.stop();
+  const lo = new Microphone({ sampleRate: 8000, channels: 1, aec: 'tau' });
+  assert(lo instanceof Microphone, 'aec constructs at the 8000 window boundary');
+  lo.stop();
+  const hi = new Microphone({ sampleRate: 48000, channels: 1, aec: 'tau' });
+  assert(hi instanceof Microphone, 'aec constructs at the 48000 window boundary');
+  hi.stop();
+} catch (e) {
+  console.log(`  FAIL: aec rate-window boundary construction rejected: ${e.message}`);
+  failed++;
+}
+
+// The reference push accepts every input shape Speaker.write accepts (Buffer,
+// any TypedArray, DataView) and never throws while capture is not running:
+// before start() and after stop() a valid push is a no-op, not an error.
+// Catches the push becoming stateful and the input normalization narrowing.
+try {
+  const m = new Microphone({ sampleRate: 16000, channels: 1, aec: 'tau' });
+  assert(
+    m.pushAecReference(Buffer.alloc(640)) === undefined,
+    'pushAecReference accepts a Buffer before start()'
+  );
+  assert(
+    m.pushAecReference(new Uint8Array(640)) === undefined,
+    'pushAecReference accepts a Uint8Array'
+  );
+  assert(
+    m.pushAecReference(new Int16Array(320)) === undefined,
+    'pushAecReference accepts an Int16Array'
+  );
+  assert(
+    m.pushAecReference(new DataView(new ArrayBuffer(640))) === undefined,
+    'pushAecReference accepts a DataView'
+  );
+  assert(
+    m.pushAecReference(Buffer.alloc(0)) === undefined,
+    'pushAecReference accepts an empty Buffer'
+  );
+  m.stop();
+  assert(
+    m.pushAecReference(Buffer.alloc(640)) === undefined,
+    'pushAecReference after stop() is a no-op, not an error'
+  );
+} catch (e) {
+  console.log(`  FAIL: pushAecReference rejected a Speaker.write input shape: ${e.message}`);
+  failed++;
+}
+
+// A float32 microphone takes the same shapes, the bytes read per its dtype.
+try {
+  const m = new Microphone({ sampleRate: 16000, channels: 1, dtype: 'float32', aec: 'tau' });
+  assert(
+    m.pushAecReference(new Float32Array(320)) === undefined,
+    'pushAecReference accepts a Float32Array on a float32 microphone'
+  );
+  m.stop();
+} catch (e) {
+  console.log(`  FAIL: float32 pushAecReference rejected: ${e.message}`);
+  failed++;
+}
+
+// A non-buffer input is a TypeError whatever the capture state, so a wrong
+// call site fails loud instead of silently pushing nothing.
+{
+  const m = new Microphone({ sampleRate: 16000, channels: 1, aec: 'tau' });
+  assertThrows(
+    () => m.pushAecReference('not audio'),
+    TypeError,
+    'pushAecReference requires a Buffer'
+  );
+  assertThrows(
+    () => m.pushAecReference([0, 0, 0]),
+    TypeError,
+    'pushAecReference requires a Buffer'
+  );
+  m.stop();
+}
+
+// AEC absent by default: no aec key enables no stage, so the metrics read
+// null and a push is a no-op. Catches the option becoming implicitly on.
+try {
+  const m = new Microphone({ sampleRate: 16000, channels: 1 });
+  assert(m.aecMetrics() === null, 'no aec key reads null metrics (off by default)');
+  assert(
+    m.pushAecReference(Buffer.alloc(64)) === undefined,
+    'push on a microphone without aec is a no-op'
+  );
+  m.stop();
+} catch (e) {
+  console.log(`  FAIL: aec off-by-default path rejected: ${e.message}`);
+  failed++;
+}
+
+// With aec set but capture not running, the metrics read null rather than a
+// zeroed report, so a caller cannot mistake a dead stream for a quiet one.
+try {
+  const m = new Microphone({ sampleRate: 16000, channels: 1, aec: 'tau' });
+  assert(m.aecMetrics() === null, 'aec metrics read null before start()');
+  m.stop();
+} catch (e) {
+  console.log(`  FAIL: pre-start aec metrics rejected: ${e.message}`);
+  failed++;
+}
+
+console.log('  Group 8f done\n');
+
+// ═══════════════════════════════════════════════════════════════════════════════
 // Group 9: async open() factories (deterministic, no hardware required)
 // ═══════════════════════════════════════════════════════════════════════════════
 //
@@ -1034,6 +1278,33 @@ async function asyncOpenTests() {
     () => Microphone.open({ vad: 'silero', modelPath: '/nonexistent/model.onnx' }),
     Error,
     'Silero VAD model not found'
+  );
+
+  // The aec option validates identically through the async factory: the
+  // wrapper's checks and the canceller's own model parse reject the same
+  // inputs with the same classes and messages the synchronous constructor
+  // raises in Group 8f, and a valid option resolves. Catches the async path
+  // skipping the shared validation.
+  {
+    const m = await Microphone.open({ sampleRate: 16000, channels: 1, aec: 'tau' });
+    assert(m instanceof Microphone, "Microphone.open() resolves with aec: 'tau'");
+    assert(m.aecMetrics() === null, 'async-opened microphone reads null aec metrics before start()');
+    m.stop();
+  }
+  await assertRejects(
+    () => Microphone.open({ aec: { model: 'tau', tailMs: 15 } }),
+    RangeError,
+    'aec tailMs must be between 16 and 500'
+  );
+  await assertRejects(
+    () => Microphone.open({ aec: { model: 'tau', suppression: 'max' } }),
+    TypeError,
+    "aec suppression must be 'conservative' or 'off'"
+  );
+  await assertRejects(
+    () => Microphone.open({ aec: 'tao' }),
+    DecibriError,
+    "model must be one of: 'tau'; got 'tao'"
   );
 
   // A native open failure (unknown device name) rejects with a DeviceError that

@@ -369,6 +369,72 @@ async function testBackpressure() {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
+// Group 9: AEC live metrics (2 seconds)
+// ═══════════════════════════════════════════════════════════════════════════════
+
+async function testAec() {
+  console.log('--- Group 9: AEC live metrics (2 seconds) ---');
+
+  // A live echo-cancelling capture fed a reference the room is not playing:
+  // the estimator searches and never locks, which is the documented
+  // no-usable-reference signature (delaySamples null while acquisitionParked
+  // climbs). Every metrics field is asserted present with its type, so the
+  // accessor cannot silently lose one, and the reference is pushed on a
+  // playback cadence while capture runs, so the push path is exercised
+  // mid-stream where it must never throw.
+  const mic = new Microphone({ sampleRate: 16000, channels: 1, aec: 'tau' });
+
+  // A 440 Hz tone in int16 PCM, one 20 ms block per push.
+  const block = Buffer.alloc(640);
+  for (let i = 0; i < 320; i++) {
+    block.writeInt16LE(Math.round(Math.sin((2 * Math.PI * 440 * i) / 16000) * 8000), i * 2);
+  }
+
+  let pushError = null;
+  const pusher = setInterval(() => {
+    try {
+      mic.pushAecReference(block);
+    } catch (e) {
+      pushError = e;
+    }
+  }, 20);
+
+  let chunks = 0;
+  mic.on('data', () => { chunks++; });
+  await new Promise((resolve, reject) => {
+    mic.on('error', reject);
+    setTimeout(resolve, 2000);
+  });
+
+  clearInterval(pusher);
+  assert(pushError === null, `pushAecReference never throws mid-stream (got ${pushError})`);
+  assert(chunks > 0, 'echo-cancelling capture delivers chunks');
+
+  const m = mic.aecMetrics();
+  assert(m !== null, 'aecMetrics() reports while capturing');
+  if (m !== null) {
+    assert(typeof m.erleDb === 'number', 'erleDb is a number');
+    assert(typeof m.doubleTalk === 'boolean', 'doubleTalk is a boolean');
+    assert(typeof m.referenceStarved === 'number', 'referenceStarved is a number');
+    assert(typeof m.acquisitionParked === 'number', 'acquisitionParked is a number');
+    assert(typeof m.referenceReanchors === 'number', 'referenceReanchors is a number');
+    assert(typeof m.referenceDropped === 'number', 'referenceDropped is a number');
+    assert(typeof m.referenceSilence === 'number', 'referenceSilence is a number');
+    // The no-usable-reference signature, reachable through the accessor: the
+    // pushed tone is not the signal the microphone hears, so the estimator
+    // keeps searching for the whole stream.
+    assert(m.delaySamples === null, 'delaySamples stays null with no acoustic echo to lock on');
+    assert(m.acquisitionParked > 0, 'acquisitionParked climbs while the estimator searches');
+    assert(m.referenceDropped === 0, 'in-cadence 20 ms pushes drop nothing');
+  }
+
+  mic.stop();
+  assert(mic.aecMetrics() === null, 'aecMetrics() reads null after stop()');
+
+  console.log('  Group 9 done\n');
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
 // Runner
 // ═══════════════════════════════════════════════════════════════════════════════
 
@@ -384,6 +450,7 @@ async function main() {
   await testVAD();
   await testMultipleInstances();
   await testBackpressure();
+  await testAec();
 
   console.log('═══════════════════════════════════════');
   console.log(`  Passed:  ${passed}`);
