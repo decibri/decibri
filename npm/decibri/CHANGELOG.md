@@ -14,8 +14,10 @@ For other decibri packages, see:
 ### Added
 
 - `aec` option on `Microphone`: acoustic echo cancellation on the capture path. The short form names the model (`aec: 'tau'`); the object form takes `{ model, tailMs, suppression, referenceSampleRate }`. It runs before the detector tap, so `vadScore` and the `speech` / `silence` events read the echo-removed signal, and it requires `sampleRate` in 8000 to 48000. Native capture only: the browser entry keeps the platform's own `echoCancellation` constraint.
-- `Microphone.pushAecReference(data)`, which queues the far-end audio the canceller cancels against: the same input shapes `Speaker.write` accepts, mono, in played order, at the declared `referenceSampleRate`. It never blocks and never throws on a full queue.
+- `Microphone.pushAecReference(data)`, which queues the far-end audio the canceller cancels against: the same input shapes `Speaker.write` accepts, mono, in played order, at the declared `referenceSampleRate`. It never blocks and never throws on a full queue. When it is pushed does not have to match when it plays: the queue is read at the rate the capture consumes it, so a greeting pushed before the first `data` event, or a whole utterance handed over in one call, is read out over the capture it echoes into and every sample of it is cancelled against. The queue holds two seconds, which bounds how far ahead of its own capture a caller may run.
 - `Microphone.aecMetrics()`, the canceller's transport and cancellation metrics merged with the reference queue's counters, or `null` while echo cancellation is off or capture is not running.
+
+Echo cancellation joins automatic gain control as a stage that can drive captured samples above full scale when the limiter is off, because it subtracts its estimate of the echo from the capture and exceeds the capture wherever that estimate is wrong in phase. The limiter runs after it and bounds the output to its ceiling; the `int16` sample format clamps, so an over-scale sample arrives as full scale rather than wrapping, and a `float32` consumer without the limiter should clamp its own output.
 
 ## [5.2.5] - 2026-07-28
 

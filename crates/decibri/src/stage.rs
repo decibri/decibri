@@ -23,6 +23,8 @@
 //! (an already-mono device already at the target rate with no enhancement
 //! enabled), keeping the capture path on its zero-cost direct path.
 
+#[cfg(feature = "aec")]
+use std::collections::VecDeque;
 use std::path::Path;
 #[cfg(feature = "aec")]
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -143,8 +145,9 @@ impl Stage for ResampleStage {
 ///
 /// The caller pushes played audio through
 /// [`MicrophoneStream::push_aec_reference`](crate::microphone::MicrophoneStream::push_aec_reference);
-/// the stage drains everything queued at the head of each block. Both sides hold
-/// an [`Arc`] of the same queue, so the push never reaches through the capture
+/// the stage takes from the front of it at the rate the capture consumes (see
+/// [`AecStage::feed_reference`]), leaving the rest queued. Both sides hold an
+/// [`Arc`] of the same queue, so the push never reaches through the capture
 /// chain's own lock and never waits on the canceller.
 ///
 /// The queue is bounded in samples, sized in seconds at the declared reference
@@ -165,13 +168,22 @@ impl Stage for ResampleStage {
 /// silence for every near-end sample the caller did not cover (see
 /// [`AecStage::fill_reference_to`]), so a discarded span costs the cancellation
 /// of that span alone rather than moving every later sample off its alignment.
+///
+/// Because the drain is rate-matched, the queue holds a caller's backlog for as
+/// long as the capture takes to reach it: a push of a whole utterance stands in
+/// the queue and is read out over the seconds that utterance plays. The bound is
+/// therefore the amount a caller may run ahead of its own capture, and
+/// [`dropped`](Self::dropped) climbing is a caller running further ahead than
+/// that.
 #[cfg(feature = "aec")]
 pub(crate) struct AecReferenceRing {
     /// Samples pushed and not yet drained, in played order. Never longer than
     /// `capacity`. Behind a `Mutex` so both sides reach it under a shared
-    /// `&self`; the drain holds the lock only for a buffer swap, so a push waits
-    /// on another push at worst and never on the canceller.
-    queued: Mutex<Vec<f32>>,
+    /// `&self`; the drain holds the lock only for a copy off the front, so a
+    /// push waits on another push at worst and never on the canceller. A deque
+    /// because the drain takes a bounded prefix and leaves the rest, which a
+    /// `Vec` could only do by moving the remainder down on every block.
+    queued: Mutex<VecDeque<f32>>,
     /// Bound on `queued`, in samples at the declared reference rate.
     capacity: usize,
     /// Samples discarded because the queue was full, read via
@@ -189,7 +201,7 @@ impl AecReferenceRing {
     /// A queue bounded at `capacity` samples.
     pub(crate) fn new(capacity: usize) -> Self {
         Self {
-            queued: Mutex::new(Vec::with_capacity(capacity)),
+            queued: Mutex::new(VecDeque::with_capacity(capacity)),
             capacity,
             dropped: AtomicU64::new(0),
             silence: AtomicU64::new(0),
@@ -206,7 +218,7 @@ impl AecReferenceRing {
             let mut queued = self.queued.lock().unwrap_or_else(PoisonError::into_inner);
             let room = self.capacity.saturating_sub(queued.len());
             let taken = reference.len().min(room);
-            queued.extend_from_slice(&reference[..taken]);
+            queued.extend(reference[..taken].iter().copied());
             taken
         };
         let dropped = reference.len() - taken;
@@ -215,15 +227,32 @@ impl AecReferenceRing {
         }
     }
 
-    /// Move everything queued into `out`, leaving the queue empty.
+    /// Move up to `max` samples off the FRONT of the queue into `out`, leaving
+    /// whatever is behind them queued in played order, and report how many are
+    /// still queued afterwards.
     ///
-    /// `out` is cleared first and its buffer is left in the queue's place, so the
-    /// two buffers alternate and neither reallocates once both have reached their
-    /// high-water length.
-    fn drain_into(&self, out: &mut Vec<f32>) {
+    /// `out` is cleared first. Taking a bounded prefix rather than the whole
+    /// queue is what keeps the far-end frontier level with the capture; the
+    /// remainder is not discarded, it is read on later blocks. The count that
+    /// comes back is what the caller needs to know whether silence would land in
+    /// front of reference or after it, taken under the same lock as the drain.
+    fn drain_into(&self, out: &mut Vec<f32>, max: usize) -> usize {
         out.clear();
         let mut queued = self.queued.lock().unwrap_or_else(PoisonError::into_inner);
-        std::mem::swap(&mut *queued, out);
+        let take = max.min(queued.len());
+        out.extend(queued.drain(..take));
+        queued.len()
+    }
+
+    /// Samples pushed and not yet taken by the drain. Read by the tests that pin
+    /// the queue's accounting; the capture path reads the same figure through
+    /// [`drain_into`](Self::drain_into), under the lock it already holds.
+    #[cfg(test)]
+    pub(crate) fn queued(&self) -> usize {
+        self.queued
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .len()
     }
 
     /// Samples discarded because the queue was full, for the lifetime of the
@@ -276,13 +305,24 @@ pub(crate) struct AecSettings {
 /// constructed at. Running before the VAD tap is taken means the detector reads
 /// the echo-removed signal rather than the raw capture.
 ///
-/// Each [`process`](Stage::process) drains the reference queue into the engine
-/// before cancelling the near-end block, so the far-end frontier is everything
-/// the caller had pushed by the time that block ran. The engine re-blocks
-/// internally, so a call may append fewer or more samples than it consumed and
-/// the totals balance after [`flush`](Stage::flush).
+/// Each [`process`](Stage::process) feeds the reference into the engine before
+/// cancelling the near-end block, and feeds it at the rate the capture consumes
+/// it: enough to reach the near-end frontier this block ends at, and no further.
+/// Whatever the caller pushed beyond that stays queued and is read on later
+/// blocks, so nothing is discarded and the far-end frontier never runs ahead of
+/// the capture. The engine re-blocks internally, so a call may append fewer or
+/// more samples than it consumed and the totals balance after
+/// [`flush`](Stage::flush).
 ///
-/// The drain then tops the far-end stream up with silence to the near-end
+/// The far-end frontier is what the canceller measures its alignment from, and
+/// it measures it once, on the first block it sees. A frontier that has run
+/// ahead of the capture puts every later near-end sample past the reference the
+/// canceller holds, which its delay search reads as a window it cannot score, so
+/// it never locks and never recovers. Feeding at the capture's own rate is what
+/// holds the two together: see
+/// [`feed_reference`](AecStage::feed_reference).
+///
+/// The feed then tops the far-end stream up with silence to the near-end
 /// frontier, so the two streams advance together whatever the caller does. That
 /// is the played signal, not a substitute for it: while nothing is playing the
 /// far end IS silence, and a caller who pushes nothing is saying so. Without the
@@ -294,9 +334,15 @@ struct AecStage {
     aec: Aec,
     /// The shared queue the caller pushes far-end audio into.
     reference: Arc<AecReferenceRing>,
-    /// Reference samples drained this block, at the declared reference rate.
-    /// Retained across blocks so the swap in
-    /// [`AecReferenceRing::drain_into`] reuses one buffer.
+    /// The rate the caller declares its pushed reference is at. Held so the
+    /// per-block take, which is measured at the capture target rate, converts to
+    /// a count of queued samples.
+    reference_rate: u32,
+    /// The capture target rate, which is the rate the canceller runs at.
+    target_rate: u32,
+    /// Reference samples taken this block, at the declared reference rate.
+    /// Retained across blocks so [`AecReferenceRing::drain_into`] copies into a
+    /// buffer that has already reached its high-water length.
     drained: Vec<f32>,
     /// Converts the drained reference to the capture target rate. `Some` only
     /// when the declared reference rate differs from the target rate. The
@@ -320,6 +366,10 @@ struct AecStage {
     /// stage that received none holds no framing carry, so it emits nothing at
     /// [`flush`](Stage::flush) rather than a tail assembled out of nothing.
     received_near: bool,
+    /// Whether the caller still has reference queued after the most recent feed.
+    /// While it does, the silence top-up is held back: silence laid down in
+    /// front of queued reference is a gap rather than a top-up.
+    reference_pending: bool,
 }
 
 #[cfg(feature = "aec")]
@@ -370,6 +420,8 @@ impl AecStage {
         Ok(Self {
             aec,
             reference,
+            reference_rate,
+            target_rate,
             drained: Vec::new(),
             reference_resampler,
             resampled: Vec::new(),
@@ -377,13 +429,52 @@ impl AecStage {
             far_fed: 0,
             near_seen: 0,
             received_near: false,
+            reference_pending: false,
         })
     }
 
-    /// Drain the reference queue into the engine, converting to the target rate
-    /// first when the declared rate differs.
-    fn feed_reference(&mut self) -> Result<(), DecibriError> {
-        self.reference.drain_into(&mut self.drained);
+    /// Feed the queued reference into the engine, at most `budget` samples of it
+    /// measured at the capture target rate, converting from the declared rate
+    /// first when the two differ.
+    ///
+    /// The budget is what makes the feed rate-matched. The canceller anchors its
+    /// alignment on the far-end frontier as it stands at the first block it
+    /// processes, and thereafter reads the far-end stream at the position that
+    /// anchor implies. A frontier that ran ahead of the capture before the
+    /// anchor was taken is therefore an offset every later block carries, and
+    /// one the canceller's delay search cannot cover past its own ceiling; a
+    /// frontier the capture has since overtaken puts the search window past the
+    /// newest reference sample, which the search refuses to score at all. Both
+    /// end the same way: no lock, no recovery, and no error.
+    ///
+    /// Handing over at most what the near-end block consumes keeps the frontier
+    /// where the capture is, which is where both bounds are widest. What the
+    /// caller pushed beyond that is not discarded, only deferred: it stays at
+    /// the front of the queue and is read on the blocks that follow, so a caller
+    /// that hands over a whole utterance at once still has every sample of it
+    /// cancelled against the capture it echoes into.
+    fn feed_reference(&mut self, budget: u64) -> Result<(), DecibriError> {
+        if budget == 0 {
+            // Nothing was asked for, so nothing was looked at: whether reference
+            // is queued is unknown, and the conservative answer is that it is.
+            // The silence top-up cannot fire on this path anyway, because a
+            // budget of zero means the far end has already reached the frontier.
+            self.reference_pending = true;
+            return Ok(());
+        }
+        // The budget is a count of target-rate samples; the queue holds the
+        // caller's declared rate. Rounded up so a block takes at least what the
+        // near end consumes rather than repeatedly falling a fraction short.
+        let take = match self.reference_resampler {
+            Some(_) => budget
+                .saturating_mul(self.reference_rate as u64)
+                .div_ceil(self.target_rate as u64),
+            None => budget,
+        };
+        self.reference_pending = self
+            .reference
+            .drain_into(&mut self.drained, take.min(usize::MAX as u64) as usize)
+            > 0;
         if self.drained.is_empty() {
             return Ok(());
         }
@@ -410,13 +501,16 @@ impl AecStage {
     /// played. A caller who pushes nothing has stated that nothing played, and
     /// the far-end signal for that span is zero, so the engine is handed exactly
     /// that. A caller feeding in step covers every sample itself and nothing is
-    /// added; a caller who pushed AHEAD of the capture stays ahead, because the
-    /// top-up only ever makes up a shortfall and never advances the frontier
-    /// past what the caller established.
+    /// added.
     ///
-    /// The shortfall is at most one block: the invariant this restores holds
-    /// entering the call, so the far end can only have fallen behind by the
-    /// near-end samples added since.
+    /// It only ever makes up a shortfall, and the shortfall is at most one
+    /// block: the invariant this restores holds entering the call, so the far
+    /// end can only have fallen behind by the near-end samples added since.
+    ///
+    /// The caller runs it only with the queue empty. Silence laid down while
+    /// reference is still queued would be a gap in the far-end stream rather
+    /// than a top-up of it, and every sample after the gap would sit off its
+    /// alignment by the width of the gap.
     fn fill_reference_to(&mut self, near_frontier: u64) {
         let fill = near_frontier.saturating_sub(self.far_fed);
         if fill == 0 {
@@ -435,12 +529,17 @@ impl AecStage {
 #[cfg(feature = "aec")]
 impl Stage for AecStage {
     fn process(&mut self, input: &[f32], out: &mut Vec<f32>) -> Result<(), DecibriError> {
-        // The reference goes in first, so the far-end frontier this block is
-        // cancelled against is everything the caller had pushed by now, and the
-        // top-up then covers whatever of this block the caller left uncovered.
-        self.feed_reference()?;
-        self.fill_reference_to(self.near_seen + input.len() as u64);
-        self.near_seen += input.len() as u64;
+        // The reference goes in first, up to the frontier this block ends at, and
+        // the top-up then covers whatever of the block the caller left uncovered.
+        // The budget is the distance the far end has left to travel to reach that
+        // frontier, so a caller feeding in step hands over its whole block and a
+        // caller running ahead hands over one block's worth of its backlog.
+        let near_frontier = self.near_seen + input.len() as u64;
+        self.feed_reference(near_frontier.saturating_sub(self.far_fed))?;
+        if !self.reference_pending {
+            self.fill_reference_to(near_frontier);
+        }
+        self.near_seen = near_frontier;
         if !input.is_empty() {
             self.received_near = true;
         }
@@ -457,10 +556,13 @@ impl Stage for AecStage {
         if !self.received_near {
             return Ok(());
         }
-        // The reference still queued, then the reference resampler's own
+        // Everything still queued, then the reference resampler's own
         // group-delay tail, both before the engine drains: the far end is
-        // complete when the near end's carry comes out.
-        self.feed_reference()?;
+        // complete when the near end's carry comes out, and a caller's push is
+        // never left unread. The budget the per-block feed is rate-matched by
+        // does not apply here, because there is no near-end audio left for the
+        // frontier to run ahead OF: the capture has ended.
+        self.feed_reference(u64::MAX)?;
         if let Some(resampler) = &mut self.reference_resampler {
             self.resampled.clear();
             resampler.flush(&mut self.resampled);
@@ -3153,6 +3255,220 @@ mod tests {
         );
     }
 
+    /// A far-end stream and its echo in the capture, on one timeline: the echo of
+    /// far-end sample `i` sits at near-end sample `i + DELAY`, so a caller that
+    /// pushes the reference early is pushing audio the capture has not reached
+    /// yet rather than audio from a different signal.
+    #[cfg(feature = "aec")]
+    fn far_and_its_echo(samples: usize, delay: usize, gain: f32) -> (Vec<f32>, Vec<f32>) {
+        let far = far_noise(samples);
+        let mut near = vec![0.0f32; far.len()];
+        for i in delay..near.len() {
+            near[i] = gain * far[i - delay];
+        }
+        (far, near)
+    }
+
+    /// A caller that hands the canceller its far-end audio BEFORE reading its
+    /// first capture chunk still locks and cancels, and reaches exactly the
+    /// alignment a caller feeding in step reaches.
+    ///
+    /// This is the opening move of a talk-back application: start the microphone,
+    /// play a greeting, then enter the read loop. The whole greeting is pushed
+    /// before the first chunk is read. Regression: a feed that hands the canceller
+    /// everything queued at the head of the block, which puts the far-end frontier
+    /// the alignment is anchored on ahead of the capture by the whole greeting.
+    /// Measured against that regression, the two-second case below never locks at
+    /// all: `delay_samples` stays `None`, `acquisition_parked` covers all 192,000
+    /// samples of the stream, and the echo is delivered at 0.0 dB of reduction for
+    /// its whole length. The cliff was at 1340 samples, 84 ms, so a greeting of a
+    /// tenth of a second was enough.
+    #[cfg(feature = "aec")]
+    #[test]
+    fn aec_locks_on_a_reference_pushed_before_the_first_capture_block() {
+        const RATE: usize = 16_000;
+        const DELAY: usize = 400;
+        const SECONDS: usize = 12;
+        const BLOCK: usize = 320;
+        let (far, near) = far_and_its_echo(SECONDS * RATE, DELAY, 0.25);
+
+        // The alignment a caller feeding in step reaches, which the pre-pushing
+        // callers below must reach as well.
+        let run = |prepush: usize| {
+            let queue = Arc::new(AecReferenceRing::new(2 * RATE));
+            let mut chain = aec_chain(1, RATE as u32, RATE as u32, false, &queue, RATE as u32);
+            let mut pushed = prepush;
+            queue.push(&far[..pushed]);
+            let mut out = Vec::new();
+            for (block, piece) in near.chunks(BLOCK).enumerate() {
+                let played = ((block + 1) * BLOCK).min(far.len());
+                if played > pushed {
+                    queue.push(&far[pushed..played]);
+                    pushed = played;
+                }
+                out.extend_from_slice(chain.run(piece).expect("run"));
+            }
+            chain.flush(&mut out).expect("flush");
+            (out, chain.aec_metrics().expect("metrics"), queue)
+        };
+
+        let (_, in_step, _) = run(0);
+        let aligned = in_step
+            .delay_samples
+            .expect("a caller feeding in step locks");
+
+        // 32,000 samples is the whole two-second queue bound, and 24 times the
+        // 1340-sample cliff the greedy feed died at, so the case is not marginal.
+        for prepush in [1_600usize, 8_000, 32_000] {
+            let (out, metrics, queue) = run(prepush);
+            assert_eq!(
+                metrics.delay_samples,
+                Some(aligned),
+                "a reference pushed before the first block must reach the same \
+                 alignment as one fed in step (pre-push {prepush})"
+            );
+            assert_eq!(
+                queue.dropped(),
+                0,
+                "a pre-push inside the bound discards nothing (pre-push {prepush})"
+            );
+            assert_eq!(
+                metrics.reference_starved, 0,
+                "the far end stays level with the capture (pre-push {prepush})"
+            );
+            assert_eq!(
+                metrics.reference_reanchors, 0,
+                "the alignment holds for the whole stream (pre-push {prepush})"
+            );
+
+            let window = (SECONDS - 1) * RATE..(SECONDS - 1) * RATE + RATE / 2;
+            let removed = rms_db(&near[window.clone()]) - rms_db(&out[window]);
+            assert!(
+                removed >= 30.0,
+                "a pre-pushed reference must still cancel (pre-push {prepush}, \
+                 removed {removed:.1} dB)"
+            );
+        }
+    }
+
+    /// The far-end frontier the canceller is handed never runs ahead of the
+    /// capture, whatever the caller's pushes look like.
+    ///
+    /// Asserted on the frontier itself rather than inferred from cancellation
+    /// succeeding: what has left the queue is what has reached the canceller, so
+    /// the samples pushed minus the samples still queued is the frontier, and it
+    /// must equal the near-end samples the chain has consumed. Regression: a feed
+    /// that empties the queue every block, which is what puts the frontier ahead;
+    /// against it the first block below leaves the queue empty and the frontier
+    /// 31,680 samples ahead of a capture that has delivered 320.
+    #[cfg(feature = "aec")]
+    #[test]
+    fn the_reference_frontier_never_runs_ahead_of_the_capture() {
+        const RATE: usize = 16_000;
+        const BLOCK: usize = 320;
+        const SECONDS: usize = 8;
+        let (far, near) = far_and_its_echo(SECONDS * RATE, 400, 0.25);
+
+        // A whole two seconds handed over before the first read, then one
+        // utterance every second, which keeps the queue occupied throughout.
+        let queue = Arc::new(AecReferenceRing::new(2 * RATE));
+        let mut chain = aec_chain(1, RATE as u32, RATE as u32, false, &queue, RATE as u32);
+        let mut pushed = 2 * RATE;
+        queue.push(&far[..pushed]);
+
+        let mut out = Vec::new();
+        for (block, piece) in near.chunks(BLOCK).enumerate() {
+            let at = block * BLOCK;
+            if at > 0 && at.is_multiple_of(RATE) && pushed < far.len() {
+                let end = (pushed + RATE).min(far.len());
+                queue.push(&far[pushed..end]);
+                pushed = end;
+            }
+            out.extend_from_slice(chain.run(piece).expect("run"));
+
+            let consumed = at + piece.len();
+            let frontier = pushed - queue.queued();
+            assert_eq!(
+                frontier, consumed,
+                "the far-end frontier must sit exactly at the capture's own \
+                 frontier (block {block})"
+            );
+        }
+        chain.flush(&mut out).expect("flush");
+
+        // The bound holds from the very first block, which is the one the
+        // alignment is anchored on.
+        let first = Arc::new(AecReferenceRing::new(2 * RATE));
+        let mut chain = aec_chain(1, RATE as u32, RATE as u32, false, &first, RATE as u32);
+        first.push(&far[..2 * RATE]);
+        chain.run(&near[..BLOCK]).expect("run");
+        assert_eq!(
+            2 * RATE - first.queued(),
+            BLOCK,
+            "the first block takes one block's worth of reference and no more"
+        );
+    }
+
+    /// Everything a caller pushes reaches the canceller, in played order, however
+    /// far ahead of the capture it was pushed. Nothing is discarded to hold the
+    /// frontier back; it is deferred and read out later.
+    ///
+    /// The echo of the LAST part of a two-second pre-push is measured, so a feed
+    /// that held the frontier back by throwing the overflow away would fail here
+    /// even though it would pass every test that only measures the steady state.
+    /// Regression: a bounded feed that discards rather than defers, which would
+    /// make the echo of the discarded span uncancellable.
+    #[cfg(feature = "aec")]
+    #[test]
+    fn a_reference_pushed_ahead_is_read_out_in_full() {
+        const RATE: usize = 16_000;
+        const BLOCK: usize = 320;
+        const SECONDS: usize = 12;
+        const PREPUSH: usize = 2 * RATE;
+        let (far, near) = far_and_its_echo(SECONDS * RATE, 400, 0.25);
+
+        let queue = Arc::new(AecReferenceRing::new(2 * RATE));
+        let mut chain = aec_chain(1, RATE as u32, RATE as u32, false, &queue, RATE as u32);
+        let mut pushed = PREPUSH;
+        queue.push(&far[..pushed]);
+        let mut out = Vec::new();
+        for (block, piece) in near.chunks(BLOCK).enumerate() {
+            let played = ((block + 1) * BLOCK).min(far.len());
+            if played > pushed {
+                queue.push(&far[pushed..played]);
+                pushed = played;
+            }
+            out.extend_from_slice(chain.run(piece).expect("run"));
+        }
+        chain.flush(&mut out).expect("flush");
+
+        // Pushed, minus what the bound discarded, minus what is still queued, is
+        // what the canceller received. Nothing was discarded and nothing is left,
+        // so it received every sample.
+        assert_eq!(pushed, far.len(), "the whole far end was pushed");
+        assert_eq!(
+            queue.dropped(),
+            0,
+            "a push inside the bound discards nothing"
+        );
+        assert_eq!(
+            queue.queued(),
+            0,
+            "the feed reads the queue out rather than leaving it behind"
+        );
+
+        // Inside the second half of the pre-pushed span, past the lock: this
+        // reference was pushed before the capture reached it and the echo of it
+        // still cancels.
+        let deferred = PREPUSH / 2 + RATE / 4..PREPUSH / 2 + RATE * 3 / 4;
+        let removed = rms_db(&near[deferred.clone()]) - rms_db(&out[deferred]);
+        assert!(
+            removed >= 20.0,
+            "the deferred part of the pre-push must still cancel \
+             (removed {removed:.1} dB)"
+        );
+    }
+
     /// A synthetic echo of the pushed reference is cancelled. The whole stream is
     /// echo, so what the chain delivers IS the residual, and the measurement is
     /// the level the chain removed. Regression: a reference that never reaches the
@@ -3584,10 +3900,12 @@ mod tests {
 
     /// The reference queue keeps the oldest contiguous run in played order,
     /// discards from the newest end when it is full, and counts what it discarded.
+    /// A bounded drain takes a prefix and leaves the rest in played order.
     /// Regression: unbounded growth on a caller that pushes faster than the
-    /// capture consumes, and a hole punched between samples already fed to the
+    /// capture consumes, a hole punched between samples already fed to the
     /// canceller and samples still queued, which moves the alignment rather than
-    /// shortening the reference.
+    /// shortening the reference, and a bounded drain that takes off the newest
+    /// end and so hands the canceller its far end out of order.
     #[cfg(feature = "aec")]
     #[test]
     fn reference_queue_keeps_the_oldest_run_and_counts_what_it_dropped() {
@@ -3601,14 +3919,25 @@ mod tests {
             2,
             "the samples past the bound are discarded and counted"
         );
+        assert_eq!(queue.queued(), 8, "the queue holds what it kept");
 
+        // A bounded take reads the OLDEST samples and leaves the rest queued.
         let mut drained = Vec::new();
-        queue.drain_into(&mut drained);
+        queue.drain_into(&mut drained, 3);
         assert_eq!(
             drained,
-            vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0],
-            "what remains is the oldest contiguous run, in played order"
+            vec![1.0, 2.0, 3.0],
+            "a bounded take reads the oldest samples, in played order"
         );
+        assert_eq!(queue.queued(), 5, "the remainder stays queued");
+
+        queue.drain_into(&mut drained, 64);
+        assert_eq!(
+            drained,
+            vec![4.0, 5.0, 6.0, 7.0, 8.0],
+            "a take larger than the queue reads the rest, still in played order"
+        );
+        assert_eq!(queue.queued(), 0, "and leaves the queue empty");
 
         // A drained queue takes its full capacity again, and the count is
         // cumulative across drains.
@@ -3619,8 +3948,14 @@ mod tests {
             "the discard count accumulates across drains"
         );
         drained.clear();
-        queue.drain_into(&mut drained);
+        queue.drain_into(&mut drained, usize::MAX);
         assert_eq!(drained.len(), 8, "the bound holds after a drain");
+
+        // A take of nothing leaves the queue untouched.
+        queue.push(&[0.25f32; 4]);
+        queue.drain_into(&mut drained, 0);
+        assert!(drained.is_empty(), "a take of nothing reads nothing");
+        assert_eq!(queue.queued(), 4, "and leaves the queue as it was");
     }
 
     /// With the canceller in the normalize segment and a same-length conditioning

@@ -13,9 +13,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 ### Added
 
 - `aec` parameter on `Microphone` and `AsyncMicrophone`: acoustic echo cancellation on the capture path. The short form names the model (`aec="tau"`); the `Aec` dataclass takes `model`, `tail_ms`, `suppression` and `reference_sample_rate`. It runs before the detector tap, so `vad_score` and `is_speaking` read the echo-removed signal, and it requires `sample_rate` in 8000 to 48000.
-- `push_aec_reference(samples)` on both capture classes, which queues the far-end audio the canceller cancels against: the same input shapes `Speaker.write` accepts, mono, in played order, at the declared `reference_sample_rate`. It never blocks and never raises on a full queue. A plain method on `AsyncMicrophone` as well, so a renderer callback calls it without awaiting.
+- `push_aec_reference(samples)` on both capture classes, which queues the far-end audio the canceller cancels against: the same input shapes `Speaker.write` accepts, mono, in played order, at the declared `reference_sample_rate`. It never blocks and never raises on a full queue. A plain method on `AsyncMicrophone` as well, so a renderer callback calls it without awaiting. When it is pushed does not have to match when it plays: the queue is read at the rate the capture consumes it, so a greeting pushed before the first `read()`, or a whole utterance handed over in one call, is read out over the capture it echoes into and every sample of it is cancelled against. The queue holds two seconds, which bounds how far ahead of its own capture a caller may run.
 - `aec_metrics()` on both capture classes, returning an `AecMetrics` dataclass with the canceller's transport and cancellation metrics merged with the reference queue's counters, or `None` while echo cancellation is off or capture is not running. Awaitable on `AsyncMicrophone`.
 - `Aec` and `AecMetrics` exported from the package root.
+
+Echo cancellation joins automatic gain control as a stage that can drive captured samples above full scale when the limiter is off, because it subtracts its estimate of the echo from the capture and exceeds the capture wherever that estimate is wrong in phase. The limiter runs after it and bounds the output to its ceiling; the `int16` sample format clamps, so an over-scale sample arrives as full scale rather than wrapping, and a `float32` consumer without the limiter should clamp its own output.
 
 ## [0.7.5] - 2026-07-28
 

@@ -172,6 +172,39 @@ mod tests {
         assert_eq!(val, -32768);
     }
 
+    /// A capture sample above full scale reaches an `int16` consumer as full
+    /// scale, and an `f32` consumer as the value the chain produced.
+    ///
+    /// Echo cancellation subtracts its estimate of the echo from the capture and
+    /// exceeds the capture wherever that estimate is wrong in phase, so a caller
+    /// running it without the limiter can be delivered samples past 1.0; 1.41
+    /// against a capture peaking at 0.81 was measured on a real acoustic path.
+    /// That is documented on `AudioChunk::data` rather than clamped away, because
+    /// the overshoot is a statement about the canceller's residual. What is not
+    /// acceptable is a conversion that wraps it: 1.41 arriving as a near
+    /// full-scale sample of the OPPOSITE sign is an audible click where a clamp
+    /// is a briefly flat peak. Regression: a scaling that casts before it clamps.
+    #[test]
+    fn an_over_scale_sample_clamps_into_int16_and_passes_through_f32() {
+        for over in [1.41f32, 2.0, 8.5, 1.000_01] {
+            let bytes = f32_to_i16_le_bytes(&[over, -over]);
+            let positive = i16::from_le_bytes([bytes[0], bytes[1]]);
+            let negative = i16::from_le_bytes([bytes[2], bytes[3]]);
+            assert_eq!(positive, 32767, "{over} must clamp to positive full scale");
+            assert_eq!(
+                negative, -32768,
+                "-{over} must clamp to negative full scale"
+            );
+
+            let passed = f32_to_f32_le_bytes(&[over]);
+            assert_eq!(
+                f32::from_le_bytes([passed[0], passed[1], passed[2], passed[3]]),
+                over,
+                "the f32 format delivers what the chain produced"
+            );
+        }
+    }
+
     #[test]
     fn test_roundtrip_i16() {
         let original: Vec<f32> = vec![0.0, 0.25, -0.25, 0.5, -0.5, 0.99, -0.99];
