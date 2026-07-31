@@ -14,7 +14,7 @@ For other decibri packages, see:
 ### Added
 
 - `aec` feature, on by default: acoustic echo cancellation on the capture path. `MicrophoneConfig::aec` names the canceller model, with `aec_tail_ms`, `aec_suppression` and `aec_reference_sample_rate` for the rest. The stage runs last in the normalize segment, on the mono signal at the target rate and before the pre-transform detector tap, so a detector reads the echo-removed signal.
-- `MicrophoneStream::push_aec_reference`, which queues the far-end audio the canceller cancels against. Mono `f32` at `aec_reference_sample_rate`, in played order. It never blocks and never fails; samples that do not fit the bounded queue are discarded from the newest end and counted by `MicrophoneStream::aec_reference_dropped`. decibri converts the reference to the capture rate when the declared rate differs. Silence between what is played need not be pushed: decibri keeps the far-end stream level with the capture, so a caller that stops pushing between utterances keeps cancelling.
+- `MicrophoneStream::push_aec_reference`, which queues the far-end audio the canceller cancels against. Mono `f32` at `aec_reference_sample_rate`, in played order. It never blocks and never fails; samples that do not fit the bounded queue are discarded from the newest end and counted by `MicrophoneStream::aec_reference_dropped`. decibri converts the reference to the capture rate when the declared rate differs. Silence between what is played need not be pushed: decibri keeps the far-end stream level with the capture, so a caller that stops pushing between utterances keeps cancelling. When it is pushed does not have to match when it plays: the queue is read at the rate the capture consumes it, so a push made before the first chunk is read, or a whole utterance handed over in one call, is read out over the capture it echoes into and every sample of it is cancelled against.
 - `MicrophoneStream::aec_reference_silence`, the count of far-end samples decibri supplied in the caller's place, at the capture sample rate. A stream where it tracks the whole length never had a reference pushed to it.
 - `MicrophoneStream::aec_metrics`, the canceller's transport and cancellation metrics.
 - `AecMetrics`, `AecModel` and `Suppression` re-exported from `decibri-aec`.
@@ -23,7 +23,9 @@ For other decibri packages, see:
 
 With no reference pushed, an echo-cancelling capture delivers the captured audio unchanged.
 
-The reference queue holds two seconds at the declared reference rate, so a whole synthesized utterance handed over in one call is held whole. A push past the bound costs the cancellation of the discarded span alone: the time it occupied is represented as silence, so the canceller keeps its alignment for the rest of the stream.
+The reference queue holds two seconds at the declared reference rate. Because it is read at the capture's own rate, that bound is how far ahead of its own capture a caller may run: a caller pushing a second of audio for every second of capture never approaches it, however large its individual pushes are. A push past the bound costs the cancellation of the discarded span alone: the time it occupied is represented as silence, so the canceller keeps its alignment for the rest of the stream.
+
+Echo cancellation joins automatic gain control as a stage that can drive `AudioChunk::data` above full scale when the limiter is off, because it subtracts its estimate of the echo from the capture and exceeds the capture wherever that estimate is wrong in phase. The limiter runs after it and bounds the output to its ceiling; the `int16` sample format clamps, so an over-scale sample reaches an `int16` consumer as full scale rather than wrapping.
 
 ## [5.4.1] - 2026-07-28
 

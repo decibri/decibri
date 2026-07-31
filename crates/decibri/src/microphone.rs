@@ -302,9 +302,16 @@ pub struct AudioChunk {
     /// Interleaved f32 samples, normally in the range [-1.0, 1.0]. The conditioning
     /// chain sanitizes non-finite input, so a conditioned capture always delivers
     /// finite samples. The range is guaranteed when the limiter is enabled, which
-    /// bounds the output to its ceiling; automatic gain control without the limiter
-    /// can drive loud passages above full scale, so enable the limiter to keep every
-    /// sample within range.
+    /// bounds the output to its ceiling. Two stages can drive samples above full
+    /// scale without it: automatic gain control, whose gain can lift a loud
+    /// passage past 1.0, and echo cancellation, which subtracts its estimate of
+    /// the echo from the capture and exceeds the capture wherever that estimate
+    /// is wrong in phase. Enable the limiter, which runs after both, to keep
+    /// every sample within range; a caller reading f32 without it should clamp
+    /// its own output before anything that assumes the range.
+    ///
+    /// The `int16` sample format clamps, so an over-scale sample reaches an
+    /// `int16` consumer as full scale rather than wrapping.
     pub data: Vec<f32>,
     /// Sample rate of this chunk.
     pub sample_rate: u32,
@@ -339,31 +346,26 @@ const VAD_TAP_BOUND_SECS: usize = 2;
 
 /// Memory bound for the far-end echo-cancellation reference queue, in seconds of
 /// audio at the declared reference rate. The caller pushes played audio into the
-/// queue with [`MicrophoneStream::push_aec_reference`] and the canceller drains
-/// everything queued at the head of each block, so a caller feeding in step with
-/// the capture never fills more than one block of it.
+/// queue with [`MicrophoneStream::push_aec_reference`] and the capture chain
+/// reads it at the rate the capture consumes it, so a caller feeding in step with
+/// the capture never holds more than one block of it.
 ///
 /// What the bound is sized for is the caller who does not feed in step: one that
-/// hands over a whole synthesized utterance in a single call. The queue holds
-/// that push whole up to this many seconds, and the canceller then reads it as
-/// the capture catches up.
+/// hands over a whole synthesized utterance in a single call, or hands over a
+/// greeting before it has read its first chunk. The queue holds that push whole
+/// up to this many seconds and it is read out over the capture it echoes into,
+/// so the bound is how far AHEAD OF ITS OWN CAPTURE a caller may run. A caller
+/// pushing a second of audio for every second of capture never approaches it,
+/// however large its individual pushes are; only one pushing faster than real
+/// time for longer than this does.
 ///
-/// The size comes from the canceller's own limit on how far the far-end feed may
-/// run ahead of the capture. It serves a lead out of its far-end history, which
-/// spans its echo-delay window plus its adaptive tail plus a fixed slack; past
-/// that depth the lead is unservable, the canceller re-anchors onto a frontier
-/// the capture has not reached, and cancellation stops for the rest of the
-/// stream. The shallowest history any configuration decibri accepts can produce
-/// is 4266 ms (the canceller's 250 ms echo-delay window, the shortest tail
-/// [`MicrophoneConfig::aec_tail_ms`] accepts, and four seconds of slack).
-/// Measured against that configuration, a lead of 4000 ms still cancels intact,
-/// 4200 ms begins to starve, and 4400 ms is the unservable cliff. Two seconds is
-/// half the shallowest depth, so one push of the full bound cannot approach the
-/// cliff even when the previous one has not yet been consumed.
+/// Two seconds covers the pattern this exists for, a synthesis pipeline handing
+/// over one utterance at a time, with the next utterance able to arrive before
+/// the previous one has finished playing.
 ///
 /// A push larger than the bound is truncated at its newest end and the discarded
 /// samples are counted by [`MicrophoneStream::aec_reference_dropped`]. The time
-/// they occupied is still represented: the drain supplies silence for every
+/// they occupied is still represented: the feed supplies silence for every
 /// near-end sample the caller did not cover, so the cost is the cancellation of
 /// the discarded span alone.
 ///
@@ -912,10 +914,13 @@ impl MicrophoneStream {
     /// `reference` is mono `f32` at
     /// [`MicrophoneConfig::aec_reference_sample_rate`] (the capture
     /// [`sample_rate`](MicrophoneConfig::sample_rate) when that is unset), in
-    /// played order. Push it as it is played, not as it is produced: the
-    /// canceller aligns it against the captured signal, so a caller running
-    /// further ahead of the capture than the canceller can search cancels
-    /// nothing.
+    /// played order.
+    ///
+    /// When it is pushed does not have to match when it plays. decibri hands the
+    /// canceller the queued reference at the rate the capture consumes it, so a
+    /// push made before the first chunk is read, or a whole utterance handed over
+    /// in one call, is read out over the capture it echoes into rather than all
+    /// at once. Every sample pushed reaches the canceller in played order.
     ///
     /// Silence between what is played need not be pushed. A caller that stops
     /// pushing has said that nothing is playing, and decibri supplies the
@@ -925,8 +930,9 @@ impl MicrophoneStream {
     ///
     /// Never blocks on the canceller and never fails, so it may be called from a
     /// renderer callback or a socket handler. The queue is bounded (see
-    /// `AEC_REFERENCE_BOUND_SECS`); samples that do not fit are discarded from
-    /// the newest end and counted by
+    /// `AEC_REFERENCE_BOUND_SECS`), and because it is read at the capture's rate
+    /// the bound is how far ahead of its own capture a caller may run; samples
+    /// that do not fit are discarded from the newest end and counted by
     /// [`aec_reference_dropped`](Self::aec_reference_dropped), leaving what
     /// remains a contiguous run in played order and the time the discarded
     /// samples occupied represented as silence.
@@ -945,10 +951,10 @@ impl MicrophoneStream {
 
     /// Total number of far-end reference samples discarded because the queue was
     /// full, at the declared reference rate. Stays 0 while the reference is
-    /// pushed as it plays; a rising count means a single push exceeded the
-    /// queue's bound, so that much of the played signal never reached the
-    /// canceller and the echo of it cannot be removed. 0 on a stream with echo
-    /// cancellation off.
+    /// pushed as it plays; a rising count means the caller has run more than
+    /// `AEC_REFERENCE_BOUND_SECS` ahead of its own capture, so that much of the
+    /// played signal never reached the canceller and the echo of it cannot be
+    /// removed. 0 on a stream with echo cancellation off.
     ///
     /// The span the discarded samples occupied is still represented, as silence,
     /// so the canceller's alignment survives a discard rather than being moved
