@@ -177,7 +177,7 @@ The denoise model is bundled in the wheel (the same way the Silero VAD model is)
 
 ## Files
 
-Everything a `Microphone` does to live audio, `File` does to audio you already have: the same conditioning options (`dc_removal`, `denoise`, `highpass`, `agc`, `limiter`), the same iteration, the same conditioned chunks out, and the same opt-in `vad=`. A `File` reads a WAV (`File("clip.wav")`, or the identical `File.open("clip.wav")`) or wraps in-memory samples (`File.buffer(samples, input_rate=48000)`; raw samples carry no header, so their native rate is explicit). `sample_rate` stays the target output rate, the same meaning it has on `Microphone`, so a 44.1 kHz recording comes out at 16 kHz unless you set it.
+Everything a `Microphone` does to live audio, `File` does to audio you already have: the same conditioning options (`dc_removal`, `denoise`, `highpass`, `agc`, `limiter`), the same iteration, the same conditioned chunks out, and the same opt-in `vad=`. A `File` reads WAV, AIFF, AIFF-C and FLAC (`File("clip.wav")`, or the identical `File.open("clip.wav")`; the container is identified from the file's own bytes rather than its extension) or wraps in-memory samples (`File.buffer(samples, input_rate=48000)`; raw samples carry no header, so their native rate is explicit). `sample_rate` stays the target output rate, the same meaning it has on `Microphone`, so a 44.1 kHz recording comes out at 16 kHz unless you set it.
 
 Because a `File` is a complete recording, it can analyze the whole recording for speech:
 

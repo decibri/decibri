@@ -189,7 +189,7 @@ for segment in report.segments:
     print(segment.start, segment.end)  # seconds of file time
 ```
 
-`File` reads WAV files (`File("clip.wav")` / `File.open("clip.wav")`, both identical) and in-memory samples (`File.buffer(samples, input_rate=48000)`). The whole-file analysis, `analyze()` (also spelled `analyse()`), returns per-window scores and merged speech segments, timed in seconds of file time so processing speed never changes the reported timing. The same surface ships in Node.js (`await File.open('clip.wav')`) and Rust (`File::open("clip.wav", config)?`).
+`File` reads WAV, AIFF, AIFF-C and FLAC (`File("clip.wav")` / `File.open("clip.wav")`, both identical) and in-memory samples (`File.buffer(samples, input_rate=48000)`). The container is identified from the file's own bytes, so the path's extension does not decide how a file is read. The whole-file analysis, `analyze()` (also spelled `analyse()`), returns per-window scores and merged speech segments, timed in seconds of file time so processing speed never changes the reported timing. The same surface ships in Node.js (`await File.open('clip.wav')`) and Rust (`File::open("clip.wav", config)?`).
 
 <br/>
 

@@ -188,8 +188,8 @@ pub enum DecibriError {
     ///
     /// `reason` is the resampler's own message, formatted into the Display
     /// string so the upstream text reaches the consumer (matching
-    /// [`Self::WavInvalid`]; the leading `resampler error:` prefix is the
-    /// stable part). Every error the pinned resampler release defines maps to
+    /// [`Self::AecConfigInvalid`]; the leading `resampler error:` prefix is
+    /// the stable part). Every error the pinned resampler release defines maps to
     /// its own variant, so this is reached only by an error added in a later
     /// resampler release; surfaced defensively. Deliberately not
     /// feature-gated, so the identity table's coverage stays unconditional.
@@ -250,15 +250,47 @@ pub enum DecibriError {
         source: std::io::Error,
     },
 
-    /// The bytes of an offline audio file are not a supported WAV.
+    /// An offline audio file is in a format decibri cannot decode.
     ///
-    /// The reason is a static description of the malformed or unsupported
-    /// element (a missing chunk, a truncated body, an encoding other than
-    /// 16-bit PCM or 32-bit float), formatted into the message. Additive
-    /// variant permitted by `#[non_exhaustive]`.
-    #[cfg(feature = "capture")]
-    #[error("invalid WAV file: {reason}")]
-    WavInvalid { reason: &'static str },
+    /// Covers a container that was not recognised, a container naming a codec
+    /// the reader does not carry, a codec at a sample width it does not carry,
+    /// and a channel layout it cannot decode. `reason` is the reader's own
+    /// message, which names the tag, four-CC or width in question, formatted
+    /// into the Display string so that text reaches the consumer (matching
+    /// [`Self::AecConfigInvalid`]; the leading `unsupported audio format:`
+    /// prefix is the stable part).
+    ///
+    /// Also where a reader failure decibri has no arm for lands, so a reader
+    /// release that adds one reports what decibri can be sure of rather than
+    /// naming a cause it cannot know. Deliberately not feature-gated, so the
+    /// identity table's coverage stays unconditional. Additive variant
+    /// permitted by `#[non_exhaustive]`.
+    #[error("unsupported audio format: {reason}")]
+    AudioFormatUnsupported { reason: String },
+
+    /// An offline audio file is structurally wrong.
+    ///
+    /// The container was identified and parsed up to the point where the bytes
+    /// were not what the format requires there. `reason` is the reader's own
+    /// message, which names the byte offset and what was expected at it,
+    /// formatted into the Display string (the leading `malformed audio file:`
+    /// prefix is the stable part). Deliberately not feature-gated, so the
+    /// identity table's coverage stays unconditional. Additive variant
+    /// permitted by `#[non_exhaustive]`.
+    #[error("malformed audio file: {reason}")]
+    AudioFileMalformed { reason: String },
+
+    /// An offline audio file ends before the audio it declares.
+    ///
+    /// Raised for a file shorter than its own headers state, including one
+    /// whose declared payload length is not a whole number of frames.
+    /// `reason` is the reader's own message, which names what was needed
+    /// against what was available, formatted into the Display string (the
+    /// leading `truncated audio file:` prefix is the stable part).
+    /// Deliberately not feature-gated, so the identity table's coverage stays
+    /// unconditional. Additive variant permitted by `#[non_exhaustive]`.
+    #[error("truncated audio file: {reason}")]
+    AudioFileTruncated { reason: String },
 
     /// Whole-recording analysis was requested on a source built without a
     /// voice-activity detection configuration.
@@ -581,9 +613,12 @@ error_identity! {
             path: PathBuf::from("sample.wav"),
             source: std::io::Error::other("sample"),
         };
-    #[cfg(feature = "capture")]
-    DecibriError::WavInvalid { .. } => "WavInvalid", "WAV_INVALID",
-        DecibriError::WavInvalid { reason: "sample" };
+    DecibriError::AudioFormatUnsupported { .. } => "AudioFormatUnsupported", "AUDIO_FORMAT_UNSUPPORTED",
+        DecibriError::AudioFormatUnsupported { reason: "sample".to_string() };
+    DecibriError::AudioFileMalformed { .. } => "AudioFileMalformed", "AUDIO_FILE_MALFORMED",
+        DecibriError::AudioFileMalformed { reason: "sample".to_string() };
+    DecibriError::AudioFileTruncated { .. } => "AudioFileTruncated", "AUDIO_FILE_TRUNCATED",
+        DecibriError::AudioFileTruncated { reason: "sample".to_string() };
 
     DecibriError::VadNotConfigured => "VadNotConfigured", "VAD_NOT_CONFIGURED",
         DecibriError::VadNotConfigured;
@@ -682,6 +717,49 @@ impl From<decibri_resampler::ResamplerError> for DecibriError {
             _ => DecibriError::ResampleFailed {
                 reason: e.to_string(),
             },
+        }
+    }
+}
+
+/// Bridge the offline file reader's errors into the central error.
+///
+/// The reader's eight variants group into three by what the caller can do about
+/// them. The four `Unsupported*` variants say decibri cannot decode this file at
+/// all, whatever is wrong with it, so they map to
+/// [`DecibriError::AudioFormatUnsupported`]. `Malformed` says the bytes at a
+/// known position were wrong, and `Truncated` says the file ended early; those
+/// are separate variants because a caller re-encodes for one and re-fetches for
+/// the other. Every forwarding arm carries the reader's own message, which names
+/// the tag, offset or counts decibri would otherwise have to describe generically.
+///
+/// `Resample` delegates to the resampler's own conversion above, so a rate
+/// failure surfacing through the reader carries the identity it carries
+/// everywhere else. `ContainerCodecMismatch` and `Resample` are both unreachable
+/// through the reader's entry point; they have arms because [`decibri_decode::DecodeError`]
+/// is `#[non_exhaustive]`.
+///
+/// The catch-all lands on [`DecibriError::AudioFormatUnsupported`]: a variant
+/// decibri has no arm for is one its reader release does not know, which is a
+/// statement about decibri rather than about the caller's file.
+#[cfg(feature = "capture")]
+impl From<decibri_decode::DecodeError> for DecibriError {
+    fn from(e: decibri_decode::DecodeError) -> Self {
+        use decibri_decode::DecodeError;
+        // Rendered before the match so every forwarding arm carries the
+        // upstream text unchanged.
+        let reason = e.to_string();
+        match e {
+            DecodeError::UnsupportedContainer { .. }
+            | DecodeError::UnsupportedCodec { .. }
+            | DecodeError::UnsupportedSampleFormat { .. }
+            | DecodeError::UnsupportedChannelLayout { .. }
+            | DecodeError::ContainerCodecMismatch { .. } => {
+                DecibriError::AudioFormatUnsupported { reason }
+            }
+            DecodeError::Malformed { .. } => DecibriError::AudioFileMalformed { reason },
+            DecodeError::Truncated { .. } => DecibriError::AudioFileTruncated { reason },
+            DecodeError::Resample(source) => DecibriError::from(source),
+            _ => DecibriError::AudioFormatUnsupported { reason },
         }
     }
 }

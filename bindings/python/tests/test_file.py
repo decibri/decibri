@@ -29,9 +29,9 @@ from decibri.exceptions import (
     DecibriError,
     FileConsumed,
     FileEngaged,
+    AudioFormatUnsupported,
     FileReadFailed,
     VadNotConfigured,
-    WavInvalid,
 )
 
 # The golden TTS speech fixture the Rust core's VAD regression tests use.
@@ -275,10 +275,10 @@ def test_open_missing_file_raises() -> None:
         File("no-such-file.wav")
 
 
-def test_open_invalid_wav_raises(tmp_path: Path) -> None:
+def test_open_unreadable_bytes_raises(tmp_path: Path) -> None:
     path = tmp_path / "junk.wav"
     path.write_bytes(b"this is not a wav file")
-    with pytest.raises(WavInvalid):
+    with pytest.raises(AudioFormatUnsupported):
         File(path)
 
 

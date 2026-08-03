@@ -341,7 +341,7 @@ VAD reads the signal before the chain, so `vadScore` and the `'speech'` / `'sile
 
 Everything a `Microphone` does to live audio, `File` does to audio you already have: the same conditioning options, the same Readable stream of conditioned chunks (finite: it ends at EOF), and the same opt-in `vad`. Because a `File` is a complete recording, it can also analyze the whole recording for speech.
 
-- `await File.open(path, options?)`: read a WAV off the event loop (recommended, like `Microphone.open`).
+- `await File.open(path, options?)`: read a file off the event loop (recommended, like `Microphone.open`). Reads WAV, AIFF, AIFF-C and FLAC, identified from the file's own bytes rather than its extension.
 - `new File(path, options?)`: the same result, synchronous (blocks on disk I/O; fine for scripts).
 - `File.buffer(samples, options)`: wrap a `Float32Array` of samples you already hold. `options.inputRate` is required (raw samples carry no header); a raw `Buffer` of bytes is rejected as ambiguous.
 - `await file.analyze()` (also spelled `analyse()`): consume the source and resolve to a `VadReport` of per-window `scores` (`{ start, end, vadScore, isSpeech }`) and merged speech `segments` (`{ start, end }`), in seconds of file time. Requires `vad: 'silero'`; a `File` opened without `vad` rejects with `analysis requires VAD`.

@@ -714,19 +714,20 @@ function version() {
 
 class File extends Readable {
   /**
-   * Open a WAV file as an offline source, synchronously. Everything a
+   * Open an audio file as an offline source, synchronously. Everything a
    * `Microphone` does to live audio, a `File` does to audio you already
    * have: the same conditioning options, the same stream of conditioned
    * chunks, and (with `vad` set) the same per-chunk speech events, plus the
    * whole-file `analyze()` a live stream cannot offer.
    *
-   * The bare constructor reads the WAV inline, blocking the event loop on
+   * The bare constructor reads the file inline, blocking the event loop on
    * disk I/O; prefer `await File.open(path, options)` in servers and other
    * latency-sensitive code, exactly as `Microphone.open` is preferred over
    * `new Microphone`. Iteration and analysis are separate single passes:
    * each consumes the source once, so use one `File` per operation.
    *
-   * @param {string} filePath Path to a WAV file (16-bit PCM or 32-bit float).
+   * @param {string} filePath Path to a WAV, AIFF, AIFF-C or FLAC file. The
+   *   container is identified from the bytes, not from the extension.
    * @param {import('./decibri').FileOptions} [options]
    * @param {{ prepared: object, native: object }} [_internal] Internal: a
    *   pre-resolved options bundle and an already-constructed native handle,
@@ -932,8 +933,8 @@ class File extends Readable {
   }
 
   /**
-   * Open a WAV file without blocking the event loop: the disk read, WAV
-   * parse, and chain construction run on the native thread pool. The
+   * Open an audio file without blocking the event loop: the disk read,
+   * decode, and chain construction run on the native thread pool. The
    * recommended form in Node, mirroring `Microphone.open`. The synchronous
    * `new File(path)` remains available for scripts.
    *
@@ -1132,10 +1133,10 @@ class File extends Readable {
   }
 
   /**
-   * The source's own rate, taken from the WAV header or from the `inputRate`
-   * passed to `File.buffer`. Differs from `sampleRate` when the source was
-   * resampled. Readable for the life of the File, including after the source
-   * is consumed or closed.
+   * The source's own rate, taken from the file's header or from the
+   * `inputRate` passed to `File.buffer`. Differs from `sampleRate` when the
+   * source was resampled. Readable for the life of the File, including after
+   * the source is consumed or closed.
    * @returns {number}
    */
   get inputRate() {

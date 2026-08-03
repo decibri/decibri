@@ -6,9 +6,9 @@
 //! handles only the Rust-Python boundary, error mapping, and GIL release on
 //! blocking calls.
 //!
-//! Error mapping covers all 43 `DecibriError` variants and surfaces them as
+//! Error mapping covers all 47 `DecibriError` variants and surfaces them as
 //! instances of the pure-Python exception classes in `decibri.exceptions`
-//! (48 class definitions: 1 base + 26 direct subclasses + the DeviceError
+//! (52 class definitions: 1 base + 30 direct subclasses + the DeviceError
 //! catch-target + 8 device subclasses + the OrtError catch-target + 8 direct
 //! ORT subclasses + the OrtPathError catch-target + 2 path-specific ORT
 //! subclasses). This crate looks the classes up by name at first use and
@@ -155,7 +155,9 @@ const EXCEPTION_NAMES: &[&str] = &[
     "FileReadFailed",
     "FileConsumed",
     "FileEngaged",
-    "WavInvalid",
+    "AudioFormatUnsupported",
+    "AudioFileMalformed",
+    "AudioFileTruncated",
     "VadNotConfigured",
     "VadModelLoadFailed",
     "ModelLoadFailed",
@@ -2083,7 +2085,7 @@ impl AsyncSpeakerBridge {
 // ---------------------------------------------------------------------------
 // FileBridge: offline source pyclass.
 //
-// Wraps the core offline File: constructed from a WAV path or in-memory
+// Wraps the core offline File: constructed from an audio path or in-memory
 // samples, iterated for conditioned chunks (read), or consumed by a
 // whole-recording analysis (analyze). Mirrors MicrophoneBridge's split of
 // responsibilities: the bridge computes the per-chunk VAD score natively on
@@ -2220,7 +2222,7 @@ fn extract_buffer_samples(samples: &Bound<'_, PyAny>) -> PyResult<Vec<f32>> {
 
 #[pymethods]
 impl FileBridge {
-    /// Open a WAV path as an offline source.
+    /// Open an audio path as an offline source.
     #[staticmethod]
     #[pyo3(signature = (
         path,
@@ -2519,7 +2521,7 @@ impl FileBridge {
         self.sample_rate
     }
 
-    /// The source's native rate, from the WAV header or the explicit
+    /// The source's native rate, from the file's header or the explicit
     /// `input_rate` of `buffer`.
     #[getter]
     fn input_rate(&self) -> u32 {

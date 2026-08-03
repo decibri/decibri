@@ -9,6 +9,26 @@ For other decibri packages, see:
 - npm package: [npm/decibri/CHANGELOG.md](../../npm/decibri/CHANGELOG.md)
 - Python package: [bindings/python/CHANGELOG.md](../../bindings/python/CHANGELOG.md)
 
+## [Unreleased]
+
+### Added
+
+- `File::open` reads AIFF, AIFF-C and FLAC as well as WAV, and reads WAV in mu-law, A-law, 8-bit and 24-bit as well as the 16-bit PCM and 32-bit float it already read. The container is identified from the file's own bytes, so the path's extension does not decide how a file is read.
+- `DecibriError::AudioFormatUnsupported`, reported when a file is in a container or an encoding decibri cannot decode. The message names the container tag, codec or sample width in question.
+- `DecibriError::AudioFileMalformed`, reported when a file's bytes are not what its format requires where they sit. The message names the byte offset and what was expected there.
+- `DecibriError::AudioFileTruncated`, reported when a file ends before the audio it declares. The message names what was needed against what was available.
+- `LICENSE`, the full Apache 2.0 text, in the published source package.
+
+### Changed
+
+- **BREAKING: a WAV whose declared data length is not a whole number of frames now fails to open**, with `DecibriError::AudioFileTruncated`. It previously opened and delivered audio a fraction of a frame short of its own declaration, with nothing to indicate it. A file shorter than its declared length, which is what an interrupted download leaves behind, already failed to open and is unaffected.
+- A file declaring no channels reports `DecibriError::AudioFormatUnsupported` where it reported `DecibriError::WavInvalid`.
+- The published source package carries the crate source, its build script, its manifest and its documents. The test assets under `tests` no longer ship with it.
+
+### Removed
+
+- **BREAKING: `DecibriError::WavInvalid`.** `AudioFormatUnsupported`, `AudioFileMalformed` and `AudioFileTruncated` replace it, splitting what was one failure into the three the caller acts on differently. Match on `DecibriError` to catch all three together.
+
 ## [5.5.0] - 2026-07-31
 
 ### Added

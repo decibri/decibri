@@ -423,7 +423,7 @@ export declare class Microphone extends Readable {
 export interface FileOptions extends ReadableOptions {
   /**
    * Target output rate in Hz: the rate every delivered chunk carries. The
-   * source's input rate (from the WAV header, or `inputRate` for
+   * source's input rate (from the file's header, or `inputRate` for
    * `File.buffer`) is resampled to this rate, so a 44.1 kHz recording comes
    * out at 16 kHz unless you set `sampleRate`. The same meaning the option
    * has on `Microphone`.
@@ -559,7 +559,7 @@ export interface VadReport {
  * analyze the whole recording for speech with `analyze()` / `analyse()`,
  * which a live stream cannot do.
  *
- * Construction: `new File(path)` reads the WAV synchronously (fine for a
+ * Construction: `new File(path)` reads the file synchronously (fine for a
  * script; it blocks the event loop on disk I/O), `await File.open(path)` reads
  * it off the event loop (the recommended form, mirroring `Microphone.open`),
  * and `File.buffer(samples, { inputRate })` wraps a `Float32Array` of samples
@@ -586,15 +586,16 @@ export interface VadReport {
  */
 export declare class File extends Readable {
   /**
-   * Open a WAV file synchronously (blocks on disk I/O; prefer `File.open`
-   * in servers). Supports 16-bit PCM and 32-bit float WAV files; the input
-   * rate and channel count come from the header.
+   * Open an audio file synchronously (blocks on disk I/O; prefer `File.open`
+   * in servers). Reads WAV, AIFF, AIFF-C and FLAC, identified from the
+   * file's own bytes rather than its extension; the input rate and channel
+   * count come from the header.
    */
   constructor(path: string, options?: FileOptions);
 
   /**
-   * Open a WAV file without blocking the event loop: the disk read, WAV
-   * parse, and chain construction run on the native thread pool. The
+   * Open an audio file without blocking the event loop: the disk read,
+   * decode, and chain construction run on the native thread pool. The
    * recommended form, mirroring `Microphone.open`.
    */
   static open(path: string, options?: FileOptions): Promise<File>;
@@ -622,7 +623,7 @@ export declare class File extends Readable {
   readonly sampleRate: number;
 
   /**
-   * The source's own rate, taken from the WAV header or from the
+   * The source's own rate, taken from the file's header or from the
    * `inputRate` passed to `File.buffer`. Differs from `sampleRate` when the
    * source was resampled.
    */

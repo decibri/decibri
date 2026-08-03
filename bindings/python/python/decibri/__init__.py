@@ -75,7 +75,9 @@ from decibri.exceptions import (
     VadThresholdOutOfRange,
     AecSampleRateUnsupported,
     AecConfigInvalid,
-    WavInvalid,
+    AudioFormatUnsupported,
+    AudioFileMalformed,
+    AudioFileTruncated,
 )
 
 __version__ = "0.8.0"

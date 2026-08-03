@@ -132,7 +132,9 @@ const BASE_CODES = [
   ['resampler error:', 'RESAMPLE_FAILED'],
   ['echo canceller configuration error:', 'AEC_CONFIG_INVALID'],
   ['Failed to read audio file', 'FILE_READ_FAILED'],
-  ['invalid WAV file:', 'WAV_INVALID'],
+  ['unsupported audio format:', 'AUDIO_FORMAT_UNSUPPORTED'],
+  ['malformed audio file:', 'AUDIO_FILE_MALFORMED'],
+  ['truncated audio file:', 'AUDIO_FILE_TRUNCATED'],
   ['ONNX Runtime was initialized in pid', 'FORK_AFTER_ORT_INIT'],
   ['ONNX backend error from', 'ONNX_BACKEND_FAILED'],
   // Authored in the napi layer (bindings/node/src/lib.rs), not in

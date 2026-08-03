@@ -1,6 +1,6 @@
 //! Offline audio source.
 //!
-//! A [`File`] conditions audio you already have, a WAV recording on disk or
+//! A [`File`] conditions audio you already have, a recording on disk or
 //! in-memory samples, through the same chain a live [`crate::Microphone`]
 //! drives: channel and rate normalization first, then the opt-in conditioning
 //! (DC removal, denoise, high-pass, level control, limiter). Iterating a
@@ -15,18 +15,17 @@
 //! rate), never wall-clock time.
 //!
 //! Construction mirrors the microphone's config-first shape: build a
-//! [`FileConfig`], then open a WAV path with [`File::open`] (or the
+//! [`FileConfig`], then open a path with [`File::open`] (or the
 //! [`File::new`] alias) or wrap in-memory samples with [`File::buffer`]. The
-//! path form reads the input rate and channel count from the WAV header; the
-//! buffer form takes the input rate explicitly because raw samples carry no
-//! header.
+//! path form reads the input rate and channel count from the file's own
+//! header; the buffer form takes the input rate explicitly because raw samples
+//! carry no header.
 
 use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
 
 use crate::error::DecibriError;
 use crate::microphone::{AudioChunk, DenoiseModel, HighpassFilter};
-use crate::sample;
 use crate::stage::{build_capture_stage, CaptureStage, Transforms};
 
 #[cfg(feature = "vad")]
@@ -251,10 +250,10 @@ pub struct VadReport {
 pub struct File {
     /// Interleaved source samples at `input_rate` with `input_channels`.
     source: Vec<f32>,
-    /// The source's native rate in Hz (from the WAV header, or the explicit
+    /// The source's native rate in Hz (from the file's header, or the explicit
     /// `input_rate` of [`File::buffer`]).
     input_rate: u32,
-    /// The source's channel count (from the WAV header; 1 for buffers).
+    /// The source's channel count (from the file's header; 1 for buffers).
     input_channels: u16,
     /// Cursor into `source`, in interleaved samples.
     pos: usize,
@@ -304,15 +303,23 @@ pub struct File {
 }
 
 impl File {
-    /// Open a WAV file and prepare it for conditioning (and, with VAD
-    /// configured, analysis). Reads the whole file; the input rate and
-    /// channel count come from the WAV header. Supports 16-bit PCM and 32-bit
-    /// float WAV encodings; other formats are owned by a separate conversion
-    /// feature, keeping this path dependency-free.
+    /// Open an audio file and prepare it for conditioning (and, with VAD
+    /// configured, analysis). Reads the whole file; the input rate and channel
+    /// count come from the file's own header. WAV, AIFF, AIFF-C and FLAC are
+    /// read, in every encoding the reader carries. The container is
+    /// identified from the bytes, so the path's extension does not decide how
+    /// the file is read.
     ///
     /// # Errors
     /// - [`DecibriError::FileReadFailed`] when the file cannot be read.
-    /// - [`DecibriError::WavInvalid`] when the bytes are not a supported WAV.
+    /// - [`DecibriError::AudioFormatUnsupported`] when the bytes are in a
+    ///   container or encoding the reader does not carry.
+    /// - [`DecibriError::AudioFileMalformed`] when the bytes are structurally
+    ///   wrong.
+    /// - [`DecibriError::AudioFileTruncated`] when the file ends before the
+    ///   audio it declares.
+    /// - [`DecibriError::SampleRateOutOfRange`] when the file's own rate is
+    ///   outside 1000-384000.
     /// - Configuration errors exactly as [`FileConfig::validate`] reports.
     pub fn open(path: impl AsRef<Path>, config: FileConfig) -> Result<Self, DecibriError> {
         let path = path.as_ref();
@@ -320,8 +327,17 @@ impl File {
             path: path.to_path_buf(),
             source,
         })?;
-        let wav = parse_wav(&bytes)?;
-        Self::from_source(wav.samples, wav.sample_rate, wav.channels, config)
+        let audio = decibri_decode::decode(&bytes)?;
+        // decibri's accepted input range, which the reader does not carry. It
+        // sits here rather than inside any one container's reader because
+        // every container can declare a rate outside it, and the same range
+        // and the same error identity apply to `File::buffer`'s explicit rate.
+        let sample_rate = audio.sample_rate();
+        if !(1000..=384000).contains(&sample_rate) {
+            return Err(DecibriError::SampleRateOutOfRange);
+        }
+        let channels = audio.channels();
+        Self::from_source(audio.into_samples(), sample_rate, channels, config)
     }
 
     /// Alias of [`File::open`]: the bare-constructor spelling. Both forms
@@ -433,7 +449,7 @@ impl File {
         self.target_rate
     }
 
-    /// The source's native rate, from the WAV header or the explicit
+    /// The source's native rate, from the file's header or the explicit
     /// [`File::buffer`] input rate.
     pub fn input_rate(&self) -> u32 {
         self.input_rate
@@ -825,131 +841,165 @@ fn merge_segments(scores: &[VadWindow], holdoff_secs: f64) -> Vec<Segment> {
     segments
 }
 
-/// A parsed WAV source: interleaved f32 samples plus the header's format.
-struct WavSource {
-    samples: Vec<f32>,
-    sample_rate: u32,
-    channels: u16,
-}
+#[cfg(test)]
+mod tests {
+    use super::*;
+    // Only the test WAV builders convert samples to bytes; the reader the
+    // `File` path uses does its own conversion.
+    use crate::sample;
+    // The module-level resampler import is `vad`-gated; the reference
+    // resampler in the buffer tests must resolve under `capture` alone.
+    use decibri_resampler::{PolyphaseResampler, Resampler};
 
-/// Parse a WAV file's bytes: RIFF/WAVE with a `fmt ` chunk describing 16-bit
-/// PCM (format 1) or 32-bit IEEE float (format 3), plain or carried in a
-/// WAVE_FORMAT_EXTENSIBLE container (format 0xFFFE), any channel count, any
-/// rate, and a `data` chunk before or after the `fmt ` chunk. The minimal
-/// reader keeps this path free of any decode dependency; other encodings are
-/// owned by a separate conversion feature.
-fn parse_wav(bytes: &[u8]) -> Result<WavSource, DecibriError> {
-    /// The SubFormat GUIDs a WAVE_FORMAT_EXTENSIBLE `fmt ` chunk carries for
-    /// the two supported encodings, in file byte order. The two differ only
-    /// in the leading little-endian word; the match is against all sixteen
-    /// bytes, since a GUID sharing only that word names a different format.
+    // ── Building input files by hand ─────────────────────────────────────
+    //
+    // Every input below is assembled here rather than committed, so the file's
+    // shape reads as a statement about the format instead of as a blob, and
+    // nothing binary enters the crate. Each builder names its fields in the
+    // order and the byte order the specification fixes them in.
+
+    /// A RIFF/WAVE file: the 12-byte `RIFF` header naming the `WAVE` form,
+    /// then a `fmt ` chunk carrying `fmt_body` and a `data` chunk carrying
+    /// `payload`. RIFF pads a chunk body to an even length and does not count
+    /// the pad byte in the chunk size, which both chunks honour here.
+    fn riff_wave(fmt_body: &[u8], payload: &[u8]) -> Vec<u8> {
+        fn chunk(id: &[u8; 4], body: &[u8]) -> Vec<u8> {
+            let mut out = Vec::with_capacity(8 + body.len() + 1);
+            out.extend_from_slice(id);
+            out.extend_from_slice(&(body.len() as u32).to_le_bytes());
+            out.extend_from_slice(body);
+            if !body.len().is_multiple_of(2) {
+                out.push(0);
+            }
+            out
+        }
+        let mut form = b"WAVE".to_vec();
+        form.extend_from_slice(&chunk(b"fmt ", fmt_body));
+        form.extend_from_slice(&chunk(b"data", payload));
+
+        let mut bytes = b"RIFF".to_vec();
+        bytes.extend_from_slice(&(form.len() as u32).to_le_bytes());
+        bytes.extend_from_slice(&form);
+        bytes
+    }
+
+    /// The 16-byte `fmt ` chunk body every WAVE file carries: `wFormatTag`,
+    /// `nChannels`, `nSamplesPerSec`, `nAvgBytesPerSec`, `nBlockAlign` and
+    /// `wBitsPerSample`, in that order, all little-endian.
+    fn wave_fmt(tag: u16, channels: u16, rate: u32, bits: u16) -> Vec<u8> {
+        let block_align = channels * bits.div_ceil(8);
+        let mut body = Vec::with_capacity(16);
+        body.extend_from_slice(&tag.to_le_bytes());
+        body.extend_from_slice(&channels.to_le_bytes());
+        body.extend_from_slice(&rate.to_le_bytes());
+        body.extend_from_slice(&(rate * u32::from(block_align)).to_le_bytes());
+        body.extend_from_slice(&block_align.to_le_bytes());
+        body.extend_from_slice(&bits.to_le_bytes());
+        body
+    }
+
+    /// The 40-byte WAVE_FORMAT_EXTENSIBLE `fmt ` body: the 16 plain fields
+    /// with `wFormatTag` 0xFFFE, then the extension, `cbSize` of 22,
+    /// `wValidBitsPerSample`, `dwChannelMask` and the 16-byte SubFormat GUID.
+    /// The GUID, not the tag, names the encoding.
+    fn wave_fmt_extensible(subformat: [u8; 16], channels: u16, rate: u32, bits: u16) -> Vec<u8> {
+        let mut body = wave_fmt(0xFFFE, channels, rate, bits);
+        body.extend_from_slice(&22u16.to_le_bytes()); // cbSize
+        body.extend_from_slice(&bits.to_le_bytes()); // wValidBitsPerSample
+        body.extend_from_slice(&0u32.to_le_bytes()); // dwChannelMask
+        body.extend_from_slice(&subformat);
+        body
+    }
+
+    /// KSDATAFORMAT_SUBTYPE_PCM, the SubFormat GUID an extensible container
+    /// carries for integer PCM, in file byte order.
     const SUBTYPE_PCM: [u8; 16] = [
         0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x10, 0x00, 0x80, 0x00, 0x00, 0xAA, 0x00, 0x38, 0x9B,
         0x71,
     ];
-    const SUBTYPE_IEEE_FLOAT: [u8; 16] = [
-        0x03, 0x00, 0x00, 0x00, 0x00, 0x00, 0x10, 0x00, 0x80, 0x00, 0x00, 0xAA, 0x00, 0x38, 0x9B,
-        0x71,
-    ];
 
-    fn u16_at(bytes: &[u8], at: usize) -> u16 {
-        u16::from_le_bytes([bytes[at], bytes[at + 1]])
-    }
-    fn u32_at(bytes: &[u8], at: usize) -> u32 {
-        u32::from_le_bytes([bytes[at], bytes[at + 1], bytes[at + 2], bytes[at + 3]])
-    }
-    let invalid = |reason: &'static str| DecibriError::WavInvalid { reason };
-
-    if bytes.len() < 12 || &bytes[0..4] != b"RIFF" || &bytes[8..12] != b"WAVE" {
-        return Err(invalid("not a RIFF/WAVE file"));
-    }
-
-    // Walk the chunk list for `fmt ` and `data`, taking the first of each;
-    // RIFF fixes neither their order nor their count. Every `fmt ` chunk the
-    // walk meets is validated, and only the first is recorded. The walk ends
-    // once both are found, so bytes past that point are not examined, exactly
-    // as before for the conventional order. Chunk bodies are padded to an
-    // even byte count in the file.
-    let mut fmt: Option<(usize, usize)> = None; // body offset, size
-    let mut data: Option<(usize, usize)> = None; // body offset, size
-    let mut offset = 12usize;
-    while offset + 8 <= bytes.len() && (fmt.is_none() || data.is_none()) {
-        let id = &bytes[offset..offset + 4];
-        let size = u32_at(bytes, offset + 4) as usize;
-        let body = offset + 8;
-        if body + size > bytes.len() {
-            return Err(invalid("chunk extends past end of file"));
-        }
-        if id == b"fmt " {
-            if size < 16 {
-                return Err(invalid("fmt chunk too short"));
+    /// An EA IFF 85 `FORM` file of type `AIFF` or `AIFC`: the 12-byte header,
+    /// the `FVER` chunk on the AIFF-C path, then `COMM` and `SSND`. IFF is
+    /// big-endian throughout and pads a chunk body to an even length without
+    /// counting the pad byte, the mirror of RIFF's rule.
+    ///
+    /// `SSND` does not begin with samples: its body opens with the 32-bit
+    /// `offset` and `blockSize` fields, both zero here, and the sample data
+    /// follows them.
+    fn iff_form(form: &[u8; 4], comm_body: &[u8], payload: &[u8]) -> Vec<u8> {
+        fn chunk(id: &[u8; 4], body: &[u8]) -> Vec<u8> {
+            let mut out = Vec::with_capacity(8 + body.len() + 1);
+            out.extend_from_slice(id);
+            out.extend_from_slice(&(body.len() as u32).to_be_bytes());
+            out.extend_from_slice(body);
+            if !body.len().is_multiple_of(2) {
+                out.push(0);
             }
-            if fmt.is_none() {
-                fmt = Some((body, size));
-            }
-        } else if id == b"data" && data.is_none() {
-            data = Some((body, size));
+            out
         }
-        offset = body + size + (size & 1);
-    }
+        let mut ssnd = Vec::with_capacity(8 + payload.len());
+        ssnd.extend_from_slice(&0u32.to_be_bytes()); // offset
+        ssnd.extend_from_slice(&0u32.to_be_bytes()); // blockSize
+        ssnd.extend_from_slice(payload);
 
-    let (fmt_body, fmt_size) = fmt.ok_or(invalid("missing fmt chunk"))?;
-    let (data_offset, data_len) = data.ok_or(invalid("missing data chunk"))?;
-    let mut format = u16_at(bytes, fmt_body);
-    let channels = u16_at(bytes, fmt_body + 2);
-    let sample_rate = u32_at(bytes, fmt_body + 4);
-    let bits = u16_at(bytes, fmt_body + 14);
-    if channels == 0 {
-        return Err(invalid("channel count is zero"));
-    }
-    if !(1000..=384000).contains(&sample_rate) {
-        return Err(DecibriError::SampleRateOutOfRange);
-    }
-
-    // WAVE_FORMAT_EXTENSIBLE: the encoding is named by the extension's
-    // SubFormat GUID, not the format tag. Resolve the tag from an exact
-    // whole-GUID match. A GUID matching neither encoding, or a `fmt ` chunk
-    // without room for one (the 16 header bytes, a declared extension of at
-    // least 22 bytes, and the GUID itself at bytes 24..40), leaves the tag
-    // unresolved for the encoding check below to reject. The chunk walk has
-    // already checked the declared chunk size against the file, so every
-    // read here stays in bounds.
-    if format == 0xFFFE {
-        format = 0;
-        if fmt_size >= 40 && usize::from(u16_at(bytes, fmt_body + 16)) >= 22 {
-            let subformat = &bytes[fmt_body + 24..fmt_body + 40];
-            if subformat == SUBTYPE_PCM {
-                format = 1;
-            } else if subformat == SUBTYPE_IEEE_FLOAT {
-                format = 3;
-            }
+        let mut body = form.to_vec();
+        if form == b"AIFC" {
+            // AIFC Version 1, the one timestamp the format has ever carried.
+            body.extend_from_slice(&chunk(b"FVER", &0xA280_5140u32.to_be_bytes()));
         }
+        body.extend_from_slice(&chunk(b"COMM", comm_body));
+        body.extend_from_slice(&chunk(b"SSND", &ssnd));
+
+        let mut bytes = b"FORM".to_vec();
+        bytes.extend_from_slice(&(body.len() as u32).to_be_bytes());
+        bytes.extend_from_slice(&body);
+        bytes
     }
 
-    let payload = &bytes[data_offset..data_offset + data_len];
-    let samples = match (format, bits) {
-        (1, 16) => sample::i16_le_bytes_to_f32(payload),
-        (3, 32) => sample::f32_le_bytes_to_f32(payload),
-        _ => {
-            return Err(invalid(
-                "unsupported encoding; 16-bit PCM or 32-bit float required",
-            ))
+    /// A `COMM` chunk body: `numChannels`, `numSampleFrames`, `sampleSize`
+    /// and the 80-bit `sampleRate`, all big-endian. An AIFF-C file appends
+    /// the compression four-CC and a `compressionName` pascal string, empty
+    /// here, padded to an even total.
+    fn aiff_comm(
+        channels: u16,
+        frames: u32,
+        bits: u16,
+        rate: u32,
+        compression: Option<&[u8; 4]>,
+    ) -> Vec<u8> {
+        let mut body = Vec::with_capacity(24);
+        body.extend_from_slice(&channels.to_be_bytes());
+        body.extend_from_slice(&frames.to_be_bytes());
+        body.extend_from_slice(&bits.to_be_bytes());
+        body.extend_from_slice(&aiff_extended_rate(rate));
+        if let Some(four_cc) = compression {
+            body.extend_from_slice(four_cc);
+            body.push(0); // compressionName length
+            body.push(0); // pad to an even total
         }
-    };
+        body
+    }
 
-    Ok(WavSource {
-        samples,
-        sample_rate,
-        channels,
-    })
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    // The module-level resampler import is `vad`-gated; the reference
-    // resampler in the buffer tests must resolve under `capture` alone.
-    use decibri_resampler::{PolyphaseResampler, Resampler};
+    /// The 80-bit IEEE 754 extended-precision float `COMM` stores its sample
+    /// rate in: the sign bit clear, a 15-bit exponent biased by 16383, and a
+    /// 64-bit mantissa whose leading integer bit is explicit rather than
+    /// implied, which is what distinguishes this format from binary32 and
+    /// binary64.
+    ///
+    /// For an integer rate, the exponent is the position of its highest set
+    /// bit and the mantissa is the rate shifted up so that bit lands in the
+    /// mantissa's top position. 16000 Hz is 2^13 scaled, so it encodes as
+    /// exponent 16383 + 13 and mantissa 0xFA00_0000_0000_0000.
+    fn aiff_extended_rate(rate: u32) -> [u8; 10] {
+        assert!(rate > 0, "a zero rate has no normalized encoding");
+        let top_bit = 31 - rate.leading_zeros();
+        let exponent = (16383 + top_bit) as u16;
+        let mantissa = u64::from(rate) << (63 - top_bit);
+        let mut out = [0u8; 10];
+        out[0..2].copy_from_slice(&exponent.to_be_bytes());
+        out[2..10].copy_from_slice(&mantissa.to_be_bytes());
+        out
+    }
 
     /// Interleave a mono signal into a synthetic WAV byte vector: 16-bit PCM
     /// (format 1) or 32-bit float (format 3), any rate and channel count.
@@ -960,24 +1010,47 @@ mod tests {
             _ => unreachable!("test formats are 1 and 3"),
         };
         let bits: u16 = if format == 1 { 16 } else { 32 };
-        let block_align = channels * bits / 8;
-        let byte_rate = rate * u32::from(block_align);
-        let mut bytes = Vec::new();
-        bytes.extend_from_slice(b"RIFF");
-        bytes.extend_from_slice(&(36 + payload.len() as u32).to_le_bytes());
-        bytes.extend_from_slice(b"WAVE");
-        bytes.extend_from_slice(b"fmt ");
-        bytes.extend_from_slice(&16u32.to_le_bytes());
-        bytes.extend_from_slice(&format.to_le_bytes());
-        bytes.extend_from_slice(&channels.to_le_bytes());
-        bytes.extend_from_slice(&rate.to_le_bytes());
-        bytes.extend_from_slice(&byte_rate.to_le_bytes());
-        bytes.extend_from_slice(&block_align.to_le_bytes());
-        bytes.extend_from_slice(&bits.to_le_bytes());
-        bytes.extend_from_slice(b"data");
-        bytes.extend_from_slice(&(payload.len() as u32).to_le_bytes());
-        bytes.extend_from_slice(&payload);
-        bytes
+        riff_wave(&wave_fmt(format, channels, rate, bits), &payload)
+    }
+
+    /// Write `bytes` to a uniquely named file under the system temp
+    /// directory, hand the path to `read_it`, and remove the file. `File`
+    /// opens a path, so an input assembled here has to reach the filesystem
+    /// to be read at all.
+    fn with_file<T>(name: &str, bytes: &[u8], read_it: impl FnOnce(&Path) -> T) -> T {
+        let path = std::env::temp_dir().join(format!("decibri-decode-{name}"));
+        std::fs::write(&path, bytes).expect("the temp input should be writable");
+        let out = read_it(&path);
+        std::fs::remove_file(&path).ok();
+        out
+    }
+
+    /// Open assembled bytes through `File` with the given configuration and
+    /// collect every delivered sample.
+    fn decode_bytes(name: &str, bytes: &[u8], config: FileConfig) -> Vec<f32> {
+        with_file(name, bytes, |path| {
+            collect(File::open(path, config).unwrap_or_else(|e| panic!("{name} should open: {e}")))
+        })
+    }
+
+    /// Open assembled bytes through `File` and return the failure.
+    fn decode_error(name: &str, bytes: &[u8]) -> DecibriError {
+        with_file(name, bytes, |path| {
+            File::open(path, FileConfig::default())
+                .err()
+                .unwrap_or_else(|| panic!("{name} should be rejected"))
+        })
+    }
+
+    /// Interleaved samples as big-endian 16-bit two's-complement words, the
+    /// payload a plain AIFF `SSND` chunk carries. Big-endian is the format's
+    /// default and the reason AIFF is worth testing separately from WAV.
+    fn be_i16_bytes(samples: &[f32]) -> Vec<u8> {
+        let mut out = Vec::with_capacity(samples.len() * 2);
+        for &s in samples {
+            out.extend_from_slice(&((s * 32768.0) as i16).to_be_bytes());
+        }
+        out
     }
 
     /// A short mono sine at the given rate, amplitude 0.5.
@@ -1191,259 +1264,623 @@ mod tests {
         assert!(matches!(err, DecibriError::FileReadFailed { .. }));
     }
 
-    /// Bytes that are not RIFF/WAVE, a truncated chunk, and an unsupported
-    /// encoding each report the typed WAV parse failure.
-    #[test]
-    fn parse_rejects_invalid_wav() {
-        assert!(matches!(
-            parse_wav(b"not a wav file at all"),
-            Err(DecibriError::WavInvalid { .. })
-        ));
+    // ── The file reader ──────────────────────────────────────────────────
+    //
+    // Inputs here are assembled byte by byte from the specifications rather
+    // than committed, so a reader sees what makes a file a 999 Hz file or a
+    // half-frame file without decoding a blob, and the crate ships no binary
+    // for them. The one exception is `libflac-speech-clip-16k.flac`, which is
+    // real encoder output for the reason recorded on `libflac_clip_path`.
 
-        let mut truncated = wav_bytes(1, 1, 16000, &sine(16000, 0.1));
-        truncated.truncate(60);
-        assert!(matches!(
-            parse_wav(&truncated),
-            Err(DecibriError::WavInvalid { .. })
-        ));
-
-        // 8-bit PCM is unsupported: rewrite the bits-per-sample field.
-        let mut eight_bit = wav_bytes(1, 1, 16000, &sine(16000, 0.1));
-        eight_bit[34] = 8;
-        eight_bit[35] = 0;
-        assert!(matches!(
-            parse_wav(&eight_bit),
-            Err(DecibriError::WavInvalid { .. })
-        ));
+    /// The one committed input on this path: 1600 samples of the golden
+    /// recording's own speech, encoded by libFLAC.
+    ///
+    /// It is committed because FLAC is the one format here that cannot be
+    /// assembled by hand into anything a real encoder produces. Every FLAC
+    /// frame a real encoder emits is predictor-and-residual coded under a
+    /// per-partition Rice parameter search; a hand-built one would carry
+    /// verbatim subframes and exercise a path no encoder takes, which would
+    /// read as evidence without being any.
+    fn libflac_clip_path() -> PathBuf {
+        Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests")
+            .join("assets")
+            .join("libflac-speech-clip-16k.flac")
     }
 
-    // ── Extensible containers and chunk order ───────────────────────────
+    /// The span of the golden recording the committed FLAC encodes. Speech,
+    /// not silence: the clip runs from the onset of the first utterance.
+    const CLIP: std::ops::Range<usize> = 22400..24000;
 
-    /// The SubFormat GUIDs of the two supported encodings, in file byte
-    /// order, as a WAVE_FORMAT_EXTENSIBLE `fmt ` chunk carries them.
-    const PCM_GUID: [u8; 16] = [
-        0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x10, 0x00, 0x80, 0x00, 0x00, 0xAA, 0x00, 0x38, 0x9B,
-        0x71,
-    ];
-    const IEEE_FLOAT_GUID: [u8; 16] = [
-        0x03, 0x00, 0x00, 0x00, 0x00, 0x00, 0x10, 0x00, 0x80, 0x00, 0x00, 0xAA, 0x00, 0x38, 0x9B,
-        0x71,
-    ];
+    /// The golden recording's samples, read with a 16-bit reader written
+    /// here rather than through the reader under test.
+    ///
+    /// The container comparisons below assert that three encodings deliver
+    /// one set of samples, so the set they are compared against must not come
+    /// from the thing being compared. This walks the chunk list, checks the
+    /// format is the mono 16-bit PCM the fixture is, and divides by 32768,
+    /// which is the whole of it.
+    fn golden_samples() -> Vec<f32> {
+        let bytes = std::fs::read(golden_wav_path()).expect("the golden recording reads");
+        assert_eq!(&bytes[0..4], b"RIFF", "the golden recording is RIFF");
+        assert_eq!(&bytes[8..12], b"WAVE", "the golden recording is WAVE");
 
-    /// The exact message a file with an unsupported encoding reports.
-    const UNSUPPORTED_ENCODING: &str = "unsupported encoding; 16-bit PCM or 32-bit float required";
-
-    /// A synthetic WAV byte vector with an arbitrary `fmt ` chunk body,
-    /// followed by a `data` chunk holding `payload`.
-    fn wav_bytes_with_fmt(fmt_body: &[u8], payload: &[u8]) -> Vec<u8> {
-        let padded_fmt = fmt_body.len() + (fmt_body.len() & 1);
-        let mut bytes = Vec::new();
-        bytes.extend_from_slice(b"RIFF");
-        bytes.extend_from_slice(&((4 + 8 + padded_fmt + 8 + payload.len()) as u32).to_le_bytes());
-        bytes.extend_from_slice(b"WAVE");
-        bytes.extend_from_slice(b"fmt ");
-        bytes.extend_from_slice(&(fmt_body.len() as u32).to_le_bytes());
-        bytes.extend_from_slice(fmt_body);
-        bytes.resize(bytes.len() + (fmt_body.len() & 1), 0);
-        bytes.extend_from_slice(b"data");
-        bytes.extend_from_slice(&(payload.len() as u32).to_le_bytes());
-        bytes.extend_from_slice(payload);
-        bytes
-    }
-
-    /// The 16 leading bytes of an extensible `fmt ` chunk: tag 0xFFFE with
-    /// the given container bit depth, mono, 16 kHz.
-    fn extensible_fmt_base(bits: u16) -> Vec<u8> {
-        let block_align = bits / 8;
-        let mut body = Vec::new();
-        body.extend_from_slice(&0xFFFEu16.to_le_bytes());
-        body.extend_from_slice(&1u16.to_le_bytes());
-        body.extend_from_slice(&16000u32.to_le_bytes());
-        body.extend_from_slice(&(16000 * u32::from(block_align)).to_le_bytes());
-        body.extend_from_slice(&block_align.to_le_bytes());
-        body.extend_from_slice(&bits.to_le_bytes());
-        body
-    }
-
-    /// A synthetic WAVE_FORMAT_EXTENSIBLE byte vector: a 40-byte `fmt `
-    /// chunk whose SubFormat GUID names the encoding, mono at 16 kHz.
-    fn wav_bytes_extensible(subformat: [u8; 16], bits: u16, samples: &[f32]) -> Vec<u8> {
-        let payload = match bits {
-            16 => sample::f32_to_i16_le_bytes(samples),
-            32 => sample::f32_to_f32_le_bytes(samples),
-            _ => unreachable!("test containers are 16 and 32 bits"),
+        let le16 = |at: usize| u16::from_le_bytes([bytes[at], bytes[at + 1]]);
+        let le32 = |at: usize| {
+            u32::from_le_bytes([bytes[at], bytes[at + 1], bytes[at + 2], bytes[at + 3]])
         };
-        let mut fmt_body = extensible_fmt_base(bits);
-        fmt_body.extend_from_slice(&22u16.to_le_bytes()); // extension size
-        fmt_body.extend_from_slice(&bits.to_le_bytes()); // valid bits
-        fmt_body.extend_from_slice(&0u32.to_le_bytes()); // channel mask
-        fmt_body.extend_from_slice(&subformat);
-        wav_bytes_with_fmt(&fmt_body, &payload)
+
+        let (mut tag, mut channels, mut rate, mut bits) = (0u16, 0u16, 0u32, 0u16);
+        let mut data: Option<(usize, usize)> = None;
+        let mut pos = 12usize;
+        while pos + 8 <= bytes.len() {
+            let id = &bytes[pos..pos + 4];
+            let size = le32(pos + 4) as usize;
+            let body = pos + 8;
+            if id == b"fmt " {
+                tag = le16(body);
+                channels = le16(body + 2);
+                rate = le32(body + 4);
+                bits = le16(body + 14);
+            } else if id == b"data" && data.is_none() {
+                data = Some((body, size));
+            }
+            pos = body + size + (size & 1);
+        }
+        assert_eq!(
+            (tag, channels, rate, bits),
+            (1, 1, 16000, 16),
+            "the golden recording is mono 16-bit PCM at 16 kHz"
+        );
+        let (at, len) = data.expect("the golden recording has a data chunk");
+        bytes[at..at + len]
+            .chunks_exact(2)
+            .map(|c| f32::from(i16::from_le_bytes([c[0], c[1]])) / 32768.0)
+            .collect()
     }
 
-    /// An extensible container with the PCM subformat opens and parses to
-    /// exactly the samples of the plain 16-bit PCM file carrying the same
-    /// body.
-    #[test]
-    fn extensible_pcm_matches_plain_pcm() {
-        let samples = sine(16000, 0.1);
-        let plain = parse_wav(&wav_bytes(1, 1, 16000, &samples)).unwrap();
-        let extensible = parse_wav(&wav_bytes_extensible(PCM_GUID, 16, &samples)).unwrap();
-        assert_eq!(extensible.samples, plain.samples);
-        assert_eq!(extensible.sample_rate, plain.sample_rate);
-        assert_eq!(extensible.channels, plain.channels);
+    /// The samples the committed FLAC encodes, taken from the golden
+    /// recording by the reader above.
+    fn clip_samples() -> Vec<f32> {
+        golden_samples()[CLIP].to_vec()
     }
 
-    /// An extensible container with the IEEE float subformat opens and
-    /// parses to exactly the samples of the plain 32-bit float file carrying
-    /// the same body.
+    /// The strongest single statement available about the reader: one span of
+    /// real speech, carried by three containers, delivers one set of samples.
+    ///
+    /// The WAV and the AIFF are assembled here from the specifications; the
+    /// FLAC is libFLAC's own output. All three are lossless at the source's
+    /// 16 bits and all three are compared against the samples a reader
+    /// written here pulls out of the golden recording, so equality is exact
+    /// and nothing in the comparison comes from the reader under test.
+    ///
+    /// Regression: a container reader that offsets, reorders, rescales or
+    /// drops samples; a byte-order fault on the big-endian container; and a
+    /// FLAC reader that disagrees with the encoder everybody else uses.
     #[test]
-    fn extensible_float_matches_plain_float() {
-        let samples = sine(16000, 0.1);
-        let plain = parse_wav(&wav_bytes(3, 1, 16000, &samples)).unwrap();
-        let extensible = parse_wav(&wav_bytes_extensible(IEEE_FLOAT_GUID, 32, &samples)).unwrap();
-        assert_eq!(extensible.samples, plain.samples);
-        assert_eq!(extensible.sample_rate, plain.sample_rate);
-        assert_eq!(extensible.channels, plain.channels);
+    fn one_span_of_speech_in_three_containers_decodes_to_one_set_of_samples() {
+        let reference = clip_samples();
+        assert_eq!(reference.len(), 1600);
+        assert!(
+            reference.iter().any(|&s| s.abs() > 0.15),
+            "the clip carries speech, not silence"
+        );
+
+        let wav = wav_bytes(1, 1, 16000, &reference);
+        assert_eq!(
+            decode_bytes("identity.wav", &wav, FileConfig::default()),
+            reference,
+            "WAV"
+        );
+
+        let aiff = iff_form(
+            b"AIFF",
+            &aiff_comm(1, reference.len() as u32, 16, 16000, None),
+            &be_i16_bytes(&reference),
+        );
+        assert_eq!(
+            decode_bytes("identity.aiff", &aiff, FileConfig::default()),
+            reference,
+            "AIFF"
+        );
+
+        let flac = collect(File::open(libflac_clip_path(), FileConfig::default()).unwrap());
+        assert_eq!(flac, reference, "FLAC");
     }
 
-    /// An extensible container whose SubFormat GUID matches neither
-    /// supported encoding is rejected, including a GUID sharing the PCM
-    /// leading word whose suffix differs.
+    /// The container comes from the bytes, not from the path: the committed
+    /// FLAC under a `.wav` name decodes as the FLAC it is.
+    ///
+    /// Regression: dispatching on the path's extension.
     #[test]
-    fn extensible_unknown_subformat_is_rejected() {
-        let samples = sine(16000, 0.05);
-        let mut near_pcm = PCM_GUID;
-        near_pcm[15] ^= 0xFF;
-        for guid in [near_pcm, [0u8; 16], [0xFFu8; 16]] {
-            let err = parse_wav(&wav_bytes_extensible(guid, 16, &samples))
-                .err()
-                .expect("an unknown subformat should be rejected");
-            assert!(matches!(
-                err,
-                DecibriError::WavInvalid { reason } if reason == UNSUPPORTED_ENCODING
-            ));
+    fn a_flac_named_wav_decodes_as_a_flac() {
+        let bytes = std::fs::read(libflac_clip_path()).expect("the committed FLAC reads");
+        assert_eq!(
+            decode_bytes("named.wav", &bytes, FileConfig::default()),
+            clip_samples()
+        );
+    }
+
+    /// The WAV encodings that open for the first time deliver the samples
+    /// their format defines.
+    ///
+    /// The three that can hold the source exactly are compared to it exactly:
+    /// 24-bit, an extensible container, and the plain 16-bit control. The
+    /// 8-bit path is compared against `(byte - 128) / 128`, which is the
+    /// whole of that format's definition, over every one of its 256 codes.
+    ///
+    /// Regression: a sample conversion that scales, biases, sign-flips or
+    /// takes the wrong end of a 24-bit word, none of which a tolerance
+    /// against lossy audio would catch.
+    #[test]
+    fn the_wav_encodings_that_newly_open_deliver_what_their_format_defines() {
+        let reference = clip_samples();
+
+        // 24-bit little-endian PCM, the source's 16 bits in the top of each
+        // word, so the value is unchanged.
+        let mut pcm24 = Vec::with_capacity(reference.len() * 3);
+        for &s in &reference {
+            let word = i32::from((s * 32768.0) as i16) << 8;
+            pcm24.extend_from_slice(&word.to_le_bytes()[0..3]);
+        }
+        let bytes = riff_wave(&wave_fmt(1, 1, 16000, 24), &pcm24);
+        assert_eq!(
+            decode_bytes("clip24.wav", &bytes, FileConfig::default()),
+            reference,
+            "24-bit"
+        );
+
+        // The same body in an extensible container, which names its encoding
+        // by SubFormat GUID rather than by tag.
+        let payload = sample::f32_to_i16_le_bytes(&reference);
+        let bytes = riff_wave(&wave_fmt_extensible(SUBTYPE_PCM, 1, 16000, 16), &payload);
+        assert_eq!(
+            decode_bytes("clipx.wav", &bytes, FileConfig::default()),
+            reference,
+            "extensible"
+        );
+
+        // 8-bit unsigned PCM, over all 256 codes, against the format's own
+        // definition. 0 is negative full scale, 128 is silence, 255 is one
+        // step short of positive full scale.
+        let codes: Vec<u8> = (0..=255u8).collect();
+        let bytes = riff_wave(&wave_fmt(1, 1, 16000, 8), &codes);
+        let decoded = decode_bytes("clip8.wav", &bytes, FileConfig::default());
+        let expected: Vec<f32> = codes
+            .iter()
+            .map(|&b| (f32::from(b) - 128.0) / 128.0)
+            .collect();
+        assert_eq!(decoded, expected, "8-bit");
+        assert_eq!(decoded[0], -1.0);
+        assert_eq!(decoded[128], 0.0);
+    }
+
+    /// The two G.711 laws open in both containers that carry them, and the
+    /// same law decodes identically whichever container carried it.
+    ///
+    /// Every one of the 256 codes is swept rather than a clip sampled, so a
+    /// wrong entry anywhere in either expansion table is reached. The two
+    /// laws are asserted distinct from each other, which is what a reader
+    /// that had wired one table to both tags would fail.
+    ///
+    /// Regression: a mu-law table used for A-law or the reverse, a table
+    /// misindexed at the segment boundaries, and an AIFF-C compression
+    /// four-CC routed to the wrong decoder.
+    #[test]
+    fn the_g711_laws_decode_the_same_in_a_wav_and_in_an_aiff_c() {
+        let codes: Vec<u8> = (0..=255u8).collect();
+        let frames = codes.len() as u32;
+        // Telephony's own rate, and the target rate too, so the chain is a
+        // pass-through and the delivered samples are the decoded codes.
+        let at_8k = || FileConfig {
+            sample_rate: 8000,
+            ..Default::default()
+        };
+
+        for (tag, four_cc, label) in [(7u16, b"ulaw", "mu-law"), (6u16, b"alaw", "A-law")] {
+            let wav = riff_wave(&wave_fmt(tag, 1, 8000, 8), &codes);
+            let from_wav = decode_bytes(&format!("g711-{label}.wav"), &wav, at_8k());
+
+            let aifc = iff_form(
+                b"AIFC",
+                &aiff_comm(1, frames, 8, 8000, Some(four_cc)),
+                &codes,
+            );
+            let from_aifc = decode_bytes(&format!("g711-{label}.aifc"), &aifc, at_8k());
+
+            assert_eq!(from_wav.len(), 256, "{label}: one sample per code");
+            assert_eq!(from_wav, from_aifc, "{label}: WAV against AIFF-C");
+            assert!(
+                from_wav.iter().all(|s| s.abs() <= 1.0),
+                "{label}: every code lands inside full scale"
+            );
+            assert!(
+                from_wav.iter().any(|&s| s > 0.9) && from_wav.iter().any(|&s| s < -0.9),
+                "{label}: the sweep reaches both ends of the scale"
+            );
+            // A companded law spends most of its codes near zero: the median
+            // magnitude is a small fraction of the peak. A linear table put
+            // behind either tag fails this.
+            let mut magnitudes: Vec<f32> = from_wav.iter().map(|s| s.abs()).collect();
+            magnitudes.sort_by(|a, b| a.partial_cmp(b).unwrap());
+            assert!(
+                magnitudes[128] < 0.15,
+                "{label}: the law is companded, median magnitude {}",
+                magnitudes[128]
+            );
+        }
+
+        // The two laws are different tables, so the same codes decode
+        // differently under each.
+        let mu = decode_bytes(
+            "g711-cmp-mu.wav",
+            &riff_wave(&wave_fmt(7, 1, 8000, 8), &codes),
+            at_8k(),
+        );
+        let a = decode_bytes(
+            "g711-cmp-a.wav",
+            &riff_wave(&wave_fmt(6, 1, 8000, 8), &codes),
+            at_8k(),
+        );
+        assert_ne!(mu, a, "mu-law and A-law are not the same table");
+    }
+
+    /// The conditioning chain runs on the committed FLAC, at a target rate
+    /// the source is resampled to, and produces what the WAV of the same
+    /// samples produces.
+    ///
+    /// Regression: a reader that delivers audio the chain cannot be driven
+    /// with (a wrong channel count, a wrong rate, an interleaving fault),
+    /// none of which the pass-through comparison reaches.
+    #[test]
+    fn the_conditioning_chain_runs_on_a_flac_at_a_resampled_rate() {
+        let reference = clip_samples();
+        let config = FileConfig {
+            sample_rate: 24000,
+            dc_removal: true,
+            highpass: Some(HighpassFilter::Hz80),
+            ..Default::default()
+        };
+
+        let flac = collect(File::open(libflac_clip_path(), config.clone()).unwrap());
+        let wav = decode_bytes(
+            "chain.wav",
+            &wav_bytes(1, 1, 16000, &reference),
+            config.clone(),
+        );
+        assert_eq!(flac, wav);
+        assert!(
+            flac.len() > reference.len(),
+            "the source was resampled up: {} from {}",
+            flac.len(),
+            reference.len()
+        );
+        assert!(flac.iter().any(|&s| s != 0.0));
+
+        // The conditioning is doing something: the same source at the same
+        // target rate with every option off is a different signal.
+        let plain = collect(
+            File::open(
+                libflac_clip_path(),
+                FileConfig {
+                    sample_rate: 24000,
+                    ..Default::default()
+                },
+            )
+            .unwrap(),
+        );
+        assert_ne!(flac, plain, "the conditioning stages engaged");
+
+        // The limiter's ceiling holds on audio that reached the chain
+        // through the FLAC reader, where that stage is compiled in.
+        #[cfg(feature = "gain")]
+        {
+            let limited = collect(
+                File::open(
+                    libflac_clip_path(),
+                    FileConfig {
+                        sample_rate: 24000,
+                        agc: Some(-18),
+                        limiter: Some(-1.0),
+                        ..Default::default()
+                    },
+                )
+                .unwrap(),
+            );
+            let peak = limited.iter().fold(0.0f32, |m, &s| m.max(s.abs()));
+            let ceiling = 10f32.powf(-1.0 / 20.0);
+            assert!(peak <= ceiling + 1e-6, "the limiter ceiling holds: {peak}");
         }
     }
 
-    /// An extensible `fmt ` chunk without room for the SubFormat GUID is
-    /// rejected rather than read out of range: no extension bytes at all, a
-    /// declared extension of zero, and a declared extension the chunk does
-    /// not actually contain.
+    /// decibri's accepted input range is enforced on every container, not on
+    /// the one that used to carry the check.
+    ///
+    /// The out-of-range case that settles the placement is an AIFF, a
+    /// container that never passes a WAV reader at all: a check reinstated
+    /// inside one would let it through. Both boundaries are asserted
+    /// inclusive from both sides.
+    ///
+    /// Regression: reinstating the range check inside a container's own
+    /// reader, and a boundary written exclusive.
     #[test]
-    fn extensible_short_fmt_is_rejected() {
-        let payload = sample::f32_to_i16_le_bytes(&sine(16000, 0.05));
+    fn the_sample_rate_range_is_enforced_on_every_container() {
+        let frames = 100u32;
+        let payload = vec![0u8; frames as usize * 2];
 
-        // 16-byte fmt chunk: the tag says extensible, the extension is absent.
-        let bare = extensible_fmt_base(16);
-        // 18-byte fmt chunk: an extension size of zero.
-        let mut empty_extension = extensible_fmt_base(16);
-        empty_extension.extend_from_slice(&0u16.to_le_bytes());
-        // 24-byte fmt chunk: the extension size claims 22 bytes the chunk
-        // does not hold.
-        let mut truncated = extensible_fmt_base(16);
-        truncated.extend_from_slice(&22u16.to_le_bytes());
-        truncated.extend_from_slice(&0u32.to_le_bytes());
+        // A non-WAV container out of range, against the same container in
+        // range: the rejection is the rate and not the container.
+        let aiff = iff_form(b"AIFF", &aiff_comm(1, frames, 16, 500, None), &payload);
+        assert!(
+            matches!(
+                decode_error("rate500.aiff", &aiff),
+                DecibriError::SampleRateOutOfRange
+            ),
+            "a 500 Hz AIFF is rejected by a check that is not in the WAV reader"
+        );
+        let control = iff_form(b"AIFF", &aiff_comm(1, frames, 16, 16000, None), &payload);
+        assert_eq!(
+            decode_bytes("rate16k.aiff", &control, FileConfig::default()).len(),
+            frames as usize,
+            "the same AIFF at an accepted rate opens"
+        );
 
-        for fmt_body in [bare, empty_extension, truncated] {
-            let err = parse_wav(&wav_bytes_with_fmt(&fmt_body, &payload))
-                .err()
-                .expect("a fmt chunk too short for the GUID should be rejected");
-            assert!(matches!(
-                err,
-                DecibriError::WavInvalid { reason } if reason == UNSUPPORTED_ENCODING
-            ));
+        for rate in [999u32, 384001] {
+            let bytes = riff_wave(&wave_fmt(1, 1, rate, 16), &payload);
+            assert!(
+                matches!(
+                    decode_error(&format!("rate{rate}.wav"), &bytes),
+                    DecibriError::SampleRateOutOfRange
+                ),
+                "{rate} Hz is outside the range"
+            );
+        }
+        for rate in [1000u32, 384000] {
+            let bytes = riff_wave(&wave_fmt(1, 1, rate, 16), &payload);
+            let out = decode_bytes(
+                &format!("rate{rate}.wav"),
+                &bytes,
+                FileConfig {
+                    sample_rate: rate,
+                    ..Default::default()
+                },
+            );
+            assert_eq!(out.len(), frames as usize, "{rate} Hz is inside the range");
         }
     }
 
-    /// A file whose `data` chunk precedes its `fmt ` chunk opens and yields
-    /// the samples the conventional order yields.
+    /// Each of the three read failures is reachable, and each reports its own
+    /// variant.
+    ///
+    /// Every failing input here is a one-field edit of a control that opens,
+    /// asserted first, so each rejection is the field named against it and
+    /// not some other thing wrong with an assembled file.
+    ///
+    /// Regression: a mapping that collapses the three into one, leaving a
+    /// caller unable to tell "re-encode this" from "fetch it again".
     #[test]
-    fn data_chunk_before_fmt_parses() {
-        let samples = sine(16000, 0.1);
-        let conventional = wav_bytes(1, 1, 16000, &samples);
-        // The conventional bytes lay out RIFF header (0..12), fmt chunk
-        // (12..36), data chunk (36..); rebuild them with the two chunks
-        // swapped.
-        let mut swapped = conventional[0..12].to_vec();
-        swapped.extend_from_slice(&conventional[36..]);
-        swapped.extend_from_slice(&conventional[12..36]);
+    fn each_read_failure_reports_its_own_variant() {
+        let payload = vec![0u8; 200];
 
-        let out_of_order = parse_wav(&swapped).unwrap();
-        let expected = parse_wav(&conventional).unwrap();
-        assert_eq!(out_of_order.samples, expected.samples);
-        assert_eq!(out_of_order.sample_rate, expected.sample_rate);
-        assert_eq!(out_of_order.channels, expected.channels);
-        assert!(!out_of_order.samples.is_empty());
+        // The control every WAV case below is an edit of: one channel,
+        // 16-bit integer PCM at 16 kHz, a `data` chunk holding all 200 bytes.
+        let control = riff_wave(&wave_fmt(1, 1, 16000, 16), &payload);
+        assert_eq!(
+            decode_bytes("control.wav", &control, FileConfig::default()).len(),
+            100,
+            "the control opens, so each rejection below is its own edit"
+        );
+
+        // Unsupported: a container magic nothing carries, a WAVE format tag
+        // for a codec the reader does not decode (0x0011, IMA ADPCM), a
+        // sample width it does not carry, and a zero channel count. The tag
+        // and the width are read from the header, so the payload is never
+        // reached and does not have to be real ADPCM.
+        let unsupported: [(&str, Vec<u8>); 4] = [
+            ("junk", b"this is definitely not audio at all".to_vec()),
+            ("adpcm", riff_wave(&wave_fmt(0x0011, 1, 16000, 4), &payload)),
+            ("pcm20", riff_wave(&wave_fmt(1, 1, 16000, 20), &payload)),
+            ("chan0", riff_wave(&wave_fmt(1, 0, 16000, 16), &payload)),
+        ];
+        for (name, bytes) in unsupported {
+            let err = decode_error(&format!("unsupported-{name}"), &bytes);
+            assert!(
+                matches!(err, DecibriError::AudioFormatUnsupported { .. }),
+                "{name}: {err}"
+            );
+        }
+
+        // Malformed: a RIFF/WAVE carrying a `fmt ` chunk and no `data` chunk.
+        // The structure parses and then runs out of the chunk the format
+        // requires, which is a different thing from the file being short.
+        let mut no_data = b"WAVE".to_vec();
+        let fmt = wave_fmt(1, 1, 16000, 16);
+        no_data.extend_from_slice(b"fmt ");
+        no_data.extend_from_slice(&(fmt.len() as u32).to_le_bytes());
+        no_data.extend_from_slice(&fmt);
+        let mut bytes = b"RIFF".to_vec();
+        bytes.extend_from_slice(&(no_data.len() as u32).to_le_bytes());
+        bytes.extend_from_slice(&no_data);
+        let err = decode_error("malformed-nodata.wav", &bytes);
+        assert!(
+            matches!(err, DecibriError::AudioFileMalformed { .. }),
+            "{err}"
+        );
+
+        // Malformed, on real encoder output: one byte of the committed FLAC
+        // flipped mid-stream, which the frame CRC catches before a sample of
+        // that frame is delivered.
+        let mut corrupt = std::fs::read(libflac_clip_path()).expect("the committed FLAC reads");
+        let at = corrupt.len() / 2;
+        corrupt[at] ^= 0xFF;
+        let err = decode_error("malformed-bitflip.flac", &corrupt);
+        assert!(
+            matches!(err, DecibriError::AudioFileMalformed { .. }),
+            "{err}"
+        );
+
+        // Truncated: nothing at all, less than a container header, a WAV
+        // whose `data` chunk declares more than the file holds, and the
+        // committed FLAC cut short.
+        let mut short_data = riff_wave(&wave_fmt(1, 1, 16000, 16), &payload);
+        short_data.truncate(short_data.len() - 40);
+        let whole = std::fs::read(libflac_clip_path()).expect("the committed FLAC reads");
+        let truncated: [(&str, Vec<u8>); 4] = [
+            ("empty", Vec::new()),
+            ("stub", b"RIFF\x00\x00\x00\x00".to_vec()),
+            ("shortdata", short_data),
+            ("flac", whole[..whole.len() * 6 / 10].to_vec()),
+        ];
+        for (name, bytes) in truncated {
+            let err = decode_error(&format!("truncated-{name}"), &bytes);
+            assert!(
+                matches!(err, DecibriError::AudioFileTruncated { .. }),
+                "{name}: {err}"
+            );
+        }
     }
 
-    /// The conventional chunk order still parses to the same samples: the
-    /// 16-bit body round-trips through the same conversion as before.
+    /// A behaviour change, pinned: a WAV whose declared data length is not a
+    /// whole number of frames is reported rather than delivered slightly
+    /// short. Two channels at 16 bits make a 4-byte frame, and the length
+    /// here is two bytes past a whole number of them.
+    ///
+    /// A file shorter than its own declaration already failed, which is what
+    /// an interrupted download leaves behind; the control below asserts that
+    /// a whole number of frames of the same shape still opens, so the
+    /// rejection is the misalignment and nothing else.
+    ///
+    /// Regression: silently dropping the partial frame, which is what the
+    /// reader this replaced did.
     #[test]
-    fn conventional_order_parses_unchanged() {
-        let samples = sine(16000, 0.1);
-        let parsed = parse_wav(&wav_bytes(1, 1, 16000, &samples)).unwrap();
-        let expected = sample::i16_le_bytes_to_f32(&sample::f32_to_i16_le_bytes(&samples));
-        assert_eq!(parsed.samples, expected);
-        assert_eq!(parsed.sample_rate, 16000);
-        assert_eq!(parsed.channels, 1);
+    fn a_frame_misaligned_wav_is_reported_rather_than_delivered_short() {
+        let fmt = wave_fmt(1, 2, 16000, 16);
+        let aligned = vec![0u8; 200];
+        let out = decode_bytes(
+            "aligned.wav",
+            &riff_wave(&fmt, &aligned),
+            FileConfig::default(),
+        );
+        assert_eq!(out.len(), 50, "50 whole stereo frames open and downmix");
+
+        let mut misaligned = aligned.clone();
+        misaligned.extend_from_slice(&[0x55, 0x66]);
+        let err = decode_error("halfframe.wav", &riff_wave(&fmt, &misaligned));
+        assert!(
+            matches!(err, DecibriError::AudioFileTruncated { .. }),
+            "{err}"
+        );
     }
 
-    /// Duplicate chunks resolve to the first of each: a later `fmt ` or
-    /// `data` chunk does not displace the one already found.
+    /// The reader's eight failures land in the three decibri names, pinned
+    /// one by one, including the two the reader has no construction site for.
+    ///
+    /// The mapping's `_` arm cannot be reached from here, because the
+    /// reader's error type is `#[non_exhaustive]` and a variant outside the
+    /// eight cannot be built. `ContainerCodecMismatch` is the row that stands
+    /// in for it: it is the shape a later addition takes, a codec named ahead
+    /// of its decoder, and it is pinned to the same name the `_` arm carries.
+    ///
+    /// Regression: a later reader release moving a failure into a category
+    /// that tells the caller to do the wrong thing about their file.
     #[test]
-    fn duplicate_chunks_take_the_first() {
-        let samples = sine(16000, 0.1);
-        let mut doubled = wav_bytes(1, 1, 16000, &samples);
-        // Append a second fmt chunk at another rate and a second data chunk
-        // with another body.
-        doubled.extend_from_slice(&wav_bytes(1, 1, 8000, &sine(8000, 0.05))[12..]);
+    fn the_reader_error_mapping_is_pinned() {
+        use decibri_decode::{CodecId, DecodeError, FourCc};
 
-        let parsed = parse_wav(&doubled).unwrap();
-        let expected = parse_wav(&wav_bytes(1, 1, 16000, &samples)).unwrap();
-        assert_eq!(parsed.samples, expected.samples);
-        assert_eq!(parsed.sample_rate, 16000);
-        assert_eq!(parsed.channels, 1);
-    }
+        let unsupported: [DecodeError; 5] = [
+            DecodeError::UnsupportedContainer {
+                tag: FourCc(*b"OggS"),
+            },
+            DecodeError::UnsupportedCodec {
+                codec: CodecId::WaveFormatTag(0x0011),
+            },
+            DecodeError::UnsupportedSampleFormat {
+                format: CodecId::WaveFormatTag(1),
+                bits_per_sample: 20,
+            },
+            DecodeError::UnsupportedChannelLayout { channels: 0 },
+            // Unreachable through the reader's entry point, and the stand-in
+            // for a variant a later release adds.
+            DecodeError::ContainerCodecMismatch {
+                declared: CodecId::WaveFormatTag(1),
+                found: CodecId::WaveFormatTag(7),
+            },
+        ];
+        for source in unsupported {
+            let text = source.to_string();
+            let mapped = DecibriError::from(source);
+            assert!(
+                matches!(mapped, DecibriError::AudioFormatUnsupported { .. }),
+                "{text} -> {mapped}"
+            );
+            // The reader's own text reaches the caller: it names the tag,
+            // four-CC or width decibri could only describe generically.
+            assert!(mapped.to_string().ends_with(&text), "{mapped}");
+        }
 
-    /// A malformed duplicate `fmt ` chunk is rejected even though a valid
-    /// first `fmt ` chunk wins: every `fmt ` chunk the walk meets is
-    /// validated, not only the recorded one.
-    #[test]
-    fn short_duplicate_fmt_chunk_is_rejected() {
-        let samples = sine(16000, 0.1);
-        let conventional = wav_bytes(1, 1, 16000, &samples);
-        // Splice a too-short `fmt ` chunk between the valid `fmt ` chunk
-        // (bytes 12..36) and the `data` chunk (bytes 36..), so the walk
-        // meets it before both chunks are found.
-        let mut doubled = conventional[0..36].to_vec();
-        doubled.extend_from_slice(b"fmt ");
-        doubled.extend_from_slice(&8u32.to_le_bytes());
-        doubled.extend_from_slice(&[0u8; 8]);
-        doubled.extend_from_slice(&conventional[36..]);
+        let mapped = DecibriError::from(DecodeError::Malformed {
+            expected: "a 'data' chunk header",
+            offset: 36,
+        });
+        assert!(
+            matches!(mapped, DecibriError::AudioFileMalformed { .. }),
+            "{mapped}"
+        );
 
-        let err = parse_wav(&doubled)
-            .err()
-            .expect("a too-short duplicate fmt chunk should be rejected");
-        assert!(matches!(
-            err,
-            DecibriError::WavInvalid { reason } if reason == "fmt chunk too short"
+        let mapped = DecibriError::from(DecodeError::Truncated {
+            expected: 4096,
+            available: 1200,
+        });
+        assert!(
+            matches!(mapped, DecibriError::AudioFileTruncated { .. }),
+            "{mapped}"
+        );
+
+        // Rate conversion keeps the identity it carries everywhere else,
+        // rather than becoming a statement about the file.
+        let mapped = DecibriError::from(DecodeError::Resample(
+            decibri_resampler::ResamplerError::ZeroSampleRate,
         ));
+        assert!(
+            matches!(mapped, DecibriError::SampleRateOutOfRange),
+            "{mapped}"
+        );
     }
 
-    /// Bytes after the last chunk the parse needs are not examined: a file
-    /// carrying malformed trailing bytes after its `data` chunk opens
-    /// exactly as it did before the walk handled either order.
+    /// The three new messages carry the prefixes the Node classifier keys on,
+    /// and the codes the identity table assigns.
+    ///
+    /// Regression: a reworded message, which would leave the Node table
+    /// classifying the failure as an unnamed decibri error.
     #[test]
-    fn malformed_bytes_after_data_are_ignored() {
-        let samples = sine(16000, 0.1);
-        let mut trailing = wav_bytes(1, 1, 16000, &samples);
-        trailing.extend_from_slice(b"JUNK");
-        trailing.extend_from_slice(&u32::MAX.to_le_bytes());
-
-        let parsed = parse_wav(&trailing).unwrap();
-        let expected = parse_wav(&wav_bytes(1, 1, 16000, &samples)).unwrap();
-        assert_eq!(parsed.samples, expected.samples);
+    fn the_read_failure_messages_and_codes_are_pinned() {
+        let cases = [
+            (
+                DecibriError::AudioFormatUnsupported {
+                    reason: "why".to_string(),
+                },
+                "unsupported audio format: why",
+                "AUDIO_FORMAT_UNSUPPORTED",
+            ),
+            (
+                DecibriError::AudioFileMalformed {
+                    reason: "why".to_string(),
+                },
+                "malformed audio file: why",
+                "AUDIO_FILE_MALFORMED",
+            ),
+            (
+                DecibriError::AudioFileTruncated {
+                    reason: "why".to_string(),
+                },
+                "truncated audio file: why",
+                "AUDIO_FILE_TRUNCATED",
+            ),
+        ];
+        for (err, message, code) in cases {
+            assert_eq!(err.to_string(), message);
+            assert_eq!(err.code(), code);
+        }
     }
 
     /// Configuration validation matches the live path: rate, AGC target, and
@@ -1573,7 +2010,6 @@ mod tests {
             .join("fastenhancer_t.onnx")
     }
 
-    #[cfg(feature = "vad")]
     fn golden_wav_path() -> PathBuf {
         let manifest_dir = env!("CARGO_MANIFEST_DIR");
         Path::new(manifest_dir)
@@ -1829,6 +2265,45 @@ mod tests {
         assert_eq!(report.segments.len(), GOLDEN_SEGMENT_COUNT);
     }
 
+    /// The whole golden recording analyzes to one answer whether it arrives
+    /// as the WAV it is committed as or as the AIFF assembled here from its
+    /// samples: the same window scores and the same speech segments, at full
+    /// length and with the pinned two segments in it.
+    ///
+    /// The FLAC needs no arm of its own. Analysis is a function of the
+    /// samples and the rate alone, and the sample-identity test already
+    /// pins the FLAC to the same samples, so a third arm here would restate
+    /// that rather than test anything further.
+    ///
+    /// Regression: a reader whose output reaches the detector feed altered
+    /// in the rate or the channel count the feed is built from, which the
+    /// sample comparison does not reach.
+    #[cfg(feature = "vad")]
+    #[test]
+    fn one_recording_in_two_containers_analyzes_to_one_answer() {
+        let wav = File::open(golden_wav_path(), vad_file_config())
+            .unwrap()
+            .analyze()
+            .unwrap();
+        assert_eq!(wav.scores.len(), GOLDEN_SCORE_COUNT);
+        assert_eq!(wav.segments.len(), GOLDEN_SEGMENT_COUNT);
+
+        let samples = golden_samples();
+        let aiff = iff_form(
+            b"AIFF",
+            &aiff_comm(1, samples.len() as u32, 16, 16000, None),
+            &be_i16_bytes(&samples),
+        );
+        let report = with_file("analyze.aiff", &aiff, |path| {
+            File::open(path, vad_file_config())
+                .unwrap()
+                .analyze()
+                .unwrap()
+        });
+        assert_eq!(report.scores, wav.scores, "AIFF");
+        assert_eq!(report.segments, wav.segments, "AIFF");
+    }
+
     /// THE detector-feed invariant: analysis scores equal feeding the
     /// detector the same recording window by window directly. The `File`
     /// path adds no conditioning here, so its detector feed is the recording
@@ -1844,7 +2319,7 @@ mod tests {
 
         // Score the same samples directly, one 512-sample window at a time.
         let bytes = std::fs::read(&path).unwrap();
-        let samples = parse_wav(&bytes).unwrap().samples;
+        let samples = decibri_decode::decode(&bytes).unwrap().into_samples();
         let mut detector = SileroVad::new(VadConfig {
             model_path: silero_model_path(),
             ..VadConfig::default()
