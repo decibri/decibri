@@ -12,6 +12,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Added
 
+- `File.save(path, format=None, compression=None)` and `AsyncFile.save(...)` write the conditioned recording to disk as 16-bit PCM mono at `sample_rate`, in WAV, AIFF or FLAC. The container comes from the path's extension (`.wav`, `.aiff`, `.aif`, `.aifc` or `.flac`) or from `format`: decibri reads a file by its content and writes one by its name, and an extension it does not recognise raises `AudioFormatUnsupported` rather than defaulting. `compression` sets the FLAC compression level, 0 to 8 with 5 the default. Saving consumes the source and raises `FileEngaged` once iteration has begun, exactly as `analyze()` does.
+- `SaveReport`, returned by `save()`: `clipped_samples` counts finite samples outside full scale clamped to `[-1.0, 1.0]`, and `non_finite_samples` counts non-finite samples that never reach the file (NaN is written as silence, an infinity as full scale).
+- `FileWriteFailed`, raised when the encoded file cannot be written to disk. The message names the path and the underlying I/O failure.
+- `FlacCompressionOutOfRange`, raised when the FLAC save compression level is outside 0 to 8.
 - `File` and `AsyncFile` read AIFF, AIFF-C and FLAC as well as WAV, and read WAV in mu-law, A-law, 8-bit and 24-bit as well as the 16-bit PCM and 32-bit float they already read. The container is identified from the file's own bytes, so the path's extension does not decide how a file is read. No parameter changes: the same `File(path)` and `File.open(path)` open more files.
 - `AudioFormatUnsupported`, raised for a file in a container or an encoding decibri cannot decode. The message names the container tag, codec or sample width in question.
 - `AudioFileMalformed`, raised for a file whose bytes are not what its format requires where they sit. The message names the byte offset and what was expected there.

@@ -14,6 +14,7 @@ from decibri._classes import (
     Chunk,
     File,
     Microphone,
+    SaveReport,
     Segment,
     Speaker,
     Vad,
@@ -37,6 +38,8 @@ from decibri.exceptions import (
     FileConsumed,
     FileEngaged,
     FileReadFailed,
+    FileWriteFailed,
+    FlacCompressionOutOfRange,
     ForkAfterOrtInit,
     FramesPerBufferOutOfRange,
     InvalidFormat,
@@ -255,6 +258,8 @@ __all__ = [
     "VadReport",
     "VadWindow",
     "Segment",
+    # Save report type
+    "SaveReport",
     # Exception hierarchy entry points:
     # only the catch-target roots plus ForkAfterOrtInit are surfaced in
     # __all__ to keep `from decibri import *` legible. The full

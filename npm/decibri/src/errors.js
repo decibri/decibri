@@ -80,6 +80,7 @@ const RANGE_PREFIXES = [
   'frames per buffer must be between',
   'agc target level must be between',
   'limiter ceiling must be between',
+  'flac compression level must be between',
   'aec tailMs must be between',
   'aec referenceSampleRate must be between',
   'Silero VAD only supports',
@@ -93,6 +94,7 @@ const TYPE_PREFIXES = [
   "dtype must be 'int16' or 'float32'",
   "format must be 'int16' or 'float32'",
   'aec suppression must be',
+  'Invalid format value:',
 ];
 
 const DEVICE_CODES = [
@@ -132,6 +134,7 @@ const BASE_CODES = [
   ['resampler error:', 'RESAMPLE_FAILED'],
   ['echo canceller configuration error:', 'AEC_CONFIG_INVALID'],
   ['Failed to read audio file', 'FILE_READ_FAILED'],
+  ['Failed to write audio file', 'FILE_WRITE_FAILED'],
   ['unsupported audio format:', 'AUDIO_FORMAT_UNSUPPORTED'],
   ['malformed audio file:', 'AUDIO_FILE_MALFORMED'],
   ['truncated audio file:', 'AUDIO_FILE_TRUNCATED'],

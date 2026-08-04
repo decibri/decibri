@@ -256,7 +256,7 @@ pub use microphone::{
 };
 
 #[cfg(feature = "capture")]
-pub use file::{File, FileConfig};
+pub use file::{File, FileConfig, SaveFormat, SaveOptions, SaveReport};
 
 #[cfg(all(feature = "capture", feature = "vad"))]
 pub use file::{Segment, VadReport, VadWindow};

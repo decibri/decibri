@@ -451,6 +451,7 @@ const BUILTIN_VARIANTS = [
   'FramesPerBufferOutOfRange',
   'AgcTargetOutOfRange',
   'LimiterCeilingOutOfRange',
+  'FlacCompressionOutOfRange',
   'InvalidFormat',
   'DeviceIndexOutOfRange',
   'VadSampleRateUnsupported',

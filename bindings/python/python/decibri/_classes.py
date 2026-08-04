@@ -1415,6 +1415,26 @@ class VadReport:
     segments: list[Segment]
 
 
+@dataclass(frozen=True, slots=True)
+class SaveReport:
+    """What ``File.save()`` did to the samples on their way into the file.
+
+    Attributes:
+        clipped_samples: Finite samples outside full scale, clamped to
+            ``[-1.0, 1.0]``. Conditioned audio can exceed full scale (AGC
+            or AEC without a limiter), and 16-bit PCM cannot hold that, so
+            the overshoot clips and this count says how much. The count is
+            a statement about integer encodings: a float encoding would
+            preserve the overshoot instead, and would report zero.
+        non_finite_samples: Non-finite samples replaced before writing:
+            NaN with silence, an infinity with full scale. The same
+            replacement on every format.
+    """
+
+    clipped_samples: int
+    non_finite_samples: int
+
+
 # ---------------------------------------------------------------------------
 # File-time VAD policy state machine.
 #
@@ -1982,6 +2002,59 @@ class File:
 
     # The same analysis under the international spelling; both are public.
     analyse = analyze
+
+    # -----------------------------------------------------------------------
+    # Save
+    # -----------------------------------------------------------------------
+
+    def save(
+        self,
+        path: str | Path,
+        *,
+        format: Literal["wav", "aiff", "flac"] | None = None,
+        compression: int | None = None,
+    ) -> SaveReport:
+        """Write the conditioned recording to ``path`` as an audio file.
+
+        Runs the recording once through the same conditioning pass
+        iteration delivers, whole, and writes it as 16-bit PCM mono at
+        ``sample_rate``. Consumes the source: a save is a single pass,
+        separate from iteration and analysis.
+
+        The container comes from the path's extension (``.wav``, ``.aiff``,
+        ``.aif``, ``.aifc`` or ``.flac``), or from ``format``: decibri
+        reads a file by its content and writes one by its name. An
+        extension it does not recognise raises ``AudioFormatUnsupported``
+        rather than defaulting. ``compression`` sets the FLAC compression
+        level (0-8, default 5); it applies only to FLAC and is ignored for
+        WAV and AIFF.
+
+        Returns a ``SaveReport``: ``clipped_samples`` counts finite
+        samples outside full scale clamped to ``[-1.0, 1.0]`` (AGC or AEC
+        without a limiter can overshoot, and 16-bit PCM cannot hold it),
+        and ``non_finite_samples`` counts NaN samples written as silence
+        and infinite samples written as full scale.
+
+        Requires a ``File`` still at its start: once iteration has pulled
+        from it, this raises ``FileEngaged``. Every failure detected
+        before the pass begins leaves the ``File`` usable; a failure
+        during the pass consumes the source.
+        """
+        # Ahead of the argument checks, so an engaged File reports the same
+        # error here as it does in the core and the other binding.
+        self._bridge.check_not_engaged()
+        if format is not None and format not in ("wav", "aiff", "flac"):
+            raise ValueError(
+                f"Invalid format value: {format!r}. Expected 'wav', 'aiff', or 'flac'."
+            )
+        if compression is not None and not 0 <= compression <= 8:
+            raise exceptions.FlacCompressionOutOfRange(
+                f"compression must be in [0, 8]; got {compression}"
+            )
+        clipped, non_finite = self._bridge.save(
+            str(Path(path)), format=format, compression=compression
+        )
+        return SaveReport(clipped_samples=clipped, non_finite_samples=non_finite)
 
     # -----------------------------------------------------------------------
     # State properties

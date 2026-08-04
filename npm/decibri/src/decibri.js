@@ -1,6 +1,6 @@
 'use strict';
 
-const { Readable } = require('stream');
+const { Readable, Writable } = require('stream');
 const path = require('path');
 const fs = require('fs');
 const { DecibriBridge, FileHandle } = require('../index.js');
@@ -1192,6 +1192,77 @@ class File extends Readable {
   }
 
   /**
+   * Validate the save options and resolve them into the native options
+   * object. Shared by `File.save` and `AudioWriter`, so the two spellings of
+   * a write accept and reject identically.
+   * @internal
+   * @param {import('./decibri').SaveOptions} options
+   */
+  static _prepareSaveOptions(options) {
+    const format = options.format;
+    if (format !== undefined && format !== 'wav' && format !== 'aiff' && format !== 'flac') {
+      throw new TypeError(
+        `Invalid format value: ${JSON.stringify(format)}. Expected 'wav', 'aiff', or 'flac'.`
+      );
+    }
+    const compression = options.compression;
+    if (compression !== undefined) {
+      if (typeof compression !== 'number' || Number.isNaN(compression)) {
+        throw new TypeError('compression must be a number');
+      }
+      if (compression < 0 || compression > 8) {
+        throw new RangeError('flac compression level must be between 0 and 8');
+      }
+    }
+    return { format, compression };
+  }
+
+  /**
+   * Write the conditioned recording to disk, off the event loop. Runs the
+   * recording once through the same conditioning pass iteration delivers,
+   * whole, and writes it as 16-bit PCM mono at `sampleRate`. Consumes the
+   * source: a save is a single pass, separate from iteration and analysis.
+   *
+   * The container comes from the path's extension (`.wav`, `.aiff`, `.aif`,
+   * `.aifc` or `.flac`), or from `options.format`: decibri reads a file by
+   * its content and writes one by its name. An extension it does not
+   * recognise rejects rather than defaulting. `options.compression` sets the
+   * FLAC compression level (0-8, default 5); it applies only to FLAC.
+   *
+   * Resolves to a `SaveReport`: `clippedSamples` counts finite samples
+   * outside full scale clamped to `[-1.0, 1.0]` (AGC or AEC without a
+   * limiter can overshoot, and 16-bit PCM cannot hold it), and
+   * `nonFiniteSamples` counts NaN samples written as silence and infinite
+   * samples written as full scale.
+   *
+   * Requires a `File` that is not already being streamed: once the stream
+   * has been engaged this rejects with a `DecibriError` carrying the code
+   * `'FILE_ENGAGED'`. Every failure detected before the pass begins leaves
+   * the `File` usable; a failure during the pass consumes the source.
+   *
+   * @param {string} filePath
+   * @param {import('./decibri').SaveOptions} [options]
+   * @returns {Promise<import('./decibri').SaveReport>}
+   */
+  async save(filePath, options = {}) {
+    // Checked before the native handle is touched: the rejection belongs to
+    // this call, and the source is never taken from a File that keeps
+    // streaming.
+    if (this._engaged) {
+      throw fileEngagedError();
+    }
+    if (typeof filePath !== 'string') {
+      throw new TypeError('path must be a string');
+    }
+    const nativeOptions = File._prepareSaveOptions(options);
+    try {
+      return await this._native.save(filePath, nativeOptions);
+    } catch (err) {
+      throw wrapNativeError(err);
+    }
+  }
+
+  /**
    * Release the source. Idempotent; a closed File reads as ended.
    */
   close() {
@@ -1199,10 +1270,131 @@ class File extends Readable {
   }
 }
 
+// ─── AudioWriter (Writable): file sink ───────────────────────────────────────
+
+class AudioWriter extends Writable {
+  /**
+   * A file sink for PCM audio: the Writable to pair with decibri's Readable
+   * sources, and with any other stream of PCM bytes (a TTS engine, a decoded
+   * network stream). Collects the whole stream, then writes it as one audio
+   * file when the stream finishes, exactly as `File.save` writes: the same
+   * containers from the same extension rule, the same 16-bit PCM encoding,
+   * the same clamp and non-finite handling, the same bytes.
+   *
+   * Chunks are raw PCM bytes in `dtype` ('int16' little-endian by default,
+   * matching what a `File` or `Microphone` emits; 'float32' for raw f32
+   * bytes). Audio is written mono: `channels` may only be 1. `sampleRate` is
+   * required, because raw audio carries no header to read one from.
+   *
+   * The file is written when the stream finishes ('finish' fires after the
+   * file is on disk), and `report` then carries the `SaveReport` the write
+   * produced. A failure destroys the stream with the error.
+   *
+   * @param {string} filePath Path whose extension names the container,
+   *   unless `format` overrides it.
+   * @param {import('./decibri').AudioWriterOptions} options
+   */
+  constructor(filePath, options = {}) {
+    super({ highWaterMark: options.highWaterMark });
+    if (typeof filePath !== 'string') {
+      throw new TypeError('path must be a string');
+    }
+    const sampleRate = options.sampleRate;
+    if (typeof sampleRate !== 'number' || Number.isNaN(sampleRate)) {
+      throw new TypeError('sampleRate is required for AudioWriter (raw audio carries no header)');
+    }
+    if (sampleRate < 1000 || sampleRate > 384000) {
+      throw new RangeError('sample rate must be between 1000 and 384000');
+    }
+    const channels = options.channels;
+    if (channels !== undefined && channels !== 1) {
+      throw new RangeError('multichannel write is not supported; channels must be 1 (mono)');
+    }
+    const dtype = options.dtype ?? 'int16';
+    if (dtype !== 'int16' && dtype !== 'float32') {
+      throw new TypeError("dtype must be 'int16' or 'float32'");
+    }
+    // Validated now, so a bad option is a construction-time throw rather
+    // than a deferred 'error' event after the audio has been streamed.
+    this._saveOptions = File._prepareSaveOptions(options);
+    this._filePath = filePath;
+    this._sampleRate = sampleRate;
+    this._dtype = dtype;
+    this._chunks = [];
+    this._report = null;
+  }
+
+  /**
+   * The `SaveReport` of the completed write: `clippedSamples` and
+   * `nonFiniteSamples`, exactly as `File.save` resolves. `null` until
+   * 'finish' has fired.
+   * @returns {import('./decibri').SaveReport | null}
+   */
+  get report() {
+    return this._report;
+  }
+
+  /** @internal */
+  _write(chunk, encoding, callback) {
+    this._chunks.push(chunk);
+    callback();
+  }
+
+  /** @internal */
+  _final(callback) {
+    const bytes = Buffer.concat(this._chunks);
+    this._chunks = [];
+    const bytesPerSample = this._dtype === 'int16' ? 2 : 4;
+    if (bytes.length % bytesPerSample !== 0) {
+      callback(
+        new RangeError(
+          `audio bytes do not divide into whole ${this._dtype} samples; ` +
+            `${bytes.length % bytesPerSample} byte(s) over`
+        )
+      );
+      return;
+    }
+    const samples = new Float32Array(bytes.length / bytesPerSample);
+    if (this._dtype === 'int16') {
+      // The inverse of the int16 delivery encoding: value / 32768, so bytes
+      // that came from a decibri source re-quantise to the identical file.
+      for (let i = 0; i < samples.length; i++) {
+        samples[i] = bytes.readInt16LE(i * 2) / 32768;
+      }
+    } else {
+      for (let i = 0; i < samples.length; i++) {
+        samples[i] = bytes.readFloatLE(i * 4);
+      }
+    }
+    // The write is File.save on a source at the writer's own rate: the same
+    // encode path, so the two spellings produce the same bytes.
+    let file;
+    try {
+      file = File.buffer(samples, {
+        inputRate: this._sampleRate,
+        sampleRate: this._sampleRate,
+      });
+    } catch (err) {
+      callback(err);
+      return;
+    }
+    file
+      .save(this._filePath, this._saveOptions)
+      .then((report) => {
+        this._report = report;
+        callback();
+      })
+      .catch((err) => {
+        callback(err);
+      });
+  }
+}
+
 module.exports = {
   Microphone,
   Speaker,
   File,
+  AudioWriter,
   inputDevices,
   outputDevices,
   version,

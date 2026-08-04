@@ -10,13 +10,13 @@ shape the core never sees. An out-of-range agc target raises
 AgcTargetOutOfRange; a malformed vad, denoise or highpass value raises
 ValueError.
 
-49 instance classes plus 3 intermediate parent classes (DeviceError,
-OrtError, OrtPathError) for catch ergonomics, totaling 52 class
+51 instance classes plus 3 intermediate parent classes (DeviceError,
+OrtError, OrtPathError) for catch ergonomics, totaling 54 class
 definitions. Single-inheritance hierarchy per CPython convention.
 
 Hierarchy:
     DecibriError
-    + 30 direct subclasses (config + runtime errors that don't involve
+    + 32 direct subclasses (config + runtime errors that don't involve
       device enumeration or ORT, including DeviceFailed and OnnxBackendFailed)
     + DeviceError (intermediate; no instances; catches device-related)
         + 8 direct device subclasses (MicrophoneNotFound, SpeakerNotFound,
@@ -79,6 +79,10 @@ class AgcTargetOutOfRange(DecibriError):
 
 class LimiterCeilingOutOfRange(DecibriError):
     """Raised when the limiter ceiling is outside the supported dBFS range."""
+
+
+class FlacCompressionOutOfRange(DecibriError):
+    """Raised when the compression level for a FLAC save is outside 0 to 8."""
 
 
 class InvalidFormat(DecibriError):
@@ -234,6 +238,16 @@ class ResampleFailed(DecibriError):
 
 class FileReadFailed(DecibriError):
     """Raised when an offline audio file cannot be read from disk."""
+
+
+class FileWriteFailed(DecibriError):
+    """Raised when an encoded audio file cannot be written to disk.
+
+    The write-side twin of FileReadFailed: reported by ``File.save`` when
+    the filesystem refuses the write (a missing directory, a permission
+    failure, a full disk). The audio was encoded before the failure, so the
+    fault is the destination's, not the recording's.
+    """
 
 
 class AudioFormatUnsupported(DecibriError):

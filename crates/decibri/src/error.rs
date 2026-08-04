@@ -81,6 +81,19 @@ pub enum DecibriError {
     #[error("limiter ceiling must be between -3.0 and 0.0")]
     LimiterCeilingOutOfRange,
 
+    /// The `compression` level for a FLAC save fell outside the encoder's
+    /// 0 to 8 range.
+    ///
+    /// `compression` is `Option<u8>` on `SaveOptions`, so a representably
+    /// invalid level can reach the core directly from a Rust consumer that
+    /// bypasses the bindings. This is the load-bearing backstop: `File::save`
+    /// returns it rather than clamping, matching how `agc` and `limiter` are
+    /// range checked. Checked before the writer runs, so the writer's own
+    /// rejection of the same level is unreachable. Static message to keep the
+    /// text stable. Additive variant permitted by `#[non_exhaustive]`.
+    #[error("flac compression level must be between 0 and 8")]
+    FlacCompressionOutOfRange,
+
     #[error("format must be 'int16' or 'float32'")]
     InvalidFormat,
 
@@ -245,6 +258,23 @@ pub enum DecibriError {
     #[cfg(feature = "capture")]
     #[error("Failed to read audio file {}: {source}", path.display())]
     FileReadFailed {
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
+
+    /// An encoded audio file could not be written to disk.
+    ///
+    /// The write-side twin of [`Self::FileReadFailed`]: carries the offending
+    /// path and the underlying I/O failure boxed via `#[source]`, so a
+    /// consumer can distinguish a missing directory from a permission failure
+    /// or a full disk by walking `error.source()`. Reported by `File::save`
+    /// after the audio is encoded, so the encoded bytes were sound and the
+    /// failure is the filesystem's. Additive variant permitted by
+    /// `#[non_exhaustive]`.
+    #[cfg(feature = "capture")]
+    #[error("Failed to write audio file {}: {source}", path.display())]
+    FileWriteFailed {
         path: PathBuf,
         #[source]
         source: std::io::Error,
@@ -551,6 +581,8 @@ error_identity! {
         DecibriError::AgcTargetOutOfRange;
     DecibriError::LimiterCeilingOutOfRange => "LimiterCeilingOutOfRange", "LIMITER_CEILING_OUT_OF_RANGE",
         DecibriError::LimiterCeilingOutOfRange;
+    DecibriError::FlacCompressionOutOfRange => "FlacCompressionOutOfRange", "FLAC_COMPRESSION_OUT_OF_RANGE",
+        DecibriError::FlacCompressionOutOfRange;
     DecibriError::InvalidFormat => "InvalidFormat", "INVALID_FORMAT",
         DecibriError::InvalidFormat;
 
@@ -610,6 +642,12 @@ error_identity! {
     #[cfg(feature = "capture")]
     DecibriError::FileReadFailed { .. } => "FileReadFailed", "FILE_READ_FAILED",
         DecibriError::FileReadFailed {
+            path: PathBuf::from("sample.wav"),
+            source: std::io::Error::other("sample"),
+        };
+    #[cfg(feature = "capture")]
+    DecibriError::FileWriteFailed { .. } => "FileWriteFailed", "FILE_WRITE_FAILED",
+        DecibriError::FileWriteFailed {
             path: PathBuf::from("sample.wav"),
             source: std::io::Error::other("sample"),
         };
@@ -959,6 +997,33 @@ mod tests {
             DecibriError::FileEngaged.to_string(),
             "File iteration has begun; construct a new File to analyze the whole recording"
         );
+    }
+
+    /// The `FlacCompressionOutOfRange` Display message is matched by prefix
+    /// in the Node binding to classify the error, so the text is frozen.
+    #[test]
+    fn flac_compression_out_of_range_message_is_frozen() {
+        assert_eq!(
+            DecibriError::FlacCompressionOutOfRange.to_string(),
+            "flac compression level must be between 0 and 8"
+        );
+    }
+
+    /// The `FileWriteFailed` Display message keeps its frozen leading prefix,
+    /// which the Node binding matches to assign the error its stable code.
+    #[cfg(feature = "capture")]
+    #[test]
+    fn file_write_failed_message_prefix_is_frozen() {
+        let err = DecibriError::FileWriteFailed {
+            path: PathBuf::from("sample.wav"),
+            source: std::io::Error::other("disk full"),
+        };
+        let msg = err.to_string();
+        assert!(
+            msg.starts_with("Failed to write audio file "),
+            "frozen prefix must not drift: {msg}"
+        );
+        assert!(err.source().is_some(), "the I/O cause is walkable");
     }
 
     /// `ResampleFailed` forwards the upstream text: the reason is formatted

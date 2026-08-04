@@ -551,6 +551,46 @@ export interface VadReport {
   segments: Segment[];
 }
 
+/** Options for `File.save` (also accepted by `AudioWriter`). */
+export interface SaveOptions {
+  /**
+   * The container format to write. When not given it comes from the path's
+   * extension: `.wav`, `.aiff`, `.aif`, `.aifc` or `.flac`. decibri reads a
+   * file by its content and writes one by its name; an extension it does not
+   * recognise is an error, never a silent default.
+   */
+  format?: 'wav' | 'aiff' | 'flac';
+
+  /**
+   * FLAC compression level. Higher levels search harder for a smaller file;
+   * every level decodes to identical audio. Applies only to FLAC; ignored
+   * for WAV and AIFF.
+   * @default 5
+   * @range 0 to 8
+   */
+  compression?: number;
+}
+
+/**
+ * What a save did to the samples on their way into the file, resolved by
+ * `File.save` and carried by `AudioWriter.report`.
+ */
+export interface SaveReport {
+  /**
+   * Finite samples outside full scale, clamped to [-1.0, 1.0]. Conditioned
+   * audio can exceed full scale (AGC or AEC without a limiter), and 16-bit
+   * PCM cannot hold that, so the overshoot clips and this count says how
+   * much. The count is a statement about integer encodings: a float encoding
+   * would preserve the overshoot instead, and would report zero.
+   */
+  clippedSamples: number;
+  /**
+   * Non-finite samples replaced before writing: NaN with silence, an
+   * infinity with full scale. The same replacement on every format.
+   */
+  nonFiniteSamples: number;
+}
+
 /**
  * Offline audio source: conditions a recording or in-memory samples through
  * the same chain as the live `Microphone`, delivered as a finite Readable
@@ -647,6 +687,26 @@ export declare class File extends Readable {
   /** The same whole-recording analysis under the international spelling. */
   analyse(): Promise<VadReport>;
 
+  /**
+   * Write the conditioned recording to disk, off the event loop. Runs the
+   * recording once through the same conditioning pass iteration delivers,
+   * whole, and writes it as 16-bit PCM mono at `sampleRate`. The container
+   * comes from the path's extension (`.wav`, `.aiff`, `.aif`, `.aifc` or
+   * `.flac`), or from `options.format`: decibri reads a file by its content
+   * and writes one by its name. Consumes the source (a `File` is a single
+   * pass).
+   *
+   * Resolves to a `SaveReport`: how many samples were clamped to full scale
+   * and how many non-finite samples were replaced (NaN as silence, an
+   * infinity as full scale).
+   *
+   * Requires a File that is not already being streamed: once the stream has
+   * been engaged this rejects with a `DecibriError` carrying the code
+   * `'FILE_ENGAGED'`. Every failure detected before the pass begins leaves
+   * the File usable; a failure during the pass consumes the source.
+   */
+  save(path: string, options?: SaveOptions): Promise<SaveReport>;
+
   /** Release the source. Idempotent; a closed File reads as ended. */
   close(): void;
 
@@ -665,6 +725,61 @@ export declare class File extends Readable {
   once(event: 'speech', listener: () => void): this;
   once(event: 'silence', listener: () => void): this;
   once(event: string | symbol, listener: (...args: any[]) => void): this;
+}
+
+/** Constructor options for `AudioWriter`: the save options plus the stream's own description. */
+export interface AudioWriterOptions extends SaveOptions, WritableOptions {
+  /**
+   * The rate of the incoming samples in Hz, written into the file's header.
+   * Required: raw audio carries no header to read a rate from.
+   * @range 1000 to 384000
+   */
+  sampleRate: number;
+
+  /**
+   * Number of channels. Audio is written mono; only `1` is accepted.
+   * @default 1
+   */
+  channels?: 1;
+
+  /**
+   * Sample encoding of the incoming bytes.
+   * - `'int16'`: 16-bit signed integer, little-endian, what a `File` or
+   *   `Microphone` emits by default
+   * - `'float32'`: 32-bit IEEE 754 float, little-endian
+   * @default 'int16'
+   */
+  dtype?: 'int16' | 'float32';
+}
+
+/**
+ * A file sink for PCM audio: the Writable to pair with decibri's Readable
+ * sources, and with any other stream of PCM bytes (a TTS engine, a decoded
+ * network stream). Collects the whole stream, then writes it as one audio
+ * file when the stream finishes, exactly as `File.save` writes: the same
+ * containers from the same extension rule, the same 16-bit PCM encoding, the
+ * same clamp and non-finite handling, the same bytes.
+ *
+ * `'finish'` fires after the file is on disk, and `report` then carries the
+ * `SaveReport` the write produced. A failure destroys the stream with the
+ * error.
+ *
+ * @example
+ * const { pipeline } = require('node:stream/promises');
+ * const { File, AudioWriter } = require('decibri');
+ * await pipeline(
+ *   new File('noisy.wav', { denoise: 'fastenhancer-t' }),
+ *   new AudioWriter('clean.flac', { sampleRate: 16000 }),
+ * );
+ */
+export declare class AudioWriter extends Writable {
+  constructor(path: string, options: AudioWriterOptions);
+
+  /**
+   * The `SaveReport` of the completed write, exactly as `File.save` resolves
+   * it. `null` until `'finish'` has fired.
+   */
+  readonly report: SaveReport | null;
 }
 
 export interface SpeakerInfo {

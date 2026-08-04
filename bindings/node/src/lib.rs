@@ -9,7 +9,10 @@ use napi::{Env, Task};
 use napi_derive::napi;
 
 use decibri::device::{self, DeviceSelector};
-use decibri::file::{File as CoreFile, FileConfig, VadReport as CoreVadReport};
+use decibri::file::{
+    File as CoreFile, FileConfig, SaveFormat as CoreSaveFormat, SaveOptions as CoreSaveOptions,
+    SaveReport as CoreSaveReport, VadReport as CoreVadReport,
+};
 use decibri::microphone::{
     DenoiseModel, HighpassFilter, Microphone, MicrophoneConfig, MicrophoneStream,
 };
@@ -796,6 +799,7 @@ fn to_napi_error(e: decibri::error::DecibriError) -> Error {
         | FramesPerBufferOutOfRange
         | AgcTargetOutOfRange
         | LimiterCeilingOutOfRange
+        | FlacCompressionOutOfRange
         | InvalidFormat
         | VadSampleRateUnsupported(_)
         | VadThresholdOutOfRange(_)
@@ -805,8 +809,8 @@ fn to_napi_error(e: decibri::error::DecibriError) -> Error {
         | AudioFileTruncated { .. }
         | VadNotConfigured => Status::InvalidArg,
 
-        // Offline file read failure (I/O)
-        FileReadFailed { .. } => Status::GenericFailure,
+        // Offline file read and write failures (I/O)
+        FileReadFailed { .. } | FileWriteFailed { .. } => Status::GenericFailure,
 
         // Device selection (bad caller input)
         MicrophoneNotFound(_)
@@ -1356,6 +1360,92 @@ fn convert_report(report: CoreVadReport) -> VadReport {
     }
 }
 
+/// Options passed from the JS `File.save` wrapper: the container format
+/// override and the FLAC compression level.
+#[napi(object)]
+#[derive(Default)]
+pub struct SaveOptions {
+    pub format: Option<String>,
+    pub compression: Option<u32>,
+}
+
+/// What a save did to the samples on their way into the file: finite
+/// samples outside full scale clamped and counted, non-finite samples
+/// replaced (NaN with silence, an infinity with full scale) and counted.
+#[napi(object)]
+pub struct SaveReport {
+    pub clipped_samples: f64,
+    pub non_finite_samples: f64,
+}
+
+/// Build the core [`CoreSaveOptions`] from the JS options, mapping the
+/// format name and range checking the compression level exactly as the
+/// wrapper's own pre-checks do. The format is resolved here, from the
+/// option or from the path's extension, so a failure is reported before the
+/// source is taken and the File stays usable.
+fn build_save_options(path: &str, options: Option<&SaveOptions>) -> Result<CoreSaveOptions> {
+    let default_opts = SaveOptions::default();
+    let opts = options.unwrap_or(&default_opts);
+    // `CoreSaveOptions` is `#[non_exhaustive]`: default-construct then assign
+    // the public fields rather than using a struct literal.
+    let mut save_options = CoreSaveOptions::default();
+    save_options.format = Some(match opts.format.as_deref() {
+        Some("wav") => CoreSaveFormat::Wav,
+        Some("aiff") => CoreSaveFormat::Aiff,
+        Some("flac") => CoreSaveFormat::Flac,
+        Some(other) => {
+            return Err(Error::new(
+                Status::InvalidArg,
+                format!("Invalid format value: {other:?}. Expected 'wav', 'aiff', or 'flac'."),
+            ))
+        }
+        None => CoreSaveFormat::from_path(path).map_err(to_napi_error)?,
+    });
+    if let Some(level) = opts.compression {
+        if level > 8 {
+            return Err(Error::new(
+                Status::InvalidArg,
+                "flac compression level must be between 0 and 8",
+            ));
+        }
+        save_options.compression = Some(level as u8);
+    }
+    Ok(save_options)
+}
+
+/// Background task that consumes the source and writes the conditioned
+/// recording on the libuv thread pool. A `File` whose source is already gone
+/// (analyzed, saved, or closed) rejects rather than silently re-reading; a
+/// `File` that was read instead is refused earlier, by the engagement check.
+pub struct SaveFileTask {
+    file: Option<CoreFile>,
+    path: String,
+    options: CoreSaveOptions,
+}
+
+impl Task for SaveFileTask {
+    type Output = CoreSaveReport;
+    type JsValue = SaveReport;
+
+    fn compute(&mut self) -> Result<Self::Output> {
+        let file = self.file.take().ok_or_else(|| {
+            Error::new(
+                Status::InvalidArg,
+                "File already consumed; construct a new File for another pass",
+            )
+        })?;
+        file.save(&self.path, self.options.clone())
+            .map_err(to_napi_error)
+    }
+
+    fn resolve(&mut self, _env: Env, output: Self::Output) -> Result<Self::JsValue> {
+        Ok(SaveReport {
+            clipped_samples: output.clipped_samples as f64,
+            non_finite_samples: output.non_finite_samples as f64,
+        })
+    }
+}
+
 /// Build the core [`FileConfig`] from the JS options, mapping each selector
 /// exactly as `build_microphone_parts` maps the same names for live capture.
 fn build_file_config(opts: &FileOptions) -> Result<FileConfig> {
@@ -1763,6 +1853,35 @@ impl FileHandle {
             self.consumed = true;
         }
         Ok(AsyncTask::new(AnalyzeFileTask { file }))
+    }
+
+    /// Consume the source and write the conditioned recording to disk, off
+    /// the JS event loop. Resolves to the `SaveReport`.
+    ///
+    /// Everything checkable is checked before the source is taken, so a
+    /// rejected call leaves the File exactly as it was and the caller can fix
+    /// the arguments and retry.
+    #[napi]
+    pub fn save(
+        &mut self,
+        path: String,
+        options: Option<SaveOptions>,
+    ) -> Result<AsyncTask<SaveFileTask>> {
+        if self.engaged {
+            return Err(to_napi_error(decibri::error::DecibriError::FileEngaged));
+        }
+        let save_options = build_save_options(&path, options.as_ref())?;
+        let file = self.inner.take();
+        // The source is taken: a later iteration reads as consumed, not as an
+        // empty recording, whatever the save resolves to.
+        if file.is_some() {
+            self.consumed = true;
+        }
+        Ok(AsyncTask::new(SaveFileTask {
+            file,
+            path,
+            options: save_options,
+        }))
     }
 
     /// Release the source. Idempotent; a closed File reads as ended.

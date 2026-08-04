@@ -13,6 +13,10 @@ For other decibri packages, see:
 
 ### Added
 
+- `File::save` writes the conditioned recording to disk as 16-bit PCM mono at the target rate, in WAV, AIFF or FLAC. The container comes from the path's extension (`.wav`, `.aiff`, `.aif`, `.aifc` or `.flac`) or from an explicit `SaveOptions::format`: decibri reads a file by its content and writes one by its name, and an extension it does not recognise is an error, never a silent default. `SaveOptions::compression` sets the FLAC compression level, 0 to 8 with 5 the default. Saving consumes the `File` and reports `FileEngaged` once iteration has begun, exactly as `analyze` does.
+- `SaveOptions`, `SaveFormat` and `SaveReport`, the save call's options, format selector and result. The report counts what the save did to the samples: finite samples outside full scale are clamped to `[-1.0, 1.0]` and counted in `clipped_samples`, and non-finite samples never reach the file (NaN is written as silence, an infinity as full scale, the same on every format) and are counted in `non_finite_samples`. `SaveFormat::from_path` names the format a path's extension selects.
+- `DecibriError::FileWriteFailed`, reported when the encoded file cannot be written to disk. Carries the offending path and the underlying I/O failure as a walkable source.
+- `DecibriError::FlacCompressionOutOfRange`, reported when the FLAC save compression level is outside 0 to 8.
 - `File::open` reads AIFF, AIFF-C and FLAC as well as WAV, and reads WAV in mu-law, A-law, 8-bit and 24-bit as well as the 16-bit PCM and 32-bit float it already read. The container is identified from the file's own bytes, so the path's extension does not decide how a file is read.
 - `DecibriError::AudioFormatUnsupported`, reported when a file is in a container or an encoding decibri cannot decode. The message names the container tag, codec or sample width in question.
 - `DecibriError::AudioFileMalformed`, reported when a file's bytes are not what its format requires where they sit. The message names the byte offset and what was expected there.
