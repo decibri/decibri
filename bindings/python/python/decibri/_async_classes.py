@@ -991,9 +991,9 @@ class AsyncFile:
     _file: File
 
     def __init__(self, path: str | Path, **kwargs: Any) -> None:
-        """Open a WAV file as an async offline source.
+        """Open an audio file as an async offline source.
 
-        The synchronous constructor reads the WAV inline; prefer
+        The synchronous constructor reads the file inline; prefer
         ``await AsyncFile.open(path, ...)`` inside a running event loop,
         exactly as ``AsyncMicrophone.open`` is preferred over its bare
         constructor. Parameters mirror ``File`` exactly.
@@ -1002,7 +1002,7 @@ class AsyncFile:
 
     @classmethod
     async def open(cls, path: str | Path, **kwargs: Any) -> "AsyncFile":
-        """Open a WAV file without blocking the event loop.
+        """Open an audio file without blocking the event loop.
 
         Identical result to ``AsyncFile(path, ...)``; the file read and
         source construction run in the default ThreadPoolExecutor.
@@ -1138,7 +1138,7 @@ class AsyncFile:
 
     @property
     def input_rate(self) -> int:
-        """The source's native rate, from the WAV header or the explicit
+        """The source's native rate, from the file's header or the explicit
         ``input_rate`` of ``AsyncFile.buffer``.
         """
         return self._file.input_rate

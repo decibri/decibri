@@ -1505,7 +1505,7 @@ class File:
         for segment in report.segments:
             print(segment.start, segment.end)
 
-    Construction reads the whole WAV (``File(path)`` / ``File.open(path)``,
+    Construction reads the whole file (``File(path)`` / ``File.open(path)``,
     both identical) or wraps in-memory samples (``File.buffer(samples,
     input_rate=...)``). Iteration and analysis are separate single passes:
     each consumes the source once, so use one ``File`` per operation.
@@ -1533,14 +1533,14 @@ class File:
         limiter: float | None = None,
         dc_removal: bool = False,
     ) -> None:
-        """Open a WAV file as an offline source.
+        """Open an audio file as an offline source.
 
-        The input rate and channel count come from the WAV header; a
-        multichannel file is downmixed, so the delivered stream is mono.
-        ``sample_rate`` is the target output rate, the same meaning it has
-        on ``Microphone``. Supports 16-bit PCM and 32-bit float WAV files;
-        other formats are handled elsewhere, keeping this path
-        dependency-free.
+        Reads WAV, AIFF, AIFF-C and FLAC. The container is identified from
+        the file's own bytes, so the path's extension does not decide how it
+        is read. The input rate and channel count come from the file's
+        header; a multichannel file is downmixed, so the delivered stream is
+        mono. ``sample_rate`` is the target output rate, the same meaning it
+        has on ``Microphone``.
         """
         self._init_common(
             ("path", str(Path(path))),
@@ -1563,7 +1563,7 @@ class File:
         path: str | Path,
         **kwargs: Any,
     ) -> "File":
-        """Open a WAV file as an offline source; identical to ``File(path)``.
+        """Open an audio file as an offline source; identical to ``File(path)``.
 
         The explicit spelling of the bare constructor: both produce the
         same ``File``. Accepts the same keyword arguments.
@@ -2019,7 +2019,7 @@ class File:
 
     @property
     def input_rate(self) -> int:
-        """The source's native rate, from the WAV header or the explicit
+        """The source's native rate, from the file's header or the explicit
         ``input_rate`` of ``File.buffer``.
         """
         return self._bridge.input_rate

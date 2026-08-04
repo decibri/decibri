@@ -8,6 +8,25 @@ For Rust core (`crates/decibri`) and npm package (`npm/decibri`) changes, see [t
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- `File` and `AsyncFile` read AIFF, AIFF-C and FLAC as well as WAV, and read WAV in mu-law, A-law, 8-bit and 24-bit as well as the 16-bit PCM and 32-bit float they already read. The container is identified from the file's own bytes, so the path's extension does not decide how a file is read. No parameter changes: the same `File(path)` and `File.open(path)` open more files.
+- `AudioFormatUnsupported`, raised for a file in a container or an encoding decibri cannot decode. The message names the container tag, codec or sample width in question.
+- `AudioFileMalformed`, raised for a file whose bytes are not what its format requires where they sit. The message names the byte offset and what was expected there.
+- `AudioFileTruncated`, raised for a file that ends before the audio it declares. The message names what was needed against what was available.
+- `LICENSE`, the full Apache 2.0 text, in the wheel and the source distribution. It installs to `decibri-<version>.dist-info/licenses/LICENSE`.
+
+### Changed
+
+- **BREAKING: a WAV whose declared data length is not a whole number of frames now fails to open**, raising `AudioFileTruncated`. It previously opened and delivered audio a fraction of a frame short of its own declaration, with nothing to indicate it. A file shorter than its declared length, which is what an interrupted download leaves behind, already failed to open and is unaffected.
+- A file declaring no channels raises `AudioFormatUnsupported` where it raised `WavInvalid`.
+
+### Removed
+
+- **BREAKING: the `WavInvalid` exception class.** `AudioFormatUnsupported`, `AudioFileMalformed` and `AudioFileTruncated` replace it, splitting what was one failure into the three the caller acts on differently. `from decibri import WavInvalid` now raises `ImportError`, and `except WavInvalid:` must be updated; `except DecibriError:` catches all three unchanged.
+
 ## [0.8.0] - 2026-07-31
 
 ### Added

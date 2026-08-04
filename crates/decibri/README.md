@@ -117,7 +117,7 @@ Everything a `Microphone` does to live audio, `File` does to audio you already h
 use decibri::{File, FileConfig, VadConfig};
 
 let mut config = FileConfig::default();
-config.sample_rate = 16_000;   // target output rate; input rate read from the WAV header
+config.sample_rate = 16_000;   // target output rate; input rate read from the file's header
 config.dc_removal = true;
 
 for chunk in File::open("clip.wav", config.clone())? {

@@ -9,6 +9,24 @@ description = "Cross-platform audio capture, playback, and voice activity detect
 readme = "README.md"
 keywords = ["audio", "microphone", "capture", "sound", "voice"]
 categories = ["multimedia::audio"]
+# What the source package carries: the crate's own source, its build script, its
+# manifest, and the documents a consumer reads. Without this, `cargo package`
+# takes the whole directory, and the speech recordings under `tests/assets` ride
+# into every release and every vendored copy.
+#
+# `Cargo.toml` ships whether or not it is named here, as do the lockfile and the
+# VCS stamp cargo generates. `tests/` is deliberately absent: the integration
+# tests read models that live above this directory and never packaged, so they
+# do not run from an extracted package regardless.
+include = [
+    "src/**/*.rs",
+    "examples/**/*.rs",
+    "build.rs",
+    "README.md",
+    "CHANGELOG.md",
+    "MIGRATION.md",
+    "LICENSE",
+]
 
 [package.metadata.docs.rs]
 # Build docs for all production targets to show platform-specific behavior.
@@ -33,7 +51,7 @@ no-default-features = true
 default = ["capture", "playback", "vad", "denoise", "gain", "aec", "ort-load-dynamic"]
 
 # Core feature set.
-capture = ["dep:cpal", "dep:crossbeam-channel", "dep:decibri-resampler"]
+capture = ["dep:cpal", "dep:crossbeam-channel", "dep:decibri-resampler", "dep:decibri-decode"]
 playback = ["dep:cpal", "dep:crossbeam-channel"]
 vad = ["dep:ort"]
 # Single-channel speech enhancement (denoise). Pulls `ort`: the capture denoise
@@ -70,6 +88,11 @@ ort = { workspace = true, optional = true }
 # Capture-path resampler: converts a device's native sample rate to the
 # requested target rate. Optional, pulled by the `capture` feature only.
 decibri-resampler = { version = "0.4", optional = true }
+# Offline file reader: identifies a recording from its bytes and decodes WAV,
+# AIFF, AIFF-C and FLAC. Optional, pulled by the `capture` feature only, which
+# is where the `File` source lives. It requires the same `decibri-resampler`
+# release decibri pins above, so cargo unifies the two into one tree entry.
+decibri-decode = { version = "0.1", optional = true }
 # Capture-path echo canceller: cancels the echo of caller-supplied far-end audio
 # out of the captured signal. Optional, pulled by the `aec` feature only.
 # `default-features` is left at its default (the crate has no default features);

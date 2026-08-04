@@ -3148,9 +3148,9 @@ mod tests {
         out
     }
 
-    /// The golden TTS recording, decoded through the offline path (which owns the
-    /// crate's WAV reader) at the recording's own rate with every conditioning
-    /// option off, so the samples delivered are the recording itself.
+    /// The golden TTS recording, decoded through the offline path at the
+    /// recording's own rate with every conditioning option off, so the samples
+    /// delivered are the recording itself.
     #[cfg(feature = "aec")]
     fn golden_recording() -> Vec<f32> {
         let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))

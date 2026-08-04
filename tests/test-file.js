@@ -203,7 +203,7 @@ async function fileTests(h) {
   assertThrows(() => new File(path.join(tmp, 'missing.wav')), DecibriError, 'Failed to read audio file');
   const junkPath = path.join(tmp, 'junk.wav');
   fs.writeFileSync(junkPath, 'this is not a wav file');
-  assertThrows(() => new File(junkPath), DecibriError, 'invalid WAV file');
+  assertThrows(() => new File(junkPath), DecibriError, 'unsupported audio format');
 
   console.log('File: per-chunk VAD events in file time');
 

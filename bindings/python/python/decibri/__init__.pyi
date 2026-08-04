@@ -65,7 +65,9 @@ from decibri.exceptions import VadSampleRateUnsupported as VadSampleRateUnsuppor
 from decibri.exceptions import VadThresholdOutOfRange as VadThresholdOutOfRange
 from decibri.exceptions import AecSampleRateUnsupported as AecSampleRateUnsupported
 from decibri.exceptions import AecConfigInvalid as AecConfigInvalid
-from decibri.exceptions import WavInvalid as WavInvalid
+from decibri.exceptions import AudioFormatUnsupported as AudioFormatUnsupported
+from decibri.exceptions import AudioFileMalformed as AudioFileMalformed
+from decibri.exceptions import AudioFileTruncated as AudioFileTruncated
 
 __version__: str
 __all__: list[str]

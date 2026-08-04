@@ -800,7 +800,9 @@ fn to_napi_error(e: decibri::error::DecibriError) -> Error {
         | VadSampleRateUnsupported(_)
         | VadThresholdOutOfRange(_)
         | AecSampleRateUnsupported(_)
-        | WavInvalid { .. }
+        | AudioFormatUnsupported { .. }
+        | AudioFileMalformed { .. }
+        | AudioFileTruncated { .. }
         | VadNotConfigured => Status::InvalidArg,
 
         // Offline file read failure (I/O)
@@ -1270,7 +1272,7 @@ impl DecibriOutputBridge {
 // ---------------------------------------------------------------------------
 // FileHandle: offline source class.
 //
-// Wraps the core offline File: constructed from a WAV path or in-memory
+// Wraps the core offline File: constructed from an audio path or in-memory
 // samples, pulled for conditioned chunks (readChunk), or consumed by a
 // whole-recording analysis (analyze). Mirrors DecibriBridge's split of
 // responsibilities: the native side computes the per-chunk VAD score on the
@@ -1463,9 +1465,10 @@ pub struct FileParts {
     input_rate: u32,
 }
 
-/// Open a WAV path as the core offline source: the blocking work (file read,
-/// WAV parse, chain construction) shared by the synchronous factory and the
-/// async open task. Touches no napi/JS state, so it can run off the JS thread.
+/// Open an audio path as the core offline source: the blocking work (file
+/// read, decode, chain construction) shared by the synchronous factory and
+/// the async open task. Touches no napi/JS state, so it can run off the JS
+/// thread.
 fn build_file_parts(path: &str, options: Option<&FileOptions>) -> Result<FileParts> {
     let default_opts = FileOptions::default();
     let opts = options.unwrap_or(&default_opts);
@@ -1515,8 +1518,8 @@ impl FileParts {
     }
 }
 
-/// Background task that performs the blocking file open work (disk read, WAV
-/// parse, chain construction) on the libuv thread pool, off the JS event
+/// Background task that performs the blocking file open work (disk read,
+/// decode, chain construction) on the libuv thread pool, off the JS event
 /// loop, then resolves to a constructed handle on the JS thread.
 pub struct OpenFileTask {
     path: String,
@@ -1598,15 +1601,16 @@ pub struct FileHandle {
 
 #[napi]
 impl FileHandle {
-    /// Open a WAV path as an offline source, synchronously (blocks on disk
-    /// I/O; the JS wrapper's async `File.open` uses `openAsync` instead).
+    /// Open an audio path as an offline source, synchronously (blocks on
+    /// disk I/O; the JS wrapper's async `File.open` uses `openAsync`
+    /// instead).
     #[napi(factory)]
     pub fn open(path: String, options: Option<FileOptions>) -> Result<FileHandle> {
         Ok(build_file_parts(&path, options.as_ref())?.into_handle())
     }
 
-    /// Open a WAV path without blocking the JS event loop: the disk read,
-    /// WAV parse, and chain construction run on the libuv thread pool.
+    /// Open an audio path without blocking the JS event loop: the disk read,
+    /// decode, and chain construction run on the libuv thread pool.
     #[napi]
     pub fn open_async(path: String, options: Option<FileOptions>) -> AsyncTask<OpenFileTask> {
         AsyncTask::new(OpenFileTask { path, options })
@@ -1780,7 +1784,7 @@ impl FileHandle {
         self.sample_rate
     }
 
-    /// The source's native rate, from the WAV header or the explicit
+    /// The source's native rate, from the file's header or the explicit
     /// `inputRate` of `buffer`.
     #[napi(getter)]
     pub fn input_rate(&self) -> u32 {

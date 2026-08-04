@@ -1,7 +1,7 @@
 """Exception hierarchy tests.
 
-Covers all 48 exception classes shipped in the public ``decibri`` namespace:
-1 base (DecibriError) + 26 direct subclasses + DeviceError intermediate
+Covers all 52 exception classes shipped in the public ``decibri`` namespace:
+1 base (DecibriError) + 30 direct subclasses + DeviceError intermediate
 + 8 direct DeviceError subclasses + OrtError intermediate + 8 direct
 OrtError subclasses + OrtPathError intermediate + 2 direct OrtPathError
 subclasses.
@@ -73,19 +73,21 @@ from decibri import (
     VadNotConfigured,
     VadSampleRateUnsupported,
     VadThresholdOutOfRange,
-    WavInvalid,
+    AudioFormatUnsupported,
+    AudioFileMalformed,
+    AudioFileTruncated,
 )
 import pytest
 
 
 # ---------------------------------------------------------------------------
-# All 50 classes are reachable and inherit from Exception via DecibriError.
+# All 52 classes are reachable and inherit from Exception via DecibriError.
 # ---------------------------------------------------------------------------
 
 
 ALL_DECIBRI_ERROR_CLASSES = (
     DecibriError,
-    # 28 direct DecibriError subclasses (non-device, non-ORT). DeviceFailed
+    # 30 direct DecibriError subclasses (non-device, non-ORT). DeviceFailed
     # is a runtime device/driver failure (distinct from the DeviceError
     # enumeration/selection family); OnnxBackendFailed is the non-ORT ONNX
     # backend catch-all (distinct from the OrtError family); FileConsumed and
@@ -115,7 +117,9 @@ ALL_DECIBRI_ERROR_CLASSES = (
     FileConsumed,
     FileEngaged,
     FileReadFailed,
-    WavInvalid,
+    AudioFormatUnsupported,
+    AudioFileMalformed,
+    AudioFileTruncated,
     VadNotConfigured,
     ForkAfterOrtInit,
     # DeviceError intermediate + 8 direct subclasses
@@ -145,11 +149,11 @@ ALL_DECIBRI_ERROR_CLASSES = (
 
 
 def test_class_count() -> None:
-    # 50 total: 1 base + 28 direct + DeviceError + 8 device + OrtError
-    # + 8 ORT direct + OrtPathError + 2 path. The additions over the prior 48
-    # are AecSampleRateUnsupported, the echo canceller's narrower rate window,
-    # and AecConfigInvalid, its configuration-rejection fallback.
-    assert len(ALL_DECIBRI_ERROR_CLASSES) == 50
+    # 52 total: 1 base + 30 direct + DeviceError + 8 device + OrtError
+    # + 8 ORT direct + OrtPathError + 2 path. The change over the prior 50 is
+    # the file reader: WavInvalid is gone and AudioFormatUnsupported,
+    # AudioFileMalformed and AudioFileTruncated replace it.
+    assert len(ALL_DECIBRI_ERROR_CLASSES) == 52
 
 
 def test_all_inherit_from_decibri_error() -> None:
@@ -475,8 +479,8 @@ def _core_variant_names() -> list[str]:
     assert "PermissionDenied" in names, "known variant missing from the parsed table"
     # The count is pinned deliberately and must be updated when a core variant
     # is added or removed.
-    assert len(names) == 45, (
-        f"parsed {len(names)} variants from the core identity table, expected 45;"
+    assert len(names) == 47, (
+        f"parsed {len(names)} variants from the core identity table, expected 47;"
         " the count is pinned deliberately and must be updated when a core"
         " variant is added or removed"
     )

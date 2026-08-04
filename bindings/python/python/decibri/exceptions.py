@@ -10,13 +10,13 @@ shape the core never sees. An out-of-range agc target raises
 AgcTargetOutOfRange; a malformed vad, denoise or highpass value raises
 ValueError.
 
-45 instance classes plus 3 intermediate parent classes (DeviceError,
-OrtError, OrtPathError) for catch ergonomics, totaling 48 class
+49 instance classes plus 3 intermediate parent classes (DeviceError,
+OrtError, OrtPathError) for catch ergonomics, totaling 52 class
 definitions. Single-inheritance hierarchy per CPython convention.
 
 Hierarchy:
     DecibriError
-    + 26 direct subclasses (config + runtime errors that don't involve
+    + 30 direct subclasses (config + runtime errors that don't involve
       device enumeration or ORT, including DeviceFailed and OnnxBackendFailed)
     + DeviceError (intermediate; no instances; catches device-related)
         + 8 direct device subclasses (MicrophoneNotFound, SpeakerNotFound,
@@ -236,8 +236,32 @@ class FileReadFailed(DecibriError):
     """Raised when an offline audio file cannot be read from disk."""
 
 
-class WavInvalid(DecibriError):
-    """Raised when an offline audio file is not a supported WAV."""
+class AudioFormatUnsupported(DecibriError):
+    """Raised when an offline audio file is in a format decibri cannot decode.
+
+    Covers a container that was not recognised, a container naming a codec the
+    reader does not carry, a codec at a sample width it does not carry, and a
+    channel layout it cannot decode. The message names the specific tag,
+    four-CC or width.
+    """
+
+
+class AudioFileMalformed(DecibriError):
+    """Raised when an offline audio file is structurally wrong.
+
+    The container was identified and parsed up to the point where the bytes
+    were not what the format requires there. The message names the byte offset
+    and what was expected at it.
+    """
+
+
+class AudioFileTruncated(DecibriError):
+    """Raised when an offline audio file ends before the audio it declares.
+
+    Covers a file shorter than its own headers state, including one whose
+    declared payload length is not a whole number of frames. The message names
+    what was needed against what was available.
+    """
 
 
 class VadNotConfigured(DecibriError):

@@ -9,6 +9,25 @@ For other decibri packages, see:
 - Rust core: [crates/decibri/CHANGELOG.md](../../crates/decibri/CHANGELOG.md)
 - Python package: [bindings/python/CHANGELOG.md](../../bindings/python/CHANGELOG.md)
 
+## [Unreleased]
+
+### Added
+
+- `File` reads AIFF, AIFF-C and FLAC as well as WAV, and reads WAV in mu-law, A-law, 8-bit and 24-bit as well as the 16-bit PCM and 32-bit float it already read. The container is identified from the file's own bytes, so the path's extension does not decide how a file is read. No option changes: the same `new File(path)` and `File.open(path)` open more files.
+- Error code `AUDIO_FORMAT_UNSUPPORTED` on `DecibriError`, for a file in a container or an encoding decibri cannot decode. The message names the container tag, codec or sample width in question.
+- Error code `AUDIO_FILE_MALFORMED` on `DecibriError`, for a file whose bytes are not what its format requires where they sit. The message names the byte offset and what was expected there.
+- Error code `AUDIO_FILE_TRUNCATED` on `DecibriError`, for a file that ends before the audio it declares. The message names what was needed against what was available.
+- `LICENSE`, the full Apache 2.0 text, in the published package.
+
+### Changed
+
+- **BREAKING: a WAV whose declared data length is not a whole number of frames now fails to open**, throwing a `DecibriError` with code `AUDIO_FILE_TRUNCATED`. It previously opened and delivered audio a fraction of a frame short of its own declaration, with nothing to indicate it. A file shorter than its declared length, which is what an interrupted download leaves behind, already failed to open and is unaffected.
+- A file declaring no channels carries `AUDIO_FORMAT_UNSUPPORTED` where it carried `WAV_INVALID`.
+
+### Removed
+
+- **BREAKING: the `WAV_INVALID` error code.** `AUDIO_FORMAT_UNSUPPORTED`, `AUDIO_FILE_MALFORMED` and `AUDIO_FILE_TRUNCATED` replace it, splitting what was one failure into the three the caller acts on differently. Code branching on `err.code === 'WAV_INVALID'` must be updated; `catch (e) { if (e instanceof DecibriError) ... }` catches all three unchanged.
+
 ## [5.3.0] - 2026-07-31
 
 ### Added

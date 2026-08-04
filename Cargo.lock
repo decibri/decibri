@@ -216,6 +216,7 @@ dependencies = [
  "cpal",
  "crossbeam-channel",
  "decibri-aec",
+ "decibri-decode",
  "decibri-resampler",
  "libloading",
  "ort",
@@ -229,6 +230,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8c082148c8441fc7db2c9c31aeb69842cf754ef9b8a853b40e086a2f383860fd"
 dependencies = [
  "thiserror 2.0.18",
+]
+
+[[package]]
+name = "decibri-decode"
+version = "0.1.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "322a328dfb6a3c57f2790a71b3b66423a02850adfb8a248fd15735ec0f8eb3ba"
+dependencies = [
+ "decibri-resampler",
 ]
 
 [[package]]
