@@ -61,6 +61,7 @@ from decibri._classes import (
     AecMetrics,
     Chunk,
     File,
+    SaveReport,
     Vad,
     VadReport,
     _BUNDLED_DENOISE_MODEL,
@@ -1116,6 +1117,32 @@ class AsyncFile:
     async def analyse(self) -> VadReport:
         """The same analysis under the international spelling."""
         return await self.analyze()
+
+    # -----------------------------------------------------------------------
+    # Save
+    # -----------------------------------------------------------------------
+
+    async def save(
+        self,
+        path: str | Path,
+        *,
+        format: Literal["wav", "aiff", "flac"] | None = None,
+        compression: int | None = None,
+    ) -> SaveReport:
+        """Write the conditioned recording to ``path``; returns a ``SaveReport``.
+
+        Async parallel of ``File.save``: the single conditioning and encode
+        pass runs off the event loop. The container comes from the path's
+        extension or from ``format``, ``compression`` sets the FLAC level,
+        and the source is consumed, exactly as the sync method contracts.
+        Requires an ``AsyncFile`` still at its start: once iteration has
+        pulled from it, this raises ``FileEngaged``.
+        """
+        loop = asyncio.get_running_loop()
+        return await loop.run_in_executor(
+            None,
+            lambda: self._file.save(path, format=format, compression=compression),
+        )
 
     # -----------------------------------------------------------------------
     # State properties (synchronous; they read wrapper-side state)

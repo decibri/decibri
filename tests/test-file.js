@@ -22,11 +22,14 @@ const path = require('path');
 const fs = require('fs');
 const os = require('os');
 const { spawnSync } = require('child_process');
+const { Readable } = require('stream');
+const { pipeline } = require('stream/promises');
 
 const DECIBRI_ENTRY = path.join(__dirname, '..', 'npm', 'decibri', 'src', 'decibri.js');
 const {
   Microphone,
   File,
+  AudioWriter,
   DecibriError,
 } = require(DECIBRI_ENTRY);
 
@@ -465,6 +468,345 @@ async function fileTests(h) {
   assert(
     (await readAll(closedFile)).length === 0,
     'reading a closed File yields nothing, no error'
+  );
+
+  console.log('File: save writes the conditioned recording');
+
+  // Samples on the exact 16-bit grid (k / 32768), so the quantisation into a
+  // 16-bit file is the identity and round trips assert sample for sample.
+  const gridSamples = (count) => {
+    const out = new Float32Array(count);
+    for (let i = 0; i < count; i++) out[i] = ((i % 1201) - 600) / 32768;
+    return out;
+  };
+  const grid = gridSamples(4000);
+
+  // Round trip in every container the extension rule names: the saved bytes
+  // carry the right magic and read back exactly. Catches a writer wired to
+  // the wrong container and a container that loses samples.
+  for (const [ext, magic] of [['wav', 'RIFF'], ['aiff', 'FORM'], ['flac', 'fLaC']]) {
+    const dest = path.join(tmp, `roundtrip.${ext}`);
+    const report = await File.buffer(grid, { inputRate: 16000 }).save(dest);
+    assert(
+      report.clippedSamples === 0 && report.nonFiniteSamples === 0,
+      `${ext}: a clean save reports zero counts`
+    );
+    const bytes = fs.readFileSync(dest);
+    assert(bytes.subarray(0, 4).toString('latin1') === magic, `${ext}: the extension picks the container`);
+    const back = await readAll(new File(dest));
+    let exact = back.length === grid.length * 2;
+    for (let i = 0; exact && i < grid.length; i++) {
+      if (back.readInt16LE(i * 2) !== Math.trunc(grid[i] * 32768)) exact = false;
+    }
+    assert(exact, `${ext}: the round trip is exact on the 16-bit grid`);
+  }
+
+  // A conditioned save writes the conditioned audio, not the input. Catches
+  // a save path that bypasses the conditioning chain.
+  const dcOffset = new Float32Array(4000).fill(0.25);
+  const dcDest = path.join(tmp, 'conditioned.wav');
+  await File.buffer(dcOffset, { inputRate: 16000, dcRemoval: true }).save(dcDest);
+  const dcBack = await readAll(new File(dcDest));
+  let dcSum = 0;
+  for (let i = 0; i < dcBack.length; i += 2) dcSum += dcBack.readInt16LE(i);
+  const dcMean = dcSum / (dcBack.length / 2) / 32768;
+  assert(
+    Math.abs(dcMean) < 0.05,
+    `a save carries the conditioned audio, not the input (mean ${dcMean.toFixed(3)})`
+  );
+
+  // The denoise round trip: a denoised save differs from its source and is
+  // readable. Needs the bundled model and a loadable ONNX Runtime, gated
+  // exactly as the silero cases above.
+  let denoisedReport = null;
+  const denoiseDest = path.join(tmp, 'denoised.flac');
+  try {
+    denoisedReport = await (await File.open(wavPath, { denoise: 'fastenhancer-t' })).save(denoiseDest);
+  } catch (e) {
+    if (e.message && (e.message.includes('failed to load ONNX Runtime') || e.message.includes('model not found'))) {
+      console.log('  SKIP: ONNX Runtime not staged; denoise save case skipped');
+    } else {
+      throw e;
+    }
+  }
+  if (denoisedReport !== null) {
+    const denoisedBack = await readAll(new File(denoiseDest));
+    assert(denoisedBack.length > 0, 'a denoised save reads back');
+    assert(
+      !denoisedBack.subarray(0, Math.min(denoisedBack.length, samples.length * 2))
+        .equals(fs.readFileSync(wavPath).subarray(44)),
+      'a denoised save differs from its source'
+    );
+  }
+
+  // Saving is refused once the stream is engaged, with the FILE_ENGAGED
+  // code, and the engaged state is reported before the arguments are
+  // interpreted. Catches a save of the unread remainder.
+  const engagedSave = File.buffer(gridSamples(3200), { inputRate: 16000 });
+  engagedSave.resume();
+  engagedSave.pause();
+  let engagedSaveErr = null;
+  try {
+    await engagedSave.save(path.join(tmp, 'engaged.wav'));
+  } catch (e) {
+    engagedSaveErr = e;
+  }
+  assert(
+    engagedSaveErr instanceof DecibriError && engagedSaveErr.code === 'FILE_ENGAGED',
+    `saving an engaged File carries the FILE_ENGAGED code (got ${engagedSaveErr && engagedSaveErr.code})`
+  );
+  await assertRejects(
+    () => engagedSave.save(path.join(tmp, 'engaged.flac'), { compression: 99 }),
+    DecibriError,
+    'File iteration has begun'
+  );
+  engagedSave.close();
+
+  // A save consumes the source exactly as analyze does: a second save, a
+  // later read, and a later analysis all fail loud with FILE_CONSUMED.
+  const oneSave = File.buffer(gridSamples(3200), { inputRate: 16000 });
+  await oneSave.save(path.join(tmp, 'first.wav'));
+  await assertRejects(
+    () => oneSave.save(path.join(tmp, 'second.wav')),
+    DecibriError,
+    'File already consumed'
+  );
+  let savedThenRead = null;
+  try {
+    await readAll(oneSave);
+  } catch (e) {
+    savedThenRead = e;
+  }
+  assert(
+    savedThenRead instanceof DecibriError && savedThenRead.code === 'FILE_CONSUMED',
+    `reading a saved File carries the FILE_CONSUMED code (got ${savedThenRead && savedThenRead.code})`
+  );
+
+  // Every failure detected before the pass begins leaves the File usable:
+  // fix the argument and the same File still saves. Catches a pre-check
+  // that takes the source.
+  const refusedSave = File.buffer(grid, { inputRate: 16000 });
+  await assertRejects(
+    () => refusedSave.save(path.join(tmp, 'refused.mp3')),
+    DecibriError,
+    'unsupported audio format'
+  );
+  await assertRejects(
+    () => refusedSave.save(path.join(tmp, 'refused.flac'), { compression: 9 }),
+    RangeError,
+    'flac compression level must be between 0 and 8'
+  );
+  const retriedReport = await refusedSave.save(path.join(tmp, 'retried.wav'));
+  assert(
+    retriedReport.clippedSamples === 0,
+    'a File refused for its arguments still saves once they are fixed'
+  );
+
+  // The container comes from the name, an explicit format beats it, and an
+  // unrecognised extension is an error rather than a silent default.
+  const overrideDest = path.join(tmp, 'override.flac');
+  await File.buffer(grid, { inputRate: 16000 }).save(overrideDest, { format: 'wav' });
+  assert(
+    fs.readFileSync(overrideDest).subarray(0, 4).toString('latin1') === 'RIFF',
+    'an explicit format override beats the extension'
+  );
+  let extErr = null;
+  try {
+    await File.buffer(grid, { inputRate: 16000 }).save(path.join(tmp, 'noformat.mp3'));
+  } catch (e) {
+    extErr = e;
+  }
+  assert(
+    extErr instanceof DecibriError &&
+      extErr.code === 'AUDIO_FORMAT_UNSUPPORTED' &&
+      extErr.message.includes("'.mp3'"),
+    `an unrecognised extension is refused by name (got ${extErr && extErr.code}: ${extErr && extErr.message})`
+  );
+  await assertRejects(
+    () => File.buffer(grid, { inputRate: 16000 }).save(path.join(tmp, 'x.wav'), { format: 'mp3' }),
+    TypeError,
+    'Invalid format value'
+  );
+
+  // FLAC compression levels: both range boundaries save and read back the
+  // identical audio; past the boundary is a range error; a non-number is a
+  // type error. Catches the writer's own rejection leaking through as a
+  // malformed-file error.
+  for (const level of [0, 8]) {
+    const levelDest = path.join(tmp, `level${level}.flac`);
+    await File.buffer(grid, { inputRate: 16000 }).save(levelDest, { compression: level });
+    const levelBack = await readAll(new File(levelDest));
+    let levelExact = levelBack.length === grid.length * 2;
+    for (let i = 0; levelExact && i < grid.length; i++) {
+      if (levelBack.readInt16LE(i * 2) !== Math.trunc(grid[i] * 32768)) levelExact = false;
+    }
+    assert(levelExact, `flac level ${level} saves and reads back losslessly`);
+  }
+  await assertRejects(
+    () => File.buffer(grid, { inputRate: 16000 }).save(path.join(tmp, 'bad.flac'), { compression: -1 }),
+    RangeError,
+    'flac compression level must be between 0 and 8'
+  );
+  await assertRejects(
+    () => File.buffer(grid, { inputRate: 16000 }).save(path.join(tmp, 'bad.flac'), { compression: 'high' }),
+    TypeError,
+    'compression must be a number'
+  );
+
+  // Clipping: a signal above full scale saves, the overshoot clamps to full
+  // scale, and the count is exactly the clamped samples. Catches a silent
+  // clamp and a count that includes in-range samples.
+  const hot = gridSamples(1600);
+  hot[10] = 1.85;
+  hot[20] = -1.85;
+  hot[30] = 2.5;
+  const hotDest = path.join(tmp, 'clipped.wav');
+  const hotReport = await File.buffer(hot, { inputRate: 16000 }).save(hotDest);
+  assert(
+    hotReport.clippedSamples === 3 && hotReport.nonFiniteSamples === 0,
+    `an overscale save counts exactly the clamped samples (got ${hotReport.clippedSamples})`
+  );
+  const hotBack = await readAll(new File(hotDest));
+  assert(
+    hotBack.readInt16LE(10 * 2) === 32767 &&
+      hotBack.readInt16LE(20 * 2) === -32768 &&
+      hotBack.readInt16LE(30 * 2) === 32767,
+    'the overshoot lands at full scale, never wrapped'
+  );
+
+  // Non-finite samples never reach the file: NaN becomes silence, an
+  // infinity becomes full scale, each counted, and the clip count stays
+  // zero because a repair is not a clamp. Catches the guard being dropped.
+  const glitched = gridSamples(1600);
+  glitched[10] = Number.NaN;
+  glitched[20] = Number.POSITIVE_INFINITY;
+  glitched[30] = Number.NEGATIVE_INFINITY;
+  const glitchedDest = path.join(tmp, 'nonfinite.wav');
+  const glitchedReport = await File.buffer(glitched, { inputRate: 16000 }).save(glitchedDest);
+  assert(
+    glitchedReport.nonFiniteSamples === 3 && glitchedReport.clippedSamples === 0,
+    `a non-finite save counts the repairs and no clips (got ${glitchedReport.nonFiniteSamples} and ${glitchedReport.clippedSamples})`
+  );
+  const glitchedBack = await readAll(new File(glitchedDest));
+  assert(
+    glitchedBack.readInt16LE(10 * 2) === 0 &&
+      glitchedBack.readInt16LE(20 * 2) === 32767 &&
+      glitchedBack.readInt16LE(30 * 2) === -32768,
+    'NaN saved as silence and the infinities as full scale'
+  );
+
+  // An unwritable destination reports the write identity, not a decode one.
+  let writeErr = null;
+  try {
+    await File.buffer(grid, { inputRate: 16000 }).save(
+      path.join(tmp, 'no-such-directory', 'out.wav')
+    );
+  } catch (e) {
+    writeErr = e;
+  }
+  assert(
+    writeErr instanceof DecibriError && writeErr.code === 'FILE_WRITE_FAILED',
+    `an unwritable destination carries FILE_WRITE_FAILED (got ${writeErr && writeErr.code})`
+  );
+  assert(
+    writeErr && writeErr.message.startsWith('Failed to write audio file'),
+    'the write failure names the operation'
+  );
+
+  console.log('AudioWriter: the Writable produces the same bytes as save()');
+
+  // A File piped into an AudioWriter writes the identical file save()
+  // writes, in WAV and in FLAC. Catches a second encode path drifting from
+  // the first, and an int16 dequantisation that is not the inverse of the
+  // delivery quantisation.
+  const saveDest = path.join(tmp, 'via-save.wav');
+  await File.buffer(grid, { inputRate: 16000 }).save(saveDest);
+  const pipeDest = path.join(tmp, 'via-pipe.wav');
+  const wavWriter = new AudioWriter(pipeDest, { sampleRate: 16000 });
+  await pipeline(File.buffer(grid, { inputRate: 16000 }), wavWriter);
+  assert(
+    fs.readFileSync(saveDest).equals(fs.readFileSync(pipeDest)),
+    'the pipe and save() produce byte-identical WAV files'
+  );
+  assert(
+    wavWriter.report !== null &&
+      wavWriter.report.clippedSamples === 0 &&
+      wavWriter.report.nonFiniteSamples === 0,
+    'the writer carries the SaveReport after finish'
+  );
+
+  const saveFlac = path.join(tmp, 'via-save.flac');
+  await File.buffer(grid, { inputRate: 16000 }).save(saveFlac, { compression: 5 });
+  const pipeFlac = path.join(tmp, 'via-pipe.flac');
+  await pipeline(
+    File.buffer(grid, { inputRate: 16000 }),
+    new AudioWriter(pipeFlac, { sampleRate: 16000, compression: 5 })
+  );
+  assert(
+    fs.readFileSync(saveFlac).equals(fs.readFileSync(pipeFlac)),
+    'the pipe and save() produce byte-identical FLAC files'
+  );
+
+  // The float32 pipe carries the samples verbatim and lands on the same
+  // file again.
+  const pipeF32 = path.join(tmp, 'via-pipe-f32.wav');
+  await pipeline(
+    File.buffer(grid, { inputRate: 16000, dtype: 'float32' }),
+    new AudioWriter(pipeF32, { sampleRate: 16000, dtype: 'float32' })
+  );
+  assert(
+    fs.readFileSync(saveDest).equals(fs.readFileSync(pipeF32)),
+    'the float32 pipe produces the same bytes as save()'
+  );
+
+  // A non-decibri source: plain Buffers of PCM pipe into a valid file, the
+  // case the writer exists for beyond File.
+  const ttsDest = path.join(tmp, 'tts.wav');
+  const pcm = Buffer.alloc(3200);
+  for (let i = 0; i < 1600; i++) pcm.writeInt16LE((i % 1201) - 600, i * 2);
+  await pipeline(
+    Readable.from([pcm.subarray(0, 1000), pcm.subarray(1000)]),
+    new AudioWriter(ttsDest, { sampleRate: 24000 })
+  );
+  const ttsBack = await readAll(new File(ttsDest, { sampleRate: 24000 }));
+  assert(
+    ttsBack.equals(pcm),
+    'a plain PCM stream writes a file that reads back sample for sample'
+  );
+
+  // The writer's own validation: the rate is required and ranged, the audio
+  // is mono, the dtype is one of the two encodings, and a byte stream that
+  // does not divide into whole samples is refused rather than truncated.
+  assertThrows(() => new AudioWriter(42, { sampleRate: 16000 }), TypeError, 'path must be a string');
+  assertThrows(() => new AudioWriter(path.join(tmp, 'w.wav'), {}), TypeError, 'sampleRate is required');
+  assertThrows(
+    () => new AudioWriter(path.join(tmp, 'w.wav'), { sampleRate: 999 }),
+    RangeError,
+    'sample rate must be between 1000 and 384000'
+  );
+  assertThrows(
+    () => new AudioWriter(path.join(tmp, 'w.wav'), { sampleRate: 16000, channels: 2 }),
+    RangeError,
+    'multichannel write is not supported'
+  );
+  assertThrows(
+    () => new AudioWriter(path.join(tmp, 'w.wav'), { sampleRate: 16000, dtype: 'int8' }),
+    TypeError,
+    "dtype must be 'int16' or 'float32'"
+  );
+  assertThrows(
+    () => new AudioWriter(path.join(tmp, 'w.wav'), { sampleRate: 16000, compression: 9 }),
+    RangeError,
+    'flac compression level must be between 0 and 8'
+  );
+  await assertRejects(
+    () =>
+      pipeline(
+        Readable.from([Buffer.alloc(3)]),
+        new AudioWriter(path.join(tmp, 'odd.wav'), { sampleRate: 16000 })
+      ),
+    RangeError,
+    'do not divide into whole int16 samples'
   );
 
   console.log('Microphone: wall-clock VAD state machine characterization');

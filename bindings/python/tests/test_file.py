@@ -24,13 +24,15 @@ from typing import Any
 import pytest
 
 import decibri
-from decibri import File, Segment, Vad, VadReport, VadWindow
+from decibri import File, SaveReport, Segment, Vad, VadReport, VadWindow
 from decibri.exceptions import (
     DecibriError,
     FileConsumed,
     FileEngaged,
     AudioFormatUnsupported,
     FileReadFailed,
+    FileWriteFailed,
+    FlacCompressionOutOfRange,
     VadNotConfigured,
 )
 
@@ -642,3 +644,217 @@ async def test_async_analyze() -> None:
     f2 = await decibri.AsyncFile.open(_GOLDEN_WAV, vad="silero")
     report2 = await f2.analyse()
     assert report2.scores == report.scores
+
+
+# ---------------------------------------------------------------------------
+# save(): writing the conditioned recording
+# ---------------------------------------------------------------------------
+
+
+def grid_samples(count: int) -> list[float]:
+    """Samples exactly on the 16-bit grid (``k / 32768``), so quantisation
+    into a 16-bit file is the identity and round trips assert sample for
+    sample."""
+    return [((i % 1201) - 600) / 32768.0 for i in range(count)]
+
+
+def read_int16(path: Path) -> list[int]:
+    """Every 16-bit sample a saved file delivers back through ``File``."""
+    data = read_all(File(path))
+    return list(struct.unpack(f"<{len(data) // 2}h", data))
+
+
+def test_save_round_trip_is_exact_in_all_three_containers(tmp_path: Path) -> None:
+    """The saved bytes carry the container the extension names and read back
+    exactly. Catches a writer wired to the wrong container and a container
+    that loses samples."""
+    grid = grid_samples(4000)
+    for ext, magic in [("wav", b"RIFF"), ("aiff", b"FORM"), ("flac", b"fLaC")]:
+        dest = tmp_path / f"roundtrip.{ext}"
+        report = File.buffer(grid, input_rate=16000).save(dest)
+        assert report == SaveReport(clipped_samples=0, non_finite_samples=0)
+        assert dest.read_bytes()[:4] == magic
+        assert read_int16(dest) == [int(s * 32768.0) for s in grid]
+
+
+def test_save_writes_the_conditioned_audio(tmp_path: Path) -> None:
+    """A conditioned save writes the conditioned audio, not the input.
+    Catches a save path that bypasses the conditioning chain."""
+    dest = tmp_path / "conditioned.wav"
+    File.buffer([0.25] * 4000, input_rate=16000, dc_removal=True).save(dest)
+    back = read_int16(dest)
+    mean = sum(back) / len(back) / 32768.0
+    assert abs(mean) < 0.05
+
+
+@pytest.mark.requires_bundled_ort
+def test_save_denoised_output_differs_and_reads_back(tmp_path: Path) -> None:
+    """The denoise round trip: a denoised save differs from its source and
+    is readable. Catches conditioning being skipped on the save pass."""
+    source = tmp_path / "noisy.wav"
+    samples = sine_samples(16000, 0.5)
+    write_wav(source, samples, 16000)
+    dest = tmp_path / "clean.flac"
+    File(source, denoise="fastenhancer-t").save(dest)
+    back = read_all(File(dest))
+    assert len(back) > 0
+    original = read_all(File(source))
+    assert back[: len(original)] != original
+
+
+def test_save_after_iteration_raises_engaged(tmp_path: Path) -> None:
+    """Saving is refused once iteration has begun, and the engaged state is
+    reported before the arguments are interpreted. Catches a save of the
+    unread remainder."""
+    f = File.buffer(grid_samples(3200), input_rate=16000)
+    assert f.read() is not None
+    with pytest.raises(FileEngaged, match="File iteration has begun"):
+        f.save(tmp_path / "engaged.wav")
+    # Engaged wins over an invalid compression level: the same check order
+    # as analyze.
+    with pytest.raises(FileEngaged):
+        f.save(tmp_path / "engaged.flac", compression=99)
+    # The rest of the recording is still there to read.
+    assert len(read_all(f)) > 0
+
+
+def test_save_twice_matches_analyze_twice(tmp_path: Path) -> None:
+    """A save consumes the source exactly as analyze does: a second save and
+    a later read both fail loud with FileConsumed."""
+    f = File.buffer(grid_samples(3200), input_rate=16000)
+    f.save(tmp_path / "first.wav")
+    with pytest.raises(FileConsumed, match="File already consumed"):
+        f.save(tmp_path / "second.wav")
+    with pytest.raises(FileConsumed):
+        f.read()
+
+
+def test_save_refused_arguments_leave_the_file_usable(tmp_path: Path) -> None:
+    """Every failure detected before the pass begins leaves the File usable:
+    fix the argument and the same File still saves. Catches a pre-check
+    that takes the source."""
+    f = File.buffer(grid_samples(4000), input_rate=16000)
+    with pytest.raises(AudioFormatUnsupported, match=r"'\.mp3'"):
+        f.save(tmp_path / "refused.mp3")
+    with pytest.raises(FlacCompressionOutOfRange):
+        f.save(tmp_path / "refused.flac", compression=9)
+    report = f.save(tmp_path / "retried.wav")
+    assert report.clipped_samples == 0
+
+
+def test_save_format_override_beats_the_extension(tmp_path: Path) -> None:
+    """An explicit format override beats the extension; an unrecognised
+    override value is an argument error. Catches an override consulted
+    after the extension rather than instead of it."""
+    dest = tmp_path / "override.flac"
+    File.buffer(grid_samples(400), input_rate=16000).save(dest, format="wav")
+    assert dest.read_bytes()[:4] == b"RIFF"
+    with pytest.raises(ValueError, match="Invalid format value"):
+        File.buffer(grid_samples(400), input_rate=16000).save(
+            tmp_path / "x.wav", format="mp3"
+        )
+
+
+def test_save_unrecognised_extension_is_refused(tmp_path: Path) -> None:
+    """An extension outside the recognised set is an error naming the
+    extension, and no file appears. Catches a silent default container."""
+    dest = tmp_path / "refused.ogg"
+    with pytest.raises(AudioFormatUnsupported, match=r"'\.ogg'"):
+        File.buffer(grid_samples(400), input_rate=16000).save(dest)
+    assert not dest.exists()
+
+
+def test_save_flac_compression_boundaries(tmp_path: Path) -> None:
+    """Both compression range boundaries save losslessly; past either end is
+    the dedicated range error. Catches the writer's own rejection leaking
+    through as a malformed-file error."""
+    grid = grid_samples(4000)
+    expected = [int(s * 32768.0) for s in grid]
+    for level in (0, 8):
+        dest = tmp_path / f"level{level}.flac"
+        File.buffer(grid, input_rate=16000).save(dest, compression=level)
+        assert read_int16(dest) == expected
+    for level in (-1, 9):
+        with pytest.raises(FlacCompressionOutOfRange):
+            File.buffer(grid, input_rate=16000).save(
+                tmp_path / "bad.flac", compression=level
+            )
+
+
+def test_save_clips_overscale_and_counts_it(tmp_path: Path) -> None:
+    """A signal above full scale saves, the overshoot clamps to full scale,
+    and the count is exactly the clamped samples. Catches a silent clamp
+    and a count that includes in-range samples."""
+    hot = grid_samples(1600)
+    hot[10] = 1.85
+    hot[20] = -1.85
+    hot[30] = 2.5
+    dest = tmp_path / "clipped.wav"
+    report = File.buffer(hot, input_rate=16000).save(dest)
+    assert report.clipped_samples == 3
+    assert report.non_finite_samples == 0
+    back = read_int16(dest)
+    assert (back[10], back[20], back[30]) == (32767, -32768, 32767)
+    assert back[40] == int(hot[40] * 32768.0)
+
+
+def test_save_replaces_non_finite_and_counts_it(tmp_path: Path) -> None:
+    """A non-finite sample never reaches the file: NaN becomes silence, an
+    infinity becomes full scale, each counted, and the clip count stays
+    zero because a repair is not a clamp. Catches the guard being dropped
+    or folded into the clamp."""
+    glitched = grid_samples(1600)
+    glitched[10] = float("nan")
+    glitched[20] = float("inf")
+    glitched[30] = float("-inf")
+    dest = tmp_path / "nonfinite.wav"
+    report = File.buffer(glitched, input_rate=16000).save(dest)
+    assert report.non_finite_samples == 3
+    assert report.clipped_samples == 0
+    back = read_int16(dest)
+    assert (back[10], back[20], back[30]) == (0, 32767, -32768)
+
+
+def test_save_write_failure_raises_file_write_failed(tmp_path: Path) -> None:
+    """An unwritable destination reports the write identity with the
+    operation named, not a decode identity."""
+    dest = tmp_path / "no-such-directory" / "out.wav"
+    with pytest.raises(FileWriteFailed, match="Failed to write audio file"):
+        File.buffer(grid_samples(400), input_rate=16000).save(dest)
+
+
+def test_save_report_is_a_frozen_dataclass() -> None:
+    """The report type is part of the public surface and its fields are
+    read-only, like the analysis report types."""
+    report = SaveReport(clipped_samples=1, non_finite_samples=2)
+    assert decibri.SaveReport is SaveReport
+    assert (report.clipped_samples, report.non_finite_samples) == (1, 2)
+    with pytest.raises(AttributeError):
+        report.clipped_samples = 3  # type: ignore[misc]
+
+
+@pytest.mark.asyncio
+async def test_async_save_round_trip(tmp_path: Path) -> None:
+    """AsyncFile.save writes the same file the sync path writes."""
+    grid = grid_samples(3200)
+    sync_dest = tmp_path / "sync.flac"
+    File.buffer(grid, input_rate=16000).save(sync_dest, compression=5)
+    async_dest = tmp_path / "async.flac"
+    f = await decibri.AsyncFile.buffer(grid, input_rate=16000)
+    report = await f.save(async_dest, compression=5)
+    assert report == SaveReport(clipped_samples=0, non_finite_samples=0)
+    assert async_dest.read_bytes() == sync_dest.read_bytes()
+
+
+@pytest.mark.asyncio
+async def test_async_save_after_iteration_raises(tmp_path: Path) -> None:
+    """An AsyncFile refuses a save once its iteration has begun, exactly as
+    the sync File does, and the refusal leaves it usable."""
+    f = await decibri.AsyncFile.buffer(grid_samples(3200), input_rate=16000)
+    assert await f.read() is not None
+    with pytest.raises(FileEngaged, match="File iteration has begun"):
+        await f.save(tmp_path / "engaged.wav")
+    remaining = 0
+    async for chunk in f:
+        remaining += len(chunk)
+    assert remaining > 0

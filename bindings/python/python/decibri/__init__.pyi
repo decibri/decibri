@@ -8,6 +8,7 @@ from decibri._classes import AecMetrics as AecMetrics
 from decibri._classes import Chunk as Chunk
 from decibri._classes import File as File
 from decibri._classes import Microphone as Microphone
+from decibri._classes import SaveReport as SaveReport
 from decibri._classes import Segment as Segment
 from decibri._classes import Speaker as Speaker
 from decibri._classes import Vad as Vad
@@ -59,6 +60,8 @@ from decibri.exceptions import SampleRateOutOfRange as SampleRateOutOfRange
 from decibri.exceptions import StreamOpenFailed as StreamOpenFailed
 from decibri.exceptions import StreamStartFailed as StreamStartFailed
 from decibri.exceptions import FileReadFailed as FileReadFailed
+from decibri.exceptions import FileWriteFailed as FileWriteFailed
+from decibri.exceptions import FlacCompressionOutOfRange as FlacCompressionOutOfRange
 from decibri.exceptions import VadModelLoadFailed as VadModelLoadFailed
 from decibri.exceptions import VadNotConfigured as VadNotConfigured
 from decibri.exceptions import VadSampleRateUnsupported as VadSampleRateUnsupported

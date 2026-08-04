@@ -181,6 +181,109 @@ impl FileConfig {
     }
 }
 
+/// The container format a [`File::save`] call writes.
+///
+/// Selected from the path's extension, or explicitly via
+/// [`SaveOptions::format`]. Every format writes 16-bit PCM mono at the
+/// `File`'s target rate; FLAC compresses it losslessly at
+/// [`SaveOptions::compression`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum SaveFormat {
+    /// RIFF/WAVE carrying 16-bit PCM. The `.wav` extension.
+    Wav,
+    /// AIFF carrying 16-bit big-endian PCM. The `.aiff`, `.aif` and `.aifc`
+    /// extensions.
+    Aiff,
+    /// FLAC carrying 16-bit samples, losslessly compressed. The `.flac`
+    /// extension.
+    Flac,
+}
+
+impl SaveFormat {
+    /// The save format the path's extension names: the resolution
+    /// [`File::save`] applies when [`SaveOptions::format`] is unset.
+    ///
+    /// The write side has no bytes to identify, so the name is the signal:
+    /// `.wav`, `.aiff`, `.aif`, `.aifc` and `.flac` are recognised, ASCII
+    /// case-insensitively. Anything else is refused rather than defaulted,
+    /// naming the extension found and the accepted set.
+    ///
+    /// # Errors
+    /// - [`DecibriError::AudioFormatUnsupported`] when the extension names
+    ///   no format decibri writes, or the path has no extension.
+    pub fn from_path(path: impl AsRef<Path>) -> Result<Self, DecibriError> {
+        let extension = path
+            .as_ref()
+            .extension()
+            .and_then(|e| e.to_str())
+            .map(str::to_ascii_lowercase);
+        match extension.as_deref() {
+            Some("wav") => Ok(SaveFormat::Wav),
+            Some("aiff" | "aif" | "aifc") => Ok(SaveFormat::Aiff),
+            Some("flac") => Ok(SaveFormat::Flac),
+            Some(other) => Err(DecibriError::AudioFormatUnsupported {
+                reason: format!(
+                    "the extension '.{other}' does not name a format decibri writes; \
+                     use .wav, .aiff, .aif, .aifc or .flac, or set an explicit format"
+                ),
+            }),
+            None => Err(DecibriError::AudioFormatUnsupported {
+                reason: "the path has no extension to name a format; use .wav, .aiff, \
+                         .aif, .aifc or .flac, or set an explicit format"
+                    .to_string(),
+            }),
+        }
+    }
+}
+
+/// Options for [`File::save`].
+///
+/// `#[non_exhaustive]`: construct it with [`SaveOptions::default`] and then
+/// assign the public fields you need, exactly as [`FileConfig`] is built.
+#[derive(Debug, Clone, Default)]
+#[non_exhaustive]
+pub struct SaveOptions {
+    /// The container format to write. `None` (the default) takes it from the
+    /// path's extension: `.wav`, `.aiff`, `.aif`, `.aifc` or `.flac`, ASCII
+    /// case-insensitively. decibri reads a file by its content and writes one
+    /// by its name; an extension it does not recognise is refused, never
+    /// defaulted.
+    pub format: Option<SaveFormat>,
+    /// FLAC compression level, 0 through 8. Higher levels search harder for a
+    /// smaller file; every level decodes to identical audio. `None` (the
+    /// default) is level 5. Range checked whenever set; consulted only when
+    /// the resolved format is [`SaveFormat::Flac`] and ignored otherwise,
+    /// exactly as [`FileConfig`] fields that belong to one stage are ignored
+    /// when that stage is off.
+    pub compression: Option<u8>,
+}
+
+/// What a [`File::save`] call did to the samples on their way into the file:
+/// the full-scale clamp and the non-finite repair, each counted.
+///
+/// `#[non_exhaustive]`: read field by field; sealing it keeps future result
+/// fields backward compatible.
+#[derive(Debug, Clone)]
+#[non_exhaustive]
+pub struct SaveReport {
+    /// Finite samples outside `[-1.0, 1.0]`, clamped to full scale. The
+    /// conditioned output can exceed full scale (AGC or AEC without a
+    /// limiter), and a 16-bit encoding cannot hold that, so the overshoot
+    /// clips and the count says how much. The count is a statement about
+    /// integer encodings: a float encoding preserves an overscale sample
+    /// rather than clipping it, and its count would be zero.
+    pub clipped_samples: u64,
+    /// Non-finite samples replaced before writing: NaN with silence, an
+    /// infinity with full scale. The same replacement on every format, so the
+    /// same samples produce the same audio whatever container carries them.
+    pub non_finite_samples: u64,
+}
+
+/// FLAC compression level written when [`SaveOptions::compression`] is unset;
+/// the encoder's own default.
+const DEFAULT_FLAC_COMPRESSION: u8 = 5;
+
 /// One scored voice-activity window of a recording.
 ///
 /// Produced by [`File::analyze`]. Windows tile the recording from the start:
@@ -585,6 +688,97 @@ impl File {
         self.analyze()
     }
 
+    /// Write the conditioned recording to `path` as an audio file.
+    ///
+    /// Runs the recording once through the same conditioning pass iteration
+    /// delivers, whole, and writes the result as 16-bit PCM mono at the
+    /// target rate. The container comes from the path's extension (`.wav`,
+    /// `.aiff`, `.aif`, `.aifc` or `.flac`), or from [`SaveOptions::format`]
+    /// when set: decibri reads a file by its content and writes one by its
+    /// name. Consumes the `File`: the save is a single pass, separate from
+    /// iteration and analysis.
+    ///
+    /// A finite sample outside `[-1.0, 1.0]`, which AGC or AEC without a
+    /// limiter can produce, is clamped to full scale and counted in the
+    /// returned [`SaveReport`]. A non-finite sample never reaches the file:
+    /// NaN becomes silence and an infinity becomes full scale, the same on
+    /// every format, counted separately in the report.
+    ///
+    /// Runs only on a source still at its start. Once iteration has pulled
+    /// from the `File`, saving reports [`DecibriError::FileEngaged`].
+    ///
+    /// # Errors
+    /// - [`DecibriError::FileEngaged`] when iteration has already begun.
+    /// - [`DecibriError::FlacCompressionOutOfRange`] when
+    ///   [`SaveOptions::compression`] is outside 0-8.
+    /// - [`DecibriError::AudioFormatUnsupported`] when neither the path's
+    ///   extension nor [`SaveOptions::format`] names a format decibri
+    ///   writes.
+    /// - [`DecibriError::FileWriteFailed`] when the encoded file cannot be
+    ///   written to disk.
+    /// - Chain errors exactly as iteration reports them.
+    pub fn save(
+        mut self,
+        path: impl AsRef<Path>,
+        options: SaveOptions,
+    ) -> Result<SaveReport, DecibriError> {
+        let path = path.as_ref();
+        // The engaged state is reported first, before any argument is
+        // interpreted, matching the check order of `analyze`.
+        if self.engaged {
+            return Err(DecibriError::FileEngaged);
+        }
+        let compression = match options.compression {
+            None => DEFAULT_FLAC_COMPRESSION,
+            Some(level) if level <= 8 => level,
+            Some(_) => return Err(DecibriError::FlacCompressionOutOfRange),
+        };
+        let format = match options.format {
+            Some(format) => format,
+            None => SaveFormat::from_path(path)?,
+        };
+
+        // The same single pass iteration delivers, taken whole: every
+        // conditioned sample including the chain's end-of-stream tail.
+        let mut samples: Vec<f32> = Vec::new();
+        loop {
+            self.advance()?;
+            samples.extend(self.reblock.drain(..));
+            if self.flushed && self.reblock.is_empty() {
+                break;
+            }
+        }
+
+        let non_finite_samples = replace_non_finite(&mut samples);
+        let clipped_samples = clamp_overscale(&mut samples);
+
+        let spec = decibri_decode::AudioSpec::mono(self.target_rate);
+        let mut bytes = Vec::new();
+        match format {
+            SaveFormat::Wav => {
+                decibri_decode::WavWriter::new(spec, decibri_decode::WavCodec::PcmI16)
+                    .write(&samples, &mut bytes)?;
+            }
+            SaveFormat::Aiff => {
+                decibri_decode::AiffWriter::new(spec, decibri_decode::AiffCodec::PcmI16)
+                    .write(&samples, &mut bytes)?;
+            }
+            SaveFormat::Flac => {
+                decibri_decode::FlacWriter::new(spec, 16)
+                    .with_level(compression)
+                    .write(&samples, &mut bytes)?;
+            }
+        }
+        std::fs::write(path, &bytes).map_err(|source| DecibriError::FileWriteFailed {
+            path: path.to_path_buf(),
+            source,
+        })?;
+        Ok(SaveReport {
+            clipped_samples,
+            non_finite_samples,
+        })
+    }
+
     /// The next source block's range, moving the cursor past it; `None` once
     /// the source is exhausted. The one place either pass advances the cursor,
     /// so both step the source in the same blocks.
@@ -812,6 +1006,50 @@ impl Iterator for File {
             channels: 1,
         }))
     }
+}
+
+/// Replace every non-finite sample in place, returning how many were
+/// replaced: NaN becomes silence (0.0) and an infinity becomes full scale
+/// (1.0 or -1.0), the values decode's integer encodings produce for the same
+/// input. Applied before any writer runs so every format writes the same
+/// audio for the same samples; a float encoding would otherwise carry NaN
+/// and infinity into the file verbatim.
+fn replace_non_finite(samples: &mut [f32]) -> u64 {
+    let mut replaced = 0u64;
+    for sample in samples.iter_mut() {
+        if !sample.is_finite() {
+            *sample = if sample.is_nan() {
+                0.0
+            } else if *sample > 0.0 {
+                1.0
+            } else {
+                -1.0
+            };
+            replaced += 1;
+        }
+    }
+    replaced
+}
+
+/// Clamp every sample outside `[-1.0, 1.0]` to full scale in place,
+/// returning how many were clamped. Runs after [`replace_non_finite`], so
+/// the count covers finite overshoot only and the writer's own clamp is a
+/// no-op. Kept separate from the non-finite replacement: the clamp belongs
+/// to integer encodings, while the replacement applies to every encoding,
+/// and a float target must be able to take the replacement without the
+/// clamp.
+fn clamp_overscale(samples: &mut [f32]) -> u64 {
+    let mut clipped = 0u64;
+    for sample in samples.iter_mut() {
+        if *sample > 1.0 {
+            *sample = 1.0;
+            clipped += 1;
+        } else if *sample < -1.0 {
+            *sample = -1.0;
+            clipped += 1;
+        }
+    }
+    clipped
 }
 
 /// Merge consecutive speech windows into segments: a silence gap within
@@ -2480,5 +2718,374 @@ mod tests {
 
         let mut plain = File::buffer(input, 16000, FileConfig::default()).unwrap();
         assert!(plain.vad_input().is_none());
+    }
+
+    // ── Save: writing the conditioned recording ─────────────────────────
+
+    /// A uniquely named path under the system temp directory, handed to
+    /// `save_it` and removed afterwards whether or not the save created it.
+    fn with_save_path<T>(name: &str, save_it: impl FnOnce(&Path) -> T) -> T {
+        let path = std::env::temp_dir().join(format!("decibri-save-{name}"));
+        std::fs::remove_file(&path).ok();
+        let out = save_it(&path);
+        std::fs::remove_file(&path).ok();
+        out
+    }
+
+    /// Samples that live exactly on the 16-bit grid (`k / 32768`), so the
+    /// quantisation into a 16-bit file is the identity and a round trip can
+    /// be asserted sample for sample rather than within a tolerance.
+    fn grid_samples(count: usize) -> Vec<f32> {
+        (0..count)
+            .map(|i| ((i as i32 % 1201) - 600) as f32 / 32768.0)
+            .collect()
+    }
+
+    /// Quantise one sample the way every 16-bit writer in the save path
+    /// does: clamp, scale by 32768, truncate toward zero, clamp in integer
+    /// space, back to `f32` over the same scale.
+    fn quantise_i16(sample: f32) -> f32 {
+        let scaled = (sample.clamp(-1.0, 1.0) * 32768.0) as i32;
+        scaled.clamp(-32768, 32767) as f32 / 32768.0
+    }
+
+    /// Save writes the delivered audio and open reads it back identically,
+    /// in every container the extension rule names. Catches a writer wired
+    /// to the wrong container, a container that loses samples, and a drain
+    /// that differs from what iteration delivers.
+    #[test]
+    fn save_round_trip_is_exact_in_all_three_containers() {
+        let input = grid_samples(4000);
+        for (ext, magic) in [
+            ("wav", &b"RIFF"[..]),
+            ("aiff", &b"FORM"[..]),
+            ("flac", &b"fLaC"[..]),
+        ] {
+            with_save_path(&format!("roundtrip.{ext}"), |path| {
+                let file = File::buffer(input.clone(), 16000, FileConfig::default()).unwrap();
+                let report = file.save(path, SaveOptions::default()).unwrap();
+                assert_eq!(report.clipped_samples, 0, "{ext}: nothing to clip");
+                assert_eq!(report.non_finite_samples, 0, "{ext}: nothing to repair");
+                let bytes = std::fs::read(path).expect("the saved file exists");
+                assert_eq!(
+                    &bytes[..4],
+                    magic,
+                    "{ext}: the extension picks the container"
+                );
+                let back = collect(File::open(path, FileConfig::default()).unwrap());
+                assert_eq!(back, input, "{ext}: the round trip is exact");
+            });
+        }
+    }
+
+    /// A conditioned save writes the conditioned audio, not the input: the
+    /// saved file differs from the source and reads back as exactly the
+    /// quantised delivered stream. Catches a save path that bypasses the
+    /// conditioning chain.
+    #[test]
+    fn save_writes_the_conditioned_audio_not_the_input() {
+        // A DC offset the conditioning removes, on the 16-bit grid.
+        let input: Vec<f32> = grid_samples(4000)
+            .iter()
+            .map(|s| s + 8192.0 / 32768.0)
+            .collect();
+        let config = FileConfig {
+            dc_removal: true,
+            ..Default::default()
+        };
+        let expected: Vec<f32> =
+            collect(File::buffer(input.clone(), 16000, config.clone()).unwrap())
+                .iter()
+                .map(|&s| quantise_i16(s))
+                .collect();
+        assert_ne!(expected, input, "the conditioning changed the audio");
+        with_save_path("conditioned.wav", |path| {
+            let file = File::buffer(input.clone(), 16000, config.clone()).unwrap();
+            file.save(path, SaveOptions::default()).unwrap();
+            let back = collect(File::open(path, FileConfig::default()).unwrap());
+            assert_eq!(back, expected, "the file holds the conditioned stream");
+        });
+    }
+
+    /// Saving is refused once iteration has begun, with the same identity
+    /// and the same check order as analysis: the engaged state is reported
+    /// before any argument is interpreted. Catches a save that writes the
+    /// unread remainder of a partially streamed source.
+    #[test]
+    fn save_after_iteration_reports_file_engaged() {
+        let mut file = File::buffer(sine(16000, 0.1), 16000, FileConfig::default()).unwrap();
+        let _ = file.next();
+        with_save_path("engaged.wav", |path| {
+            let err = file.save(path, SaveOptions::default()).unwrap_err();
+            assert!(matches!(err, DecibriError::FileEngaged));
+        });
+
+        // Engaged wins over an invalid compression level, matching the
+        // check order pinned for analyze.
+        let mut file = File::buffer(sine(16000, 0.1), 16000, FileConfig::default()).unwrap();
+        let _ = file.next();
+        with_save_path("engaged-order.flac", |path| {
+            let options = SaveOptions {
+                compression: Some(99),
+                ..Default::default()
+            };
+            let err = file.save(path, options).unwrap_err();
+            assert!(matches!(err, DecibriError::FileEngaged));
+        });
+    }
+
+    /// An explicit format override beats the extension, including an
+    /// extension outside the recognised set. Catches an override consulted
+    /// after the extension rather than instead of it.
+    #[test]
+    fn save_format_override_beats_the_extension() {
+        let input = grid_samples(400);
+        with_save_path("override.flac", |path| {
+            let file = File::buffer(input.clone(), 16000, FileConfig::default()).unwrap();
+            let options = SaveOptions {
+                format: Some(SaveFormat::Wav),
+                ..Default::default()
+            };
+            file.save(path, options).unwrap();
+            let bytes = std::fs::read(path).unwrap();
+            assert_eq!(&bytes[..4], b"RIFF", "the override picked WAV");
+        });
+        with_save_path("override.dat", |path| {
+            let file = File::buffer(input.clone(), 16000, FileConfig::default()).unwrap();
+            let options = SaveOptions {
+                format: Some(SaveFormat::Flac),
+                ..Default::default()
+            };
+            file.save(path, options).unwrap();
+            let bytes = std::fs::read(path).unwrap();
+            assert_eq!(
+                &bytes[..4],
+                b"fLaC",
+                "an explicit format needs no known extension"
+            );
+        });
+    }
+
+    /// An extension outside the recognised set, or a path with none, is
+    /// refused with the format identity and no file is created. Catches a
+    /// silent default container.
+    #[test]
+    fn save_refuses_an_unrecognised_extension() {
+        let input = grid_samples(400);
+        with_save_path("refused.mp3", |path| {
+            let file = File::buffer(input.clone(), 16000, FileConfig::default()).unwrap();
+            let err = file.save(path, SaveOptions::default()).unwrap_err();
+            match err {
+                DecibriError::AudioFormatUnsupported { reason } => {
+                    assert!(
+                        reason.contains("'.mp3'"),
+                        "the extension is named: {reason}"
+                    );
+                }
+                other => panic!("expected AudioFormatUnsupported, got {other:?}"),
+            }
+            assert!(!path.exists(), "no file appears for a refused save");
+        });
+        with_save_path("refused-no-extension", |path| {
+            let file = File::buffer(input.clone(), 16000, FileConfig::default()).unwrap();
+            let err = file.save(path, SaveOptions::default()).unwrap_err();
+            assert!(matches!(err, DecibriError::AudioFormatUnsupported { .. }));
+            assert!(!path.exists());
+        });
+    }
+
+    /// Extension matching is ASCII case-insensitive, and `.aif` and `.aifc`
+    /// select the AIFF writer. Catches a case-sensitive extension table.
+    #[test]
+    fn save_extension_matching_is_case_insensitive() {
+        let input = grid_samples(400);
+        for name in ["upper.WAV", "mixed.Flac", "short.aif", "compressed.aifc"] {
+            with_save_path(name, |path| {
+                let file = File::buffer(input.clone(), 16000, FileConfig::default()).unwrap();
+                file.save(path, SaveOptions::default()).unwrap();
+                let back = collect(File::open(path, FileConfig::default()).unwrap());
+                assert_eq!(back, input, "{name}: saved and read back");
+            });
+        }
+    }
+
+    /// Every FLAC compression level in range is accepted, both boundaries
+    /// included, decodes back to the identical audio, and a level past the
+    /// range is refused with its own identity before anything is written.
+    /// Catches the writer's own rejection leaking through as a malformed
+    /// file error, and a lossy level.
+    #[test]
+    fn save_flac_compression_range_and_losslessness() {
+        let reference = collect(File::open(libflac_clip_path(), FileConfig::default()).unwrap());
+        for level in [0u8, 5, 8] {
+            with_save_path(&format!("level{level}.flac"), |path| {
+                let file = File::open(libflac_clip_path(), FileConfig::default()).unwrap();
+                let options = SaveOptions {
+                    compression: Some(level),
+                    ..Default::default()
+                };
+                file.save(path, options).unwrap();
+                let back = collect(File::open(path, FileConfig::default()).unwrap());
+                assert_eq!(back, reference, "level {level} is lossless");
+            });
+        }
+        with_save_path("level9.flac", |path| {
+            let file = File::open(libflac_clip_path(), FileConfig::default()).unwrap();
+            let options = SaveOptions {
+                compression: Some(9),
+                ..Default::default()
+            };
+            let err = file.save(path, options).unwrap_err();
+            assert!(matches!(err, DecibriError::FlacCompressionOutOfRange));
+            assert!(!path.exists(), "nothing is written for a refused level");
+        });
+    }
+
+    /// A signal above full scale saves, the overshoot clamps to full scale,
+    /// and the report counts exactly the clamped samples. Catches a silent
+    /// clamp and a count that includes in-range samples.
+    #[test]
+    fn save_clips_overscale_and_counts_it() {
+        let mut input = grid_samples(1600);
+        input[10] = 1.85;
+        input[20] = -1.85;
+        input[30] = 2.5;
+        with_save_path("clipped.wav", |path| {
+            let file = File::buffer(input.clone(), 16000, FileConfig::default()).unwrap();
+            let report = file.save(path, SaveOptions::default()).unwrap();
+            assert_eq!(
+                report.clipped_samples, 3,
+                "exactly the three overscale samples"
+            );
+            assert_eq!(report.non_finite_samples, 0);
+            let back = collect(File::open(path, FileConfig::default()).unwrap());
+            // Positive full scale quantises to 32767; negative to -32768.
+            assert_eq!(back[10], 32767.0 / 32768.0);
+            assert_eq!(back[20], -1.0);
+            assert_eq!(back[30], 32767.0 / 32768.0);
+            assert_eq!(back[40], input[40], "in-range neighbours are untouched");
+        });
+    }
+
+    /// A non-finite sample reaches the save on the direct path (the probe
+    /// pinned by `buffer_passthrough_is_byte_identical`), never reaches the
+    /// file, and is counted: NaN becomes silence, an infinity becomes full
+    /// scale, and the clip count stays zero because the repair is not a
+    /// clamp. Catches the guard being dropped, folded into the clamp, or
+    /// left to the writer.
+    #[test]
+    fn save_replaces_non_finite_and_counts_it() {
+        let mut input = grid_samples(1600);
+        input[10] = f32::NAN;
+        input[20] = f32::INFINITY;
+        input[30] = f32::NEG_INFINITY;
+        with_save_path("nonfinite.wav", |path| {
+            let file = File::buffer(input.clone(), 16000, FileConfig::default()).unwrap();
+            let report = file.save(path, SaveOptions::default()).unwrap();
+            assert_eq!(
+                report.non_finite_samples, 3,
+                "exactly the three non-finite samples"
+            );
+            assert_eq!(report.clipped_samples, 0, "a repair is not a clip");
+            let back = collect(File::open(path, FileConfig::default()).unwrap());
+            assert_eq!(back[10], 0.0, "NaN became silence");
+            assert_eq!(
+                back[20],
+                32767.0 / 32768.0,
+                "positive infinity became full scale"
+            );
+            assert_eq!(back[30], -1.0, "negative infinity became full scale");
+        });
+    }
+
+    /// The same repair applies when the non-finite input arrives from disk:
+    /// a float WAV carrying NaN and infinity opens on the direct path and
+    /// saves as the repaired audio. Pins the reachable path from `File::open`
+    /// as well as from `File::buffer`.
+    #[test]
+    fn save_repairs_non_finite_input_read_from_a_float_file() {
+        let mut input = grid_samples(1600);
+        input[10] = f32::NAN;
+        input[20] = f32::INFINITY;
+        let wav = wav_bytes(3, 1, 16000, &input);
+        let report = with_file("nonfinite-input.wav", &wav, |source| {
+            with_save_path("nonfinite-from-open.wav", |dest| {
+                let file = File::open(source, FileConfig::default()).unwrap();
+                file.save(dest, SaveOptions::default()).unwrap()
+            })
+        });
+        assert_eq!(report.non_finite_samples, 2);
+        assert_eq!(report.clipped_samples, 0);
+    }
+
+    /// The guard and the clamp are separate steps: the guard repairs
+    /// non-finite samples and leaves finite overshoot alone, so a float
+    /// target given the guarded samples preserves 1.85 verbatim and its
+    /// clip count is zero; the clamp alone accounts for clipping. Catches
+    /// overscale clamping being folded into the non-finite repair, which
+    /// would silently change what a float target writes.
+    #[test]
+    fn save_guard_leaves_overscale_for_the_float_target_to_preserve() {
+        let mut samples = vec![0.5, 1.85, f32::NAN, -1.85];
+        let replaced = replace_non_finite(&mut samples);
+        assert_eq!(replaced, 1, "only the NaN is repaired");
+        assert_eq!(
+            samples,
+            [0.5, 1.85, 0.0, -1.85],
+            "the overshoot is untouched"
+        );
+
+        // A float target writes the guarded samples through verbatim: the
+        // overshoot survives into the file, so its clip count is zero.
+        let file = decibri_decode::WavWriter::new(
+            decibri_decode::AudioSpec::mono(16000),
+            decibri_decode::WavCodec::Float32,
+        )
+        .to_bytes(&samples)
+        .expect("the float writer accepts guarded samples");
+        let audio = decibri_decode::decode(&file).expect("the float file reads back");
+        assert_eq!(audio.samples(), &[0.5, 1.85, 0.0, -1.85]);
+
+        // The clamp is where clipping happens and is counted.
+        let clipped = clamp_overscale(&mut samples);
+        assert_eq!(clipped, 2);
+        assert_eq!(samples, [0.5, 1.0, 0.0, -1.0]);
+    }
+
+    /// A destination the filesystem refuses reports `FileWriteFailed` with
+    /// the path and a walkable I/O cause. Catches the write failure
+    /// surfacing as a decode identity or losing the path.
+    #[test]
+    fn save_write_failure_reports_file_write_failed() {
+        use std::error::Error as _;
+        let dest = std::env::temp_dir()
+            .join("decibri-save-no-such-directory")
+            .join("out.wav");
+        let file = File::buffer(grid_samples(400), 16000, FileConfig::default()).unwrap();
+        let err = file.save(&dest, SaveOptions::default()).unwrap_err();
+        match &err {
+            DecibriError::FileWriteFailed { path, .. } => {
+                assert_eq!(path, &dest, "the offending path is carried");
+            }
+            other => panic!("expected FileWriteFailed, got {other:?}"),
+        }
+        assert!(err.source().is_some(), "the I/O cause is walkable");
+    }
+
+    /// An empty source saves as a valid, empty file in every container, and
+    /// each reads back as zero samples. Catches a writer that refuses or
+    /// corrupts a zero-length payload.
+    #[test]
+    fn save_empty_source_writes_a_valid_empty_file() {
+        for ext in ["wav", "aiff", "flac"] {
+            with_save_path(&format!("empty.{ext}"), |path| {
+                let file = File::buffer(Vec::new(), 16000, FileConfig::default()).unwrap();
+                let report = file.save(path, SaveOptions::default()).unwrap();
+                assert_eq!(report.clipped_samples, 0);
+                assert_eq!(report.non_finite_samples, 0);
+                let back = collect(File::open(path, FileConfig::default()).unwrap());
+                assert!(back.is_empty(), "{ext}: zero samples back");
+            });
+        }
     }
 }

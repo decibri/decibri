@@ -50,7 +50,9 @@ use decibri::device::{
     SpeakerInfo as CoreOutputDeviceInfo,
 };
 use decibri::error::DecibriError as CoreDecibriError;
-use decibri::file::{File as CoreFile, FileConfig};
+use decibri::file::{
+    File as CoreFile, FileConfig, SaveFormat as CoreSaveFormat, SaveOptions as CoreSaveOptions,
+};
 use decibri::microphone::{
     AudioChunk, DenoiseModel, HighpassFilter, Microphone, MicrophoneConfig, MicrophoneStream,
 };
@@ -143,6 +145,7 @@ const EXCEPTION_NAMES: &[&str] = &[
     "SampleRateOutOfRange",
     "AgcTargetOutOfRange",
     "LimiterCeilingOutOfRange",
+    "FlacCompressionOutOfRange",
     "StreamOpenFailed",
     "StreamStartFailed",
     "VadSampleRateUnsupported",
@@ -153,6 +156,7 @@ const EXCEPTION_NAMES: &[&str] = &[
     "ResampleAfterFlush",
     "ResampleFailed",
     "FileReadFailed",
+    "FileWriteFailed",
     "FileConsumed",
     "FileEngaged",
     "AudioFormatUnsupported",
@@ -2501,6 +2505,61 @@ impl FileBridge {
                 .collect(),
             report.segments.iter().map(|s| (s.start, s.end)).collect(),
         ))
+    }
+
+    /// Consume the source and write the conditioned recording to `path`.
+    /// Returns the save counts as a `(clipped, non_finite)` tuple; the
+    /// wrapper shapes them into the public report type.
+    ///
+    /// Everything checkable is checked before the source is taken, so a
+    /// rejected call leaves the File exactly as it was and the caller can
+    /// fix the arguments and retry.
+    #[pyo3(signature = (path, format=None, compression=None))]
+    fn save(
+        &self,
+        py: Python<'_>,
+        path: PathBuf,
+        format: Option<String>,
+        compression: Option<u8>,
+    ) -> PyResult<(u64, u64)> {
+        if self.engaged.load(Ordering::Relaxed) {
+            return Err(to_py_err(py, CoreDecibriError::FileEngaged));
+        }
+        // `CoreSaveOptions` is `#[non_exhaustive]`: default-construct then
+        // assign the public fields rather than using a struct literal. The
+        // format is resolved here, from the argument or from the path's
+        // extension, so a failure is reported before the source is taken.
+        let mut options = CoreSaveOptions::default();
+        options.format = Some(match format.as_deref() {
+            Some("wav") => CoreSaveFormat::Wav,
+            Some("aiff") => CoreSaveFormat::Aiff,
+            Some("flac") => CoreSaveFormat::Flac,
+            Some(other) => {
+                return Err(PyValueError::new_err(format!(
+                    "Invalid format value: {other:?}. Expected 'wav', 'aiff', or 'flac'."
+                )))
+            }
+            None => CoreSaveFormat::from_path(&path).map_err(|e| to_py_err(py, e))?,
+        });
+        if compression.is_some_and(|level| level > 8) {
+            return Err(to_py_err(py, CoreDecibriError::FlacCompressionOutOfRange));
+        }
+        options.compression = compression;
+        let file = lock_recover(&self.inner).take();
+        let Some(file) = file else {
+            return Err(raise_named(
+                py,
+                "FileConsumed",
+                "File already consumed; construct a new File for another pass",
+            ));
+        };
+        // The source is taken: a later iteration reads as consumed, not as an
+        // empty recording, whatever the save below returns.
+        self.consumed.store(true, Ordering::Relaxed);
+        let report = py
+            .detach(|| file.save(&path, options))
+            .map_err(|e| to_py_err(py, e))?;
+        Ok((report.clipped_samples, report.non_finite_samples))
     }
 
     /// Release the source. Idempotent; a closed File reads as ended.
