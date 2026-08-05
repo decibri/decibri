@@ -23,8 +23,50 @@ jobs:
         with:
           shared-key: "rust"
       - run: sudo apt-get update && sudo apt-get install -y libasound2-dev
-      - run: cargo clippy --workspace -- -D warnings
+      # --all-targets lints the test targets as well as the library. The
+      # published crate ships src/ including its test modules, and the sdist
+      # ships bindings/python/tests/, so a lint in test code is a lint in what
+      # a consumer downloads. Without this flag the test targets are never
+      # linted here.
+      - run: cargo clippy --workspace --all-targets -- -D warnings
       - run: cargo fmt --all -- --check
+
+  deny:
+    name: Dependency Policy
+    runs-on: ubuntu-latest
+    # This job reads the dependency graph and the lockfile. It writes nothing
+    # and needs no token beyond source access.
+    permissions:
+      contents: read
+    # Deliberately not gated on `lint`. It compiles nothing and finishes in
+    # seconds, so running it in parallel puts a licence or advisory failure in
+    # front of a reviewer at the same time as a formatting one.
+    steps:
+      # Third-party actions are pinned to immutable commits with a version
+      # comment, per the action pin policy documented in python-ci.yml: a
+      # floating major tag can be repointed by whoever controls the action.
+      # dtolnay/rust-toolchain is that policy's documented exception and keeps
+      # its rolling form. The other jobs in this workflow still use floating
+      # tags; converting them is separate work.
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@23869a5bd66c73db3c0ac40331f3206eb23791dc # v2.9.1
+        with:
+          # Distinct from the "rust" key the compiling jobs share. This job
+          # builds nothing and only needs the registry warm, so it neither
+          # depends on nor overwrites their target/ cache.
+          shared-key: "rust-deny"
+      - uses: taiki-e/install-action@cb33e69fad06166ca28a42b2575e4dadabf62ee8 # v2.85.8
+        with:
+          # Pinned exactly. cargo-deny's config semantics change between minor
+          # versions, so an unpinned upgrade can silently change what
+          # deny.toml means.
+          tool: cargo-deny@0.20.2
+      # All four checks: advisories, licenses, bans, sources. deny.toml holds
+      # the policy and the reasoning for each setting. The four cost under two
+      # seconds once warm; the advisory database adds about eight seconds and
+      # 2 MB on a cold runner, which is too small to be worth caching.
+      - run: cargo deny check
 
   audit:
     name: Security Audit

@@ -3671,7 +3671,7 @@ mod tests {
             let mut out = Vec::new();
             for (block, piece) in near.chunks(320).enumerate() {
                 let at = block * 320;
-                let paused = at >= PAUSE_AT * RATE && at < (PAUSE_AT + PAUSE) * RATE;
+                let paused = (PAUSE_AT * RATE..(PAUSE_AT + PAUSE) * RATE).contains(&at);
                 if push_the_silence || !paused {
                     queue.push(&far[at..at + piece.len()]);
                 }
