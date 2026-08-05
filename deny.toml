@@ -1,0 +1,102 @@
+# cargo-deny policy for decibri.
+#
+# Four checks are enforced on every push and pull request by the `deny` job in
+# .github/workflows/ci.yml: advisories, licenses, bans, sources. All four are
+# enforcing. There are no ignore entries, no licence exceptions, no
+# clarifications and no skip entries. A dependency that would need one is a
+# dependency to reconsider, not a line to add here.
+#
+# A clarification asserts what someone else's licence means, so it is a
+# maintainer decision rather than a build fix. If a crate's licence cannot be
+# read, raise it rather than writing a `[[licenses.clarify]]` entry.
+#
+# Written against cargo-deny 0.20.2. The tool's config semantics change
+# between minor versions.
+
+[graph]
+# The four targets decibri publishes for. They are the build matrices of
+# .github/workflows/publish-npm.yml and .github/workflows/publish-pypi.yml,
+# and they must stay in step with both.
+#
+# Restricting the graph is what lets `multiple-versions = "deny"` below hold
+# with no skip entries. The duplicate versions in the lockfile (thiserror 1.x,
+# windows-sys 0.45) enter through cpal's Android branch, which none of these
+# four targets compiles, so they are absent from everything decibri ships.
+targets = [
+    "x86_64-pc-windows-msvc",
+    "aarch64-apple-darwin",
+    "x86_64-unknown-linux-gnu",
+    "aarch64-unknown-linux-gnu",
+]
+
+# Check every optional feature, not just the default selection. vad, denoise,
+# aec and capture each pull dependencies the default set does not, and an
+# unchecked feature is an unchecked dependency.
+all-features = true
+
+[advisories]
+# A yanked crate in the lockfile fails the build rather than warning.
+yanked = "deny"
+
+# The widest unmaintained scope: report an unmaintained crate anywhere in the
+# graph, not only among the workspace's own dependencies. A transitive
+# unmaintained crate ships in exactly the same binary as a direct one.
+unmaintained = "all"
+
+[licenses]
+# Permissive licences only. A crate whose licence expression cannot be
+# satisfied by an entry in this list fails the check.
+#
+# LGPL is deliberately absent, and its absence is the copyleft gate. Nothing
+# the four targets above resolve carries a copyleft arm today, so the gate is
+# forward-looking: a dependency that can only be satisfied under LGPL, GPL,
+# AGPL or MPL fails this check and reaches a person, rather than arriving with
+# a routine version bump. Widening `targets` reaches code these four do not, so
+# a change there is also a change to what this list has to cover.
+#
+# Nothing is added to this list to make a build pass. Each entry is a licence
+# decibri is willing to redistribute under, in a product with a paid
+# component.
+allow = [
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "MIT",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Zlib",
+    "Unicode-3.0",
+    "Unlicense",
+    "CDLA-Permissive-2.0",
+]
+
+# The list above is what decibri accepts, not an inventory of what the graph
+# currently contains, so an entry matching nothing is not a defect. Under the
+# four shipped targets BSD-3-Clause matches nothing today: it reaches the
+# lockfile only through num_enum under cpal's Android backend. Left at the
+# default this reports a warning on every green run.
+unused-allowed-license = "allow"
+
+[bans]
+# Exactly one version of each crate across the four shipped targets. A second
+# version entering the graph changes what ships, so it fails rather than warns.
+multiple-versions = "deny"
+
+# No dependency may carry a `*` version requirement.
+#
+# The two settings below work as a pair, and both are load-bearing.
+# bindings/node and bindings/python depend on decibri by path with no version
+# component; cargo-deny reads that as a wildcard for any crate bound for
+# crates.io, because publishing strips the path and leaves the requirement
+# unbounded. `allow-wildcard-paths` exempts an unversioned path dependency, but
+# only for a crate that is never published, which is why both bindings carry
+# `publish = false`. Removing either the setting below or `publish = false`
+# from either binding fails this check.
+wildcards = "deny"
+allow-wildcard-paths = true
+
+[sources]
+# crates.io is the only source. A git dependency or an alternative registry
+# fails the check.
+unknown-registry = "deny"
+unknown-git = "deny"

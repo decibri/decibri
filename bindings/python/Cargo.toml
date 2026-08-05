@@ -4,6 +4,12 @@ version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
+# Never published to crates.io. maturin builds this crate and PyPI distributes
+# the result, so the unversioned path dependency on decibri below is the only
+# resolution that ever runs. This line pairs with `allow-wildcard-paths` in
+# deny.toml, which exempts an unversioned path dependency only for a crate that
+# is never published. Removing it fails cargo-deny's `bans` check.
+publish = false
 
 [lib]
 # Python extension module. `name = "_decibri"` makes cargo output
