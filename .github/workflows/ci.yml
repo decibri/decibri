@@ -6,6 +6,12 @@ on:
   pull_request:
     branches: [main, development]
 
+# Every job here reads source, compiles, and runs tests. None writes to the
+# repository, opens an issue, or requests an OIDC token, so the whole workflow
+# runs on a read-only token.
+permissions:
+  contents: read
+
 concurrency:
   group: ci-${{ github.ref }}
   cancel-in-progress: true
@@ -15,11 +21,21 @@ jobs:
     name: Lint
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
+      # Action references are pinned to commit SHAs with a version comment.
+      # The policy and its one exception (dtolnay/rust-toolchain) live in
+      # .github/zizmor.yml, which enforces them in CI.
+      #
+      # actions/checkout appears here at v6.1.0 and in the deny job at
+      # v6.0.2. The deny job was pinned earlier at the version current then;
+      # both are the version each site already ran. Dependabot's grouped
+      # github-actions update converges them.
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          persist-credentials: false
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy, rustfmt
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2.9.1
         with:
           shared-key: "rust"
       - run: sudo apt-get update && sudo apt-get install -y libasound2-dev
@@ -42,13 +58,9 @@ jobs:
     # seconds, so running it in parallel puts a licence or advisory failure in
     # front of a reviewer at the same time as a formatting one.
     steps:
-      # Third-party actions are pinned to immutable commits with a version
-      # comment, per the action pin policy documented in python-ci.yml: a
-      # floating major tag can be repointed by whoever controls the action.
-      # dtolnay/rust-toolchain is that policy's documented exception and keeps
-      # its rolling form. The other jobs in this workflow still use floating
-      # tags; converting them is separate work.
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@23869a5bd66c73db3c0ac40331f3206eb23791dc # v2.9.1
         with:
@@ -72,13 +84,15 @@ jobs:
     name: Security Audit
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          persist-credentials: false
       - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2.9.1
         with:
           shared-key: "rust"
       - run: cargo generate-lockfile
-      - uses: taiki-e/install-action@v2
+      - uses: taiki-e/install-action@cb33e69fad06166ca28a42b2575e4dadabf62ee8 # v2.85.8
         with:
           tool: cargo-audit
       - run: cargo audit
@@ -96,9 +110,11 @@ jobs:
         os: [ubuntu-latest, macos-14, windows-latest]
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          persist-credentials: false
       - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2.9.1
         with:
           shared-key: "rust"
       - name: Install ALSA (Linux only)
@@ -163,9 +179,11 @@ jobs:
           # executes them.
           - { name: capture+aec, command: "test", flags: "--no-default-features --features capture,aec" }
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          persist-credentials: false
       - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2.9.1
         with:
           shared-key: "rust"
       - run: sudo apt-get update && sudo apt-get install -y libasound2-dev
@@ -177,12 +195,14 @@ jobs:
     runs-on: ubuntu-latest
     needs: lint
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          persist-credentials: false
       - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2.9.1
         with:
           shared-key: "rust"
-      - uses: actions/setup-node@v6
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6.5.0
         with:
           node-version: '22'
           cache: 'npm'
@@ -204,8 +224,10 @@ jobs:
     runs-on: ubuntu-latest
     needs: lint
     steps:
-      - uses: actions/checkout@v6
-      - uses: actions/setup-node@v6
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6.5.0
         with:
           node-version: '22'
           cache: 'npm'

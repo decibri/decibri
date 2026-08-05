@@ -1,0 +1,66 @@
+# zizmor configuration. https://docs.zizmor.sh/configuration/
+#
+# zizmor audits the workflow files in .github/workflows for GitHub Actions
+# security weaknesses. This file holds the repository's action-pin policy and
+# every accepted exception, so a finding is either fixed or recorded here with
+# a reason. The workflow that runs it is .github/workflows/zizmor.yml.
+
+rules:
+  # Action-pin policy. Every action reference is pinned to a commit SHA with a
+  # trailing `# vX.Y.Z` comment, which dependabot parses and rewrites on
+  # update. A floating tag (@v6, @v2) can be repointed at any commit by
+  # whoever controls the action repository.
+  #
+  # Exception: dtolnay/rust-toolchain is documented to use the rolling
+  # `@stable` / `@nightly` / `@1.83.0` form, and its maintainer warns against
+  # SHA pinning because the rolling branches are subject to orphan GC. The
+  # action is a thin wrapper around rustup, so the security boundary is rustup
+  # itself. `ref-pin` still requires a named ref and rejects a bare branch
+  # reference elsewhere.
+  unpinned-uses:
+    config:
+      policies:
+        dtolnay/rust-toolchain: ref-pin
+        "*": hash-pin
+
+  # cla.yml runs on pull_request_target because a CLA check has to post a
+  # check result on pull requests that arrive from forks, which the
+  # read-only pull_request token cannot do. The workflow checks out no code:
+  # its single step passes a token to the CLA action, so the untrusted head
+  # of the pull request is never fetched or executed.
+  dangerous-triggers:
+    ignore:
+      - cla.yml
+
+  # The cache keys these two workflows read are written only by workflows that
+  # require repository write access to trigger (tag push, workflow_dispatch,
+  # or a push to main / development). Pull requests from forks run against an
+  # isolated cache scope and cannot write into the base repository's caches,
+  # so there is no untrusted writer to poison them.
+  #
+  # The two publish-npm.yml entries are actions/setup-node steps that pass no
+  # `cache:` input, so they enable no caching at all.
+  cache-poisoning:
+    ignore:
+      - publish-npm.yml
+      - publish-pypi.yml
+
+  # `npm install -g npm@latest` in the publish job. npm trusted publishing
+  # needs a recent npm client, and pinning the client to a version makes it
+  # one more release-time bump that fails the publish when it goes stale.
+  # The package comes from the npm registry over the same trust path the
+  # publish itself uses.
+  adhoc-packages:
+    ignore:
+      - publish-npm.yml
+
+  # Remaining expansions in these two workflows are values the workflow
+  # computed itself: a static build matrix and the ORT download URL derived
+  # from it by an earlier step. No external input reaches them. The
+  # expansions that did carry external input (the crates.io and GitHub API
+  # responses in check-upstream.yml, and the tag name in the publish
+  # workflows) are passed through `env:` instead.
+  template-injection:
+    ignore:
+      - publish-pypi.yml
+      - python-ci.yml

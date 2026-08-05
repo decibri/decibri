@@ -1,0 +1,46 @@
+name: Workflow Audit
+
+# zizmor audits the workflow files themselves: action pins, job permissions,
+# expression expansion into run blocks, and trigger safety. Path-filtered to
+# .github/** because that is the only input it reads, and those files change
+# rarely; running it on every commit would be noise. workflow_dispatch is
+# there so the audit can be run on demand before a release tag is pushed.
+on:
+  push:
+    branches: [main, development]
+    paths:
+      - '.github/workflows/**'
+      - '.github/zizmor.yml'
+  pull_request:
+    branches: [main, development]
+    paths:
+      - '.github/workflows/**'
+      - '.github/zizmor.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: zizmor-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  zizmor:
+    name: zizmor
+    runs-on: ubuntu-latest
+    # Reads the workflow files and nothing else.
+    permissions:
+      contents: read
+    steps:
+      # An audit that checks for unpinned actions has to be pinned itself.
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
+      # Pinned exactly. zizmor adds audits between releases, so an unpinned
+      # upgrade turns a green gate red on a commit that changed nothing.
+      # The policy and every accepted exception live in .github/zizmor.yml;
+      # the run fails on any finding not recorded there.
+      - name: Audit workflows
+        run: uvx zizmor@1.29.0 --no-progress .github/workflows

@@ -11,15 +11,10 @@ on:
         default: false
         description: 'Tick to actually publish. Unticked = dry run (build, stage, verify-pack only; no publish).'
 
+# Read-only at the workflow level. The build job and the publish job each
+# declare the writes they need; the preflight job needs none.
 permissions:
-  # `contents: write` permits the `gh release create` step.
-  # `id-token: write` is required for npm Trusted Publisher OIDC token
-  # issuance.
-  # `attestations: write` permits the actions/attest-build-provenance step
-  # against the native addons.
-  contents: write
-  id-token: write
-  attestations: write
+  contents: read
 
 # Single source of truth for the bundled ONNX Runtime version, read by
 # every platform job's preflight/download step. Also parsed by the
@@ -34,27 +29,36 @@ jobs:
   preflight:
     name: Preflight (version match)
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          persist-credentials: false
 
       - name: Run mode
         shell: bash
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          PUBLISH_INPUT: ${{ inputs.publish }}
+          TAG: ${{ github.ref_name }}
         run: |
-          if [ "${{ github.event_name }}" = "workflow_dispatch" ] && [ "${{ inputs.publish }}" != "true" ]; then
+          if [ "$EVENT_NAME" = "workflow_dispatch" ] && [ "$PUBLISH_INPUT" != "true" ]; then
             echo "::notice::DRY RUN MODE (workflow_dispatch with publish=false). No publish will occur."
           else
-            echo "Publishing run. Trigger: ${{ github.event_name }}. Tag: ${{ github.ref_name }}"
+            echo "Publishing run. Trigger: ${EVENT_NAME}. Tag: ${TAG}"
           fi
 
       - name: Assert tag version matches package manifests
         if: github.event_name == 'push'
         shell: bash
+        env:
+          TAG: ${{ github.ref_name }}
         run: |
           # Tag form: refs/tags/npm-v3.4.0 -> TAG_VERSION=3.4.0
           # Pre-release tags (npm-v3.5.0-rc.1) are allowed; the suffix is
           # preserved and must match across every manifest if used.
-          TAG_VERSION="${{ github.ref_name }}"
-          TAG_VERSION="${TAG_VERSION#npm-v}"
+          TAG_VERSION="${TAG#npm-v}"
           echo "Tag version: ${TAG_VERSION}"
 
           MISMATCH=0
@@ -116,14 +120,23 @@ jobs:
             ort_platform_slug: linux-aarch64
             ort_ext: tgz
 
+    permissions:
+      # `id-token: write` and `attestations: write` are what
+      # actions/attest-build-provenance requires to sign the native addons;
+      # `contents: read` is the checkout.
+      contents: read
+      id-token: write
+      attestations: write
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          persist-credentials: false
 
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
 
-      - uses: actions/setup-node@v6
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6.5.0
         with:
           node-version: '22'
 
@@ -235,11 +248,11 @@ jobs:
         run: ls -la npm/decibri/decibri.*.node
 
       - name: Attest build provenance
-        uses: actions/attest-build-provenance@v4
+        uses: actions/attest-build-provenance@0f67c3f4856b2e3261c31976d6725780e5e4c373 # v4.1.1
         with:
           subject-path: npm/decibri/decibri.*.node
 
-      - uses: actions/upload-artifact@v7
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: decibri-${{ matrix.artifact }}
           # Only one of the libonnxruntime.* / onnxruntime.dll patterns matches
@@ -256,7 +269,7 @@ jobs:
 
       - name: Upload napi loader (Linux x64 only)
         if: matrix.artifact == 'linux-x64-gnu'
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: decibri-loader
           path: |
@@ -271,10 +284,20 @@ jobs:
     # Required-reviewer protection on this environment gates the publish
     # behind a manual approval in the Actions UI.
     environment: npm
+    permissions:
+      # `contents: write` permits the `gh release create` step.
+      # `id-token: write` is required for npm Trusted Publisher OIDC token
+      # issuance. npm's provenance runs over that OIDC token and does not
+      # call the GitHub attestations API, so `attestations: write` belongs
+      # on the build job (attest-build-provenance) rather than here.
+      contents: write
+      id-token: write
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          persist-credentials: false
 
-      - uses: actions/setup-node@v6
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6.5.0
         with:
           node-version: '22'
           registry-url: 'https://registry.npmjs.org'
@@ -283,7 +306,7 @@ jobs:
         run: npm install -g npm@latest
 
       - name: Download all artifacts
-        uses: actions/download-artifact@v8
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           path: artifacts/
 
@@ -455,9 +478,10 @@ jobs:
         if: github.event_name == 'push'
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ github.ref_name }}
         run: |
-          gh release create ${{ github.ref_name }} \
-            --title "${{ github.ref_name }}" \
+          gh release create "$TAG" \
+            --title "$TAG" \
             --generate-notes
 
       - name: Verify npm publish
@@ -467,9 +491,10 @@ jobs:
         # workflow_dispatch the tag is HEAD's most recent tag or empty;
         # the strip is a no-op for non-prefixed inputs.
         shell: bash
+        env:
+          TAG: ${{ github.ref_name }}
         run: |
-          VERSION="${{ github.ref_name }}"
-          VERSION="${VERSION#npm-v}"
+          VERSION="${TAG#npm-v}"
           echo "Verifying npm registry view for decibri@${VERSION}"
           sleep 30
           npm view "decibri@${VERSION}"
