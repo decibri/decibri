@@ -11,39 +11,45 @@ on:
         default: false
         description: 'Tick to actually publish. Unticked = dry run (preflight only, no publish).'
 
+# Read-only at the workflow level. The write grants the publish job needs are
+# declared on that job. `attestations: write` was declared here for an
+# attest-build-provenance step that this workflow does not have; no step
+# requests it, so it is not granted.
 permissions:
-  # `contents: write` permits the `gh release create` step.
-  # `id-token: write` lets the `rust-lang/crates-io-auth-action` step
-  # exchange a GitHub OIDC token for a short-lived crates.io publish token.
-  # `attestations: write` is reserved for a future attest-build-provenance
-  # step against the .crate tarball.
-  contents: write
-  id-token: write
-  attestations: write
+  contents: read
 
 jobs:
   preflight:
     name: Preflight (version match)
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          persist-credentials: false
 
       - name: Run mode
         shell: bash
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          PUBLISH_INPUT: ${{ inputs.publish }}
+          TAG: ${{ github.ref_name }}
         run: |
-          if [ "${{ github.event_name }}" = "workflow_dispatch" ] && [ "${{ inputs.publish }}" != "true" ]; then
+          if [ "$EVENT_NAME" = "workflow_dispatch" ] && [ "$PUBLISH_INPUT" != "true" ]; then
             echo "::notice::DRY RUN MODE (workflow_dispatch with publish=false). No publish will occur."
           else
-            echo "Publishing run. Trigger: ${{ github.event_name }}. Tag: ${{ github.ref_name }}"
+            echo "Publishing run. Trigger: ${EVENT_NAME}. Tag: ${TAG}"
           fi
 
       - name: Assert tag version matches workspace Cargo.toml
         if: github.event_name == 'push'
         shell: bash
+        env:
+          TAG: ${{ github.ref_name }}
         run: |
           # Tag form: refs/tags/crate-v3.4.0 -> TAG_VERSION=3.4.0
-          TAG_VERSION="${{ github.ref_name }}"
-          TAG_VERSION="${TAG_VERSION#crate-v}"
+          TAG_VERSION="${TAG#crate-v}"
           echo "Tag version: ${TAG_VERSION}"
 
           # Workspace Cargo.toml: the `[workspace.package]` block's
@@ -73,8 +79,19 @@ jobs:
     # Required-reviewer protection on this environment gates the publish
     # behind a manual approval in the Actions UI.
     environment: crates
+    permissions:
+      # `contents: write` permits the `gh release create` step.
+      # `id-token: write` lets the `rust-lang/crates-io-auth-action` step
+      # exchange a GitHub OIDC token for a short-lived crates.io publish token.
+      contents: write
+      id-token: write
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          # `cargo publish` and `gh release create` both authenticate with
+          # their own token, so the checkout does not need to leave one in
+          # .git/config.
+          persist-credentials: false
 
       - uses: dtolnay/rust-toolchain@stable
 
@@ -90,7 +107,7 @@ jobs:
         # consumed by the next step's `CARGO_REGISTRY_TOKEN` env var.
         if: github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.publish == true)
         id: auth
-        uses: rust-lang/crates-io-auth-action@v1
+        uses: rust-lang/crates-io-auth-action@c6f97d42243bad5fab37ca0427f495c86d5b1a18 # v1.0.5
 
       - name: Publish to crates.io
         # Tag-push always publishes. workflow_dispatch publishes only when
@@ -104,7 +121,8 @@ jobs:
         if: github.event_name == 'push'
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ github.ref_name }}
         run: |
-          gh release create ${{ github.ref_name }} \
-            --title "${{ github.ref_name }}" \
+          gh release create "$TAG" \
+            --title "$TAG" \
             --generate-notes

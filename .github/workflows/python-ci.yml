@@ -26,6 +26,11 @@ on:
     # schedules in this repo (check-upstream.yml runs Sundays 22:00 UTC).
     - cron: "0 4 * * *"
 
+# The single job here builds a wheel and runs tests. It writes nothing back to
+# the repository and requests no OIDC token, so it runs on a read-only token.
+permissions:
+  contents: read
+
 concurrency:
   # Distinct from ci.yml's `ci-${{ github.ref }}` group so Rust-side CI and
   # Python-side CI run in parallel per ref, cancelling only their own
@@ -115,24 +120,14 @@ jobs:
       # the abi3-floor canary; the matrix now exercises every supported
       # runtime explicitly).
       UV_PYTHON: ${{ matrix.python-version }}
-    # Action pin policy: third-party actions pinned to immutable commit SHAs
-    # with a `# vX.Y.Z` version comment that dependabot parses for updates.
-    # Floating major tags (@v6, @v8) were the attack vector for the 2025
-    # tj-actions/changed-files supply-chain compromise; SHA pins eliminate
-    # that class of risk. setup-uv v8 explicitly stopped publishing major
-    # tags for this reason, which is what surfaced this hardening pass.
-    #
-    # Exception: `dtolnay/rust-toolchain` is documented to use the rolling
-    # `@stable` / `@nightly` / `@1.83.0` form; the maintainer explicitly
-    # warns against SHA pinning (orphan-GC risk on the rolling branches).
-    # Acceptable because the action is a thin shell wrapper around rustup;
-    # the security boundary is rustup itself, not the action.
-    #
-    # The existing ci.yml workflow uses floating major tags (v6 / v2 etc).
-    # Pinning that workflow to SHAs is deferred to Phase 5 CI hardening
-    # (see Phase 1 plan §7.7).
+    # Action references are pinned to commit SHAs with a `# vX.Y.Z` version
+    # comment that dependabot parses for updates. The policy, and its one
+    # exception (dtolnay/rust-toolchain), live in .github/zizmor.yml, which
+    # enforces them across every workflow.
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
 
       - name: Install libasound2-dev (Linux only)
         # cpal (transitive via decibri core) needs ALSA dev headers on Linux.
@@ -165,7 +160,15 @@ jobs:
         # platform (linux-x64, linux-aarch64, darwin-aarch64, win-x64),
         # so this single command works across all four matrix OSes
         # without per-OS conditionals.
-        run: uv python install ${{ matrix.python-version }}
+        #
+        # `shell: bash` is required, not cosmetic: the matrix includes
+        # windows-latest, whose default shell is pwsh, and `$PYTHON_VERSION`
+        # below is bash syntax. pwsh reads it as an undefined PowerShell
+        # variable and passes an empty argument to `uv python install`.
+        shell: bash
+        env:
+          PYTHON_VERSION: ${{ matrix.python-version }}
+        run: uv python install "$PYTHON_VERSION"
 
       - name: Sync dev environment (locked)
         working-directory: bindings/python

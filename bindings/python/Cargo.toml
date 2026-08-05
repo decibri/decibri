@@ -19,7 +19,7 @@ publish = false
 # `decibri_python.{pyd,so}` (derived from crate name) and maturin would
 # have to rename during wheel packaging.
 #
-# `cdylib` only. `rlib` would let other Rust crates depend on us; we're a
+# `cdylib` only. `rlib` would let other crates depend on us; we're a
 # terminal binding crate, so cdylib is the sole output.
 name = "_decibri"
 crate-type = ["cdylib"]

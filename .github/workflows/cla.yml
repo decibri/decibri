@@ -14,6 +14,9 @@ jobs:
   cla:
     runs-on: ubuntu-latest
     steps:
-      - uses: decibri/decibri-cla-action@v1
+      # First-party action, pinned like every other reference. A new release
+      # of decibri-cla-action needs this SHA moved before it takes effect
+      # here; the floating `v1` tag no longer carries it automatically.
+      - uses: decibri/decibri-cla-action@df302efd816125bd596dd62fdc1896e467b74151 # v1
         with:
           store-token: ${{ secrets.CLA_STORE_TOKEN }}
