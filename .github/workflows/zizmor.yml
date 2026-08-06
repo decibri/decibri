@@ -29,9 +29,14 @@ jobs:
   zizmor:
     name: zizmor
     runs-on: ubuntu-latest
-    # Reads the workflow files and nothing else.
     permissions:
+      # Reads the workflow files.
       contents: read
+      # Uploading SARIF to the Security tab. This is the only write scope in
+      # the workflow. Same shape as the scan job in osv-scanner.yml.
+      security-events: write
+      # codeql-action/upload-sarif reads the workflow run it uploads for.
+      actions: read
     steps:
       # An audit that checks for unpinned actions has to be pinned itself.
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
@@ -40,7 +45,31 @@ jobs:
       - uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
       # Pinned exactly. zizmor adds audits between releases, so an unpinned
       # upgrade turns a green gate red on a commit that changed nothing.
-      # The policy and every accepted exception live in .github/zizmor.yml;
-      # the run fails on any finding not recorded there.
-      - name: Audit workflows
+      # The policy and every accepted exception live in .github/zizmor.yml.
+      #
+      # SARIF is written to stdout, so it is redirected to a file. This run
+      # reports and does not gate: zizmor sets a finding-based exit code for
+      # its other output formats but not for SARIF, so it exits zero here
+      # even when it finds something. It still exits non-zero on an internal
+      # error, which is what should stop the job at this point.
+      - name: Audit workflows (SARIF)
+        run: uvx zizmor@1.29.0 --no-progress --format=sarif .github/workflows > zizmor.sarif
+      - name: Upload results to the Security tab
+        if: ${{ !cancelled() && hashFiles('zizmor.sarif') != '' }}
+        uses: github/codeql-action/upload-sarif@5595ccaf912efad79be6eef63a5619ff05969be3 # v4.37.6
+        with:
+          sarif_file: zizmor.sarif
+          category: zizmor
+      # The gate, and the command this workflow has always run, so the pass
+      # and fail behaviour is unchanged: any finding not recorded in
+      # .github/zizmor.yml fails the job. It runs after the upload so that
+      # the findings reach the Security tab whether or not this step fails.
+      #
+      # Code scanning's convention is that a workflow uploading SARIF fails
+      # only on an internal error and leaves findings to the Security tab.
+      # That convention is deliberately not followed here. .github/zizmor.yml
+      # is an accepted-exception list, so an unrecorded finding means a
+      # workflow changed without being accounted for, and that should block a
+      # merge rather than file a report.
+      - name: Fail on unrecorded findings
         run: uvx zizmor@1.29.0 --no-progress .github/workflows

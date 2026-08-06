@@ -22,6 +22,16 @@
 # with no skip entries. The duplicate versions in the lockfile (thiserror 1.x,
 # windows-sys 0.45) enter through cpal's Android branch, which none of these
 # four targets compiles, so they are absent from everything decibri ships.
+#
+# The restriction narrows `advisories` too, which is less obvious than its
+# effect on `bans`. A crate that reaches Cargo.lock but no shipped target sits
+# outside this graph, so an advisory against it is not reported here at all.
+# anyhow is the case that established this: RUSTSEC-2026-0190 enters the
+# lockfile through the wasip2 and wasip3 chain, and this check stays green on
+# it whatever `unsound` below is set to, while cargo-audit reports it.
+# .github/workflows/osv-scanner.yml covers the difference by reading every
+# lockfile flat, with no target resolution. Narrowing these targets without
+# that scan in place would drop advisory coverage silently.
 targets = [
     "x86_64-pc-windows-msvc",
     "aarch64-apple-darwin",

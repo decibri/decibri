@@ -1,0 +1,85 @@
+name: OSV Scanner
+
+# OSV-Scanner reads every lockfile in the repository and reports known
+# vulnerabilities against the OSV database. It covers four lockfiles across
+# three ecosystems, which no single other check in this repository does:
+#
+#   Cargo.lock                       crates.io
+#   package-lock.json                npm, the test runner's dependencies
+#   npm/decibri/package-lock.json    npm, the addon package's dependencies
+#   bindings/python/uv.lock          PyPI
+#
+# The `deny` job in ci.yml also reads advisories, but only for crates
+# reachable from the four targets in deny.toml, so the two are not
+# interchangeable. deny.toml records that boundary.
+#
+# Triggers match ci.yml, plus a weekly run: a lockfile that was clean when it
+# merged can be reported against later, so the scan repeats on a clock as well
+# as on a change. No path filter, for the same reason. The database moves
+# independently of this repository.
+on:
+  push:
+    branches: [main, development]
+  pull_request:
+    branches: [main, development]
+  schedule:
+    # Mondays, 05:23 UTC. Off the hour, where scheduled runs across GitHub
+    # queue together.
+    - cron: '23 5 * * 1'
+  workflow_dispatch:
+
+# Read-only at file level. The one job below raises its own scope for the
+# SARIF upload and nothing else.
+permissions:
+  contents: read
+
+concurrency:
+  group: osv-scanner-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  scan:
+    name: Lockfile Vulnerabilities
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      # Uploading SARIF to the Security tab. This is the only write scope in
+      # the workflow and this job is the only holder of it.
+      security-events: write
+      # codeql-action/upload-sarif reads the workflow run it uploads for.
+      actions: read
+    steps:
+      # Action references are pinned to commit SHAs with a version comment,
+      # per the policy in .github/zizmor.yml.
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          persist-credentials: false
+      # Pinned exactly, as cargo-deny and zizmor are. The scanner is installed
+      # from its GitHub release rather than run as a container action, which
+      # keeps the version visible here instead of inside an image tag.
+      - uses: taiki-e/install-action@cb33e69fad06166ca28a42b2575e4dadabf62ee8 # v2.85.8
+        with:
+          tool: osv-scanner@2.4.0
+      # Recursive from the repository root, so a lockfile added later is
+      # scanned without editing this file.
+      #
+      # continue-on-error because osv-scanner exits non-zero when it finds
+      # something, and the SARIF still has to reach the Security tab. The last
+      # step turns that outcome back into a job failure. Removing it makes the
+      # upload unreachable on exactly the runs that need it.
+      - name: Scan lockfiles
+        id: scan
+        continue-on-error: true
+        run: osv-scanner scan source --recursive --format=sarif --output-file=results.sarif ./
+      - name: Upload results to the Security tab
+        if: ${{ !cancelled() && hashFiles('results.sarif') != '' }}
+        uses: github/codeql-action/upload-sarif@5595ccaf912efad79be6eef63a5619ff05969be3 # v4.37.6
+        with:
+          sarif_file: results.sarif
+          category: osv-scanner
+      # Fails on any non-zero exit, a finding or a scanner error alike.
+      - name: Fail on findings
+        if: ${{ steps.scan.outcome == 'failure' }}
+        run: |
+          echo "::error::OSV-Scanner reported known vulnerabilities. See the Security tab."
+          exit 1
