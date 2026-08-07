@@ -39,7 +39,7 @@ use crate::onnx::{
     OnnxInputs, OnnxOutputs, OnnxSession, OnnxSessionBuilder, OnnxTensorData, OnnxTensorOwned,
     OnnxTensorView,
 };
-use crate::stage::Stage;
+use crate::stage::{Block, Stage};
 
 /// Analysis window length the model consumes per call (`wav_in[1, 512]`).
 const WINDOW: usize = 512;
@@ -194,7 +194,18 @@ impl Denoise {
 }
 
 impl Stage for Denoise {
-    fn process(&mut self, input: &[f32], out: &mut Vec<f32>) -> Result<(), DecibriError> {
+    fn process(&mut self, input: Block<'_>, out: &mut Vec<f32>) -> Result<(), DecibriError> {
+        // The model takes one channel, and the accumulator below frames a single
+        // time series: an interleaved block pushed through it would be framed
+        // across channels rather than along each. Stated here rather than
+        // assumed, so a chain that ever hands this stage more than one channel
+        // says so.
+        debug_assert_eq!(
+            input.channels(),
+            1,
+            "the denoise model requires mono, got {} channels",
+            input.channels()
+        );
         if input.is_empty() {
             return Ok(());
         }
@@ -205,7 +216,7 @@ impl Stage for Denoise {
             // that is still empty means the stage has received no audio.
             self.accumulator.resize(WINDOW - HOP, 0.0);
         }
-        self.accumulator.extend_from_slice(input);
+        self.accumulator.extend_from_slice(input.samples());
         self.drain_ready(out)
     }
 
@@ -340,7 +351,9 @@ mod tests {
 
         let input = noisy(4096);
         let mut out = Vec::new();
-        stage.process(&input, &mut out).expect("process runs");
+        stage
+            .process(Block::new(&input, 1), &mut out)
+            .expect("process runs");
 
         // Output is whole hops of finite enhanced audio.
         assert!(!out.is_empty(), "enough input forms at least one hop");
@@ -374,7 +387,9 @@ mod tests {
             .expect("bundled FastEnhancer-T model loads");
 
         let mut out = Vec::new();
-        stage.process(&noisy(4096), &mut out).expect("process runs");
+        stage
+            .process(Block::new(&noisy(4096), 1), &mut out)
+            .expect("process runs");
         let processed = out.len();
 
         let mut tail = Vec::new();
@@ -413,7 +428,9 @@ mod tests {
         );
 
         // An empty block is not audio either, and neither is a repeated flush.
-        stage.process(&[], &mut tail).expect("empty block runs");
+        stage
+            .process(Block::new(&[], 1), &mut tail)
+            .expect("empty block runs");
         stage.flush(&mut tail).expect("second flush runs");
         assert_eq!(
             tail.len(),
@@ -433,7 +450,9 @@ mod tests {
             .expect("bundled FastEnhancer-T model loads");
 
         let mut processed = Vec::new();
-        stage.process(&noisy(100), &mut processed).expect("process");
+        stage
+            .process(Block::new(&noisy(100), 1), &mut processed)
+            .expect("process");
         assert_eq!(
             processed.len(),
             0,
@@ -705,7 +724,9 @@ mod tests {
         let mut stage = Denoise::new(DenoiseModel::FastEnhancerT, model, None)
             .expect("bundled FastEnhancer-T model loads");
         let mut out = Vec::new();
-        stage.process(input, &mut out).expect("process runs");
+        stage
+            .process(Block::new(input, 1), &mut out)
+            .expect("process runs");
         stage.flush(&mut out).expect("flush drains the tail");
         out
     }

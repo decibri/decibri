@@ -969,6 +969,19 @@ impl File {
             self.vad_queue.drain(..excess);
         }
     }
+
+    /// The channel count the delivered chunks are interleaved at.
+    ///
+    /// The chain's own resolved output when there is a chain, and the source's
+    /// count unchanged when there is not: with no stage in the way, what the
+    /// decoder produced is what the consumer receives. Read from the chain
+    /// rather than named here, so the count stamped on a chunk and the count
+    /// the stages actually produce cannot drift apart.
+    fn delivered_channels(&self) -> u16 {
+        self.stage
+            .as_ref()
+            .map_or(self.input_channels, CaptureStage::output_channels)
+    }
 }
 
 impl Iterator for File {
@@ -1000,10 +1013,11 @@ impl Iterator for File {
         if self.flushed && self.reblock.is_empty() {
             self.finished = true;
         }
+        let channels = self.delivered_channels();
         Some(Ok(AudioChunk {
             data,
             sample_rate: self.target_rate,
-            channels: 1,
+            channels,
         }))
     }
 }

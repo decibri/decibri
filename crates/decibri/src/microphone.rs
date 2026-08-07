@@ -1064,6 +1064,26 @@ pub struct Microphone {
     device: BackendDevice,
 }
 
+/// The channel count a stream delivers, given the chain it was built with and
+/// the count its device is opened at.
+///
+/// The chain's own resolved output when there is a chain, and `device_channels`
+/// unchanged when there is not: with no stage in the way, what the device
+/// produces is what the consumer receives. The count is READ from the chain
+/// rather than recomputed from the configuration, so the number a consumer is
+/// told and the number the stages actually produce cannot drift apart.
+///
+/// A named function rather than an expression inline in
+/// [`Microphone::start`], because that is what makes the derivation assertable
+/// without a device to open. `delivered_channels_are_derived_from_the_chain`
+/// holds it: a count fixed here as a constant agrees with the derivation for
+/// every configuration capture accepts today, so nothing else in the suite
+/// would notice the difference.
+#[cfg(feature = "capture")]
+fn delivered_channels(capture_stage: Option<&CaptureStage>, device_channels: u16) -> u16 {
+    capture_stage.map_or(device_channels, CaptureStage::output_channels)
+}
+
 #[cfg(feature = "capture")]
 impl Microphone {
     /// Create a microphone: validates the [`MicrophoneConfig`] and resolves the
@@ -1152,11 +1172,7 @@ impl Microphone {
                 aec,
             },
         )?;
-        let output_channels = if channels > target_channels {
-            target_channels
-        } else {
-            channels
-        };
+        let output_channels = delivered_channels(capture_stage.as_ref(), channels);
 
         let err_running = running.clone();
         let last_error = Arc::new(Mutex::new(None));
@@ -1663,6 +1679,57 @@ mod tests {
             stream.capture_stage.is_none(),
             "no CaptureStage is allocated for a mono stream"
         );
+    }
+
+    /// The channel count a stream reports is DERIVED from its chain, not named
+    /// beside it.
+    ///
+    /// Regression: `delivered_channels` answering with a constant. Capture is
+    /// mono in and mono out for every configuration it accepts today, so a
+    /// hardcoded `1` matches the derived value at every point the rest of the
+    /// suite observes it. Planting one against the code before this test existed
+    /// left all 277 tests green, which is the whole reason the test is here.
+    ///
+    /// Each arm below fails a constant a different way round: a chain that
+    /// collapses must report the collapse, a chain that collapses nothing must
+    /// report what it was handed, and no chain at all must leave the device's
+    /// own count untouched.
+    #[test]
+    fn delivered_channels_are_derived_from_the_chain() {
+        // A chain that collapses reports the collapse, whatever went in.
+        for device_channels in [2u16, 6, 1024] {
+            let chain =
+                build_capture_stage(device_channels, 1, 16_000, 16_000, Transforms::default())
+                    .expect("no channel count is rejected by the builder")
+                    .expect("a device above the target gets a downmix chain");
+            assert_eq!(
+                delivered_channels(Some(&chain), device_channels),
+                1,
+                "a collapsing chain delivers mono"
+            );
+        }
+
+        // A chain that collapses nothing reports the count it was handed.
+        for channels in [2u16, 5, 32] {
+            let chain =
+                build_capture_stage(channels, channels, 48_000, 16_000, Transforms::default())
+                    .expect("no channel count is rejected by the builder")
+                    .expect("a rate change builds a resample chain");
+            assert_eq!(
+                delivered_channels(Some(&chain), channels),
+                channels,
+                "a chain that collapses nothing delivers what it was handed"
+            );
+        }
+
+        // With no chain, what the device produces is what the consumer receives.
+        for device_channels in [1u16, 2, 7] {
+            assert_eq!(
+                delivered_channels(None, device_channels),
+                device_channels,
+                "no chain means nothing changed the count"
+            );
+        }
     }
 
     /// Auto-normalize (the `Some([Downmix])` path): a multichannel source is
