@@ -22,6 +22,27 @@
 //! [`build_capture_stage`], which returns `None` when no conditioning is needed
 //! (an already-mono device already at the target rate with no enhancement
 //! enabled), keeping the capture path on its zero-cost direct path.
+//!
+//! # Channel layout
+//!
+//! A block crossing a stage boundary is INTERLEAVED and carries the channel
+//! count it is interleaved at, as a [`Block`]. Inside a stage that reads across
+//! channels the samples are PLANAR: one contiguous run per channel,
+//! deinterleaved once at the head of the chain, at the position [`Downmix`]
+//! occupies, and re-interleaved at delivery. Interleaved at the boundaries and
+//! planar inside is the single arrangement this chain uses. A stage that picks
+//! the other one at either point is what this convention exists to rule out,
+//! because two stages disagreeing about the layout of the buffer between them
+//! is not a difference the type system catches.
+//!
+//! Lengths that count frames are named `frames`; lengths that count interleaved
+//! samples are named `samples`. The two are equal at one channel, which is the
+//! reason a name is worth carrying rather than inferring.
+//!
+//! No stage, and no part of the chain walk, names an upper bound on the channel
+//! count. The count is a `u16` because that is the width cpal, WAVE and AIFF all
+//! carry it in; the only ceiling the chain may enforce is the one a device
+//! reports for itself.
 
 #[cfg(feature = "aec")]
 use std::collections::VecDeque;
@@ -39,14 +60,93 @@ use crate::error::DecibriError;
 use crate::microphone::{DenoiseModel, HighpassFilter};
 use crate::sample;
 
-/// A capture processing stage: reads one block of interleaved f32 samples and
-/// appends its processed output to `out` (the caller clears `out` first).
+/// One block of interleaved f32 samples together with the channel count they
+/// are interleaved at.
+///
+/// The descriptor exists so a stage reads its input's channel count from the
+/// block rather than from a value it was constructed with or a count it
+/// assumes. A stage that requires mono says so against this count (see the
+/// `debug_assert_eq!` at the head of each such stage) instead of being handed a
+/// bare slice whose layout it cannot check.
+///
+/// `channels` is a `u16` and carries no upper bound: it is the width cpal's
+/// `StreamConfig`, WAVE's `nChannels` and AIFF's `numChannels` all use.
+#[derive(Clone, Copy)]
+pub(crate) struct Block<'a> {
+    /// The interleaved samples, `frames * channels` of them.
+    samples: &'a [f32],
+    /// The count `samples` is interleaved at. At least 1.
+    channels: u16,
+}
+
+impl<'a> Block<'a> {
+    /// A block of `samples` interleaved at `channels`.
+    ///
+    /// `channels` is at least 1 (a zero-channel block has no frames to speak
+    /// of); the assertion is a floor, not a ceiling, and no maximum is implied.
+    pub(crate) fn new(samples: &'a [f32], channels: u16) -> Self {
+        debug_assert!(channels >= 1, "a block carries at least one channel");
+        Self { samples, channels }
+    }
+
+    /// The interleaved samples.
+    pub(crate) fn samples(&self) -> &'a [f32] {
+        self.samples
+    }
+
+    /// The count the samples are interleaved at.
+    pub(crate) fn channels(&self) -> u16 {
+        self.channels
+    }
+
+    /// Frames in the block: interleaved samples divided by the channel count.
+    ///
+    /// Divides by `channels.max(1)` so a descriptor built with zero (which the
+    /// constructor rejects in a debug build) yields a number rather than
+    /// dividing by zero in a release one. Any trailing partial frame is
+    /// truncated, matching [`sample::downmix_to_mono`].
+    pub(crate) fn frames(&self) -> usize {
+        self.samples.len() / self.channels.max(1) as usize
+    }
+
+    /// Whether the block carries no samples.
+    pub(crate) fn is_empty(&self) -> bool {
+        self.samples.is_empty()
+    }
+
+    /// Interleaved samples in the block, the length the bare slice had.
+    pub(crate) fn len(&self) -> usize {
+        self.samples.len()
+    }
+}
+
+/// A capture processing stage: reads one [`Block`] of interleaved f32 samples
+/// and appends its processed output to `out` (the caller clears `out` first).
 ///
 /// `Send` so the boxed stages can live behind the stream's `Mutex` and cross
 /// thread boundaries with the `Send + Sync` [`crate::microphone::MicrophoneStream`].
 pub(crate) trait Stage: Send {
     /// Process `input`, appending the result to `out`.
-    fn process(&mut self, input: &[f32], out: &mut Vec<f32>) -> Result<(), DecibriError>;
+    ///
+    /// What is appended is interleaved at
+    /// [`output_channels`](Stage::output_channels) of the input's count, which
+    /// is the same count for every stage that does not change it.
+    fn process(&mut self, input: Block<'_>, out: &mut Vec<f32>) -> Result<(), DecibriError>;
+
+    /// The channel count this stage emits, given the count it is handed.
+    ///
+    /// The identity by default: a stage conditions the channels it receives and
+    /// hands the same number on. [`Downmix`] overrides it, being the one stage
+    /// in the chain whose output count differs from its input count. The chain
+    /// walks this to resolve its own delivered count
+    /// ([`CaptureStage::output_channels`]) rather than naming that count, so a
+    /// count fixed here rather than derived is a defect the chain can see.
+    ///
+    /// Takes the input count rather than answering from state, so a stage whose
+    /// output count depends on its input can say so without being rebuilt.
+    fn output_channels(&self, input_channels: u16) -> u16 {
+        input_channels
+    }
 
     /// Drain any end-of-stream tail held in the stage's state into `out`.
     ///
@@ -100,9 +200,31 @@ impl Downmix {
 }
 
 impl Stage for Downmix {
-    fn process(&mut self, input: &[f32], out: &mut Vec<f32>) -> Result<(), DecibriError> {
-        out.extend(sample::downmix_to_mono(input, self.channels));
+    fn process(&mut self, input: Block<'_>, out: &mut Vec<f32>) -> Result<(), DecibriError> {
+        // The count the stage was built for and the count the block carries are
+        // the same number reaching it by two routes: the chain resolved this
+        // stage's position from the device count, and the walk hands it the
+        // running count. They can only disagree if one of the two drifted.
+        debug_assert_eq!(
+            input.channels(),
+            self.channels,
+            "the downmix was built for {} channels and handed {}",
+            self.channels,
+            input.channels()
+        );
+        let frames = input.frames();
+        out.extend(sample::downmix_to_mono(input.samples(), self.channels));
+        debug_assert_eq!(
+            out.len(),
+            frames,
+            "the downmix emits exactly one sample per input frame"
+        );
         Ok(())
+    }
+
+    /// Mono, whatever it was handed: this is the stage the chain collapses at.
+    fn output_channels(&self, _input_channels: u16) -> u16 {
+        1
     }
 }
 
@@ -116,11 +238,21 @@ impl Stage for Downmix {
 struct ResampleStage(PolyphaseResampler);
 
 impl Stage for ResampleStage {
-    fn process(&mut self, input: &[f32], out: &mut Vec<f32>) -> Result<(), DecibriError> {
+    fn process(&mut self, input: Block<'_>, out: &mut Vec<f32>) -> Result<(), DecibriError> {
+        // The wrapped engine is mono by documented contract, and reading an
+        // interleaved block as one time series would filter across channels
+        // rather than along each. Stated here rather than assumed, so a chain
+        // that ever hands this stage more than one channel says so.
+        debug_assert_eq!(
+            input.channels(),
+            1,
+            "the resampler requires mono, got {} channels",
+            input.channels()
+        );
         // The resampler appends to `out`. Its one steady-path error rejects a
         // block that arrives after the flush; the callers stop feeding a flushed
         // chain, so it is propagated rather than assumed away.
-        self.0.process(input, out)?;
+        self.0.process(input.samples(), out)?;
         Ok(())
     }
 
@@ -528,7 +660,17 @@ impl AecStage {
 
 #[cfg(feature = "aec")]
 impl Stage for AecStage {
-    fn process(&mut self, input: &[f32], out: &mut Vec<f32>) -> Result<(), DecibriError> {
+    fn process(&mut self, input: Block<'_>, out: &mut Vec<f32>) -> Result<(), DecibriError> {
+        // The canceller is mono on both its near and far ends, and its far-end
+        // accounting below counts near-end samples as if each were one frame.
+        // Stated here rather than assumed, so a chain that ever hands this stage
+        // more than one channel says so.
+        debug_assert_eq!(
+            input.channels(),
+            1,
+            "the echo canceller requires mono, got {} channels",
+            input.channels()
+        );
         // The reference goes in first, up to the frontier this block ends at, and
         // the top-up then covers whatever of the block the caller left uncovered.
         // The budget is the distance the far end has left to travel to reach that
@@ -546,7 +688,7 @@ impl Stage for AecStage {
         // The engine appends its output in step with the near-end samples that
         // produced it. Its `latency_samples` is a buffering budget, not an index
         // offset, so nothing here shifts the output by it.
-        self.aec.process(input, out)?;
+        self.aec.process(input.samples(), out)?;
         Ok(())
     }
 
@@ -607,11 +749,23 @@ pub(crate) trait InPlaceDsp: Send {
 struct InPlace<T: InPlaceDsp>(T);
 
 impl<T: InPlaceDsp> Stage for InPlace<T> {
-    fn process(&mut self, input: &[f32], out: &mut Vec<f32>) -> Result<(), DecibriError> {
+    fn process(&mut self, input: Block<'_>, out: &mut Vec<f32>) -> Result<(), DecibriError> {
+        // Every `InPlaceDsp` behind this wrapper carries recursive state across
+        // samples (the DC blocker's and biquad's filter memory, the level
+        // control's and limiter's gain estimate), and a flat pass over an
+        // interleaved block would run that state across channels rather than
+        // along each. Stated here rather than assumed, so a chain that ever
+        // hands this wrapper more than one channel says so.
+        debug_assert_eq!(
+            input.channels(),
+            1,
+            "the scalar in-place wrapper requires mono, got {} channels",
+            input.channels()
+        );
         // The caller clears `out` first, so this is an exact-length copy of the
         // input that the DSP then rewrites in place: one input sample, one output
         // sample.
-        out.extend_from_slice(input);
+        out.extend_from_slice(input.samples());
         self.0.process_in_place(out);
         Ok(())
     }
@@ -757,6 +911,17 @@ pub(crate) struct CaptureStage {
     /// `normalize`. Not necessarily same-length: the denoise stage re-blocks and
     /// introduces latency, so its output count differs from its input.
     transform: Vec<Box<dyn Stage>>,
+    /// The channel count a block enters the chain at: the device's own count.
+    /// Every walk seeds its running count from this.
+    input_channels: u16,
+    /// The channel count after the `normalize` segment, which is the count the
+    /// [`tap`](Self::tap) carries and the count the `transform` segment is
+    /// entered at. Resolved at construction by walking `normalize`.
+    tap_channels: u16,
+    /// The channel count the chain delivers. Resolved at construction by walking
+    /// both segments' [`Stage::output_channels`], never named as a constant, so
+    /// the value the consumer is told tracks the stages actually built.
+    output_channels: u16,
     /// Holds the current block as it passes through the chain; [`run`](Self::run)
     /// returns a borrow of this after the last stage.
     work: Vec<f32>,
@@ -793,7 +958,18 @@ impl CaptureStage {
     pub(crate) fn run(&mut self, input: &[f32]) -> Result<&[f32], DecibriError> {
         self.run_normalize(input)?;
         self.capture_tap();
-        Self::run_segment(&mut self.work, &mut self.scratch, &mut self.transform)?;
+        let mut channels = self.tap_channels;
+        Self::run_segment(
+            &mut self.work,
+            &mut self.scratch,
+            &mut self.transform,
+            &mut channels,
+        )?;
+        debug_assert_eq!(
+            channels, self.output_channels,
+            "the chain walk ended at {} channels but the chain declares {}",
+            channels, self.output_channels
+        );
         Ok(&self.work)
     }
 
@@ -813,7 +989,18 @@ impl CaptureStage {
                 *sample = 0.0;
             }
         }
-        Self::run_segment(&mut self.work, &mut self.scratch, &mut self.normalize)?;
+        let mut channels = self.input_channels;
+        Self::run_segment(
+            &mut self.work,
+            &mut self.scratch,
+            &mut self.normalize,
+            &mut channels,
+        )?;
+        debug_assert_eq!(
+            channels, self.tap_channels,
+            "the normalize walk ended at {} channels but the chain declares {}",
+            channels, self.tap_channels
+        );
         Ok(&self.work)
     }
 
@@ -832,14 +1019,23 @@ impl CaptureStage {
     /// in `work`. Each stage reads `work` and writes `scratch`; the two are then
     /// swapped, so after the loop `work` holds the segment's output. An empty
     /// segment leaves `work` untouched.
+    ///
+    /// `channels` is the running channel count: it enters holding the count
+    /// `work` is interleaved at and leaves holding the count the segment's
+    /// output is interleaved at, advanced past each stage by that stage's own
+    /// [`Stage::output_channels`]. Carrying it is what lets a stage read its
+    /// input's layout from the block instead of assuming one.
     fn run_segment(
         work: &mut Vec<f32>,
         scratch: &mut Vec<f32>,
         stages: &mut [Box<dyn Stage>],
+        channels: &mut u16,
     ) -> Result<(), DecibriError> {
         for stage in stages.iter_mut() {
             scratch.clear();
-            stage.process(work, scratch)?;
+            let emitted = stage.output_channels(*channels);
+            stage.process(Block::new(work, *channels), scratch)?;
+            *channels = emitted;
             std::mem::swap(work, scratch);
         }
         Ok(())
@@ -862,7 +1058,18 @@ impl CaptureStage {
         // before it passes through `transform`, so the tap stays aligned with the
         // delivered output across the close path too.
         self.capture_tap();
-        Self::flush_segment(&mut self.work, &mut self.scratch, &mut self.transform)?;
+        let mut channels = self.tap_channels;
+        Self::flush_segment(
+            &mut self.work,
+            &mut self.scratch,
+            &mut self.transform,
+            &mut channels,
+        )?;
+        debug_assert_eq!(
+            channels, self.output_channels,
+            "the chain flush ended at {} channels but the chain declares {}",
+            channels, self.output_channels
+        );
         out.extend_from_slice(&self.work);
         Ok(())
     }
@@ -875,7 +1082,18 @@ impl CaptureStage {
     /// stream, only each stage's drained tail.
     pub(crate) fn flush_normalize(&mut self) -> Result<&[f32], DecibriError> {
         self.work.clear();
-        Self::flush_segment(&mut self.work, &mut self.scratch, &mut self.normalize)?;
+        let mut channels = self.input_channels;
+        Self::flush_segment(
+            &mut self.work,
+            &mut self.scratch,
+            &mut self.normalize,
+            &mut channels,
+        )?;
+        debug_assert_eq!(
+            channels, self.tap_channels,
+            "the normalize flush ended at {} channels but the chain declares {}",
+            channels, self.tap_channels
+        );
         Ok(&self.work)
     }
 
@@ -891,6 +1109,17 @@ impl CaptureStage {
     /// pre-transform signal.
     pub(crate) fn has_transform(&self) -> bool {
         !self.transform.is_empty()
+    }
+
+    /// The channel count the chain's delivered output is interleaved at.
+    ///
+    /// Resolved at construction by walking every stage's
+    /// [`Stage::output_channels`] from the device count the chain was built
+    /// with, so it reports what the stages actually do rather than a count named
+    /// alongside them. A consumer reads this instead of deriving the count from
+    /// the configuration a second time.
+    pub(crate) fn output_channels(&self) -> u16 {
+        self.output_channels
     }
 
     /// The summed algorithmic latency, in samples at the output rate, of the
@@ -917,17 +1146,25 @@ impl CaptureStage {
     /// that stage's own held tail into the same buffer. `work` enters holding the
     /// previous segment's carried tail (empty for the first non-empty stage) and
     /// leaves holding this segment's output.
+    ///
+    /// `channels` is the running channel count, advanced past each stage exactly
+    /// as [`run_segment`](Self::run_segment) advances it. A stage's drained tail
+    /// is interleaved at that stage's OUTPUT count, so the count advances once
+    /// per stage, after both the carried block and the tail have been written.
     fn flush_segment(
         work: &mut Vec<f32>,
         scratch: &mut Vec<f32>,
         stages: &mut [Box<dyn Stage>],
+        channels: &mut u16,
     ) -> Result<(), DecibriError> {
         for stage in stages.iter_mut() {
             scratch.clear();
+            let emitted = stage.output_channels(*channels);
             if !work.is_empty() {
-                stage.process(work, scratch)?;
+                stage.process(Block::new(work, *channels), scratch)?;
             }
             stage.flush(scratch)?;
+            *channels = emitted;
             std::mem::swap(work, scratch);
         }
         Ok(())
@@ -1116,12 +1353,26 @@ pub(crate) fn build_capture_stage(
     #[cfg(not(feature = "gain"))]
     let _ = limiter;
 
+    // Resolve the channel count each segment ends at by asking the stages that
+    // were actually built, in the order they run. Named nowhere: a count written
+    // here as a literal would agree with the stages today and stop agreeing the
+    // moment a stage that changes the count is added or removed.
+    let tap_channels = normalize.iter().fold(device_channels, |channels, stage| {
+        stage.output_channels(channels)
+    });
+    let output_channels = transform.iter().fold(tap_channels, |channels, stage| {
+        stage.output_channels(channels)
+    });
+
     Ok(if normalize.is_empty() && transform.is_empty() {
         None
     } else {
         Some(CaptureStage {
             normalize,
             transform,
+            input_channels: device_channels,
+            tap_channels,
+            output_channels,
             work: Vec::new(),
             scratch: Vec::new(),
             tap: Vec::new(),
@@ -1218,6 +1469,111 @@ mod tests {
             .is_some(),
             "stereo device above the target rate gets a chain (downmix + resample)"
         );
+    }
+
+    /// The chain resolves its channel counts by walking the stages it built,
+    /// never by naming them.
+    ///
+    /// Regression: an `input_channels` or `output_channels` written as a
+    /// literal. Every capture configuration decibri accepts today is mono in and
+    /// mono out, so a constant `1` in either place agrees with the resolved
+    /// value at every point the rest of the suite observes it, and planting one
+    /// leaves the whole suite green. The counts below are chosen so a constant
+    /// cannot pass: a device count the builder must carry unchanged, and a chain
+    /// whose resolved output is not 1.
+    ///
+    /// The chains are built and inspected, never run. Stages that require mono
+    /// assert it, so this pins what the builder RESOLVED rather than what a
+    /// multichannel block would do through it.
+    ///
+    /// The counts also run far past any plausible invented ceiling, up to
+    /// `u16::MAX`, so a fixed maximum added to the builder fails here rather
+    /// than passing unnoticed for every count anyone happened to test.
+    #[test]
+    fn chain_channel_counts_are_resolved_by_walking_the_stages() {
+        // The device count reaches the chain unchanged, at every count.
+        for device_channels in [1u16, 2, 3, 6, 8, 17, 64, 1024, u16::MAX] {
+            let chain =
+                build_capture_stage(device_channels, 1, 48_000, 16_000, Transforms::default())
+                    .expect("no channel count is rejected by the builder")
+                    .expect("a rate change always builds a chain");
+            assert_eq!(
+                chain.input_channels, device_channels,
+                "the chain must carry the device count it was given"
+            );
+        }
+
+        // `Downmix` declares mono, so a chain holding one resolves to 1 whatever
+        // went into it.
+        for device_channels in [2u16, 6, 1024] {
+            let chain =
+                build_capture_stage(device_channels, 1, 16_000, 16_000, Transforms::default())
+                    .expect("no channel count is rejected by the builder")
+                    .expect("a device above the target gets a downmix chain");
+            assert_eq!(
+                chain.output_channels(),
+                1,
+                "the downmix declares mono, so the chain resolves to mono"
+            );
+        }
+
+        // No downmix in the chain: every stage passes the count through, so the
+        // chain resolves to a count that is NOT 1. This is the arm a constant
+        // cannot pass.
+        for channels in [2u16, 5, 32] {
+            let chain =
+                build_capture_stage(channels, channels, 48_000, 16_000, Transforms::default())
+                    .expect("no channel count is rejected by the builder")
+                    .expect("a rate change builds a resample chain");
+            assert_eq!(
+                chain.output_channels(),
+                channels,
+                "with nothing collapsing, the count passes through unchanged"
+            );
+            assert_eq!(
+                chain.input_channels,
+                chain.output_channels(),
+                "a chain that collapses nothing delivers what it was handed"
+            );
+        }
+    }
+
+    /// The block descriptor carries the channel count it was given and derives
+    /// its frame count from it, rather than either being assumed.
+    ///
+    /// Regression: a descriptor that drops or caps the count, or a `frames()`
+    /// that answers from the sample count alone. The counts run past any
+    /// plausible invented ceiling for the same reason as above.
+    #[test]
+    fn a_block_carries_its_channel_count_and_derives_its_frames() {
+        let samples = [0.0f32; 720];
+        for channels in [1u16, 2, 3, 6, 8, 16, 45, 720] {
+            let block = Block::new(&samples, channels);
+            assert_eq!(
+                block.channels(),
+                channels,
+                "the descriptor carries the count it was given"
+            );
+            assert_eq!(
+                block.frames(),
+                samples.len() / channels as usize,
+                "frames are derived from the carried count"
+            );
+            assert_eq!(
+                block.len(),
+                samples.len(),
+                "the interleaved sample count is the length the bare slice had"
+            );
+            assert!(!block.is_empty());
+        }
+        // A trailing partial frame is truncated, matching the downmix engine.
+        let odd = [0.0f32; 7];
+        assert_eq!(
+            Block::new(&odd, 2).frames(),
+            3,
+            "a partial frame is dropped"
+        );
+        assert!(Block::new(&[], 1).is_empty());
     }
 
     /// Enabling the DC-removal step adds a `transform` stage, so even a mono
