@@ -148,6 +148,7 @@ const EXCEPTION_NAMES: &[&str] = &[
     "FlacCompressionOutOfRange",
     "StreamOpenFailed",
     "StreamStartFailed",
+    "SpeakerChannelsUnsupported",
     "VadSampleRateUnsupported",
     "VadThresholdOutOfRange",
     "AecSampleRateUnsupported",

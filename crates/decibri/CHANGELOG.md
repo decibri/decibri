@@ -9,6 +9,18 @@ For other decibri packages, see:
 - npm package: [npm/decibri/CHANGELOG.md](../../npm/decibri/CHANGELOG.md)
 - Python package: [bindings/python/CHANGELOG.md](../../bindings/python/CHANGELOG.md)
 
+## [Unreleased]
+
+### Added
+
+- `DecibriError::SpeakerChannelsUnsupported`, reported when an output device cannot serve the requested output channel count. Carries the count asked for, the count the device reports (the figure `SpeakerInfo::max_output_channels` carries) and the platform's own message.
+
+### Changed
+
+- **BREAKING: `SpeakerConfig::validate` no longer refuses a channel count above 32.** It bounds `channels` below only. A count above 32 is offered to the device when the stream is opened, and a device that cannot serve it reports `SpeakerChannelsUnsupported` rather than `ChannelsOutOfRange`. Code matching `ChannelsOutOfRange` to detect a rejected output channel count must also match `SpeakerChannelsUnsupported`; `channels: 0` still reports `ChannelsOutOfRange` with an unchanged message. How many channels a device serves depends on the sample rate asked for as well as the count.
+- **BREAKING: an output channel count above the device's reported figure now reports `SpeakerChannelsUnsupported` where it reported `StreamOpenFailed`.** `StreamOpenFailed` remains the report for an output open that failed for any other reason.
+- A channel count above 16383 is refused before the platform audio library sees it, as `StreamOpenFailed` naming that limit. 16383 is the largest count the Windows audio API can carry for a 32-bit float stream.
+
 ## [6.0.0] - 2026-08-04
 
 ### Added

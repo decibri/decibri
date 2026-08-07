@@ -67,8 +67,12 @@ class Speaker extends Writable {
       throw new RangeError('sample rate must be between 1000 and 384000');
     }
 
+    // Bounded below only. How many output channels can be carried is the
+    // device's answer, so any count above zero is passed through and a device
+    // that refuses it throws a DecibriError with code
+    // 'SPEAKER_CHANNELS_UNSUPPORTED' naming the count the device reports.
     const channels = options.channels ?? 1;
-    if (channels < 1 || channels > 32) {
+    if (channels < 1) {
       throw new RangeError('channels must be between 1 and 32');
     }
 

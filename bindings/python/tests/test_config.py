@@ -153,8 +153,10 @@ def test_invalid_frames_per_buffer(frames_per_buffer: int) -> None:
 
 # ---------------------------------------------------------------------------
 # Speaker: the same bridge-layer validation, at Speaker.__init__. SpeakerConfig
-# validates sample_rate and channels only (playback accepts up to 32 channels,
-# so there is no multichannel rejection here). Hardware-free.
+# validates sample_rate and channels only, and bounds channels below only:
+# playback is not mono only, and how many channels can be carried is the
+# device's answer, given when the stream opens rather than at construction.
+# Hardware-free.
 # ---------------------------------------------------------------------------
 
 
@@ -173,18 +175,29 @@ def test_speaker_invalid_sample_rate(sample_rate: int) -> None:
     assert str(exc_info.value) == "sample rate must be between 1000 and 384000"
 
 
+def test_speaker_zero_channels_is_out_of_range() -> None:
+    """A zero channel count raises at Speaker construction, not at start()."""
+    with pytest.raises(ChannelsOutOfRange) as exc_info:
+        Speaker(channels=0)
+    assert str(exc_info.value) == "channels must be between 1 and 32"
+
+
 @pytest.mark.parametrize(
     "channels",
     [
-        pytest.param(0, id="speaker_channels_zero"),
-        pytest.param(33, id="speaker_channels_above_maximum"),
+        pytest.param(33, id="speaker_channels_above_former_maximum"),
+        pytest.param(64, id="speaker_channels_far_above"),
+        pytest.param(1024, id="speaker_channels_beyond_any_device"),
     ],
 )
-def test_speaker_invalid_channels(channels: int) -> None:
-    """Out-of-range channels raises at Speaker construction, not at start()."""
-    with pytest.raises(ChannelsOutOfRange) as exc_info:
-        Speaker(channels=channels)
-    assert str(exc_info.value) == "channels must be between 1 and 32"
+def test_speaker_high_channel_counts_construct(channels: int) -> None:
+    """Channels is bounded below only: a high count constructs and is left for
+    the device to answer at start(), rather than being refused here.
+
+    Regression: an upper bound reintroduced at the construction layer refuses
+    counts the device would serve.
+    """
+    Speaker(channels=channels)
 
 
 def test_speaker_stereo_constructs() -> None:

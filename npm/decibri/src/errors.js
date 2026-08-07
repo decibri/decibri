@@ -125,6 +125,7 @@ const BASE_CODES = [
   ['audio stream is already running', 'ALREADY_RUNNING'],
   ['Failed to open audio stream', 'STREAM_OPEN_FAILED'],
   ['Failed to start audio stream', 'STREAM_START_FAILED'],
+  ['the output device does not support', 'SPEAKER_CHANNELS_UNSUPPORTED'],
   ['Microphone permission denied.', 'PERMISSION_DENIED'],
   ['Microphone stream is closed', 'MICROPHONE_STREAM_CLOSED'],
   ['Speaker stream is closed', 'SPEAKER_STREAM_CLOSED'],

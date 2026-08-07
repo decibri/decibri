@@ -9,6 +9,18 @@ For other decibri packages, see:
 - Rust core: [crates/decibri/CHANGELOG.md](../../crates/decibri/CHANGELOG.md)
 - Python package: [bindings/python/CHANGELOG.md](../../bindings/python/CHANGELOG.md)
 
+## [Unreleased]
+
+### Added
+
+- Error code `SPEAKER_CHANNELS_UNSUPPORTED` on `DecibriError`, for an output device that cannot serve the requested `channels`. The message names the count asked for, the count the device reports (the figure `SpeakerInfo.maxOutputChannels` carries) and the platform's own message.
+
+### Changed
+
+- **BREAKING: `Speaker` no longer throws a `RangeError` for `channels` above 32.** It accepts any count above zero. A count above 32 is offered to the device when playback starts, and a device that cannot serve it throws a `DecibriError` with code `SPEAKER_CHANNELS_UNSUPPORTED` on the `'error'` event (or as a rejection from `writeAsync()`), where it previously threw `RangeError: channels must be between 1 and 32` from the constructor. `new Speaker({ channels: 0 })` still throws that `RangeError`. How many channels a device serves depends on the `sampleRate` asked for as well as the count. A count above 16383 carries `STREAM_OPEN_FAILED` naming that limit.
+- **BREAKING: an output channel count above the device's reported figure now carries `SPEAKER_CHANNELS_UNSUPPORTED` where it carried `STREAM_OPEN_FAILED`.** `STREAM_OPEN_FAILED` remains the code for an output open that failed for any other reason.
+- The browser `Speaker` and `Microphone` are unchanged. Both still accept 1 to 32 channels, the range the Web Audio specification requires an implementation to support.
+
 ## [5.4.0] - 2026-08-04
 
 ### Added

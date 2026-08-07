@@ -105,6 +105,10 @@ class Microphone extends Emitter {
     if (this._sampleRate < 1000 || this._sampleRate > 384000) {
       throw new RangeError('sample rate must be between 1000 and 384000');
     }
+    // The Web Audio specification's floor, as on the browser Speaker: an
+    // implementation is required to support up to 32 channels and says nothing
+    // above that. Deliberately unlike the native surface, which bounds channels
+    // below only.
     if (this._channels < 1 || this._channels > 32) {
       throw new TypeError(`channels must be between 1 and 32, got ${this._channels}`);
     }

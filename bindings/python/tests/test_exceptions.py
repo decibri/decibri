@@ -1,7 +1,7 @@
 """Exception hierarchy tests.
 
-Covers all 54 exception classes shipped in the public ``decibri`` namespace:
-1 base (DecibriError) + 32 direct subclasses + DeviceError intermediate
+Covers all 55 exception classes shipped in the public ``decibri`` namespace:
+1 base (DecibriError) + 33 direct subclasses + DeviceError intermediate
 + 8 direct DeviceError subclasses + OrtError intermediate + 8 direct
 OrtError subclasses + OrtPathError intermediate + 2 direct OrtPathError
 subclasses.
@@ -66,6 +66,7 @@ from decibri import (
     ResampleAfterFlush,
     ResampleConfigInvalid,
     ResampleFailed,
+    SpeakerChannelsUnsupported,
     SpeakerNotFound,
     SpeakerStreamClosed,
     SampleRateOutOfRange,
@@ -83,13 +84,13 @@ import pytest
 
 
 # ---------------------------------------------------------------------------
-# All 54 classes are reachable and inherit from Exception via DecibriError.
+# All 55 classes are reachable and inherit from Exception via DecibriError.
 # ---------------------------------------------------------------------------
 
 
 ALL_DECIBRI_ERROR_CLASSES = (
     DecibriError,
-    # 32 direct DecibriError subclasses (non-device, non-ORT). DeviceFailed
+    # 33 direct DecibriError subclasses (non-device, non-ORT). DeviceFailed
     # is a runtime device/driver failure (distinct from the DeviceError
     # enumeration/selection family); OnnxBackendFailed is the non-ORT ONNX
     # backend catch-all (distinct from the OrtError family); FileConsumed and
@@ -108,6 +109,7 @@ ALL_DECIBRI_ERROR_CLASSES = (
     SampleRateOutOfRange,
     StreamOpenFailed,
     StreamStartFailed,
+    SpeakerChannelsUnsupported,
     VadSampleRateUnsupported,
     VadThresholdOutOfRange,
     AecSampleRateUnsupported,
@@ -153,12 +155,11 @@ ALL_DECIBRI_ERROR_CLASSES = (
 
 
 def test_class_count() -> None:
-    # 54 total: 1 base + 32 direct + DeviceError + 8 device + OrtError
-    # + 8 ORT direct + OrtPathError + 2 path. The change over the prior 52 is
-    # the file writer: FileWriteFailed for a destination the filesystem
-    # refuses, and FlacCompressionOutOfRange for a save compression level
-    # outside 0 to 8.
-    assert len(ALL_DECIBRI_ERROR_CLASSES) == 54
+    # 55 total: 1 base + 33 direct + DeviceError + 8 device + OrtError
+    # + 8 ORT direct + OrtPathError + 2 path. The change over the prior 54 is
+    # SpeakerChannelsUnsupported, for an output device that cannot serve the
+    # requested channel count.
+    assert len(ALL_DECIBRI_ERROR_CLASSES) == 55
 
 
 def test_all_inherit_from_decibri_error() -> None:
@@ -484,8 +485,8 @@ def _core_variant_names() -> list[str]:
     assert "PermissionDenied" in names, "known variant missing from the parsed table"
     # The count is pinned deliberately and must be updated when a core variant
     # is added or removed.
-    assert len(names) == 49, (
-        f"parsed {len(names)} variants from the core identity table, expected 49;"
+    assert len(names) == 50, (
+        f"parsed {len(names)} variants from the core identity table, expected 50;"
         " the count is pinned deliberately and must be updated when a core"
         " variant is added or removed"
     )

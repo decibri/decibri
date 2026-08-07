@@ -826,6 +826,7 @@ fn to_napi_error(e: decibri::error::DecibriError) -> Error {
         | AlreadyRunning
         | StreamOpenFailed(_)
         | StreamStartFailed(_)
+        | SpeakerChannelsUnsupported { .. }
         | PermissionDenied
         | MicrophoneStreamClosed
         | SpeakerStreamClosed

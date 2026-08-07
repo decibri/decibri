@@ -73,6 +73,60 @@ pub(crate) struct StreamParams {
     pub frames_per_buffer: Option<u32>,
 }
 
+/// The largest channel count an output stream may carry.
+///
+/// `WAVEFORMATEX.nBlockAlign` is a `u16` in the Windows API, and the platform
+/// library computes it as `channels * bytes_per_sample` in `u16` arithmetic.
+/// decibri opens output as `f32`, four bytes per sample, which fixes the
+/// multiplier at 4 and puts the product outside the type above 16383. A build
+/// with overflow checks on panics on that multiply inside the platform library,
+/// where no error path of decibri's runs, so the count is refused here instead.
+/// The other two platform backends compute the same figure in a wider type, so
+/// the limit is Windows' own; it is enforced on every platform so the accepted
+/// set does not vary by host.
+///
+/// Not a bound on what a device serves. Every count at or below it is offered to
+/// the device, which answers for itself.
+#[cfg(feature = "playback")]
+const MAX_OUTPUT_STREAM_CHANNELS: u16 = 16383;
+
+/// Refuse an output channel count the platform cannot express, before it
+/// reaches the platform library. See [`MAX_OUTPUT_STREAM_CHANNELS`].
+#[cfg(feature = "playback")]
+fn check_output_stream_channels(channels: u16) -> Result<(), DecibriError> {
+    if channels > MAX_OUTPUT_STREAM_CHANNELS {
+        return Err(DecibriError::StreamOpenFailed(format!(
+            "the platform supports at most {MAX_OUTPUT_STREAM_CHANNELS} output channels, \
+             and {channels} were requested"
+        )));
+    }
+    Ok(())
+}
+
+/// Report a failed output open, naming the device's own channel count when the
+/// requested count is above it.
+///
+/// The device's figure is read through the same [`DeviceDirection::default_config`]
+/// call that populates [`SpeakerInfo::max_output_channels`], so the number a
+/// refusal names is the number a listing reports. A device that cannot answer
+/// (the query fails and the figure reads 0) keeps the plain
+/// [`DecibriError::StreamOpenFailed`], as does any open that failed at or below
+/// the figure: the channel count is only named where it is the one thing known
+/// to be beyond what the device states.
+#[cfg(feature = "playback")]
+fn output_open_error(device: &BackendDevice, requested: u16, reason: String) -> DecibriError {
+    let (available, _) = Output::default_config(&device.inner);
+    if available > 0 && requested > available {
+        DecibriError::SpeakerChannelsUnsupported {
+            requested,
+            available,
+            reason,
+        }
+    } else {
+        DecibriError::StreamOpenFailed(reason)
+    }
+}
+
 /// Realtime capture callback: invoked with one interleaved `f32` input buffer.
 #[cfg(feature = "capture")]
 pub(crate) type InputDataCallback = Box<dyn FnMut(&[f32]) + Send + 'static>;
@@ -229,6 +283,10 @@ impl AudioBackend for CpalBackend {
         mut on_data: OutputDataCallback,
         mut on_error: StreamErrorCallback,
     ) -> Result<BackendStream, DecibriError> {
+        // Before the platform library sees the count: above this the product it
+        // computes leaves its own type. See `MAX_OUTPUT_STREAM_CHANNELS`.
+        check_output_stream_channels(params.channels)?;
+
         let stream = device
             .inner
             .build_output_stream(
@@ -243,7 +301,7 @@ impl AudioBackend for CpalBackend {
                 },
                 None,
             )
-            .map_err(|e| DecibriError::StreamOpenFailed(e.to_string()))?;
+            .map_err(|e| output_open_error(device, params.channels, e.to_string()))?;
 
         stream
             .play()
@@ -517,10 +575,47 @@ mod tests {
     /// Enumeration through the seam reaches cpal and returns without panicking
     /// on any host, including headless CI runners with no audio devices (the
     /// result may be an empty list or an enumeration error, both acceptable).
+    ///
+    /// The one test in this crate that reaches the platform library on every
+    /// host, and it has to stay the only one: a second faults the process on a
+    /// host with no audio endpoints. See the note on
+    /// `speaker::tests::a_count_the_platform_cannot_express_is_refused_not_panicked`.
     #[test]
     fn backend_enumeration_runs() {
         let _ = CpalBackend.input_devices();
         let _ = CpalBackend.output_devices();
+    }
+
+    /// The output-channel guard passes every count the platform can express and
+    /// refuses the first one it cannot, reporting a stream-open failure that
+    /// names the limit and the count asked for.
+    ///
+    /// Regression: the guard is what keeps a count above the limit from reaching
+    /// the platform library, where the multiply it feeds panics in a build with
+    /// overflow checks on. This test runs in exactly such a build.
+    #[cfg(feature = "playback")]
+    #[test]
+    fn output_channel_guard_brackets_the_platform_limit() {
+        for channels in [1_u16, 2, 8, 33, 123, 1024, MAX_OUTPUT_STREAM_CHANNELS] {
+            assert!(
+                check_output_stream_channels(channels).is_ok(),
+                "{channels} channels is within what the platform can express"
+            );
+        }
+
+        for channels in [MAX_OUTPUT_STREAM_CHANNELS + 1, 32768, u16::MAX] {
+            let err = check_output_stream_channels(channels)
+                .expect_err("a count above the limit must be refused");
+            assert!(
+                matches!(err, DecibriError::StreamOpenFailed(_)),
+                "the refusal is an open failure, got {err:?}"
+            );
+            let msg = err.to_string();
+            assert!(
+                msg.contains("16383") && msg.contains(&channels.to_string()),
+                "the refusal names the limit and the count asked for: {msg}"
+            );
+        }
     }
 
     /// The direction-specific `not_found_error` produces the correct

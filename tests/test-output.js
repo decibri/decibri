@@ -1,7 +1,7 @@
 'use strict';
 
 const path = require('path');
-const { Microphone, Speaker, DeviceError } = require(path.join(__dirname, '..', 'npm', 'decibri', 'src', 'decibri.js'));
+const { Microphone, Speaker, DeviceError, DecibriError } = require(path.join(__dirname, '..', 'npm', 'decibri', 'src', 'decibri.js'));
 const pkg = require(path.join(__dirname, '..', 'npm', 'decibri', 'package.json'));
 
 let passed = 0;
@@ -79,9 +79,9 @@ async function testErrors() {
   assertThrows(() => new Speaker({ sampleRate: 999 }), RangeError, 'sample rate must be between 1000 and 384000');
   assertThrows(() => new Speaker({ sampleRate: 384001 }), RangeError, 'sample rate must be between 1000 and 384000');
 
-  // channels
+  // channels: bounded below only. A high count is left for the device to
+  // answer when the stream opens (Group 8), not refused here.
   assertThrows(() => new Speaker({ channels: 0 }), RangeError, 'channels must be between 1 and 32');
-  assertThrows(() => new Speaker({ channels: 33 }), RangeError, 'channels must be between 1 and 32');
 
   // dtype
   assertThrows(() => new Speaker({ dtype: 'wav' }), TypeError, "dtype must be 'int16' or 'float32'");
@@ -298,6 +298,133 @@ async function testMultipleInstances() {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
+// Group 8: Output channel counts against the device
+// ═══════════════════════════════════════════════════════════════════════════════
+//
+// The stream is opened on the first write, so a channel count the device
+// refuses surfaces there rather than at construction. Everything here except
+// the platform-limit case is machine-dependent: what a device serves above its
+// own reported count is the host's business, and a machine whose ceiling sits
+// lower than the counts tried below reports the typed refusal instead of
+// opening. Both outcomes are asserted; neither may be a range error.
+
+/** Resolve on the first write's outcome: the error it produced, or null. */
+function firstWrite(speaker, buffer) {
+  return new Promise((resolve) => {
+    let settled = false;
+    const done = (err) => {
+      if (settled) return;
+      settled = true;
+      resolve(err || null);
+    };
+    speaker.once('error', done);
+    speaker.write(buffer, done);
+  });
+}
+
+/** A short buffer of int16 silence for `channels` interleaved channels. */
+function silence(channels) {
+  return Buffer.alloc(channels * 256 * 2);
+}
+
+async function testChannelCounts() {
+  console.log('--- Group 8: Output channel counts ---');
+
+  const devices = Speaker.devices();
+  const preferred = devices.find((d) => d.isDefault) || devices[0];
+  if (!preferred) {
+    console.log('  SKIP: no output device');
+    skipped++;
+    console.log('  Group 8 done\n');
+    return;
+  }
+  const reported = preferred.maxOutputChannels;
+  // How many channels a device serves depends on the rate it is asked for:
+  // the host converts, and it converts rate and channel count together. The
+  // device's own rate is where it is most permissive, so the counts above the
+  // former cap are tried there.
+  const nativeRate = preferred.defaultSampleRate;
+  console.log(
+    `  default output "${preferred.name}" reports ${reported} channels at ${nativeRate} Hz`
+  );
+
+  // Counts at and below the former cap are unchanged: they open and play.
+  for (const channels of [1, 2, 8]) {
+    const speaker = new Speaker({ sampleRate: 16000, channels });
+    const err = await firstWrite(speaker, silence(channels));
+    speaker.stop();
+    assert(err === null, `channels: ${channels} still opens (got ${err && err.message})`);
+  }
+
+  // Counts above the former cap reach the device instead of being refused by
+  // decibri. Regression: the cap at 32 refused counts the platform serves.
+  for (const channels of [33, 40, 64]) {
+    const speaker = new Speaker({ sampleRate: nativeRate, channels });
+    const err = await firstWrite(speaker, silence(channels));
+    speaker.stop();
+    if (err === null) {
+      console.log(`  ${channels} channels: opened`);
+      assert(true, `channels: ${channels} opens on this machine`);
+    } else {
+      console.log(`  ${channels} channels: refused (${err.code})`);
+      assert(
+        !(err instanceof RangeError),
+        `channels: ${channels} is not refused as a range error (got ${err.constructor.name})`
+      );
+      assert(
+        err.code === 'SPEAKER_CHANNELS_UNSUPPORTED',
+        `channels: ${channels} above this machine's ceiling is typed (got ${err.code}: ${err.message})`
+      );
+    }
+  }
+
+  // A count beyond any device, still within what the platform can express. The
+  // refusal names the count asked for and the count the device reports.
+  {
+    const channels = 8192;
+    const speaker = new Speaker({ sampleRate: nativeRate, channels });
+    const err = await firstWrite(speaker, silence(channels));
+    speaker.stop();
+    assert(err !== null, `channels: ${channels} is refused`);
+    if (err) {
+      assert(err instanceof DecibriError, `channels: ${channels} is a DecibriError`);
+      assert(
+        err.code === 'SPEAKER_CHANNELS_UNSUPPORTED',
+        `channels: ${channels} carries SPEAKER_CHANNELS_UNSUPPORTED (got ${err.code})`
+      );
+      assert(
+        err.message.includes(`${channels}`) && err.message.includes(`it reports ${reported}`),
+        `the refusal names both counts (got ${err.message})`
+      );
+    }
+  }
+
+  // Above what the platform can express at all. Refused by decibri before the
+  // platform library sees it, so the process survives and the message names the
+  // limit. Regression: the count reaching the platform library, where the
+  // multiply it feeds overflows.
+  {
+    const channels = 20000;
+    const speaker = new Speaker({ sampleRate: 16000, channels });
+    const err = await firstWrite(speaker, silence(channels));
+    speaker.stop();
+    assert(err !== null, `channels: ${channels} is refused`);
+    if (err) {
+      assert(
+        err.code === 'STREAM_OPEN_FAILED',
+        `channels: ${channels} carries STREAM_OPEN_FAILED (got ${err.code})`
+      );
+      assert(
+        err.message.includes('16383'),
+        `the refusal names the platform limit (got ${err.message})`
+      );
+    }
+  }
+
+  console.log('  Group 8 done\n');
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
 // Runner
 // ═══════════════════════════════════════════════════════════════════════════════
 
@@ -311,6 +438,7 @@ async function main() {
   await testEcho();
   await testStopDiscards();
   await testMultipleInstances();
+  await testChannelCounts();
 
   console.log('═══════════════════════════════════════');
   console.log(`  Passed:  ${passed}`);

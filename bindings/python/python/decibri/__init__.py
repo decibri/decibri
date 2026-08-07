@@ -68,6 +68,7 @@ from decibri.exceptions import (
     ResampleConfigInvalid,
     ResampleFailed,
     SampleRateOutOfRange,
+    SpeakerChannelsUnsupported,
     SpeakerNotFound,
     SpeakerStreamClosed,
     StreamOpenFailed,
