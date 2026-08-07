@@ -9,6 +9,12 @@ name: OSV Scanner
 #   npm/decibri/package-lock.json    npm, the addon package's dependencies
 #   bindings/python/uv.lock          PyPI
 #
+# Findings go to the Security tab. This workflow does not fail on them.
+# Advisories are published continuously against dependencies decibri does not
+# control, so a gate here would turn red on the advisory database's schedule
+# rather than on a change made in this repository, and a check that stays red
+# for weeks stops being read.
+#
 # The `deny` job in ci.yml also reads advisories, but only for crates
 # reachable from the four targets in deny.toml, so the two are not
 # interchangeable. deny.toml records that boundary.
@@ -63,12 +69,11 @@ jobs:
       # Recursive from the repository root, so a lockfile added later is
       # scanned without editing this file.
       #
-      # continue-on-error because osv-scanner exits non-zero when it finds
-      # something, and the SARIF still has to reach the Security tab. The last
-      # step turns that outcome back into a job failure. Removing it makes the
-      # upload unreachable on exactly the runs that need it.
+      # osv-scanner exits non-zero when it finds something. continue-on-error
+      # keeps that exit code from failing the job, so a run with findings
+      # still reaches the upload below and still reports green. Removing it
+      # turns every finding into a failed check.
       - name: Scan lockfiles
-        id: scan
         continue-on-error: true
         run: osv-scanner scan source --recursive --format=sarif --output-file=results.sarif ./
       - name: Upload results to the Security tab
@@ -77,9 +82,3 @@ jobs:
         with:
           sarif_file: results.sarif
           category: osv-scanner
-      # Fails on any non-zero exit, a finding or a scanner error alike.
-      - name: Fail on findings
-        if: ${{ steps.scan.outcome == 'failure' }}
-        run: |
-          echo "::error::OSV-Scanner reported known vulnerabilities. See the Security tab."
-          exit 1
