@@ -8,6 +8,17 @@ For Rust core (`crates/decibri`) and npm package (`npm/decibri`) changes, see [t
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- `SpeakerChannelsUnsupported`, raised when an output device cannot serve the requested `channels`. The message names the count asked for, the count the device reports (the figure `SpeakerInfo.max_output_channels` carries) and the platform's own message.
+
+### Changed
+
+- **BREAKING: `Speaker` and `AsyncSpeaker` no longer raise `ChannelsOutOfRange` for `channels` above 32.** They accept any count above zero. A count above 32 is offered to the device at `start()`, and a device that cannot serve it raises `SpeakerChannelsUnsupported`, where construction previously raised `ChannelsOutOfRange`. `Speaker(channels=0)` still raises `ChannelsOutOfRange` with an unchanged message. How many channels a device serves depends on the `sample_rate` asked for as well as the count. A count above 16383 raises `StreamOpenFailed` naming that limit.
+- **BREAKING: an output channel count above the device's reported figure now raises `SpeakerChannelsUnsupported` where it raised `StreamOpenFailed`.** `StreamOpenFailed` remains the exception for an output open that failed for any other reason.
+
 ## [0.9.0] - 2026-08-04
 
 ### Added

@@ -35,6 +35,17 @@ pub enum DecibriError {
     #[error("sample rate must be between 1000 and 384000")]
     SampleRateOutOfRange,
 
+    /// A configuration requested a channel count below one.
+    ///
+    /// Reached from both surfaces by a zero channel count:
+    /// [`crate::microphone::MicrophoneConfig::validate`] and
+    /// [`crate::speaker::SpeakerConfig::validate`] each return it for `channels
+    /// == 0`. Neither surface has an upper bound in its own validation: capture
+    /// is mono only and reports [`Self::MultichannelNotSupported`] above one,
+    /// and playback leaves the maximum to the device, which answers when the
+    /// stream is opened ([`Self::SpeakerChannelsUnsupported`]). The message is a
+    /// frozen exact-match string that downstream consumers branch on, so its
+    /// text is unchanged.
     #[error("channels must be between 1 and 32")]
     ChannelsOutOfRange,
 
@@ -49,9 +60,10 @@ pub enum DecibriError {
     /// rather than reusing [`Self::ChannelsOutOfRange`] reads more
     /// intentionally and signals the mono-only constraint explicitly; a zero
     /// channel count remains [`Self::ChannelsOutOfRange`]. The speaker path is
-    /// unaffected (output may be multichannel) and keeps using
-    /// [`Self::ChannelsOutOfRange`] for its `1..=32` range. Static message to
-    /// keep the text stable.
+    /// unaffected: output may be multichannel, and the count it accepts is the
+    /// device's to state, reported through
+    /// [`Self::SpeakerChannelsUnsupported`]. Static message to keep the text
+    /// stable.
     #[error("multichannel capture is not supported; channels must be 1 (mono)")]
     MultichannelNotSupported,
 
@@ -136,6 +148,29 @@ pub enum DecibriError {
 
     #[error("Failed to start audio stream: {0}")]
     StreamStartFailed(String),
+
+    /// An output stream could not be opened at the requested channel count, and
+    /// the count is above what the device reports supporting.
+    ///
+    /// `requested` is the count [`crate::speaker::SpeakerConfig`] carried;
+    /// `available` is the device's own figure, the same one
+    /// [`crate::device::SpeakerInfo::max_output_channels`] reports; `reason` is
+    /// the platform's message, formatted into the Display string so its text
+    /// reaches the consumer (matching [`Self::AecConfigInvalid`]; the leading
+    /// `the output device does not support` clause is the stable part).
+    ///
+    /// Narrower than [`Self::StreamOpenFailed`], which stays the report for an
+    /// output open that failed for any other reason, including one at or below
+    /// the device's figure. A device serves more channels than it reports
+    /// whenever the host mixes and converts for it, so the figure is what the
+    /// device states rather than a bound decibri enforces: nothing is refused
+    /// ahead of the device. Additive variant permitted by `#[non_exhaustive]`.
+    #[error("the output device does not support {requested} output channels; it reports {available}: {reason}")]
+    SpeakerChannelsUnsupported {
+        requested: u16,
+        available: u16,
+        reason: String,
+    },
 
     #[error("Microphone permission denied. {}", PERMISSION_HINT)]
     PermissionDenied,
@@ -612,6 +647,12 @@ error_identity! {
         DecibriError::StreamOpenFailed("sample".to_string());
     DecibriError::StreamStartFailed(_) => "StreamStartFailed", "STREAM_START_FAILED",
         DecibriError::StreamStartFailed("sample".to_string());
+    DecibriError::SpeakerChannelsUnsupported { .. } => "SpeakerChannelsUnsupported", "SPEAKER_CHANNELS_UNSUPPORTED",
+        DecibriError::SpeakerChannelsUnsupported {
+            requested: 8,
+            available: 2,
+            reason: "sample".to_string(),
+        };
     DecibriError::PermissionDenied => "PermissionDenied", "PERMISSION_DENIED",
         DecibriError::PermissionDenied;
     DecibriError::MicrophoneStreamClosed => "MicrophoneStreamClosed", "MICROPHONE_STREAM_CLOSED",
@@ -1024,6 +1065,36 @@ mod tests {
             "frozen prefix must not drift: {msg}"
         );
         assert!(err.source().is_some(), "the I/O cause is walkable");
+    }
+
+    /// The `SpeakerChannelsUnsupported` Display message keeps its frozen
+    /// leading clause, which the Node binding matches to assign the error its
+    /// stable code, and names both counts plus the platform's own text.
+    /// Regression: a reworded clause silently demotes the error to the
+    /// unclassified bucket in the Node binding.
+    #[test]
+    fn speaker_channels_unsupported_message_names_both_counts() {
+        let err = DecibriError::SpeakerChannelsUnsupported {
+            requested: 124,
+            available: 2,
+            reason: "the device said no".to_string(),
+        };
+        assert_eq!(
+            err.to_string(),
+            "the output device does not support 124 output channels; it reports 2: \
+             the device said no"
+        );
+    }
+
+    /// The `ChannelsOutOfRange` Display message is a frozen exact-match string
+    /// that downstream consumers branch on. Regression: widening the speaker's
+    /// accepted channel count reworded it.
+    #[test]
+    fn channels_out_of_range_message_is_frozen() {
+        assert_eq!(
+            DecibriError::ChannelsOutOfRange.to_string(),
+            "channels must be between 1 and 32"
+        );
     }
 
     /// `ResampleFailed` forwards the upstream text: the reason is formatted

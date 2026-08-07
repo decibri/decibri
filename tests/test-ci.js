@@ -170,7 +170,22 @@ console.log('--- Group 3: Speaker error messages ---');
 assertThrows(() => new Speaker({ sampleRate: 0 }), RangeError, 'sample rate must be between 1000 and 384000');
 assertThrows(() => new Speaker({ sampleRate: 384001 }), RangeError, 'sample rate must be between 1000 and 384000');
 assertThrows(() => new Speaker({ channels: 0 }), RangeError, 'channels must be between 1 and 32');
-assertThrows(() => new Speaker({ channels: 33 }), RangeError, 'channels must be between 1 and 32');
+// Channels is bounded below only. A count above the former cap is no longer
+// refused by the wrapper: it constructs where an output device is present, and
+// fails for a device reason where none is (a CI runner). What it must never be
+// is a channel-range refusal. Regression: a reintroduced cap refuses counts the
+// device would serve.
+for (const channels of [33, 64, 1024]) {
+  try {
+    new Speaker({ channels }).stop();
+    assert(true, `channels: ${channels} is accepted at construction`);
+  } catch (e) {
+    assert(
+      !(e instanceof RangeError),
+      `channels: ${channels} is not refused as a range error (got ${e.constructor.name}: ${e.message})`
+    );
+  }
+}
 assertThrows(() => new Speaker({ dtype: 'wav' }), TypeError, "dtype must be 'int16' or 'float32'");
 assertThrows(
   () => new Speaker({ device: '__nonexistent__' }),
@@ -415,6 +430,26 @@ try {
   assert(!(dev instanceof OrtError), 'DeviceFailed is NOT an OrtError');
   assert(dev.code === 'DEVICE_FAILED', `code is DEVICE_FAILED (got ${dev.code})`);
   assert(dev.message === 'decibri: audio device error: device unplugged', 'DeviceFailed message preserved verbatim');
+
+  // An output device that cannot serve the requested channel count. Fires only
+  // against real hardware, so wrapNativeError is exercised directly with the
+  // frozen core Display string. It is a DecibriError with its own code, not a
+  // RangeError: the count is not a bad argument shape, it is a capability the
+  // device does not have.
+  const chans = wrapNativeError(
+    new Error('the output device does not support 124 output channels; it reports 2: refused')
+  );
+  assert(chans instanceof DecibriError, 'SpeakerChannelsUnsupported maps to a DecibriError');
+  assert(!(chans instanceof RangeError), 'SpeakerChannelsUnsupported is NOT a RangeError');
+  assert(!(chans instanceof DeviceError), 'SpeakerChannelsUnsupported is NOT a DeviceError (enumeration family)');
+  assert(
+    chans.code === 'SPEAKER_CHANNELS_UNSUPPORTED',
+    `code is SPEAKER_CHANNELS_UNSUPPORTED (got ${chans.code})`
+  );
+  assert(
+    chans.message === 'the output device does not support 124 output channels; it reports 2: refused',
+    'SpeakerChannelsUnsupported message preserved verbatim'
+  );
 
   const onnx = wrapNativeError(new Error('ONNX backend error from coreml: boom'));
   assert(onnx instanceof DecibriError, 'OnnxBackendFailed maps to a DecibriError');
@@ -1269,10 +1304,22 @@ async function asyncOpenTests() {
     "dtype must be 'int16' or 'float32'"
   );
   await assertRejects(
-    () => Speaker.open({ channels: 33 }),
+    () => Speaker.open({ channels: 0 }),
     RangeError,
     'channels must be between 1 and 32'
   );
+  // The async factory shares _prepareOptions with the constructor, so it is
+  // bounded below only in the same way. Regression: the two validation paths
+  // drifting apart.
+  try {
+    (await Speaker.open({ channels: 33 })).stop();
+    assert(true, 'Speaker.open accepts channels: 33');
+  } catch (e) {
+    assert(
+      !(e instanceof RangeError),
+      `Speaker.open channels: 33 is not refused as a range error (got ${e.constructor.name}: ${e.message})`
+    );
+  }
 
   // A missing Silero model rejects before any native work (wrapper-side check).
   await assertRejects(

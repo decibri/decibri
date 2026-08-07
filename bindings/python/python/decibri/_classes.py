@@ -1212,7 +1212,10 @@ class Speaker:
             playback of OpenAI Realtime audio use 24000.
         channels : int, optional
             Number of output channels. Default 1 (mono). Multi-channel
-            samples are interleaved on the wire.
+            samples are interleaved on the wire. Bounded below only: a
+            count the device cannot serve raises
+            ``SpeakerChannelsUnsupported`` at ``start()``, naming the
+            count the device reports.
         dtype : str, optional
             Sample dtype: ``"int16"`` (default) or ``"float32"``. Must
             match the dtype of the data passed to ``write()``; mismatch

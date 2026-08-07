@@ -59,6 +59,7 @@ from decibri.exceptions import ResampleFailed as ResampleFailed
 from decibri.exceptions import SampleRateOutOfRange as SampleRateOutOfRange
 from decibri.exceptions import StreamOpenFailed as StreamOpenFailed
 from decibri.exceptions import StreamStartFailed as StreamStartFailed
+from decibri.exceptions import SpeakerChannelsUnsupported as SpeakerChannelsUnsupported
 from decibri.exceptions import FileReadFailed as FileReadFailed
 from decibri.exceptions import FileWriteFailed as FileWriteFailed
 from decibri.exceptions import FlacCompressionOutOfRange as FlacCompressionOutOfRange

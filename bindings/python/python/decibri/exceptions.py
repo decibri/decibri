@@ -10,13 +10,13 @@ shape the core never sees. An out-of-range agc target raises
 AgcTargetOutOfRange; a malformed vad, denoise or highpass value raises
 ValueError.
 
-51 instance classes plus 3 intermediate parent classes (DeviceError,
-OrtError, OrtPathError) for catch ergonomics, totaling 54 class
+52 instance classes plus 3 intermediate parent classes (DeviceError,
+OrtError, OrtPathError) for catch ergonomics, totaling 55 class
 definitions. Single-inheritance hierarchy per CPython convention.
 
 Hierarchy:
     DecibriError
-    + 32 direct subclasses (config + runtime errors that don't involve
+    + 33 direct subclasses (config + runtime errors that don't involve
       device enumeration or ORT, including DeviceFailed and OnnxBackendFailed)
     + DeviceError (intermediate; no instances; catches device-related)
         + 8 direct device subclasses (MicrophoneNotFound, SpeakerNotFound,
@@ -153,6 +153,19 @@ class StreamOpenFailed(DecibriError):
 
 class StreamStartFailed(DecibriError):
     """Raised when the audio stream fails to start after opening."""
+
+
+class SpeakerChannelsUnsupported(DecibriError):
+    """Raised when an output device cannot serve the requested channel count.
+
+    ``Speaker`` bounds ``channels`` below only: how many output channels can be
+    carried is the device's answer, so the count is offered to the device when
+    the stream opens. A device that refuses a count above the figure it reports
+    raises this; the message names the count asked for, the figure the device
+    reports (the same one ``SpeakerInfo.max_output_channels`` carries) and the
+    platform's own text. An open that fails for any other reason stays
+    ``StreamOpenFailed``.
+    """
 
 
 class PermissionDenied(DecibriError):

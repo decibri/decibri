@@ -810,9 +810,11 @@ export interface SpeakerOptions extends WritableOptions {
   sampleRate?: number;
 
   /**
-   * Number of output channels.
+   * Number of output channels. The maximum is the device's: a count the device
+   * cannot serve throws a `DecibriError` with code
+   * `'SPEAKER_CHANNELS_UNSUPPORTED'` naming the count the device reports.
    * @default 1
-   * @range 1–32
+   * @range 1 or more
    */
   channels?: number;
 

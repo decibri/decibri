@@ -34,7 +34,9 @@ use crate::error::DecibriError;
 pub struct SpeakerConfig {
     /// Sample rate in Hz. Range: 1000–384000. Default: 16000.
     pub sample_rate: u32,
-    /// Number of output channels. Range: 1–32. Default: 1.
+    /// Number of output channels. Minimum: 1. Default: 1. The maximum is the
+    /// device's, reported when the stream is opened; see
+    /// [`SpeakerConfig::validate`].
     pub channels: u16,
     /// Device selection. Default: system default output.
     pub device: DeviceSelector,
@@ -51,13 +53,23 @@ impl Default for SpeakerConfig {
 }
 
 impl SpeakerConfig {
-    /// Validate the configuration: sample rate and channel count must fall
-    /// within the supported ranges.
+    /// Validate the configuration: the sample rate must fall within the
+    /// supported range and the channel count must be at least one.
+    ///
+    /// There is no upper bound on `channels` here. How many output channels can
+    /// be carried is the device's answer, not a number decibri holds: a host
+    /// that mixes and converts serves counts above what the device reports, and
+    /// what it serves is discovered by asking. So the count is offered to the
+    /// device when the stream is opened, and a device that refuses it is
+    /// reported as [`DecibriError::SpeakerChannelsUnsupported`], naming the
+    /// figure the device states. The one count refused ahead of the device is
+    /// one the platform cannot express at all; see the output channel guard in
+    /// [`crate::backend`].
     pub fn validate(&self) -> Result<(), DecibriError> {
         if !(1000..=384000).contains(&self.sample_rate) {
             return Err(DecibriError::SampleRateOutOfRange);
         }
-        if !(1..=32).contains(&self.channels) {
+        if self.channels == 0 {
             return Err(DecibriError::ChannelsOutOfRange);
         }
         Ok(())
@@ -532,6 +544,81 @@ mod tests {
     use super::*;
     use std::thread;
     use std::time::{Duration, Instant};
+
+    /// A speaker configuration at `channels`, ready to validate or open.
+    fn config_with_channels(channels: u16) -> SpeakerConfig {
+        SpeakerConfig {
+            channels,
+            ..SpeakerConfig::default()
+        }
+    }
+
+    /// Validation accepts every channel count above zero and refuses zero with
+    /// the frozen `ChannelsOutOfRange` message.
+    ///
+    /// Regression: an upper bound reintroduced into `validate` refuses counts
+    /// the device would serve, which is the whole of what this configuration
+    /// leaves to the device.
+    #[test]
+    fn validate_bounds_channels_below_only() {
+        assert!(
+            matches!(
+                config_with_channels(0).validate(),
+                Err(DecibriError::ChannelsOutOfRange)
+            ),
+            "a zero channel count is refused"
+        );
+        for channels in [1_u16, 2, 8, 32, 33, 64, 123, 1024, 16383, u16::MAX] {
+            assert!(
+                config_with_channels(channels).validate().is_ok(),
+                "{channels} channels is left to the device to answer"
+            );
+        }
+    }
+
+    /// A channel count the platform cannot express is refused before the
+    /// platform library is reached, and refused as an error rather than a panic.
+    ///
+    /// This is the load-bearing case: the count crosses `Speaker::start` into
+    /// the backend seam, which is where the platform's own multiply would
+    /// overflow. `cargo test` builds with overflow checks on, so a guard that
+    /// stopped working would abort this test rather than fail it.
+    ///
+    /// Ignored by default, and run on a machine that has an output device with
+    /// `cargo test-decibri --lib -- --ignored`. Two things put it there. It
+    /// needs a device to reach `start`. And the platform library keeps one
+    /// device enumerator for the whole process, created in the COM apartment of
+    /// whichever thread first reaches it; on a host with no audio endpoints that
+    /// apartment closes when the thread ends and the kept handle is left
+    /// dangling, so a second test reaching the platform library faults the
+    /// process rather than failing. One test reaches it on every host already,
+    /// `backend::tests::backend_enumeration_runs`, and it stays the only one.
+    ///
+    /// What runs everywhere in place of this is
+    /// `backend::tests::output_channel_guard_brackets_the_platform_limit`, which
+    /// covers the guard itself. What only this test covers is that the open path
+    /// consults the guard before it reaches the platform library.
+    #[test]
+    #[ignore = "needs an output device; see the note on this test"]
+    fn a_count_the_platform_cannot_express_is_refused_not_panicked() {
+        let Ok(speaker) = Speaker::new(config_with_channels(20_000)) else {
+            // No output device on this machine: nothing to open.
+            return;
+        };
+        // `SpeakerStream` is not `Debug`, so unwrap the arms by hand.
+        let Err(err) = speaker.start() else {
+            panic!("a count above the platform limit must be refused");
+        };
+        assert!(
+            matches!(err, DecibriError::StreamOpenFailed(_)),
+            "the refusal is an open failure, got {err:?}"
+        );
+        let msg = err.to_string();
+        assert!(
+            msg.contains("16383") && msg.contains("20000"),
+            "the refusal names the limit and the count asked for: {msg}"
+        );
+    }
 
     /// Build a synthetic `SpeakerStream` with no cpal device, returning the
     /// stream plus the receiving end of its channel and a clone of the

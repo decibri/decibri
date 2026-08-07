@@ -125,7 +125,7 @@ async function testDeterministic() {
     'Microphone.open legacy vad'
   );
   await assertRejects(
-    () => Speaker.open({ channels: 33 }),
+    () => Speaker.open({ channels: 0 }),
     RangeError,
     'channels must be between 1 and 32',
     'Speaker.open bad channels'

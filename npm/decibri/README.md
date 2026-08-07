@@ -152,7 +152,7 @@ Creates a Writable stream for speaker playback.
 | Option | Type | Default | Description |
 | --- | --- | --- | --- |
 | `sampleRate` | number | 16000 | Playback sample rate (1000 to 384000) |
-| `channels` | number | 1 | Output channels (1 to 32) |
+| `channels` | number | 1 | Output channels (1 or more, up to what the device supports) |
 | `dtype` | `'int16'` \| `'float32'` | `'int16'` | Sample encoding of incoming data |
 | `device` | number, string, or `{ id: string }` | system default | Output device index, case-insensitive name substring, or stable per-host ID |
 

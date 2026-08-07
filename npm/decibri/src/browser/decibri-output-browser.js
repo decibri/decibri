@@ -104,6 +104,12 @@ class Speaker {
     if (this._sampleRate < 1000 || this._sampleRate > 384000) {
       throw new TypeError(`sample rate must be between 1000 and 384000, got ${this._sampleRate}`);
     }
+    // The 32 is the Web Audio specification's floor: an implementation is
+    // required to support up to 32 channels and the specification says nothing
+    // above that, so 32 is what a browser can be relied on to accept. The
+    // native surface bounds output channels below only and leaves the maximum
+    // to the device; the two differ deliberately, because they are answering to
+    // different things.
     if (this._channels < 1 || this._channels > 32) {
       throw new TypeError(`channels must be between 1 and 32, got ${this._channels}`);
     }
