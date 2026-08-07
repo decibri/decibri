@@ -60,16 +60,16 @@ jobs:
         with:
           sarif_file: zizmor.sarif
           category: zizmor
-      # The gate, and the command this workflow has always run, so the pass
-      # and fail behaviour is unchanged: any finding not recorded in
-      # .github/zizmor.yml fails the job. It runs after the upload so that
-      # the findings reach the Security tab whether or not this step fails.
+      # The gate: any finding not recorded in .github/zizmor.yml fails the job.
       #
-      # Code scanning's convention is that a workflow uploading SARIF fails
-      # only on an internal error and leaves findings to the Security tab.
-      # That convention is deliberately not followed here. .github/zizmor.yml
-      # is an accepted-exception list, so an unrecorded finding means a
-      # workflow changed without being accounted for, and that should block a
-      # merge rather than file a report.
+      # .github/zizmor.yml is an accepted-exception list, so a finding outside
+      # it means a workflow file changed without that change being accounted
+      # for. The only input this audit reads is .github, so nothing outside
+      # this repository can raise a finding here and every one of them points
+      # at the commit that introduced it. Blocking the merge is what that
+      # calls for.
+      #
+      # This step runs after the upload so the findings reach the Security tab
+      # whether or not it fails.
       - name: Fail on unrecorded findings
         run: uvx zizmor@1.29.0 --no-progress .github/workflows
