@@ -494,6 +494,13 @@ pub struct MicrophoneStream {
     // with zero overhead. `Mutex<VecDeque<f32>>` is `Send + Sync`, so the type
     // stays `Send + Sync`.
     vad_tap: Option<Mutex<VecDeque<f32>>>,
+    // The channel count the tap signal is interleaved at: the chain's
+    // post-normalize count, read from the chain at construction, or the
+    // device count when there is no chain (where the tap is never active).
+    // [`detector_feed`](Self::detector_feed) collapses the tap at this count,
+    // which is fixed for the stream's lifetime, so no lock is needed to read
+    // it.
+    tap_channels: u16,
     // Memory bound (in samples) for `vad_tap`, computed from the target rate at
     // construction (see `VAD_TAP_BOUND_SECS`). Oldest tapped samples are dropped
     // beyond this so a consumer that enables an enhancement step but never drains
@@ -932,6 +939,46 @@ impl MicrophoneStream {
         Some(tap.drain(..take).collect())
     }
 
+    /// The detector feed for one delivered chunk: the mono samples a
+    /// voice-activity detector reads.
+    ///
+    /// Binding-internal plumbing: a binding that runs voice-activity detection
+    /// calls this right after a `next_chunk` / `try_next_chunk` delivery,
+    /// passing the delivered chunk, and feeds the returned samples (or, on
+    /// `None`, the delivered chunk itself) to the detector. Not part of the
+    /// stable FFI-consumer surface.
+    ///
+    /// The feed is the pre-transform signal from
+    /// [`vad_input`](Self::vad_input) when the tap is active, and the
+    /// delivered chunk otherwise. Either signal is collapsed to mono when it
+    /// carries more than one channel: each interleaved frame becomes one
+    /// sample, the average of its channels. The tap is collapsed at the
+    /// chain's own post-normalize channel count, the count the tapped samples
+    /// are interleaved at; the delivered chunk is collapsed at the stream's
+    /// delivered count.
+    ///
+    /// # Returns
+    /// - `Some(v)`: `v` is the mono detector feed for this delivery.
+    /// - `None`: `delivered` already is the feed; read it directly, with no
+    ///   allocation or copy.
+    ///
+    /// # Thread safety
+    /// As [`vad_input`](Self::vad_input): takes only the tap mutex, so it
+    /// composes with a concurrent [`next_chunk`](Self::next_chunk).
+    pub fn detector_feed(&self, delivered: &[f32]) -> Option<Vec<f32>> {
+        if let Some(tap) = self.vad_input(delivered.len()) {
+            return Some(if self.tap_channels > 1 {
+                crate::sample::downmix_to_mono(&tap, self.tap_channels)
+            } else {
+                tap
+            });
+        }
+        if self.channels > 1 {
+            return Some(crate::sample::downmix_to_mono(delivered, self.channels));
+        }
+        None
+    }
+
     /// Take the last device/driver error reported while streaming, if any.
     ///
     /// When the cpal error callback fires (device unplug, driver failure) it
@@ -1303,6 +1350,12 @@ impl Microphone {
             Some(stage) if stage.has_transform() => Some(Mutex::new(VecDeque::new())),
             _ => None,
         };
+        // The count the tap signal is interleaved at, read from the chain (see
+        // the field docs). With no chain the tap is never active; the device
+        // count stands in.
+        let tap_channels = capture_stage
+            .as_ref()
+            .map_or(channels, CaptureStage::tap_channels);
         let vad_tap_cap = target_rate as usize * VAD_TAP_BOUND_SECS;
         // The tap memory bound must sit far above the chain's conditioning
         // latency, so an actively draining detector never reaches it even when a
@@ -1331,6 +1384,7 @@ impl Microphone {
             capture_stage: capture_stage.map(Mutex::new),
             chain_flushed: AtomicBool::new(false),
             vad_tap,
+            tap_channels,
             vad_tap_cap,
             #[cfg(feature = "aec")]
             aec_reference,
@@ -1374,6 +1428,13 @@ mod tests {
             Some(stage) if stage.has_transform() => Some(Mutex::new(VecDeque::new())),
             _ => None,
         };
+        // As `Microphone::start`: the tap count comes from the chain, with the
+        // given count standing in when there is no chain. The `channels`
+        // argument stays the stream's own (delivered) count, so a test can set
+        // the two apart on purpose.
+        let tap_channels = capture_stage
+            .as_ref()
+            .map_or(channels, CaptureStage::tap_channels);
         let stream = MicrophoneStream {
             _stream: BackendStream::empty(),
             receiver,
@@ -1385,6 +1446,7 @@ mod tests {
             reblock_buffer: Mutex::new(VecDeque::new()),
             capture_stage: capture_stage.map(Mutex::new),
             vad_tap,
+            tap_channels,
             vad_tap_cap: 16000 * VAD_TAP_BOUND_SECS,
             chain_flushed: AtomicBool::new(false),
             #[cfg(feature = "aec")]
@@ -2166,6 +2228,147 @@ mod tests {
             d_mean.abs() < 1e-3,
             "the delivered output has the DC offset removed (post-transform)"
         );
+    }
+
+    /// A capture stage chain whose normalize segment ends above one channel:
+    /// no downmix (the device count equals the target count) and a DC-removal
+    /// transform, so the tap is active and its resolved count is 2. Built
+    /// through `build_capture_stage` exactly as `Microphone::start` builds it.
+    /// The tests that use it fill the tap directly and never run a block
+    /// through the chain: the in-place transform wrappers assert mono, so no
+    /// multichannel signal can cross the transform segment.
+    fn two_channel_tap_chain() -> CaptureStage {
+        build_capture_stage(
+            2,
+            2,
+            16_000,
+            16_000,
+            Transforms {
+                dc_removal: true,
+                ..Default::default()
+            },
+        )
+        .unwrap()
+        .expect("a transform builds a chain")
+    }
+
+    /// `detector_feed` collapses a multichannel tap to mono: each interleaved
+    /// frame becomes the average of its channels, so the feed halves in length
+    /// and a detector reads one channel-averaged signal. Regression: a feed
+    /// handed to a detector interleaved, where the score would read
+    /// consecutive channels as successive mono samples.
+    #[test]
+    fn detector_feed_collapses_a_multichannel_tap() {
+        let (stream, _sender, _running) = test_stream_with(Some(two_channel_tap_chain()), 2);
+
+        let frames = 160;
+        let left: Vec<f32> = (0..frames).map(|i| (i % 8) as f32 * 0.125 - 0.5).collect();
+        let interleaved: Vec<f32> = left.iter().flat_map(|&l| [l, l + 0.5]).collect();
+        let expected: Vec<f32> = left.iter().map(|&l| l + 0.25).collect();
+        stream.push_vad_tap(interleaved.clone());
+
+        // The delivered chunk only sizes the drain here; the tap is what the
+        // feed is derived from.
+        let feed = stream
+            .detector_feed(&interleaved)
+            .expect("a transform keeps the tap active");
+        assert_eq!(
+            feed.len(),
+            frames,
+            "the feed is mono: one sample per interleaved frame"
+        );
+        for (i, (got, want)) in feed.iter().zip(&expected).enumerate() {
+            assert!(
+                (got - want).abs() < 1e-6,
+                "feed sample {i} is the frame's channel average (got {got}, want {want})"
+            );
+        }
+    }
+
+    /// `detector_feed` is the identity on the mono path: with a mono tap the
+    /// feed is the pre-transform signal unchanged in length and value, and
+    /// with no chain it returns `None` so the delivered chunk is read directly
+    /// with no copy. Regression: a collapse that reshapes or rescales a signal
+    /// that is already mono.
+    #[test]
+    fn detector_feed_is_the_identity_on_the_mono_path() {
+        // Mono tap: the feed is the pre-transform (DC-offset-intact) signal.
+        let stage = build_capture_stage(
+            1,
+            1,
+            16_000,
+            16_000,
+            Transforms {
+                dc_removal: true,
+                ..Default::default()
+            },
+        )
+        .unwrap()
+        .expect("dc-only chain");
+        let (stream, sender, running) = test_stream_with(Some(stage), 1);
+        let n = 320;
+        sender.send(make_native_chunk(vec![0.5_f32; n])).unwrap();
+        drop(sender);
+        running.store(false, Ordering::Relaxed);
+        let chunk = stream
+            .next_chunk(n, Some(Duration::from_millis(100)))
+            .expect("the chain delivers")
+            .expect("a full block is buffered");
+        let feed = stream
+            .detector_feed(&chunk.data)
+            .expect("a transform keeps the tap active");
+        assert_eq!(feed.len(), n, "a mono feed keeps its length");
+        assert!(
+            feed.iter().all(|&s| (s - 0.5).abs() < 1e-6),
+            "a mono feed is the pre-transform signal unchanged"
+        );
+
+        // No chain: the delivered chunk already is the feed.
+        let (stream, sender, running) = test_stream();
+        sender.send(make_chunk(0.25)).unwrap();
+        drop(sender);
+        running.store(false, Ordering::Relaxed);
+        let chunk = stream
+            .next_chunk(1, Some(Duration::from_millis(100)))
+            .expect("the direct path delivers")
+            .expect("a block is buffered");
+        assert!(
+            stream.detector_feed(&chunk.data).is_none(),
+            "no chain: the delivered chunk already is the feed"
+        );
+    }
+
+    /// `detector_feed` collapses the tap at the CHAIN's post-normalize count,
+    /// not the stream's delivered count: a stream whose stored delivered count
+    /// is set apart from the chain's tap count on purpose still averages each
+    /// tapped frame at the chain's count. Regression: the derivation quietly
+    /// switching to the delivered count, which reads a signal tapped mid-chain
+    /// at the count of a different point in the chain.
+    #[test]
+    fn detector_feed_reads_the_chain_tap_count_not_the_delivered_count() {
+        // The chain taps at 2 channels; the stream's own count is set to 1.
+        let (stream, _sender, _running) = test_stream_with(Some(two_channel_tap_chain()), 1);
+
+        let frames = 160;
+        let left: Vec<f32> = (0..frames).map(|i| (i % 4) as f32 * 0.25 - 0.375).collect();
+        let interleaved: Vec<f32> = left.iter().flat_map(|&l| [l, l + 0.25]).collect();
+        let expected: Vec<f32> = left.iter().map(|&l| l + 0.125).collect();
+        stream.push_vad_tap(interleaved.clone());
+
+        let feed = stream
+            .detector_feed(&interleaved)
+            .expect("a transform keeps the tap active");
+        assert_eq!(
+            feed.len(),
+            frames,
+            "the collapse runs at the chain's tap count, not the stream's count"
+        );
+        for (i, (got, want)) in feed.iter().zip(&expected).enumerate() {
+            assert!(
+                (got - want).abs() < 1e-6,
+                "feed sample {i} is the frame's channel average (got {got}, want {want})"
+            );
+        }
     }
 
     /// The tap stays aligned with the delivered output through the resampler's
