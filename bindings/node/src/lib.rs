@@ -113,6 +113,15 @@ pub struct DecibriOptions {
     /// converts the reference before the canceller sees it. Consulted only
     /// when `aec` names a model.
     pub aec_reference_sample_rate: Option<u32>,
+    /// Number of channels in the far-end reference pushed through
+    /// `pushAecReference`, at least 1. Absent means the reference is mono;
+    /// when it names a count above 1, the core collapses each interleaved
+    /// frame to one mono sample before the canceller sees it. The declared
+    /// count must match the pushed buffer: a mismatch is not detected and
+    /// raises no error, and shows up only as `aecMetrics().delaySamples`
+    /// staying `null` with no fault reported. Consulted only when `aec`
+    /// names a model.
+    pub aec_reference_channels: Option<u32>,
 }
 
 /// Native bridge class exposed to Node.js via napi-rs.
@@ -275,13 +284,13 @@ fn build_microphone_parts(options: Option<DecibriOptions>) -> Result<MicrophoneP
     // Echo canceller. The model string parses through the canceller's own
     // boundary (`AecModel::from_str`), so the accepted set lives in one place
     // and an unknown name carries the canceller's own message; it is not a
-    // hardcoded list here the way `denoise` and `highpass` are. The tail and
-    // reference-rate checks mirror the JS wrapper's RangeErrors as the native
-    // backstop, like `agc`; the suppression set is the canceller's two-value
-    // policy enum. The capture-rate window (8000..=48000 with AEC on) is
-    // guarded by the core's validate(), reached through `Microphone::new`
-    // below. The three tuning fields are consulted only when `aec` names a
-    // model, matching the core config's contract.
+    // hardcoded list here the way `denoise` and `highpass` are. The tail,
+    // reference-rate and reference-channel checks mirror the JS wrapper's
+    // RangeErrors as the native backstop, like `agc`; the suppression set is
+    // the canceller's two-value policy enum. The capture-rate window
+    // (8000..=48000 with AEC on) is guarded by the core's validate(), reached
+    // through `Microphone::new` below. The four tuning fields are consulted
+    // only when `aec` names a model, matching the core config's contract.
     if let Some(name) = opts.aec.as_deref() {
         let model: decibri::AecModel = name.parse().map_err(|e| {
             Error::new(
@@ -320,6 +329,23 @@ fn build_microphone_parts(options: Option<DecibriOptions>) -> Result<MicrophoneP
                 ));
             }
             config.aec_reference_sample_rate = Some(rate);
+        }
+        if let Some(count) = opts.aec_reference_channels {
+            if count == 0 {
+                return Err(Error::new(
+                    Status::InvalidArg,
+                    "aec referenceChannels must be at least 1",
+                ));
+            }
+            // The only ceiling is the config field's own `u16`, named here at
+            // the boundary it belongs to; the core enforces no maximum.
+            let count: u16 = count.try_into().map_err(|_| {
+                Error::new(
+                    Status::InvalidArg,
+                    "aec referenceChannels must be at most 65535",
+                )
+            })?;
+            config.aec_reference_channels = count;
         }
     }
 

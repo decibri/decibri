@@ -163,6 +163,87 @@ def test_reference_rate_out_of_range_rejected_by_the_dataclass() -> None:
     assert Aec(reference_sample_rate=384000) is not None
 
 
+def test_reference_channels_out_of_range_rejected_by_the_dataclass() -> None:
+    """reference_channels below 1 raises AecConfigInvalid; nothing above is.
+
+    A count of 1 or 2 constructs, and so does the bridge field's own u16
+    ceiling: the count declares the shape of the caller's buffer, so no
+    smaller maximum exists to enforce. Catches the check missing from the
+    dataclass, and a fixed maximum creeping in below the field's own type.
+    """
+    with pytest.raises(
+        exceptions.AecConfigInvalid, match="reference_channels must be at least 1"
+    ):
+        Aec(reference_channels=0)
+    with pytest.raises(
+        exceptions.AecConfigInvalid, match="reference_channels must be at least 1"
+    ):
+        Aec(reference_channels=-2)
+    assert Aec(reference_channels=1) is not None
+    assert Aec(reference_channels=2) is not None
+    assert Aec(reference_channels=65535) is not None
+
+
+def test_reference_channels_reach_the_bridge_on_both_surfaces() -> None:
+    """A declared multichannel reference constructs, sync and async.
+
+    The count past the bridge field's own u16 reports that container bound
+    (pyo3's overflow), not an invented maximum. Catches the field dropped
+    between the dataclass and the bridge.
+    """
+    assert (
+        Microphone(
+            sample_rate=16000,
+            channels=1,
+            aec=Aec(model="tau", reference_channels=2),
+        )
+        is not None
+    )
+    assert (
+        AsyncMicrophone(
+            sample_rate=16000,
+            channels=1,
+            aec=Aec(model="tau", reference_channels=2),
+        )
+        is not None
+    )
+    assert (
+        Microphone(
+            sample_rate=16000,
+            channels=1,
+            aec=Aec(model="tau", reference_channels=65535),
+        )
+        is not None
+    )
+    with pytest.raises(OverflowError):
+        Microphone(
+            sample_rate=16000,
+            channels=1,
+            aec=Aec(model="tau", reference_channels=65536),
+        )
+
+
+def test_bridge_backstop_rejects_a_zero_reference_channel_count() -> None:
+    """A direct bridge consumer bypassing the dataclass gets the core's own
+    rejection.
+
+    The core's validate() reports AecConfigInvalid with its own reason.
+    Catches the core validation disappearing from the construction path.
+    """
+    with pytest.raises(
+        exceptions.AecConfigInvalid,
+        match="the reference channel count must be at least 1",
+    ):
+        _decibri.MicrophoneBridge(
+            sample_rate=16000,
+            channels=1,
+            frames_per_buffer=1600,
+            format="int16",
+            aec="tau",
+            aec_reference_channels=0,
+        )
+
+
 def test_non_string_model_rejected_by_the_dataclass() -> None:
     """A non-string model is a clear ValueError before any bridge work."""
     with pytest.raises(ValueError, match="Invalid aec model"):

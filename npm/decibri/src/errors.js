@@ -83,6 +83,7 @@ const RANGE_PREFIXES = [
   'flac compression level must be between',
   'aec tailMs must be between',
   'aec referenceSampleRate must be between',
+  'aec referenceChannels must be at',
   'Silero VAD only supports',
   'VAD threshold must be between',
   'echo cancellation only supports',

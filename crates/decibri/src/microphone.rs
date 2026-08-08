@@ -198,6 +198,32 @@ pub struct MicrophoneConfig {
     /// Consulted only when [`aec`](Self::aec) names a model.
     #[cfg(feature = "aec")]
     pub aec_reference_sample_rate: Option<u32>,
+    /// Number of channels in the far-end reference the caller pushes through
+    /// [`MicrophoneStream::push_aec_reference`]. The pushed samples are
+    /// expected frame-interleaved at this count; when it is above 1, decibri
+    /// collapses each frame to one mono sample (the channel average) before
+    /// the samples enter the reference queue, so the queue and the canceller
+    /// always carry mono. 1 (the default) means the pushed reference is
+    /// already mono and is taken as is. A count of 0 is rejected by
+    /// [`validate`](Self::validate); there is no upper bound. Consulted only
+    /// when [`aec`](Self::aec) names a model.
+    ///
+    /// The declared count must match the buffer actually pushed. The
+    /// reference arrives as a flat slice whose true channel count is not
+    /// recoverable from its length, so a mismatch is not detected and raises
+    /// no error: the frames are misread, nothing is cancelled, and the
+    /// observable signature is `delay_samples` staying `None` in
+    /// [`MicrophoneStream::aec_metrics`] while the canceller reports no
+    /// fault.
+    ///
+    /// A mono reference against playback through more than one loudspeaker
+    /// has a cancellation ceiling: the echo reaching the microphone is the
+    /// sum of different room responses driven by different signals, and a
+    /// single-reference canceller models one response applied to their
+    /// average, so a placement where those paths differ leaves a residual
+    /// that no amount of adaptation removes.
+    #[cfg(feature = "aec")]
+    pub aec_reference_channels: u16,
 }
 
 impl Default for MicrophoneConfig {
@@ -222,14 +248,17 @@ impl Default for MicrophoneConfig {
             aec_suppression: None,
             #[cfg(feature = "aec")]
             aec_reference_sample_rate: None,
+            #[cfg(feature = "aec")]
+            aec_reference_channels: 1,
         }
     }
 }
 
 impl MicrophoneConfig {
     /// Validate the configuration: sample rate, channel count, buffer size, the
-    /// AGC target, the limiter ceiling, and the echo-cancellation rates (each
-    /// when set) must fall within the supported ranges.
+    /// AGC target, the limiter ceiling, and the echo-cancellation rates and
+    /// reference channel count (each when set) must fall within the supported
+    /// ranges.
     pub fn validate(&self) -> Result<(), DecibriError> {
         if !(1000..=384000).contains(&self.sample_rate) {
             return Err(DecibriError::SampleRateOutOfRange);
@@ -286,6 +315,16 @@ impl MicrophoneConfig {
                 if !(1000..=384000).contains(&rate) {
                     return Err(DecibriError::SampleRateOutOfRange);
                 }
+            }
+            // The declared reference channel count sets the interleave stride
+            // the push collapses by, and a stride of 0 describes no buffer at
+            // all. There is deliberately no upper bound: the count declares the
+            // shape of the caller's own buffer, not a capability decibri
+            // enforces.
+            if self.aec_reference_channels == 0 {
+                return Err(DecibriError::AecConfigInvalid {
+                    reason: "the reference channel count must be at least 1".to_string(),
+                });
             }
         }
         Ok(())
@@ -468,6 +507,13 @@ pub struct MicrophoneStream {
     // duration of every block.
     #[cfg(feature = "aec")]
     aec_reference: Option<Arc<AecReferenceRing>>,
+    // The declared channel count of the pushed far-end reference
+    // ([`MicrophoneConfig::aec_reference_channels`]). Above 1,
+    // [`push_aec_reference`](Self::push_aec_reference) collapses each
+    // interleaved frame to one mono sample before it enters the queue; the
+    // queue itself stays sized and filled in mono samples.
+    #[cfg(feature = "aec")]
+    aec_reference_channels: u16,
 }
 
 #[cfg(feature = "capture")]
@@ -911,10 +957,22 @@ impl MicrophoneStream {
 
     /// Queue far-end reference audio for the echo canceller.
     ///
-    /// `reference` is mono `f32` at
+    /// `reference` is `f32` at
     /// [`MicrophoneConfig::aec_reference_sample_rate`] (the capture
     /// [`sample_rate`](MicrophoneConfig::sample_rate) when that is unset), in
-    /// played order.
+    /// played order, frame-interleaved at
+    /// [`MicrophoneConfig::aec_reference_channels`] (mono at the default of
+    /// 1). With a declared count above 1, each frame is collapsed to one mono
+    /// sample (the channel average) on this call, before the samples enter
+    /// the queue; the queue itself always carries mono. A trailing partial
+    /// frame is dropped.
+    ///
+    /// The declared count must match this buffer's actual interleaving. A
+    /// mismatch is not detected and raises no error, exactly as a reference
+    /// at an undeclared rate is not: the frames are misread, nothing is
+    /// cancelled, and the signature is `delay_samples` staying `None` in
+    /// [`aec_metrics`](Self::aec_metrics) while the canceller reports no
+    /// fault.
     ///
     /// When it is pushed does not have to match when it plays. decibri hands the
     /// canceller the queued reference at the rate the capture consumes it, so a
@@ -945,7 +1003,18 @@ impl MicrophoneStream {
     #[cfg(feature = "aec")]
     pub fn push_aec_reference(&self, reference: &[f32]) {
         if let Some(queue) = &self.aec_reference {
-            queue.push(reference);
+            // The collapse precedes the push, so the queue stays sized and
+            // filled in mono samples whatever count the caller declares. At
+            // the default count of 1 the slice goes in untouched, on the same
+            // path as before the count existed.
+            if self.aec_reference_channels > 1 {
+                queue.push(&crate::sample::downmix_to_mono(
+                    reference,
+                    self.aec_reference_channels,
+                ));
+            } else {
+                queue.push(reference);
+            }
         }
     }
 
@@ -1265,6 +1334,8 @@ impl Microphone {
             vad_tap_cap,
             #[cfg(feature = "aec")]
             aec_reference,
+            #[cfg(feature = "aec")]
+            aec_reference_channels: self.config.aec_reference_channels,
         })
     }
 }
@@ -1318,6 +1389,8 @@ mod tests {
             chain_flushed: AtomicBool::new(false),
             #[cfg(feature = "aec")]
             aec_reference: None,
+            #[cfg(feature = "aec")]
+            aec_reference_channels: 1,
         };
         (stream, sender, running)
     }
@@ -2979,5 +3052,237 @@ mod tests {
         assert_eq!(plain.aec_reference_dropped(), 0);
         assert_eq!(plain.aec_reference_silence(), 0);
         assert!(plain.aec_metrics().is_none());
+    }
+
+    /// A stereo push whose two channels are identical leaves the queue exactly
+    /// what the mono push of the same content leaves, and the mono push itself
+    /// carries the slice through untouched. The averaging arithmetic is pinned
+    /// by `sample::downmix_to_mono`'s own tests; this pins the wiring from the
+    /// declared count to the collapse, where a stride or offset error would
+    /// land interleaved samples in the queue.
+    #[cfg(feature = "aec")]
+    #[test]
+    fn a_duplicated_channel_stereo_push_matches_the_mono_push() {
+        let mono_content = [0.1f32, -0.2, 0.3, -0.4];
+        let stereo: Vec<f32> = mono_content.iter().flat_map(|&s| [s, s]).collect();
+
+        let mono_queue = Arc::new(crate::stage::AecReferenceRing::new(16));
+        let (mono_stream, _s, _r) = test_stream_with_reference(None, 1, Arc::clone(&mono_queue));
+        mono_stream.push_aec_reference(&mono_content);
+        assert_eq!(
+            mono_queue.queued_samples(),
+            mono_content,
+            "the default count of 1 passes the slice through untouched"
+        );
+
+        let queue = Arc::new(crate::stage::AecReferenceRing::new(16));
+        let (stream, _s2, _r2) = test_stream_with_reference(None, 1, Arc::clone(&queue));
+        let stereo_stream = MicrophoneStream {
+            aec_reference_channels: 2,
+            ..stream
+        };
+        stereo_stream.push_aec_reference(&stereo);
+        assert_eq!(
+            queue.queued_samples(),
+            mono_queue.queued_samples(),
+            "duplicated channels collapse to the mono push's own content"
+        );
+    }
+
+    /// A stereo push with different content per channel queues each frame's
+    /// average, and the queue is sized and filled in mono samples after the
+    /// collapse: six frames against a four-sample capacity leave four averages
+    /// queued and two mono samples counted dropped. Catches a collapse that
+    /// takes one channel instead of averaging, and a queue made channel-aware
+    /// (sized or filled in interleaved samples), which would reintroduce the
+    /// undeclared-stereo defect from the other side.
+    #[cfg(feature = "aec")]
+    #[test]
+    fn a_declared_stereo_push_averages_frames_and_fills_the_queue_in_mono() {
+        let frames = [
+            (0.2f32, 0.4f32),
+            (0.0, 1.0),
+            (-0.5, 0.5),
+            (0.6, 0.2),
+            (-1.0, -0.5),
+            (0.3, 0.1),
+        ];
+        let interleaved: Vec<f32> = frames.iter().flat_map(|&(l, r)| [l, r]).collect();
+        let expected: Vec<f32> = frames.iter().map(|&(l, r)| (l + r) / 2.0).collect();
+
+        let queue = Arc::new(crate::stage::AecReferenceRing::new(4));
+        let (stream, _s, _r) = test_stream_with_reference(None, 1, Arc::clone(&queue));
+        let stream = MicrophoneStream {
+            aec_reference_channels: 2,
+            ..stream
+        };
+        stream.push_aec_reference(&interleaved);
+        assert_eq!(
+            queue.queued_samples(),
+            expected[..4],
+            "the queue holds the oldest four frame averages"
+        );
+        assert_eq!(
+            stream.aec_reference_dropped(),
+            2,
+            "the discard is counted in mono samples, after the collapse"
+        );
+    }
+
+    /// A declared reference channel count of 0 is a configuration error
+    /// carrying the echo-canceller configuration identity, and no count above
+    /// 0 is rejected: the count declares the shape of the caller's own buffer,
+    /// so there is no upper bound to enforce. Driven to `u16::MAX` so a fixed
+    /// maximum added later fails here loudly. With echo cancellation off the
+    /// count is not consulted, matching the reference rate.
+    #[cfg(feature = "aec")]
+    #[test]
+    fn aec_rejects_a_zero_reference_channel_count_and_caps_nothing() {
+        let mut config = MicrophoneConfig {
+            aec: Some(decibri_aec::AecModel::default()),
+            aec_reference_channels: 0,
+            ..Default::default()
+        };
+        let err = config.validate().expect_err("a zero count is rejected");
+        assert!(
+            matches!(err, DecibriError::AecConfigInvalid { .. }),
+            "a zero count reports the echo-canceller configuration identity, got {err:?}"
+        );
+        assert_eq!(
+            err.to_string(),
+            "echo canceller configuration error: the reference channel count must be at least 1"
+        );
+        for count in [1u16, 2, 8, 255, 4096, u16::MAX] {
+            config.aec_reference_channels = count;
+            assert!(config.validate().is_ok(), "a count of {count} is accepted");
+        }
+        config.aec = None;
+        config.aec_reference_channels = 0;
+        assert!(
+            config.validate().is_ok(),
+            "the count is consulted only when echo cancellation is on"
+        );
+    }
+
+    /// The failure this field exists for, made deterministic: a stereo far end
+    /// pushed with the count declared lets the delay search lock, and the same
+    /// bytes pushed undeclared never lock and only overfill the queue. Runs
+    /// entirely on synthetic audio through the offline ingest path; the
+    /// estimator cuts frames on sample counts and uses exact arithmetic, so
+    /// the outcome is the same on every run.
+    #[cfg(feature = "aec")]
+    #[test]
+    fn a_declared_stereo_reference_lets_the_delay_search_lock() {
+        /// Deterministic wideband noise from a linear congruential generator,
+        /// scaled to `amplitude`.
+        fn noise(seed: u32, len: usize, amplitude: f32) -> Vec<f32> {
+            let mut state = seed;
+            (0..len)
+                .map(|_| {
+                    state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+                    ((state >> 8) as f32 / (1u32 << 24) as f32 - 0.5) * 2.0 * amplitude
+                })
+                .collect()
+        }
+
+        const RATE: usize = 16_000;
+        const SECONDS: usize = 10;
+        const BLOCK: usize = 320;
+        const DELAY: usize = 640;
+        let len = RATE * SECONDS;
+        // The played (mono) signal, plus a difference signal that puts
+        // different content on each channel while keeping every frame average
+        // exactly the played signal: left carries the sum, right the
+        // difference.
+        let played = noise(0x2001, len, 0.25);
+        let side = noise(0x7f4a_11c3, len, 0.25);
+        let left: Vec<f32> = played.iter().zip(&side).map(|(&m, &d)| m + d).collect();
+        let right: Vec<f32> = played.iter().zip(&side).map(|(&m, &d)| m - d).collect();
+        // The capture is the played signal through a synthetic echo path:
+        // delayed by `DELAY` samples and attenuated.
+        let near: Vec<f32> = (0..len)
+            .map(|i| {
+                if i >= DELAY {
+                    played[i - DELAY] * 0.5
+                } else {
+                    0.0
+                }
+            })
+            .collect();
+
+        for (declared, expect_lock) in [(2u16, true), (1u16, false)] {
+            let queue = Arc::new(crate::stage::AecReferenceRing::new(
+                RATE * AEC_REFERENCE_BOUND_SECS,
+            ));
+            let chain = build_capture_stage(
+                1,
+                1,
+                16_000,
+                16_000,
+                Transforms {
+                    aec: Some(AecSettings {
+                        model: decibri_aec::AecModel::default(),
+                        tail_ms: None,
+                        suppression: None,
+                        reference_rate: 16_000,
+                        reference: Arc::clone(&queue),
+                    }),
+                    ..Default::default()
+                },
+            )
+            .expect("the chain builds")
+            .expect("echo cancellation builds a chain");
+            let (stream, _sender, _running) =
+                test_stream_with_reference(Some(chain), 1, Arc::clone(&queue));
+            let stream = MicrophoneStream {
+                aec_reference_channels: declared,
+                ..stream
+            };
+
+            let mut delivered = VecDeque::new();
+            let mut locked = None;
+            for block in 0..len / BLOCK {
+                let start = block * BLOCK;
+                let interleaved: Vec<f32> = (start..start + BLOCK)
+                    .flat_map(|i| [left[i], right[i]])
+                    .collect();
+                stream.push_aec_reference(&interleaved);
+                stream
+                    .ingest(
+                        &mut delivered,
+                        make_native_chunk(near[start..start + BLOCK].to_vec()),
+                    )
+                    .expect("the chain conditions the block");
+                let metrics = stream.aec_metrics().expect("the stream reports metrics");
+                if let Some(delay) = metrics.delay_samples {
+                    locked = Some(delay);
+                    break;
+                }
+            }
+            if expect_lock {
+                let delay = locked.expect("the declared stereo reference locks the delay search");
+                // The locked value is the engine's alignment offset, not the
+                // bare echo-path delay: the drain feeds each block's reference
+                // before the block's near samples are processed, so the far
+                // frontier leads the near end by up to one block at the
+                // anchor, and the estimator backs the peak off by its onset
+                // margin. The window below covers the path delay plus that
+                // feed lead.
+                assert!(
+                    (DELAY - 64..=DELAY + BLOCK).contains(&delay),
+                    "the locked delay ({delay}) sits at the synthetic echo path ({DELAY}) \
+                     plus the feed lead"
+                );
+            } else {
+                assert!(
+                    locked.is_none(),
+                    "the undeclared stereo reference never locks"
+                );
+                assert!(
+                    stream.aec_reference_dropped() > 0,
+                    "the undeclared stereo push overfills the queue"
+                );
+            }
+        }
     }
 }

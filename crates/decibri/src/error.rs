@@ -278,8 +278,11 @@ pub enum DecibriError {
     /// error:` prefix is the stable part). It carries the canceller's
     /// filter-tail, echo-delay and search-delay window rejections, its
     /// unknown-model rejection, and any error a later canceller release adds.
-    /// Deliberately not feature-gated, so the identity table's coverage stays
-    /// unconditional. Additive variant permitted by `#[non_exhaustive]`.
+    /// [`crate::microphone::MicrophoneConfig::validate`] also returns it, with
+    /// a decibri-authored reason behind the same prefix, for a declared
+    /// reference channel count of 0. Deliberately not feature-gated, so the
+    /// identity table's coverage stays unconditional. Additive variant
+    /// permitted by `#[non_exhaustive]`.
     #[error("echo canceller configuration error: {reason}")]
     AecConfigInvalid { reason: String },
 

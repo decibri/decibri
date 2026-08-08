@@ -387,6 +387,20 @@ impl AecReferenceRing {
             .len()
     }
 
+    /// The queued samples in played order, front to back. Test support like
+    /// [`queued`](Self::queued): the tests that pin what the push leaves in the
+    /// queue read the contents through this; the capture path only ever reads
+    /// through [`drain_into`](Self::drain_into).
+    #[cfg(test)]
+    pub(crate) fn queued_samples(&self) -> Vec<f32> {
+        self.queued
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .iter()
+            .copied()
+            .collect()
+    }
+
     /// Samples discarded because the queue was full, for the lifetime of the
     /// queue.
     pub(crate) fn dropped(&self) -> u64 {

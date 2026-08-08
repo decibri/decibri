@@ -950,6 +950,7 @@ impl MicrophoneBridge {
         aec_tail_ms = None,
         aec_suppression = None,
         aec_reference_sample_rate = None,
+        aec_reference_channels = None,
     ))]
     #[allow(clippy::too_many_arguments)]
     fn new(
@@ -976,6 +977,7 @@ impl MicrophoneBridge {
         aec_tail_ms: Option<u16>,
         aec_suppression: Option<String>,
         aec_reference_sample_rate: Option<u32>,
+        aec_reference_channels: Option<u16>,
     ) -> PyResult<Self> {
         let parsed_format = parse_sample_format(&format).map_err(|e| to_py_err(py, e))?;
         let device_selector = build_device_selector(device.as_ref())?;
@@ -1057,10 +1059,11 @@ impl MicrophoneBridge {
         // denoise and highpass are. The tail check is this layer's eager
         // backstop, using the message the canceller itself reports for the same
         // range at start(); the suppression set is the canceller's two-value
-        // policy enum, checked like highpass. The reference rate and the
-        // capture-rate window (8000..=48000 with AEC on) are guarded by
-        // validate() below. The three tuning fields are consulted only when
-        // `aec` names a model, matching the core config's contract.
+        // policy enum, checked like highpass. The reference rate, the
+        // reference channel count and the capture-rate window (8000..=48000
+        // with AEC on) are guarded by validate() below. The four tuning
+        // fields are consulted only when `aec` names a model, matching the
+        // core config's contract.
         if let Some(name) = aec.as_deref() {
             let model: decibri::AecModel = name
                 .parse()
@@ -1090,6 +1093,7 @@ impl MicrophoneBridge {
                 capture_config.aec_suppression = Some(suppression);
             }
             capture_config.aec_reference_sample_rate = aec_reference_sample_rate;
+            capture_config.aec_reference_channels = aec_reference_channels.unwrap_or(1);
         }
 
         // Value validation runs at construction: a bad sample rate, channel
@@ -1257,8 +1261,9 @@ impl MicrophoneBridge {
         }
     }
 
-    /// Queue far-end reference audio for the echo canceller: mono samples at
-    /// the declared reference rate, in played order. Accepts the same input
+    /// Queue far-end reference audio for the echo canceller: samples at the
+    /// declared reference rate, interleaved at the declared reference channel
+    /// count (mono when undeclared), in played order. Accepts the same input
     /// shapes `SpeakerBridge::write` accepts (bytes in the wire format, or a
     /// numpy ndarray with dtype matching the configured format).
     ///
@@ -1648,6 +1653,7 @@ impl AsyncMicrophoneBridge {
         aec_tail_ms = None,
         aec_suppression = None,
         aec_reference_sample_rate = None,
+        aec_reference_channels = None,
     ))]
     #[allow(clippy::too_many_arguments)]
     fn new(
@@ -1674,6 +1680,7 @@ impl AsyncMicrophoneBridge {
         aec_tail_ms: Option<u16>,
         aec_suppression: Option<String>,
         aec_reference_sample_rate: Option<u32>,
+        aec_reference_channels: Option<u16>,
     ) -> PyResult<Self> {
         let inner = MicrophoneBridge::new(
             py,
@@ -1699,6 +1706,7 @@ impl AsyncMicrophoneBridge {
             aec_tail_ms,
             aec_suppression,
             aec_reference_sample_rate,
+            aec_reference_channels,
         )?;
         Ok(AsyncMicrophoneBridge {
             inner: Arc::new(inner),
