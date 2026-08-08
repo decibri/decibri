@@ -17,8 +17,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Changed
 
-- **BREAKING: `Speaker` and `AsyncSpeaker` no longer raise `ChannelsOutOfRange` for `channels` above 32.** They accept any count above zero. A count above 32 is offered to the device at `start()`, and a device that cannot serve it raises `SpeakerChannelsUnsupported`, where construction previously raised `ChannelsOutOfRange`. `Speaker(channels=0)` still raises `ChannelsOutOfRange` with an unchanged message. How many channels a device serves depends on the `sample_rate` asked for as well as the count. A count above 16383 raises `StreamOpenFailed` naming that limit.
+- **BREAKING: `Speaker` and `AsyncSpeaker` no longer raise `ChannelsOutOfRange` for `channels` above 32.** They accept any count above zero. A count above 32 is offered to the device at `start()`, and a device that cannot serve it raises `SpeakerChannelsUnsupported`, where construction previously raised `ChannelsOutOfRange`. `Speaker(channels=0)` still raises `ChannelsOutOfRange`. How many channels a device serves depends on the `sample_rate` asked for as well as the count. A count above 16383 raises `StreamOpenFailed` naming that limit.
 - **BREAKING: an output channel count above the device's reported figure now raises `SpeakerChannelsUnsupported` where it raised `StreamOpenFailed`.** `StreamOpenFailed` remains the exception for an output open that failed for any other reason.
+- **BREAKING: `ChannelsOutOfRange` now carries the message `channels must be at least 1`.** It carried `channels must be between 1 and 32`, naming an upper bound that neither `Microphone` nor `Speaker` enforces. Code matching `str(exc)` must match the new text. The exception class and the input that raises it are unchanged: `channels=0` on either.
 
 ## [0.9.0] - 2026-08-04
 

@@ -127,7 +127,7 @@ async function testDeterministic() {
   await assertRejects(
     () => Speaker.open({ channels: 0 }),
     RangeError,
-    'channels must be between 1 and 32',
+    'channels must be at least 1',
     'Speaker.open bad channels'
   );
 

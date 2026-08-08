@@ -81,7 +81,7 @@ async function testErrors() {
 
   // channels: bounded below only. A high count is left for the device to
   // answer when the stream opens (Group 8), not refused here.
-  assertThrows(() => new Speaker({ channels: 0 }), RangeError, 'channels must be between 1 and 32');
+  assertThrows(() => new Speaker({ channels: 0 }), RangeError, 'channels must be at least 1');
 
   // dtype
   assertThrows(() => new Speaker({ dtype: 'wav' }), TypeError, "dtype must be 'int16' or 'float32'");

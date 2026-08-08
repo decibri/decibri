@@ -151,7 +151,7 @@ class Microphone extends Readable {
     // additive. The `channels` option is kept for that forward compatibility.
     const channels = options.channels ?? 1;
     if (channels < 1) {
-      throw new RangeError('channels must be between 1 and 32');
+      throw new RangeError('channels must be at least 1');
     }
     if (channels > 1) {
       throw new RangeError('multichannel capture is not supported; channels must be 1 (mono)');

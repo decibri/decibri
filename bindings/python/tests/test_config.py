@@ -112,7 +112,7 @@ def test_zero_channels_is_out_of_range() -> None:
     """A zero channel count raises the plain ChannelsOutOfRange at construction."""
     with pytest.raises(ChannelsOutOfRange) as exc_info:
         Microphone(channels=0)
-    assert str(exc_info.value) == "channels must be between 1 and 32"
+    assert str(exc_info.value) == "channels must be at least 1"
 
 
 @pytest.mark.parametrize(
@@ -179,7 +179,7 @@ def test_speaker_zero_channels_is_out_of_range() -> None:
     """A zero channel count raises at Speaker construction, not at start()."""
     with pytest.raises(ChannelsOutOfRange) as exc_info:
         Speaker(channels=0)
-    assert str(exc_info.value) == "channels must be between 1 and 32"
+    assert str(exc_info.value) == "channels must be at least 1"
 
 
 @pytest.mark.parametrize(
