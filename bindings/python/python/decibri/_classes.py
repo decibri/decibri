@@ -223,6 +223,30 @@ class Aec:
             so the conversion is decibri's rather than the caller's. Range
             1000 to 384000. ``None`` (the default) means the reference is
             already at the capture rate.
+        reference_channels: Number of channels in the far-end reference
+            pushed through ``push_aec_reference``, frame-interleaved. When
+            it names a count above 1, decibri averages each frame to one
+            mono sample before the canceller sees it: a multichannel
+            reference pushed without declaring the count cancels nothing
+            and reports no error, so the collapse is decibri's rather than
+            the caller's. At least 1; no upper bound. 1 (the default)
+            means the reference is already mono.
+
+            The declared count must match the buffer actually pushed. The
+            reference arrives as flat samples whose true channel count is
+            not recoverable from their length, so a mismatch is not
+            detected and raises no error: the frames are misread, nothing
+            is cancelled, and the observable signature is
+            ``aec_metrics().delay_samples`` staying ``None`` while the
+            canceller reports no fault.
+
+            The canceller itself reads one mono reference. Against
+            playback through more than one loudspeaker that is a
+            cancellation ceiling: the echo reaching the microphone is the
+            sum of different room responses driven by different signals,
+            and a single-reference canceller models one response applied
+            to their average, so a placement where those paths differ
+            leaves a residual that no amount of adaptation removes.
 
     Example:
         Microphone(aec=Aec(model="tau", tail_ms=200, reference_sample_rate=24000))
@@ -232,6 +256,7 @@ class Aec:
     tail_ms: int | None = None
     suppression: str | None = None
     reference_sample_rate: int | None = None
+    reference_channels: int = 1
 
     def __post_init__(self) -> None:
         if not isinstance(self.model, str):
@@ -257,6 +282,11 @@ class Aec:
             raise exceptions.SampleRateOutOfRange(
                 f"reference_sample_rate must be in [1000, 384000]; "
                 f"got {self.reference_sample_rate}"
+            )
+        if self.reference_channels < 1:
+            raise exceptions.AecConfigInvalid(
+                f"reference_channels must be at least 1; "
+                f"got {self.reference_channels}"
             )
 
 
@@ -770,21 +800,25 @@ class Microphone:
         aec_tail_ms: int | None
         aec_suppression: str | None
         aec_reference_sample_rate: int | None
+        aec_reference_channels: int | None
         if aec is None:
             aec_model = None
             aec_tail_ms = None
             aec_suppression = None
             aec_reference_sample_rate = None
+            aec_reference_channels = None
         elif isinstance(aec, Aec):
             aec_model = aec.model
             aec_tail_ms = aec.tail_ms
             aec_suppression = aec.suppression
             aec_reference_sample_rate = aec.reference_sample_rate
+            aec_reference_channels = aec.reference_channels
         elif isinstance(aec, str):
             aec_model = aec
             aec_tail_ms = None
             aec_suppression = None
             aec_reference_sample_rate = None
+            aec_reference_channels = None
         else:
             raise ValueError(
                 f"Invalid aec value: {aec!r}. "
@@ -835,6 +869,7 @@ class Microphone:
             aec_tail_ms=aec_tail_ms,
             aec_suppression=aec_suppression,
             aec_reference_sample_rate=aec_reference_sample_rate,
+            aec_reference_channels=aec_reference_channels,
         )
 
         self._vad_enabled = vad_enabled
@@ -1079,10 +1114,18 @@ class Microphone:
         """Queue far-end reference audio for the echo canceller.
 
         ``samples`` is the audio being played out, pushed as it is played, in
-        played order: mono, at the declared ``reference_sample_rate`` (the
-        capture ``sample_rate`` when unset), as ``bytes`` or a
+        played order: at the declared ``reference_sample_rate`` (the capture
+        ``sample_rate`` when unset), interleaved at the declared
+        ``reference_channels`` (mono when unset), as ``bytes`` or a
         ``numpy.ndarray``, the same input shapes ``Speaker.write`` accepts,
-        with dtype matching this microphone's ``dtype``.
+        with dtype matching this microphone's ``dtype``. With
+        ``reference_channels`` above 1, each frame is averaged to one mono
+        sample before the canceller sees it; a multichannel reference pushed
+        without declaring the count cancels nothing and reports no error.
+        The declared count must match this buffer's actual interleaving: a
+        mismatch is not detected and raises no error, and shows up only as
+        ``aec_metrics().delay_samples`` staying ``None`` with no fault
+        reported.
 
         Never blocks and never raises on a full queue: samples that do not
         fit are discarded and counted by ``aec_metrics().reference_dropped``,

@@ -349,21 +349,25 @@ class AsyncMicrophone:
         aec_tail_ms: int | None
         aec_suppression: str | None
         aec_reference_sample_rate: int | None
+        aec_reference_channels: int | None
         if aec is None:
             aec_model = None
             aec_tail_ms = None
             aec_suppression = None
             aec_reference_sample_rate = None
+            aec_reference_channels = None
         elif isinstance(aec, Aec):
             aec_model = aec.model
             aec_tail_ms = aec.tail_ms
             aec_suppression = aec.suppression
             aec_reference_sample_rate = aec.reference_sample_rate
+            aec_reference_channels = aec.reference_channels
         elif isinstance(aec, str):
             aec_model = aec
             aec_tail_ms = None
             aec_suppression = None
             aec_reference_sample_rate = None
+            aec_reference_channels = None
         else:
             raise ValueError(
                 f"Invalid aec value: {aec!r}. "
@@ -407,6 +411,7 @@ class AsyncMicrophone:
             aec_tail_ms=aec_tail_ms,
             aec_suppression=aec_suppression,
             aec_reference_sample_rate=aec_reference_sample_rate,
+            aec_reference_channels=aec_reference_channels,
         )
 
         self._vad_enabled = vad_enabled
@@ -634,11 +639,16 @@ class AsyncMicrophone:
         (a bounded queue behind a short critical section), so a renderer
         callback calls it without awaiting, and the sync and async capture
         surfaces share one contract. Everything else matches
-        ``Microphone.push_aec_reference``: mono samples at the declared
-        ``reference_sample_rate``, in played order, as ``bytes`` or a
-        ``numpy.ndarray`` with dtype matching this microphone's ``dtype``;
-        never raises on a full queue; a push while capture is not running,
-        or with the ``aec`` parameter unset, is a no-op.
+        ``Microphone.push_aec_reference``: samples at the declared
+        ``reference_sample_rate``, interleaved at the declared
+        ``reference_channels`` (mono when unset, averaged to mono above 1),
+        in played order, as ``bytes`` or a ``numpy.ndarray`` with dtype
+        matching this microphone's ``dtype``; never raises on a full queue;
+        a push while capture is not running, or with the ``aec`` parameter
+        unset, is a no-op. The declared count must match this buffer's
+        actual interleaving: a mismatch is not detected and raises no
+        error, and shows up only as ``aec_metrics().delay_samples`` staying
+        ``None`` with no fault reported.
         """
         self._bridge.push_aec_reference(samples)
 

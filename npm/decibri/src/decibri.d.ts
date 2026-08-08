@@ -105,6 +105,32 @@ export interface AecOptions {
    * @range 1000 to 384000
    */
   referenceSampleRate?: number;
+
+  /**
+   * Number of channels in the far-end reference pushed through
+   * `pushAecReference`, frame-interleaved. When it names a count above 1,
+   * decibri averages each frame to one mono sample before the canceller sees
+   * it: a multichannel reference pushed without declaring the count cancels
+   * nothing and reports no error, so the collapse is decibri's rather than
+   * the caller's.
+   *
+   * The declared count must match the buffer actually pushed. The reference
+   * arrives as flat PCM whose true channel count is not recoverable from its
+   * length, so a mismatch is not detected and raises no error: the frames
+   * are misread, nothing is cancelled, and the observable signature is
+   * `aecMetrics().delaySamples` staying `null` while the canceller reports
+   * no fault.
+   *
+   * The canceller itself reads one mono reference. Against playback through
+   * more than one loudspeaker that is a cancellation ceiling: the echo
+   * reaching the microphone is the sum of different room responses driven by
+   * different signals, and a single-reference canceller models one response
+   * applied to their average, so a placement where those paths differ leaves
+   * a residual that no amount of adaptation removes.
+   * @default 1 (mono)
+   * @range at least 1; no upper bound
+   */
+  referenceChannels?: number;
 }
 
 /**
@@ -371,8 +397,14 @@ export declare class Microphone extends Readable {
    * Queue far-end reference audio for the echo canceller: the audio being
    * played out, pushed as it is played, in played order. Accepts the same
    * input shapes `Speaker.write` accepts (a `Buffer`, any TypedArray, or a
-   * `DataView` of PCM bytes in this microphone's `dtype`), mono, at the
-   * declared `referenceSampleRate` (the capture rate when unset).
+   * `DataView` of PCM bytes in this microphone's `dtype`), at the declared
+   * `referenceSampleRate` (the capture rate when unset), interleaved at the
+   * declared `referenceChannels` (mono when unset). With `referenceChannels`
+   * above 1, each frame is averaged to one mono sample before the canceller
+   * sees it. The declared count must match this buffer's actual
+   * interleaving: a mismatch is not detected and raises no error, and shows
+   * up only as `aecMetrics().delaySamples` staying `null` with no fault
+   * reported.
    *
    * Never blocks and never throws on a full queue: samples that do not fit
    * are discarded and counted by `aecMetrics().referenceDropped`. Silence

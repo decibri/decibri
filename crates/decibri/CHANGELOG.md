@@ -14,6 +14,7 @@ For other decibri packages, see:
 ### Added
 
 - `DecibriError::SpeakerChannelsUnsupported`, reported when an output device cannot serve the requested output channel count. Carries the count asked for, the count the device reports (the figure `SpeakerInfo::max_output_channels` carries) and the platform's own message.
+- `MicrophoneConfig::aec_reference_channels`, the channel count of the far-end reference pushed through `MicrophoneStream::push_aec_reference`. Default 1 (mono). With a count above 1 the pushed samples are read as interleaved frames and each frame is averaged to one mono sample before it enters the reference queue, so the queue and the canceller carry mono as before. The collapse is opt-in: a caller pushing a multichannel reference must declare the count, and an undeclared multichannel push keeps its current behaviour, cancelling nothing and reporting no error. The declared count must match the pushed buffer: a mismatch is not detected and raises no error, and shows up only as `delay_samples` staying `None` with no fault reported. A count of 0 is rejected by `MicrophoneConfig::validate` as `AecConfigInvalid`; there is no upper bound. A mono reference against playback through more than one loudspeaker has a cancellation ceiling: the canceller models one room response applied to the channel average, so a placement where the per-loudspeaker echo paths differ leaves a residual that adaptation does not remove.
 
 ### Changed
 

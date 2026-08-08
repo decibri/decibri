@@ -1136,6 +1136,49 @@ assertThrows(
   'aec referenceSampleRate must be a number'
 );
 
+// referenceChannels constructs at 1, 2, and the config field's own u16
+// ceiling: the count declares the shape of the caller's buffer, so no smaller
+// maximum exists to enforce. Catches the option failing to reach the native
+// config, and a fixed maximum creeping in below the field's own type.
+try {
+  const stereoRef = new Microphone({
+    sampleRate: 16000,
+    channels: 1,
+    aec: { model: 'tau', referenceChannels: 2 },
+  });
+  assert(stereoRef instanceof Microphone, 'aec referenceChannels: 2 constructs');
+  stereoRef.stop();
+  const wideRef = new Microphone({
+    sampleRate: 16000,
+    channels: 1,
+    aec: { model: 'tau', referenceChannels: 65535 },
+  });
+  assert(wideRef instanceof Microphone, 'aec referenceChannels: 65535 constructs');
+  wideRef.stop();
+} catch (e) {
+  console.log(`  FAIL: aec referenceChannels construction rejected: ${e.message}`);
+  failed++;
+}
+
+// referenceChannels below 1 is a RangeError; a non-number is a TypeError;
+// past the config field's own u16 the native layer names that container
+// bound, also a RangeError.
+assertThrows(
+  () => new Microphone({ aec: { model: 'tau', referenceChannels: 0 } }),
+  RangeError,
+  'aec referenceChannels must be at least 1'
+);
+assertThrows(
+  () => new Microphone({ aec: { model: 'tau', referenceChannels: 'stereo' } }),
+  TypeError,
+  'aec referenceChannels must be a number'
+);
+assertThrows(
+  () => new Microphone({ aec: { model: 'tau', referenceChannels: 65536 } }),
+  RangeError,
+  'aec referenceChannels must be at most 65535'
+);
+
 // A non-string model in the object form, and a non-option aec value, are
 // TypeErrors from the wrapper before any native work.
 assertThrows(() => new Microphone({ aec: { model: 42 } }), TypeError, 'Invalid aec model');

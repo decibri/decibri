@@ -345,8 +345,8 @@ class Microphone extends Readable {
     // ── Validate AEC ─────────────────────────────────────────────────────────
 
     // Echo cancellation: the 'tau' shorthand names the model, or an
-    // { model, tailMs, suppression, referenceSampleRate } object tunes it;
-    // absence leaves it off. The model name is deliberately NOT checked
+    // { model, tailMs, suppression, referenceSampleRate, referenceChannels }
+    // object tunes it; absence leaves it off. The model name is deliberately NOT checked
     // against a list here: the canceller owns the accepted set, so the native
     // layer parses it (AecModel::from_str) and an unknown name is rejected by
     // the native constructor with the canceller's own message (a DecibriError
@@ -360,11 +360,12 @@ class Microphone extends Readable {
     let aecTailMs;
     let aecSuppression;
     let aecReferenceSampleRate;
+    let aecReferenceChannels;
     if (aec !== undefined) {
       if (typeof aec === 'string') {
         aecModel = aec;
       } else if (aec !== null && typeof aec === 'object' && !Array.isArray(aec)) {
-        const { model, tailMs, suppression, referenceSampleRate } = aec;
+        const { model, tailMs, suppression, referenceSampleRate, referenceChannels } = aec;
         if (typeof model !== 'string') {
           throw new TypeError(
             `Invalid aec model: ${JSON.stringify(model)}. Expected a model name string such as 'tau'.`
@@ -397,9 +398,18 @@ class Microphone extends Readable {
           }
           aecReferenceSampleRate = referenceSampleRate;
         }
+        if (referenceChannels !== undefined) {
+          if (typeof referenceChannels !== 'number' || Number.isNaN(referenceChannels)) {
+            throw new TypeError('aec referenceChannels must be a number');
+          }
+          if (referenceChannels < 1) {
+            throw new RangeError('aec referenceChannels must be at least 1');
+          }
+          aecReferenceChannels = referenceChannels;
+        }
       } else {
         throw new TypeError(
-          `Invalid aec value: ${JSON.stringify(aec)}. Expected a model name such as 'tau', or a config object { model, tailMs, suppression, referenceSampleRate }.`
+          `Invalid aec value: ${JSON.stringify(aec)}. Expected a model name such as 'tau', or a config object { model, tailMs, suppression, referenceSampleRate, referenceChannels }.`
         );
       }
     }
@@ -443,6 +453,7 @@ class Microphone extends Readable {
         aecTailMs,
         aecSuppression,
         aecReferenceSampleRate,
+        aecReferenceChannels,
       },
     };
   }
@@ -605,8 +616,15 @@ class Microphone extends Readable {
    * Queue far-end reference audio for the echo canceller: the audio being
    * played out, pushed as it is played, in played order. Accepts the same
    * input shapes `Speaker.write` accepts (a `Buffer`, any TypedArray, or a
-   * `DataView` of PCM bytes in this microphone's `dtype`), mono, at the
-   * declared `referenceSampleRate` (the capture rate when unset).
+   * `DataView` of PCM bytes in this microphone's `dtype`), at the declared
+   * `referenceSampleRate` (the capture rate when unset), interleaved at the
+   * declared `referenceChannels` (mono when unset). With `referenceChannels`
+   * above 1, each frame is averaged to one mono sample before the canceller
+   * sees it; a multichannel reference pushed without declaring the count
+   * cancels nothing and reports no error. The declared count must match this
+   * buffer's actual interleaving: a mismatch is not detected and raises no
+   * error, and shows up only as `aecMetrics().delaySamples` staying `null`
+   * with no fault reported.
    *
    * Never blocks and never throws on a full queue: samples that do not fit
    * are discarded and counted by `aecMetrics().referenceDropped`, and the
