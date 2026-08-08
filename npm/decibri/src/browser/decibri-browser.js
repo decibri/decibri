@@ -105,6 +105,15 @@ class Microphone extends Emitter {
     if (this._sampleRate < 1000 || this._sampleRate > 384000) {
       throw new RangeError('sample rate must be between 1000 and 384000');
     }
+    // Mono only: the worklet reads a single channel. The classes and the
+    // messages are the node entry's, so the same value is rejected the same
+    // way in both runtimes.
+    if (this._channels < 1) {
+      throw new RangeError('channels must be at least 1');
+    }
+    if (this._channels > 1) {
+      throw new RangeError('multichannel capture is not supported; channels must be 1 (mono)');
+    }
     // The Web Audio specification's floor, as on the browser Speaker: an
     // implementation is required to support up to 32 channels and says nothing
     // above that. Deliberately unlike the native surface, which bounds channels
