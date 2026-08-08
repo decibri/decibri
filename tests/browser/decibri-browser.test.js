@@ -1,4 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { readFileSync } from 'node:fs';
 import pkg from '../../npm/decibri/package.json';
 
 // ── Browser API mocks ────────────────────────────────────────────────────────
@@ -121,7 +122,7 @@ describe('Microphone constructor', () => {
   it('accepts all options', () => {
     const mic = new Microphone({
       sampleRate: 44100,
-      channels: 2,
+      channels: 1,
       framesPerBuffer: 800,
       device: 'mic2',
       dtype: 'float32',
@@ -151,8 +152,29 @@ describe('Microphone constructor validation', () => {
   });
 
   it('throws on invalid channels', () => {
-    expect(() => new Microphone({ channels: 0 })).toThrow('channels');
-    expect(() => new Microphone({ channels: 33 })).toThrow('channels');
+    // The classes and the messages are the node entry's, so the same value is
+    // rejected identically in both runtimes.
+    const below = thrownBy(() => new Microphone({ channels: 0 }));
+    expect(below).toBeInstanceOf(RangeError);
+    expect(below.message).toBe('channels must be at least 1');
+
+    for (const channels of [2, 33]) {
+      const err = thrownBy(() => new Microphone({ channels }));
+      expect(err).toBeInstanceOf(RangeError);
+      expect(err.message).toBe('multichannel capture is not supported; channels must be 1 (mono)');
+    }
+  });
+
+  it('accepts channels 1 and keeps the Web Audio ceiling on record', () => {
+    expect(new Microphone({ channels: 1 })).toBeInstanceOf(Microphone);
+    // The 32-channel bound is unreachable while only 1 is accepted, so pin it
+    // in the source text: the recorded Web Audio floor must stay in place.
+    const source = readFileSync(
+      new URL('../../npm/decibri/src/browser/decibri-browser.js', import.meta.url),
+      'utf8'
+    );
+    expect(source).toContain('this._channels > 32');
+    expect(source).toContain("The Web Audio specification's floor");
   });
 
   it('throws on invalid vad threshold', () => {

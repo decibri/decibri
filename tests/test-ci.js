@@ -736,6 +736,18 @@ const parityCases = [
     type: RangeError,
     message: 'sample rate must be between 1000 and 384000',
   },
+  {
+    label: 'channels 0',
+    options: { channels: 0 },
+    type: RangeError,
+    message: 'channels must be at least 1',
+  },
+  {
+    label: 'channels 2',
+    options: { channels: 2 },
+    type: RangeError,
+    message: 'multichannel capture is not supported; channels must be 1 (mono)',
+  },
 ];
 
 for (const { label, options, type, message } of parityCases) {

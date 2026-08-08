@@ -132,6 +132,8 @@ var decibri = (function() {
 				this._noiseSuppression = options.noiseSuppression ?? true;
 				this._workletUrl = options.workletUrl;
 				if (this._sampleRate < 1e3 || this._sampleRate > 384e3) throw new RangeError("sample rate must be between 1000 and 384000");
+				if (this._channels < 1) throw new RangeError("channels must be at least 1");
+				if (this._channels > 1) throw new RangeError("multichannel capture is not supported; channels must be 1 (mono)");
 				if (this._channels < 1 || this._channels > 32) throw new TypeError(`channels must be between 1 and 32, got ${this._channels}`);
 				if (this._framesPerBuffer < 64 || this._framesPerBuffer > 65536) throw new TypeError(`frames per buffer must be between 64 and 65536, got ${this._framesPerBuffer}`);
 				if (this._dtype !== "int16" && this._dtype !== "float32") throw new TypeError("dtype must be 'int16' or 'float32'");
