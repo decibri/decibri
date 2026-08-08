@@ -73,7 +73,7 @@ class Speaker extends Writable {
     // 'SPEAKER_CHANNELS_UNSUPPORTED' naming the count the device reports.
     const channels = options.channels ?? 1;
     if (channels < 1) {
-      throw new RangeError('channels must be between 1 and 32');
+      throw new RangeError('channels must be at least 1');
     }
 
     const dtype = options.dtype ?? 'int16';

@@ -78,7 +78,7 @@ assertThrows(() => new Microphone({ sampleRate: 384001 }), RangeError, 'sample r
 
 // channels: mono only. A value below 1 is a plain range error; a value above
 // 1 is rejected as multichannel (not silently downmixed to mono).
-assertThrows(() => new Microphone({ channels: 0 }), RangeError, 'channels must be between 1 and 32');
+assertThrows(() => new Microphone({ channels: 0 }), RangeError, 'channels must be at least 1');
 assertThrows(() => new Microphone({ channels: 2 }), RangeError, 'multichannel capture is not supported; channels must be 1 (mono)');
 assertThrows(() => new Microphone({ channels: 33 }), RangeError, 'multichannel capture is not supported; channels must be 1 (mono)');
 
@@ -169,7 +169,7 @@ console.log('--- Group 3: Speaker error messages ---');
 
 assertThrows(() => new Speaker({ sampleRate: 0 }), RangeError, 'sample rate must be between 1000 and 384000');
 assertThrows(() => new Speaker({ sampleRate: 384001 }), RangeError, 'sample rate must be between 1000 and 384000');
-assertThrows(() => new Speaker({ channels: 0 }), RangeError, 'channels must be between 1 and 32');
+assertThrows(() => new Speaker({ channels: 0 }), RangeError, 'channels must be at least 1');
 // Channels is bounded below only. A count above the former cap is no longer
 // refused by the wrapper: it constructs where an output device is present, and
 // fails for a device reason where none is (a CI runner). What it must never be
@@ -1349,7 +1349,7 @@ async function asyncOpenTests() {
   await assertRejects(
     () => Speaker.open({ channels: 0 }),
     RangeError,
-    'channels must be between 1 and 32'
+    'channels must be at least 1'
   );
   // The async factory shares _prepareOptions with the constructor, so it is
   // bounded below only in the same way. Regression: the two validation paths

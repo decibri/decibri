@@ -70,7 +70,7 @@ async function testErrors() {
 
   // channels: mono only. A value below 1 is a plain range error; a value above
   // 1 is rejected as multichannel (not silently downmixed to mono).
-  assertThrows(() => new Microphone({ channels: 0 }), RangeError, 'channels must be between 1 and 32');
+  assertThrows(() => new Microphone({ channels: 0 }), RangeError, 'channels must be at least 1');
   assertThrows(() => new Microphone({ channels: 2 }), RangeError, 'multichannel capture is not supported; channels must be 1 (mono)');
   assertThrows(() => new Microphone({ channels: 33 }), RangeError, 'multichannel capture is not supported; channels must be 1 (mono)');
 

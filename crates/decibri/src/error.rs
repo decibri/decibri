@@ -43,10 +43,11 @@ pub enum DecibriError {
     /// == 0`. Neither surface has an upper bound in its own validation: capture
     /// is mono only and reports [`Self::MultichannelNotSupported`] above one,
     /// and playback leaves the maximum to the device, which answers when the
-    /// stream is opened ([`Self::SpeakerChannelsUnsupported`]). The message is a
-    /// frozen exact-match string that downstream consumers branch on, so its
-    /// text is unchanged.
-    #[error("channels must be between 1 and 32")]
+    /// stream is opened ([`Self::SpeakerChannelsUnsupported`]). The message
+    /// names the floor only, because no upper bound is enforced anywhere. It is
+    /// an exact-match string that downstream consumers branch on, so it is
+    /// frozen at the text below.
+    #[error("channels must be at least 1")]
     ChannelsOutOfRange,
 
     /// A microphone capture configuration requested more than one channel.
@@ -1090,13 +1091,13 @@ mod tests {
     }
 
     /// The `ChannelsOutOfRange` Display message is a frozen exact-match string
-    /// that downstream consumers branch on. Regression: widening the speaker's
-    /// accepted channel count reworded it.
+    /// that downstream consumers branch on, and it names the floor only.
+    /// Regression: a ceiling named in the text that no validation enforces.
     #[test]
     fn channels_out_of_range_message_is_frozen() {
         assert_eq!(
             DecibriError::ChannelsOutOfRange.to_string(),
-            "channels must be between 1 and 32"
+            "channels must be at least 1"
         );
     }
 

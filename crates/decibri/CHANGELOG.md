@@ -18,8 +18,9 @@ For other decibri packages, see:
 
 ### Changed
 
-- **BREAKING: `SpeakerConfig::validate` no longer refuses a channel count above 32.** It bounds `channels` below only. A count above 32 is offered to the device when the stream is opened, and a device that cannot serve it reports `SpeakerChannelsUnsupported` rather than `ChannelsOutOfRange`. Code matching `ChannelsOutOfRange` to detect a rejected output channel count must also match `SpeakerChannelsUnsupported`; `channels: 0` still reports `ChannelsOutOfRange` with an unchanged message. How many channels a device serves depends on the sample rate asked for as well as the count.
+- **BREAKING: `SpeakerConfig::validate` no longer refuses a channel count above 32.** It bounds `channels` below only. A count above 32 is offered to the device when the stream is opened, and a device that cannot serve it reports `SpeakerChannelsUnsupported` rather than `ChannelsOutOfRange`. Code matching `ChannelsOutOfRange` to detect a rejected output channel count must also match `SpeakerChannelsUnsupported`; `channels: 0` still reports `ChannelsOutOfRange`. How many channels a device serves depends on the sample rate asked for as well as the count.
 - **BREAKING: an output channel count above the device's reported figure now reports `SpeakerChannelsUnsupported` where it reported `StreamOpenFailed`.** `StreamOpenFailed` remains the report for an output open that failed for any other reason.
+- **BREAKING: `DecibriError::ChannelsOutOfRange` now displays as `channels must be at least 1`.** It displayed `channels must be between 1 and 32`, naming an upper bound that neither `MicrophoneConfig::validate` nor `SpeakerConfig::validate` enforces. Code matching the message text must match the new text. The variant, its `code()` and the input that reports it are unchanged: a channel count of 0 on either surface.
 - A channel count above 16383 is refused before the platform audio library sees it, as `StreamOpenFailed` naming that limit. 16383 is the largest count the Windows audio API can carry for a 32-bit float stream.
 
 ## [6.0.0] - 2026-08-04
