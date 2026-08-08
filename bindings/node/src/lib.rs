@@ -485,12 +485,10 @@ impl DecibriBridge {
         let running = self.running.clone();
         let format = self.format;
         // After the engine's normalize chain the output is mono, so the block
-        // size and the VAD downmix trigger are counted in OUTPUT channels (read
-        // from the stream), not the device channels. The binding-side downmix
-        // becomes a no-op once the engine has already delivered mono.
+        // size is counted in OUTPUT channels (read from the stream), not the
+        // device channels.
         let output_channels = stream.channels();
         let target_samples = self.frames_per_buffer as usize * output_channels as usize;
-        let channels = output_channels;
         let vad_probability = self.vad_probability.clone();
 
         // Move VAD into the pump thread (SileroVad is Send); it is handed back
@@ -523,28 +521,19 @@ impl DecibriBridge {
                         let frame = chunk.data;
 
                         // Run VAD on the f32 frame (before format conversion).
-                        // Both modes read the signal BEFORE the opt-in
-                        // enhancement step: when the tap is active, drain it;
-                        // otherwise the delivered frame already is that signal.
-                        // Reading the pre-enhancement signal means enabling an
-                        // enhancement step does not change detection, the same
-                        // guarantee for Silero and energy alike. Called once per
-                        // delivered chunk so the tap drains in lockstep. VAD
-                        // models a single channel, so downmix interleaved
-                        // multichannel frames to mono first: feeding interleaved
-                        // samples makes the score read consecutive channels as
-                        // successive mono samples. The interleaved `frame` is
+                        // Both modes read the detector feed the core derives:
+                        // the signal BEFORE the opt-in enhancement step when
+                        // the tap is active, otherwise the delivered frame,
+                        // collapsed to mono by the core when it carries more
+                        // than one channel. Reading the pre-enhancement signal
+                        // means enabling an enhancement step does not change
+                        // detection, the same guarantee for Silero and energy
+                        // alike. Called once per delivered chunk so the tap
+                        // drains in lockstep. The interleaved `frame` is
                         // untouched and is still what gets emitted to JS below.
                         if vad.is_some() || energy_vad {
-                            let pre_enh = pump_stream.vad_input(frame.len());
-                            let vad_frame: &[f32] = pre_enh.as_deref().unwrap_or(&frame);
-                            let downmixed;
-                            let vad_input: &[f32] = if channels > 1 {
-                                downmixed = sample::downmix_to_mono(vad_frame, channels);
-                                &downmixed
-                            } else {
-                                vad_frame
-                            };
+                            let feed = pump_stream.detector_feed(&frame);
+                            let vad_input: &[f32] = feed.as_deref().unwrap_or(&frame);
                             if let Some(ref mut v) = vad {
                                 if let Ok(result) = v.process(vad_input) {
                                     vad_probability

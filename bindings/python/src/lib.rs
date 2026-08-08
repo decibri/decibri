@@ -57,8 +57,7 @@ use decibri::microphone::{
     AudioChunk, DenoiseModel, HighpassFilter, Microphone, MicrophoneConfig, MicrophoneStream,
 };
 use decibri::sample::{
-    downmix_to_mono, f32_le_bytes_to_f32, f32_to_f32_le_bytes, f32_to_i16_le_bytes,
-    i16_le_bytes_to_f32, rms,
+    f32_le_bytes_to_f32, f32_to_f32_le_bytes, f32_to_i16_le_bytes, i16_le_bytes_to_f32, rms,
 };
 use decibri::speaker::{Speaker, SpeakerConfig, SpeakerStream};
 use decibri::vad::{SileroVad, VadConfig};
@@ -741,29 +740,20 @@ impl MicrophoneBridge {
             return Ok(None);
         };
 
-        // Run VAD on the signal BEFORE the opt-in enhancement step. Only read()
-        // touches `vad`, so this lock never contends with stop(). Drain the
-        // pre-enhancement tap once (when a transform is active); otherwise the
-        // delivered chunk already is that signal. Reading the pre-enhancement
-        // signal means enabling enhancement does not change detection in either
-        // mode. Called once per delivered chunk so the tap drains in lockstep.
+        // Run VAD on the detector feed the core derives: the signal BEFORE the
+        // opt-in enhancement step when the tap is active, otherwise the
+        // delivered chunk, collapsed to mono by the core when it carries more
+        // than one channel. Only read() touches `vad`, so this lock never
+        // contends with stop(). Reading the pre-enhancement signal means
+        // enabling enhancement does not change detection in either mode.
+        // Called once per delivered chunk so the tap drains in lockstep.
         // `chunk.data` stays untouched and is what the caller receives below.
         {
             let mut vad_guard = lock_recover(&self.vad);
             let silero = vad_guard.as_mut();
             if self.energy_vad || silero.is_some() {
-                let pre_enh = stream.vad_input(chunk.data.len());
-                let vad_frame: &[f32] = pre_enh.as_deref().unwrap_or(&chunk.data);
-                // VAD models a single channel. Downmix interleaved multichannel
-                // audio to mono first so consecutive channels are not misread as
-                // successive mono samples.
-                let downmixed;
-                let vad_input: &[f32] = if chunk.channels > 1 {
-                    downmixed = downmix_to_mono(vad_frame, chunk.channels);
-                    &downmixed
-                } else {
-                    vad_frame
-                };
+                let feed = stream.detector_feed(&chunk.data);
+                let vad_input: &[f32] = feed.as_deref().unwrap_or(&chunk.data);
                 if let Some(vad) = silero {
                     let result = py
                         .detach(|| vad.process(vad_input))

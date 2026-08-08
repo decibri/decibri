@@ -1136,6 +1136,18 @@ impl CaptureStage {
         self.output_channels
     }
 
+    /// The channel count the [`tap`](Self::tap) signal is interleaved at: the
+    /// count the `normalize` segment ends at.
+    ///
+    /// Resolved at construction by walking the `normalize` stages'
+    /// [`Stage::output_channels`] from the device count the chain was built
+    /// with, so it reports what the stages actually do rather than a count
+    /// named alongside them. A consumer reading the tap collapses or
+    /// interprets it at this count.
+    pub(crate) fn tap_channels(&self) -> u16 {
+        self.tap_channels
+    }
+
     /// The summed algorithmic latency, in samples at the output rate, of the
     /// `transform` (conditioning) stages: the amount by which the delivered,
     /// post-conditioning output trails the post-normalize signal the
@@ -1292,7 +1304,7 @@ pub(crate) fn build_capture_stage(
     // only channel count it accepts, and the rate its engine is constructed at.
     // Nothing runs between it and the VAD tap, so the detector reads the
     // echo-removed signal. The order is pinned by this push position and
-    // `build_orders_aec_last_in_normalize`.
+    // `build_ends_normalize_at_the_canceller`.
     #[cfg(feature = "aec")]
     if let Some(settings) = aec {
         normalize.push(Box::new(AecStage::new(settings, target_rate)?));
@@ -3947,6 +3959,44 @@ mod tests {
         assert!(
             removed >= 20.0,
             "a target-rate reference must cancel the resampled echo (removed {removed:.1} dB)"
+        );
+    }
+
+    /// The canceller holds the LAST slot in the normalize segment, after the
+    /// downmix and the resample, so nothing runs between it and the tap and
+    /// the tap carries the echo-removed signal. A full normalize segment pins
+    /// the position through the stage that answers metrics: only the last
+    /// slot's stage is the canceller. Regression: a stage added to the
+    /// segment's tail, which would push the canceller off the end and hand the
+    /// tap a signal the canceller has not seen.
+    #[cfg(feature = "aec")]
+    #[test]
+    fn build_ends_normalize_at_the_canceller() {
+        let queue = Arc::new(AecReferenceRing::new(16_000));
+        let chain = aec_chain(2, 48_000, 16_000, false, &queue, 16_000);
+        assert_eq!(
+            chain.normalize.len(),
+            3,
+            "downmix, resample, canceller: three normalize stages"
+        );
+        assert!(
+            chain
+                .normalize
+                .last()
+                .expect("a non-empty normalize segment")
+                .aec_metrics()
+                .is_some(),
+            "the canceller holds the last normalize slot"
+        );
+        assert!(
+            chain.normalize[..chain.normalize.len() - 1]
+                .iter()
+                .all(|stage| stage.aec_metrics().is_none()),
+            "no stage before the last is the canceller"
+        );
+        assert!(
+            chain.transform.is_empty(),
+            "with conditioning off the chain ends at the normalize segment"
         );
     }
 
