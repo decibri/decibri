@@ -1,4 +1,4 @@
-//! Voice Activity Detection using the Silero VAD v5 ONNX model.
+//! Voice Activity Detection using the Silero VAD v6.2 ONNX model.
 //!
 //! Silero VAD is a pre-trained ML model that detects human speech in audio.
 //! It runs inference on 512-sample windows (at 16kHz) and returns a speech
@@ -111,7 +111,7 @@ pub struct VadResult {
     pub is_speech: bool,
 }
 
-/// Silero VAD v5 inference engine.
+/// Silero VAD v6.2 inference engine.
 ///
 /// Stateful: maintains LSTM hidden/cell state across calls.
 /// Call `process()` with each audio chunk. Call `reset()` to clear state.
@@ -128,7 +128,7 @@ pub struct SileroVad {
     accumulator: Vec<f32>,
     /// 512 for 16kHz, 256 for 8kHz.
     window_size: usize,
-    /// Silero v5 audio context: the last `context_size` samples of the previous
+    /// Silero v6.2 audio context: the last `context_size` samples of the previous
     /// window, prepended to each window before inference (zeros at start and
     /// after `reset`). The model is fed `context ++ window`, so the input is
     /// `context_size + window_size` samples (576 at 16 kHz). This is separate
@@ -166,7 +166,7 @@ impl SileroVad {
             .with_intra_threads(1)
             .build()?;
 
-        // Silero v5 context size is window_size / 8 (64 at 16 kHz, 32 at 8 kHz).
+        // Silero v6.2 context size is window_size / 8 (64 at 16 kHz, 32 at 8 kHz).
         let context_size = window_size / 8;
 
         Ok(Self {
@@ -238,7 +238,7 @@ impl SileroVad {
     /// `ort::Session` directly. The trait owns the marshaling between
     /// borrowed input slices and the backend's native tensor types.
     fn infer_window(&mut self, window: &[f32]) -> Result<f32, DecibriError> {
-        // Silero v5 requires a `context_size`-sample audio context prepended to
+        // Silero v6.2 requires a `context_size`-sample audio context prepended to
         // each window: the model is fed `context ++ window` (576 samples at
         // 16 kHz). The context is the last `context_size` samples of the
         // previous window (zeros initially / after reset). Feeding only the bare
@@ -333,7 +333,7 @@ impl SileroVad {
         }
 
         // Carry the last context_size samples of this window forward as the
-        // context for the next window (matches Silero v5's `OnnxWrapper`).
+        // context for the next window (matches Silero v6.2's `OnnxWrapper`).
         self.context
             .copy_from_slice(&window[self.window_size - self.context_size..]);
 
@@ -583,7 +583,7 @@ mod tests {
     //
     // The fixture (see `golden_fixture`) alternates silent windows with windows
     // of formant-synthesized voiced audio (a diphthong with breath noise). With
-    // the correct Silero v5 invocation the voiced bursts cross the 0.5 speech
+    // the correct Silero v6.2 invocation the voiced bursts cross the 0.5 speech
     // threshold (peaks around 0.9) while the silent windows stay low (about
     // 0.002 to 0.06), so the trajectory spans both regimes and the two bursts
     // exercise the LSTM and the audio-context carry across silence-to-onset
@@ -591,7 +591,7 @@ mod tests {
     //
     // These EXPECTED_GOLDEN values were regenerated when the Silero context bug
     // was fixed. Earlier the inference path fed only the bare 512-sample window,
-    // omitting the 64-sample audio context Silero v5 requires, so every window
+    // omitting the 64-sample audio context Silero v6.2 requires, so every window
     // (even loud speech) scored at the non-speech floor (~0.0005) and nothing
     // crossed 0.5. The values now reflect the corrected `context ++ window`
     // invocation, where `infer_window` prepends the previous window's last 64

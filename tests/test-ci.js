@@ -1408,6 +1408,150 @@ console.log('--- Group 8g: third-party notice version pins ---');
 console.log('  Group 8g done\n');
 
 // ═══════════════════════════════════════════════════════════════════════════════
+// Group 8h: bundled model pins (deterministic, no hardware required)
+// ═══════════════════════════════════════════════════════════════════════════════
+//
+// Two ONNX models ship inside the main npm package and inside the wheel and the
+// sdist published to PyPI, each next to the models/THIRD-PARTY-NOTICES.md that
+// carries their license notices and the models/README.md that documents their
+// tensor interfaces. The repository holds three copies of that directory: the
+// root `models/` that the Rust tests and examples read, and the two packaged
+// copies. Nothing copies one to the others, so only these assertions hold them
+// together.
+//
+// Each model's SHA-256 is pinned so that replacing a model file fails this suite
+// and forces the notice beside it to be revisited. Pinned alongside each hash is
+// the version the notice states, asserted in both files, so a swap that moves
+// the hash but leaves the label behind fails here rather than shipping a notice
+// naming a version the bytes are not. Each license block inside the notice is
+// hashed against the upstream LICENSE file it reproduces, so the text cannot
+// drift from what its holder wrote. The packaging declarations that carry both
+// files into the published artifacts are asserted as well, because a notice that
+// stops shipping is the failure this guards against.
+
+console.log('--- Group 8h: bundled model pins ---');
+
+{
+  const fs = require('fs');
+  const crypto = require('crypto');
+  const repoRoot = path.join(__dirname, '..');
+  const sha256 = (buf) => crypto.createHash('sha256').update(buf).digest('hex');
+
+  // Directories holding a copy of the two models, their notice and their
+  // interface documentation. The first is the copy the Rust tests read; the
+  // other two are the copies that ship.
+  const modelDirs = [
+    path.join('models'),
+    path.join('npm', 'decibri', 'models'),
+    path.join('bindings', 'python', 'python', 'decibri', 'models'),
+  ];
+  const NOTICE = 'THIRD-PARTY-NOTICES.md';
+  const README = 'README.md';
+
+  // SHA-256 of each bundled model file, with the version the notice states for
+  // it. Moving one of these hashes means a different model is shipping, and the
+  // notice has to be re-checked against the new file's origin before the pin
+  // moves; the version pin beside it is what makes that a failure rather than a
+  // silent mislabel. `noticeVersion` is the notice's exact bullet, `label` the
+  // token both files have to carry.
+  const modelPins = {
+    'silero_vad.onnx': {
+      sha256: '1a153a22f4509e292a94e67d6f9b85e8deb25b4988682b7e174c65279d8788e3',
+      noticeVersion: '- **Version:** v6.2',
+      label: 'v6.2',
+    },
+    'fastenhancer_t.onnx': {
+      sha256: '9ed1b928d18fbead4db69bfbeb4ff99e3007f12abf9887d40fd41732674ccd0d',
+      noticeVersion: '- **Version:** `onnx-vd-v1.0.0`',
+      label: 'onnx-vd-v1.0.0',
+    },
+  };
+
+  for (const [name, pin] of Object.entries(modelPins)) {
+    const copies = modelDirs.map((dir) => fs.readFileSync(path.join(repoRoot, dir, name)));
+    assert(sha256(copies[0]) === pin.sha256, `${modelDirs[0]}/${name} matches its pinned SHA-256`);
+    for (let i = 1; i < copies.length; i++) {
+      assert(
+        copies[i].equals(copies[0]),
+        `${modelDirs[i]}/${name} is byte-identical to ${modelDirs[0]}/${name}`
+      );
+    }
+  }
+
+  // Both files travel with the models, so both are held byte-identical across
+  // the three copies.
+  const readFrom = (dir, file) => fs.readFileSync(path.join(repoRoot, dir, file));
+  for (const file of [NOTICE, README]) {
+    const copies = modelDirs.map((dir) => readFrom(dir, file));
+    for (let i = 1; i < copies.length; i++) {
+      assert(
+        copies[i].equals(copies[0]),
+        `${modelDirs[i]}/${file} is byte-identical to ${modelDirs[0]}/${file}`
+      );
+    }
+  }
+
+  // SHA-256 of each upstream LICENSE file with trailing newlines removed, which
+  // is how the notice carries it inside a fenced block. Silero VAD is
+  // github.com/snakers4/silero-vad; FastEnhancer is github.com/aask1357/fastenhancer.
+  const licensePins = [
+    ['Silero VAD', '2e63e9a38b6e8fc0c7bc37ce174caca1862870856c6daf5697cfb785e925520b'],
+    ['FastEnhancer', '3be376575fa9dfdfdce80b089717b354fb106979ea1ea8e56469260ed7005b24'],
+  ];
+  const noticeText = readFrom(modelDirs[0], NOTICE).toString('utf8').replace(/\r\n/g, '\n');
+  const readmeText = readFrom(modelDirs[0], README).toString('utf8').replace(/\r\n/g, '\n');
+  const blocks = [...noticeText.matchAll(/```text\n([\s\S]*?)```/g)].map((m) => m[1]);
+  assert(
+    blocks.length === licensePins.length,
+    `models/${NOTICE} carries ${licensePins.length} fenced license blocks (found ${blocks.length})`
+  );
+  licensePins.forEach(([label, pin], i) => {
+    const payload = (blocks[i] || '').replace(/\n+$/, '');
+    assert(
+      sha256(Buffer.from(payload, 'utf8')) === pin,
+      `models/${NOTICE} reproduces the ${label} LICENSE unaltered`
+    );
+  });
+
+  for (const [name, pin] of Object.entries(modelPins)) {
+    assert(noticeText.includes(name), `models/${NOTICE} names ${name}`);
+    assert(readmeText.includes(name), `models/${README} names ${name}`);
+    assert(
+      noticeText.includes(pin.noticeVersion),
+      `models/${NOTICE} states ${pin.label} for ${name}`
+    );
+    assert(readmeText.includes(pin.label), `models/${README} states ${pin.label} for ${name}`);
+  }
+
+  // The split only works if a reader of the interface documentation is sent to
+  // the notice, so the pointer is asserted rather than left to convention.
+  assert(readmeText.includes(NOTICE), `models/${README} points at ${NOTICE}`);
+
+  // The notice only satisfies the license if it reaches the published artifacts.
+  // These declarations are what carry it there. npm packs the whole directory,
+  // so one entry covers both files; maturin names each path explicitly.
+  assert(
+    Array.isArray(pkg.files) && pkg.files.includes('models/'),
+    'npm/decibri/package.json packs models/'
+  );
+  const pyproject = fs.readFileSync(
+    path.join(repoRoot, 'bindings', 'python', 'pyproject.toml'),
+    'utf8'
+  );
+  for (const file of [NOTICE, README]) {
+    const declaration = new RegExp(
+      `path\\s*=\\s*"python/decibri/models/${file.replace(/\./g, '\\.')}",\\s*format\\s*=\\s*\\["sdist",\\s*"wheel"\\]`
+    );
+    assert(
+      declaration.test(pyproject),
+      `bindings/python/pyproject.toml ships models/${file} in the sdist and the wheel`
+    );
+  }
+}
+
+console.log('  Group 8h done\n');
+
+// ═══════════════════════════════════════════════════════════════════════════════
 // Group 9: async open() factories (deterministic, no hardware required)
 // ═══════════════════════════════════════════════════════════════════════════════
 //

@@ -293,7 +293,7 @@ mic.on('silence', () => console.log('silent'));
 
 ### Silero mode
 
-ML-based detection using the Silero VAD v5 model. More accurate than energy mode, especially in noisy environments.
+ML-based detection using the Silero VAD v6.2 model. More accurate than energy mode, especially in noisy environments.
 
 ```javascript
 const mic = new Microphone({ vad: { model: 'silero', threshold: 0.5 } });

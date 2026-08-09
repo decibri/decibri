@@ -15,12 +15,18 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - `SpeakerChannelsUnsupported`, raised when an output device cannot serve the requested `channels`. The message names the count asked for, the count the device reports (the figure `SpeakerInfo.max_output_channels` carries) and the platform's own message.
 - `reference_channels` on the `Aec` dataclass: the channel count of the far-end reference pushed through `push_aec_reference`. Default 1 (mono). With a count above 1 the pushed samples are read as interleaved frames and each frame is averaged to one mono sample before the canceller sees it. The collapse is opt-in: a caller pushing a multichannel reference must declare the count, and an undeclared multichannel push keeps its current behaviour, cancelling nothing and reporting no error. The declared count must match the pushed buffer: a mismatch is not detected and raises no error, and shows up only as `aec_metrics().delay_samples` staying `None` with no fault reported. A count below 1 raises `AecConfigInvalid`; the only ceiling is the field's own 16-bit carrier. A mono reference against playback through more than one loudspeaker has a cancellation ceiling: the canceller models one room response applied to the channel average, so a placement where the per-loudspeaker echo paths differ leaves a residual that adaptation does not remove.
 - The wheel now includes `decibri/_ort/THIRD-PARTY-NOTICES.md`, the third-party license notices for the bundled ONNX Runtime dynamic library it ships alongside and for the third-party material incorporated into it, with a source-availability statement for the MPL-2.0-licensed Eigen code it contains.
+- The wheel and the sdist now include `decibri/models/THIRD-PARTY-NOTICES.md`, carrying the origin, version and license text for the two bundled ONNX models together with the training-data attribution the denoise checkpoint requires. It ships beside the weights it covers. `decibri/models/README.md` alongside it documents each model's tensor interface and points at the notice.
 
 ### Changed
 
 - **BREAKING: `Speaker` and `AsyncSpeaker` no longer raise `ChannelsOutOfRange` for `channels` above 32.** They accept any count above zero. A count above 32 is offered to the device at `start()`, and a device that cannot serve it raises `SpeakerChannelsUnsupported`, where construction previously raised `ChannelsOutOfRange`. `Speaker(channels=0)` still raises `ChannelsOutOfRange`. How many channels a device serves depends on the `sample_rate` asked for as well as the count. A count above 16383 raises `StreamOpenFailed` naming that limit.
 - **BREAKING: an output channel count above the device's reported figure now raises `SpeakerChannelsUnsupported` where it raised `StreamOpenFailed`.** `StreamOpenFailed` remains the exception for an output open that failed for any other reason.
 - **BREAKING: `ChannelsOutOfRange` now carries the message `channels must be at least 1`.** It carried `channels must be between 1 and 32`, naming an upper bound that neither `Microphone` nor `Speaker` enforces. Code matching `str(exc)` must match the new text. The exception class and the input that raises it are unchanged: `channels=0` on either.
+
+### Fixed
+
+- The bundled Silero VAD model is documented as v6.2, the version that ships. The notice beside the model in the wheel named v5. Which model file ships is unchanged.
+- The Silero VAD tensor specification in `decibri/models/README.md` names the tensors the model exposes: `input`, `state` and `sr` in, `output` and `stateN` out. It described a four-input form carrying separate `h` and `c` LSTM tensors.
 
 ## [0.9.0] - 2026-08-04
 
