@@ -42,7 +42,7 @@ export interface VersionInfo {
 export interface VadOptions {
   /**
    * Which detector to run.
-   * - `'silero'`: Silero VAD v5 ML model (more accurate, ~1ms inference)
+   * - `'silero'`: Silero VAD v6.2 ML model (more accurate, ~1ms inference)
    * - `'energy'`: RMS energy threshold (lightweight, no model)
    */
   model: 'silero' | 'energy';
@@ -237,7 +237,7 @@ export interface MicrophoneOptions extends ReadableOptions {
   /**
    * Voice activity detection. One of:
    * - `false`: disabled (default)
-   * - `'silero'`: Silero VAD v5 ML model (more accurate, ~1ms inference)
+   * - `'silero'`: Silero VAD v6.2 ML model (more accurate, ~1ms inference)
    * - `'energy'`: RMS energy threshold (lightweight)
    * - a `VadOptions` config object `{ model, threshold?, holdoffMs? }` to tune
    *   the threshold and holdoff for the chosen model

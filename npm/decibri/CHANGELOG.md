@@ -16,6 +16,7 @@ For other decibri packages, see:
 - Error code `SPEAKER_CHANNELS_UNSUPPORTED` on `DecibriError`, for an output device that cannot serve the requested `channels`. The message names the count asked for, the count the device reports (the figure `SpeakerInfo.maxOutputChannels` carries) and the platform's own message.
 - `referenceChannels` on the `aec` option object: the channel count of the far-end reference pushed through `pushAecReference`. Default 1 (mono). With a count above 1 the pushed samples are read as interleaved frames and each frame is averaged to one mono sample before the canceller sees it. The collapse is opt-in: a caller pushing a multichannel reference must declare the count, and an undeclared multichannel push keeps its current behaviour, cancelling nothing and reporting no error. The declared count must match the pushed buffer: a mismatch is not detected and raises no error, and shows up only as `aecMetrics().delaySamples` staying `null` with no fault reported. A count below 1 throws a `RangeError`; the only ceiling is the option's own 16-bit carrier. A mono reference against playback through more than one loudspeaker has a cancellation ceiling: the canceller models one room response applied to the channel average, so a placement where the per-loudspeaker echo paths differ leaves a residual that adaptation does not remove.
 - Each of the four platform packages (`@decibri/decibri-win32-x64-msvc`, `@decibri/decibri-darwin-arm64`, `@decibri/decibri-linux-x64-gnu`, `@decibri/decibri-linux-arm64-gnu`) now includes `THIRD-PARTY-NOTICES.md`, the third-party license notices for the ONNX Runtime dynamic libraries the package carries and for the third-party material incorporated into them, with a source-availability statement for the MPL-2.0-licensed Eigen code they contain.
+- `models/THIRD-PARTY-NOTICES.md`, carrying the origin, version and license text for the two bundled ONNX models together with the training-data attribution the denoise checkpoint requires. It ships beside the weights it covers. `models/README.md` alongside it documents each model's tensor interface and points at the notice.
 
 ### Changed
 
@@ -24,6 +25,11 @@ For other decibri packages, see:
 - **BREAKING: the `RangeError` thrown for a `channels` count below 1 now carries the message `channels must be at least 1`.** It carried `channels must be between 1 and 32`, naming an upper bound that neither `Microphone` nor `Speaker` enforces. Code matching the message text must match the new text. The error class and the input that throws it are unchanged: `channels: 0` on either constructor or `open()`.
 - **BREAKING: the browser `Microphone` rejects a `channels` count above 1.** It accepted 1 to 32 and delivered the first channel only. A count above 1 now throws `RangeError: multichannel capture is not supported; channels must be 1 (mono)`, and a count below 1 throws `RangeError: channels must be at least 1` where it threw a `TypeError`. Both class and message are the Node entry's for the same values, so the two entries reject the same input the same way. `channels: 1` is unchanged.
 - The browser `Speaker` is unchanged. It still accepts 1 to 32 channels, the range the Web Audio specification requires an implementation to support, and keeps its own `channels must be between 1 and 32, got <n>` message, which that range does enforce.
+
+### Fixed
+
+- The bundled Silero VAD model is documented as v6.2, the version that ships. The `model` field on `VadOptions`, the `vad` option on `MicrophoneOptions`, the README and the notice beside the model named v5. Which model file ships is unchanged.
+- The Silero VAD tensor specification in `models/README.md` names the tensors the model exposes: `input`, `state` and `sr` in, `output` and `stateN` out. It described a four-input form carrying separate `h` and `c` LSTM tensors.
 
 ## [5.4.0] - 2026-08-04
 

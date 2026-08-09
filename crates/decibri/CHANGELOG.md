@@ -23,6 +23,10 @@ For other decibri packages, see:
 - **BREAKING: `DecibriError::ChannelsOutOfRange` now displays as `channels must be at least 1`.** It displayed `channels must be between 1 and 32`, naming an upper bound that neither `MicrophoneConfig::validate` nor `SpeakerConfig::validate` enforces. Code matching the message text must match the new text. The variant, its `code()` and the input that reports it are unchanged: a channel count of 0 on either surface.
 - A channel count above 16383 is refused before the platform audio library sees it, as `StreamOpenFailed` naming that limit. 16383 is the largest count the Windows audio API can carry for a 32-bit float stream.
 
+### Fixed
+
+- The `vad` module and `SileroVad` documentation name Silero VAD v6.2. They named v5. The inference path, the tensor names it binds and the VAD outputs it produces are unchanged.
+
 ## [6.0.0] - 2026-08-04
 
 ### Added

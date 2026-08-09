@@ -209,7 +209,7 @@ Supports:
 Decibri ships two VAD modes:
 
 - **Energy mode**: lightweight RMS threshold.
-- **Silero mode**: ML-based detection using the Silero VAD v5 ONNX model. More accurate, especially in noisy environments. The model (~2.3 MB) is bundled; no downloads or API keys required.
+- **Silero mode**: ML-based detection using the Silero VAD v6.2 ONNX model. More accurate, especially in noisy environments. The model (~2.3 MB) is bundled; no downloads or API keys required.
 
 ```python
 import decibri

@@ -90,7 +90,9 @@ include = [
     { path = "python/decibri/models/fastenhancer_t.onnx", format = ["sdist", "wheel"] },
     # The model notice file (license text plus dataset attribution) ships next
     # to the weights so the required attribution travels with the files it
-    # covers, in both the sdist and the wheel.
+    # covers, in both the sdist and the wheel. README.md alongside it documents
+    # each model's tensor interface.
+    { path = "python/decibri/models/THIRD-PARTY-NOTICES.md", format = ["sdist", "wheel"] },
     { path = "python/decibri/models/README.md", format = ["sdist", "wheel"] },
     # Per-platform ONNX Runtime dynamic library bundled by python-ci.yml's
     # download/extract step before maturin runs. Wheel-only: the dylib is
