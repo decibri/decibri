@@ -8,7 +8,13 @@ For Rust core (`crates/decibri`) and npm package (`npm/decibri`) changes, see [t
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.10.0] - 2026-08-10
+
+### Breaking changes
+
+- **`ChannelsOutOfRange` carries the message `channels must be at least 1`.** It carried `channels must be between 1 and 32`, naming an upper bound that neither `Microphone` nor `Speaker` enforces. Code that matches `str(exc)` exactly stops matching and has to be updated to the new text. Nothing else about the exception moves: the class, its place in the exception hierarchy and the input that raises it are unchanged, that input being `channels=0` on either.
+- **`Speaker` and `AsyncSpeaker` accept a `channels` count above 32.** Construction raised `ChannelsOutOfRange`. They now accept any count above zero, offer the count to the device at `start()`, and a device that cannot serve it raises `SpeakerChannelsUnsupported` from `start()`. Code that relied on construction raising to reject an unsupported output channel count has to catch `SpeakerChannelsUnsupported` at `start()` instead. `Speaker(channels=0)` still raises `ChannelsOutOfRange` at construction, and a count above 16383 still raises `StreamOpenFailed` naming that limit. How many channels a device serves depends on the `sample_rate` asked for as well as the count.
+- **An output channel count above the device's reported figure raises `SpeakerChannelsUnsupported`.** It raised `StreamOpenFailed`. Code catching `StreamOpenFailed` to detect an unsupported output channel count has to catch `SpeakerChannelsUnsupported` as well, and cannot drop `StreamOpenFailed`, because a device that reports no figure at all keeps `StreamOpenFailed` for the same condition. `StreamOpenFailed` is otherwise unchanged and remains the exception for an output open that failed for any other reason. Both are `DecibriError` subclasses, so `except DecibriError:` catches them together unchanged.
 
 ### Added
 
@@ -19,9 +25,6 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Changed
 
-- **BREAKING: `Speaker` and `AsyncSpeaker` no longer raise `ChannelsOutOfRange` for `channels` above 32.** They accept any count above zero. A count above 32 is offered to the device at `start()`, and a device that cannot serve it raises `SpeakerChannelsUnsupported`, where construction previously raised `ChannelsOutOfRange`. `Speaker(channels=0)` still raises `ChannelsOutOfRange`. How many channels a device serves depends on the `sample_rate` asked for as well as the count. A count above 16383 raises `StreamOpenFailed` naming that limit.
-- **BREAKING: an output channel count above the device's reported figure now raises `SpeakerChannelsUnsupported` where it raised `StreamOpenFailed`.** `StreamOpenFailed` remains the exception for an output open that failed for any other reason.
-- **BREAKING: `ChannelsOutOfRange` now carries the message `channels must be at least 1`.** It carried `channels must be between 1 and 32`, naming an upper bound that neither `Microphone` nor `Speaker` enforces. Code matching `str(exc)` must match the new text. The exception class and the input that raises it are unchanged: `channels=0` on either.
 - ONNX Runtime telemetry is disabled on the environment decibri commits when it initializes the runtime, where it was left at ONNX Runtime's own default of enabled. This covers every path that reaches the runtime: `vad="silero"` and the ACE `denoise` stage. Set `DECIBRI_ORT_TELEMETRY=1` in the environment before first use to leave it enabled; every other value, an empty value, and an absent variable leave it disabled. Two limits apply on Windows and decibri can close neither. ONNX Runtime logs one process-information event while the environment is being created, before the setting is applied, and logs it once per process, so that event is emitted whichever way the setting is left. The runtime also assigns its telemetry state from the Windows tracing session through an ETW callback, so the platform can re-enable telemetry after decibri has disabled it. On other platforms ONNX Runtime's telemetry provider does nothing. No class, parameter, exception or message text changes.
 
 ### Fixed
