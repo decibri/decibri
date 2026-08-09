@@ -194,6 +194,12 @@ Under `ort-load-dynamic` (default), the ONNX Runtime shared library is located a
 
 See the [ONNX Runtime linking docs](https://ort.pyke.io/setup/linking) for the full runtime-loading reference.
 
+### Telemetry
+
+ONNX Runtime carries its own telemetry, separate from anything decibri does. Decibri disables it on the environment it commits when it initializes the runtime. Set `DECIBRI_ORT_TELEMETRY=1` before first use to leave it enabled; every other value, an empty value, and an absent variable leave it disabled.
+
+Two limits apply on Windows and decibri can close neither, so decibri does not claim that no telemetry is emitted. ONNX Runtime logs one process-information event while the environment is being created, before the setting is applied, and logs it once per process, so that event is emitted whichever way the setting is left. The runtime also assigns its telemetry state from the Windows tracing session through an ETW callback, so the platform can re-enable telemetry after decibri has disabled it. On other platforms ONNX Runtime's telemetry provider does nothing.
+
 ### Fork safety (Linux)
 
 ONNX Runtime initialized in a parent process does not survive `fork()` cleanly: internal threads, memory pools, and device handles belonging to the parent may misbehave in the child. Python consumers should use `multiprocessing.set_start_method('spawn', force=True)` before importing decibri. Node.js consumers using `child_process` or `worker_threads` are unaffected.

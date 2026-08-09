@@ -194,6 +194,42 @@ fn wrap_init_error(path: Option<&Path>, err: ort::Error) -> DecibriError {
     }
 }
 
+/// Whether an environment value re-enables ONNX Runtime telemetry.
+///
+/// Only the exact value `1` does. Every other value, an empty value, and an
+/// absent variable leave telemetry disabled.
+///
+/// Split from the environment read so the parse is testable without mutating
+/// the process environment.
+fn telemetry_enabled_from(value: Option<&str>) -> bool {
+    value == Some("1")
+}
+
+/// Whether ONNX Runtime telemetry is enabled for this process, read from
+/// `DECIBRI_ORT_TELEMETRY`.
+///
+/// Decibri disables ONNX Runtime telemetry, and [`do_ort_init`] applies this
+/// to every builder chain it holds. A chain added there must carry it too.
+///
+/// Two limits bound what that achieves. Both are Windows-only and neither can
+/// be closed from here, so decibri must never state that no telemetry is
+/// emitted. ONNX Runtime logs one process-information event from inside
+/// `CreateEnv` (`Environment::Initialize` in `core/session/environment.cc`);
+/// `ort` applies this setting only after `CreateEnv` returns, and the event is
+/// guarded by a once-per-process flag, so it is emitted whichever way the
+/// setting is left. Separately, the runtime's ETW enable callback assigns its
+/// enabled flag from the tracing session
+/// (`WindowsTelemetry::ORT_TL_EtwEnableCallback` in
+/// `core/platform/windows/telemetry.cc`), so the platform can re-enable
+/// telemetry after decibri has disabled it.
+///
+/// On other targets ONNX Runtime's telemetry provider is a stub whose methods
+/// do nothing.
+fn telemetry_enabled() -> bool {
+    let value = std::env::var("DECIBRI_ORT_TELEMETRY").ok();
+    telemetry_enabled_from(value.as_deref())
+}
+
 /// Perform the actual ORT init call. Split out by distribution-mode feature
 /// so `init_ort_once` stays single-path.
 ///
@@ -204,17 +240,29 @@ fn wrap_init_error(path: Option<&Path>, err: ort::Error) -> DecibriError {
 /// statically linked into the binary and any path argument is meaningless.
 /// The path is ignored; we call `ort::init()` to commit an
 /// `EnvironmentBuilder` so our OnceLock bookkeeping fires.
+///
+/// Every chain carries [`telemetry_enabled`]; see its documentation for the
+/// default and the limits on it.
 #[cfg(feature = "ort-load-dynamic")]
 fn do_ort_init(path: Option<&Path>) -> Result<bool, ort::Error> {
+    let telemetry = telemetry_enabled();
     match path {
-        Some(p) => ort::init_from(p).map(|b| b.with_name("decibri").commit()),
-        None => Ok(ort::init().with_name("decibri").commit()),
+        Some(p) => {
+            ort::init_from(p).map(|b| b.with_name("decibri").with_telemetry(telemetry).commit())
+        }
+        None => Ok(ort::init()
+            .with_name("decibri")
+            .with_telemetry(telemetry)
+            .commit()),
     }
 }
 
 #[cfg(not(feature = "ort-load-dynamic"))]
 fn do_ort_init(_path: Option<&Path>) -> Result<bool, ort::Error> {
-    Ok(ort::init().with_name("decibri").commit())
+    Ok(ort::init()
+        .with_name("decibri")
+        .with_telemetry(telemetry_enabled())
+        .commit())
 }
 
 /// Initialize ORT exactly once per process.
@@ -1028,7 +1076,7 @@ mod tests {
                 (
                     "sr",
                     OnnxTensorView {
-                        shape: &[1],
+                        shape: &[],
                         data: OnnxTensorData::I64(&sr),
                     },
                 ),
@@ -1097,8 +1145,9 @@ mod tests {
     /// inference with deterministic zero-filled inputs, verify output
     /// structure (shape + dtype) without asserting exact values.
     ///
-    /// The entire `onnx` module is `#[cfg(feature = "vad")]`-gated, so this
-    /// test only runs with vad enabled (which is the default feature set).
+    /// The `onnx` module is gated on `any(vad, all(capture, denoise))` in
+    /// `lib.rs`, so this test runs in a capture plus denoise build as well as
+    /// with vad enabled (which is the default feature set).
     #[test]
     fn ort_backed_session_runs_silero_inference() {
         use std::path::Path;
@@ -1153,7 +1202,7 @@ mod tests {
                     (
                         "sr",
                         OnnxTensorView {
-                            shape: &[1],
+                            shape: &[],
                             data: OnnxTensorData::I64(&sr),
                         },
                     ),
@@ -1174,6 +1223,91 @@ mod tests {
         match &state_n.data {
             OnnxTensorOwned::F32(v) => assert_eq!(v.len(), 256, "Silero `stateN` is 256 f32s"),
             OnnxTensorOwned::I64(_) => panic!("Silero `stateN` is f32, not i64"),
+        }
+    }
+
+    /// The rank decibri passes for Silero's `sr` input must be the rank the
+    /// model declares. ORT accepts a rank-1 `[1]` tensor for a rank-0 scalar
+    /// input because the element count matches, so a rank mismatch produces no
+    /// error and no wrong answer today. Reading the declared rank from the
+    /// model itself is the only thing that catches a regression here.
+    ///
+    /// Gated on `vad`: `crate::vad` (and so `SR_SHAPE`) is absent from a
+    /// denoise-only build, which this module also serves.
+    #[cfg(feature = "vad")]
+    #[test]
+    fn silero_sr_input_rank_matches_the_model() {
+        use std::path::Path;
+
+        use ort::session::Session;
+        use ort::value::ValueType;
+
+        let manifest_dir = env!("CARGO_MANIFEST_DIR");
+        let model = Path::new(manifest_dir)
+            .join("..")
+            .join("..")
+            .join("models")
+            .join("silero_vad.onnx");
+        if !model.is_file() {
+            eprintln!(
+                "skipping silero_sr_input_rank_matches_the_model: model not found at {}",
+                model.display()
+            );
+            return;
+        }
+
+        super::init_ort_once(None).expect("ORT init should succeed");
+
+        let session = Session::builder()
+            .expect("session builder")
+            .commit_from_file(&model)
+            .expect("bundled Silero model should load");
+
+        let sr = session
+            .inputs()
+            .iter()
+            .find(|input| input.name() == "sr")
+            .expect("Silero declares an `sr` input");
+        let declared_rank = match sr.dtype() {
+            ValueType::Tensor { shape, .. } => shape.len(),
+            other => panic!("Silero `sr` should be a tensor input, got {other:?}"),
+        };
+
+        assert_eq!(
+            declared_rank, 0,
+            "Silero declares `sr` as a rank-0 i64 scalar"
+        );
+        assert_eq!(
+            crate::vad::SR_SHAPE.len(),
+            declared_rank,
+            "the `sr` shape decibri passes must match the model's declared rank"
+        );
+    }
+
+    /// ONNX Runtime telemetry is off unless `DECIBRI_ORT_TELEMETRY` is exactly
+    /// `1`, so an unset, empty, `0` or otherwise-spelled value leaves it
+    /// disabled.
+    ///
+    /// This pins the parse and the default and nothing beyond them. Whether
+    /// ONNX Runtime stops emitting is not observable from a test: the state is
+    /// a static inside the runtime with no read-back in its C API, the
+    /// environment is committed once per process, and the events are Windows
+    /// ETW.
+    #[test]
+    fn ort_telemetry_is_off_unless_the_variable_is_exactly_one() {
+        assert!(
+            !super::telemetry_enabled_from(None),
+            "an absent variable leaves telemetry disabled"
+        );
+        assert!(
+            super::telemetry_enabled_from(Some("1")),
+            "`1` re-enables telemetry"
+        );
+        for value in ["0", "", "true", "TRUE", "yes", "on", " 1", "1 ", "01"] {
+            assert!(
+                !super::telemetry_enabled_from(Some(value)),
+                "`{value}` must leave telemetry disabled"
+            );
         }
     }
 }
