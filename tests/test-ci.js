@@ -1316,6 +1316,98 @@ try {
 console.log('  Group 8f done\n');
 
 // ═══════════════════════════════════════════════════════════════════════════════
+// Group 8g: third-party notice version pins (deterministic, no hardware required)
+// ═══════════════════════════════════════════════════════════════════════════════
+//
+// The bundled ONNX Runtime version is pinned in three workflow env blocks and
+// restated in each THIRD-PARTY-NOTICES.md that ships next to the binaries it
+// covers. Each notice also reproduces, between marker lines, the verbatim
+// ThirdPartyNotices.txt from the pinned ONNX Runtime release archives. These
+// assertions hold the pins and the notices in lockstep: the three workflow
+// pins agree, every version-shaped string in every notice equals that pin,
+// the five notice copies are byte-identical, each copy carries exactly one
+// marker-delimited verbatim section, and that section's text hashes to the
+// upstream file's SHA-256. The hash constant moves together with the
+// ORT_VERSION pins whenever the bundled ONNX Runtime version changes.
+
+console.log('--- Group 8g: third-party notice version pins ---');
+
+{
+  const fs = require('fs');
+  const repoRoot = path.join(__dirname, '..');
+
+  const workflowFiles = [
+    path.join('.github', 'workflows', 'publish-npm.yml'),
+    path.join('.github', 'workflows', 'publish-pypi.yml'),
+    path.join('.github', 'workflows', 'python-ci.yml'),
+  ];
+  const pins = workflowFiles.map((rel) => {
+    const text = fs.readFileSync(path.join(repoRoot, rel), 'utf8');
+    const match = text.match(/^\s+ORT_VERSION:\s*([0-9]+\.[0-9]+\.[0-9]+)\s*$/m);
+    assert(match !== null, `${rel} declares an ORT_VERSION pin`);
+    return match ? match[1] : null;
+  });
+  assert(
+    pins.every((pin) => pin !== null && pin === pins[0]),
+    `the three workflow ORT_VERSION pins agree (${pins.join(', ')})`
+  );
+
+  const noticeFiles = [
+    path.join('npm', 'platform-win32-x64-msvc', 'THIRD-PARTY-NOTICES.md'),
+    path.join('npm', 'platform-darwin-arm64', 'THIRD-PARTY-NOTICES.md'),
+    path.join('npm', 'platform-linux-x64-gnu', 'THIRD-PARTY-NOTICES.md'),
+    path.join('npm', 'platform-linux-arm64-gnu', 'THIRD-PARTY-NOTICES.md'),
+    path.join('bindings', 'python', 'python', 'decibri', '_ort', 'THIRD-PARTY-NOTICES.md'),
+  ];
+  const bodies = noticeFiles.map((rel) => fs.readFileSync(path.join(repoRoot, rel), 'utf8'));
+  bodies.forEach((body, i) => {
+    const versions = body.match(/[0-9]+\.[0-9]+\.[0-9]+/g) || [];
+    assert(versions.length > 0, `${noticeFiles[i]} states the bundled ONNX Runtime version`);
+    assert(
+      versions.every((version) => version === pins[0]),
+      `every version in ${noticeFiles[i]} matches the workflow pin ${pins[0]}`
+    );
+  });
+  for (let i = 1; i < bodies.length; i++) {
+    assert(bodies[i] === bodies[0], `${noticeFiles[i]} is byte-identical to ${noticeFiles[0]}`);
+  }
+
+  // SHA-256 of the ThirdPartyNotices.txt file shipped in the ONNX Runtime
+  // release archives for the pinned version, LF line endings.
+  const crypto = require('crypto');
+  const upstreamNoticesSha256 = '0e07b95f3a8d6230037707c5c4a2b554d12c4cb67369669ac255635528ffcee2';
+  const beginMarker = `<!-- BEGIN VERBATIM ThirdPartyNotices.txt (ONNX Runtime v${pins[0]}) -->\n`;
+  const endMarker = `<!-- END VERBATIM ThirdPartyNotices.txt (ONNX Runtime v${pins[0]}) -->`;
+  bodies.forEach((body, i) => {
+    const normalized = body.replace(/\r\n/g, '\n');
+    const beginAt = normalized.indexOf(beginMarker);
+    const endAt = normalized.indexOf(endMarker, beginAt + beginMarker.length);
+    assert(
+      beginAt !== -1 && endAt !== -1,
+      `${noticeFiles[i]} carries the verbatim notices section for v${pins[0]}`
+    );
+    assert(
+      normalized.indexOf(beginMarker, beginAt + 1) === -1 &&
+        normalized.indexOf(endMarker, endAt + 1) === -1,
+      `${noticeFiles[i]} carries exactly one verbatim notices section`
+    );
+    const inner = normalized.slice(beginAt + beginMarker.length, endAt);
+    assert(
+      inner.startsWith('```text\n') && inner.endsWith('```\n'),
+      `${noticeFiles[i]} fences the verbatim notices text`
+    );
+    const payload = inner.slice('```text\n'.length, inner.length - '```\n'.length);
+    const digest = crypto.createHash('sha256').update(payload, 'utf8').digest('hex');
+    assert(
+      digest === upstreamNoticesSha256,
+      `${noticeFiles[i]} reproduces the upstream ThirdPartyNotices.txt unaltered`
+    );
+  });
+}
+
+console.log('  Group 8g done\n');
+
+// ═══════════════════════════════════════════════════════════════════════════════
 // Group 9: async open() factories (deterministic, no hardware required)
 // ═══════════════════════════════════════════════════════════════════════════════
 //

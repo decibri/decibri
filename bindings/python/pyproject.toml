@@ -95,10 +95,12 @@ include = [
     # Per-platform ONNX Runtime dynamic library bundled by python-ci.yml's
     # download/extract step before maturin runs. Wheel-only: the dylib is
     # platform-specific and source distributions must not embed prebuilt
-    # binaries. The directory is empty on dev installs (no manual ORT
-    # download); tests gated by the requires_bundled_ort marker auto-skip
-    # in that case. Glob pattern tolerates auditwheel/delocate hash-suffix
-    # renaming applied at wheel-repair time.
+    # binaries. On dev installs (no manual ORT download) the directory
+    # carries only the committed THIRD-PARTY-NOTICES.md, which this glob
+    # also ships in the wheel next to the dylib it covers; tests gated by
+    # the requires_bundled_ort marker match the dylib pattern specifically
+    # and auto-skip in that case. Glob pattern tolerates auditwheel/delocate
+    # hash-suffix renaming applied at wheel-repair time.
     { path = "python/decibri/_ort/*", format = ["wheel"] },
 ]
 

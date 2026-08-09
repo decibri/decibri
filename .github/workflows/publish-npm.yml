@@ -422,21 +422,25 @@ jobs:
 
           verify_pack npm/platform-darwin-arm64 "@decibri/decibri-darwin-arm64" \
             :decibri.darwin-arm64.node \
-            :libonnxruntime.dylib
+            :libonnxruntime.dylib \
+            :THIRD-PARTY-NOTICES.md
 
           verify_pack npm/platform-linux-x64-gnu "@decibri/decibri-linux-x64-gnu" \
             :decibri.linux-x64-gnu.node \
             :libonnxruntime.so \
-            :libonnxruntime_providers_shared.so
+            :libonnxruntime_providers_shared.so \
+            :THIRD-PARTY-NOTICES.md
 
           verify_pack npm/platform-linux-arm64-gnu "@decibri/decibri-linux-arm64-gnu" \
             :decibri.linux-arm64-gnu.node \
             :libonnxruntime.so \
-            :libonnxruntime_providers_shared.so
+            :libonnxruntime_providers_shared.so \
+            :THIRD-PARTY-NOTICES.md
 
           verify_pack npm/platform-win32-x64-msvc "@decibri/decibri-win32-x64-msvc" \
             :decibri.win32-x64-msvc.node \
-            :onnxruntime.dll
+            :onnxruntime.dll \
+            :THIRD-PARTY-NOTICES.md
 
           echo ""
           if [ "$FAIL" -ne 0 ]; then

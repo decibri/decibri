@@ -6,7 +6,8 @@
   "main": "decibri.win32-x64-msvc.node",
   "files": [
     "decibri.win32-x64-msvc.node",
-    "onnxruntime.dll"
+    "onnxruntime.dll",
+    "THIRD-PARTY-NOTICES.md"
   ],
   "license": "Apache-2.0",
   "description": "decibri native binary for Windows x64",
