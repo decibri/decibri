@@ -84,7 +84,7 @@ from decibri.exceptions import (
     AudioFileTruncated,
 )
 
-__version__ = "0.9.0"
+__version__ = "0.10.0"
 
 
 def input_devices() -> list[MicrophoneInfo]:
