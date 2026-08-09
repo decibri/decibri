@@ -337,6 +337,14 @@ setTimeout(() => mic.stop(), 5000);
 
 VAD reads the signal before the chain, so `vadScore` and the `'speech'` / `'silence'` events are unaffected by which conditioning stages you enable. The conditioning chain runs in the native Node.js capture path; the browser build does not include it.
 
+## ONNX Runtime telemetry
+
+Silero mode (`vad: 'silero'`) and the ACE `denoise` stage run on ONNX Runtime, which carries its own telemetry, separate from anything decibri does. Decibri disables it on the environment it commits when it initializes the runtime. Set `DECIBRI_ORT_TELEMETRY=1` in the environment before first use to leave it enabled; every other value, an empty value, and an absent variable leave it disabled.
+
+Two limits apply on Windows and decibri can close neither, so decibri does not claim that no telemetry is emitted. ONNX Runtime logs one process-information event while the environment is being created, before the setting is applied, and logs it once per process, so that event is emitted whichever way the setting is left. The runtime also assigns its telemetry state from the Windows tracing session through an ETW callback, so the platform can re-enable telemetry after decibri has disabled it. On other platforms ONNX Runtime's telemetry provider does nothing.
+
+Neither ONNX Runtime nor this setting applies to the browser build, which has no ONNX Runtime.
+
 ## API: File (offline source)
 
 Everything a `Microphone` does to live audio, `File` does to audio you already have: the same conditioning options, the same Readable stream of conditioned chunks (finite: it ends at EOF), and the same opt-in `vad`. Because a `File` is a complete recording, it can also analyze the whole recording for speech.

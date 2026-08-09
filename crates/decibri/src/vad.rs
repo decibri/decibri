@@ -144,6 +144,18 @@ pub struct SileroVad {
 /// State size: 2 (hidden + cell layers) × batch(1) × hidden_dim(128).
 const STATE_SIZE: usize = 256;
 
+/// Shape of the `sr` input tensor: rank 0, the rank the model declares.
+///
+/// `sr` is an i64 scalar, so its shape carries no dimensions. ONNX Runtime
+/// also accepts a rank-1 `[1]` tensor here because the element count matches,
+/// which makes a rank mismatch invisible at runtime; passing the declared rank
+/// keeps the call correct under stricter shape validation.
+///
+/// Pinned against the model's own declaration by
+/// `onnx::tests::silero_sr_input_rank_matches_the_model`.
+#[cfg(feature = "vad")]
+pub(crate) const SR_SHAPE: [i64; 0] = [];
+
 #[cfg(feature = "vad")]
 impl SileroVad {
     /// Create a new Silero VAD instance by loading the ONNX model.
@@ -250,7 +262,6 @@ impl SileroVad {
 
         let input_shape = [1i64, (self.context_size + self.window_size) as i64];
         let state_shape = [2i64, 1i64, 128i64];
-        let sr_shape = [1i64];
         let sr_data = [self.sample_rate as i64];
 
         let outputs = self.session.run(OnnxInputs {
@@ -272,7 +283,7 @@ impl SileroVad {
                 (
                     "sr",
                     OnnxTensorView {
-                        shape: &sr_shape,
+                        shape: &SR_SHAPE,
                         data: OnnxTensorData::I64(&sr_data),
                     },
                 ),

@@ -86,6 +86,23 @@
 //! with a different [`vad::VadConfig::ort_library_path`] silently reuse the
 //! first path. See [`vad::VadConfig`] for details.
 //!
+//! # ONNX Runtime telemetry
+//!
+//! ONNX Runtime carries its own telemetry, separate from anything decibri
+//! does. Decibri disables it on the environment it commits during that same
+//! process-global initialization. Set `DECIBRI_ORT_TELEMETRY=1` before first
+//! use to leave it enabled; every other value, an empty value, and an absent
+//! variable leave it disabled.
+//!
+//! Two limits apply on Windows and decibri can close neither, so decibri does
+//! not claim that no telemetry is emitted. ONNX Runtime logs one
+//! process-information event while the environment is being created, before
+//! the setting is applied, and logs it once per process, so that event is
+//! emitted whichever way the setting is left. The runtime also assigns its
+//! telemetry state from the Windows tracing session through an ETW callback,
+//! so the platform can re-enable telemetry after decibri has disabled it. On
+//! other targets ONNX Runtime's telemetry provider does nothing.
+//!
 //! # ORT error construction has FFI side effects
 //!
 //! Under `ort-load-dynamic`, constructing any [`ort::Error`] calls into the

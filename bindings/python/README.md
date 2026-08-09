@@ -206,6 +206,12 @@ The wheel includes:
 
 First ORT load on `vad="silero"` initialization is ~100 to 500 ms (amortized across subsequent calls).
 
+## ONNX Runtime telemetry
+
+`vad="silero"` and the ACE `denoise` stage run on ONNX Runtime, which carries its own telemetry, separate from anything decibri does. Decibri disables it on the environment it commits when it initializes the runtime. Set `DECIBRI_ORT_TELEMETRY=1` in the environment before first use to leave it enabled; every other value, an empty value, and an absent variable leave it disabled.
+
+Two limits apply on Windows and decibri can close neither, so decibri does not claim that no telemetry is emitted. ONNX Runtime logs one process-information event while the environment is being created, before the setting is applied, and logs it once per process, so that event is emitted whichever way the setting is left. The runtime also assigns its telemetry state from the Windows tracing session through an ETW callback, so the platform can re-enable telemetry after decibri has disabled it. On other platforms ONNX Runtime's telemetry provider does nothing.
+
 ## Async usage
 
 For Silero VAD in async code, use the `open()` factory to dispatch the synchronous ORT init off the event loop:

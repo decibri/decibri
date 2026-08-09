@@ -50,7 +50,7 @@ decibri ACE (Audio Capture Engine) is decibri's opt-in audio front-end for speec
 
 What makes it useful is not the individual filters, it is the package they come in:
 
-- **Keyless and local.** No API key, no account, no network call. The chain runs on-device. The denoise model and the Silero VAD model ship inside the package.
+- **Keyless and local.** No API key, no account, no network call. The chain runs on-device. The denoise model and the Silero VAD model ship inside the package. The denoise stage and the Silero VAD run on ONNX Runtime, which carries its own telemetry; decibri disables it, within the limits set out under [ONNX Runtime telemetry](#onnx-runtime-telemetry).
 - **Opt-in and zero-cost when off.** Nothing in the chain runs until you ask for it. With every stage left at its default, the capture path is unchanged.
 - **One surface across the bindings.** The same conditioning options, with the same names and ranges, are available from Python, Node.js, and Rust.
 
@@ -69,6 +69,14 @@ The stages run in that order: DC removal, denoise, high-pass, AGC, then limiter.
 Voice activity detection reads the signal before the chain, so turning on enhancement does not change what counts as speech.
 
 See the [Quick Start](#quick-start) below for a runnable example. The same options are available in Node.js (`dcRemoval`, `denoise`, `highpass`, `agc`, `limiter`) and Rust (`MicrophoneConfig` fields); per-language detail lives in each binding's README.
+
+## ONNX Runtime telemetry
+
+The denoise stage and the Silero VAD run on ONNX Runtime, which carries its own telemetry, separate from anything decibri does. Decibri disables it on the environment it commits when it initializes the runtime. Set `DECIBRI_ORT_TELEMETRY=1` before first use to leave it enabled; every other value, an empty value, and an absent variable leave it disabled.
+
+Two limits apply on Windows and decibri can close neither, so decibri does not claim that no telemetry is emitted. ONNX Runtime logs one process-information event while the environment is being created, before the setting is applied, and logs it once per process, so that event is emitted whichever way the setting is left. The runtime also assigns its telemetry state from the Windows tracing session through an ETW callback, so the platform can re-enable telemetry after decibri has disabled it. On other platforms ONNX Runtime's telemetry provider does nothing.
+
+The browser build has no ONNX Runtime, so neither the telemetry nor this setting applies there.
 
 ## Installation
 
