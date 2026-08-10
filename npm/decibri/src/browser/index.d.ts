@@ -47,14 +47,42 @@ export interface MicrophoneOptions {
   sampleRate?: number;
 
   /**
-   * Number of input channels. Mono only: the only accepted value is `1`, and a
-   * value greater than `1` throws a `RangeError` (multichannel capture is not
-   * supported) rather than being silently downmixed. The option is kept for
-   * forward compatibility: a future release may accept a value greater than `1`
-   * by delivering true interleaved multichannel.
+   * Number of channels the stream delivers. Mono only: the only accepted value
+   * is `1`, and a value greater than `1` throws a `RangeError` (multichannel
+   * capture is not supported) rather than being silently downmixed. The option
+   * is kept for forward compatibility: a future release may accept a value
+   * greater than `1` by delivering true interleaved multichannel.
+   *
+   * The capture itself asks the browser for every channel it will grant (the
+   * Web Audio specification's 32-channel floor, with ideal semantics):
+   * decibri collapses the granted audio to this delivered count with the
+   * documented average of every granted channel, or with the channel
+   * `channelMap` selects.
    * @default 1
    */
   channels?: number;
+
+  /**
+   * Optional list of 0-based device channel indices selecting which granted
+   * channels feed the delivered channels: delivered channel `j` carries device
+   * channel `channelMap[j]`. The length must equal `channels`, so the accepted
+   * length is `1` (the map selects the one delivered channel). Absent delivers
+   * the documented average of every granted channel.
+   *
+   * The same shape as the Node entry's `channelMap`, validated with the same
+   * classes and messages. Entries are checked against the granted track's own
+   * report: where the browser reports the granted channel count, `start()`
+   * rejects with an `Error` whose message names the entry and the granted
+   * count; where it does not, the same `Error` is emitted on `'error'` and
+   * the capture stops as soon as the audio graph reports its true channel
+   * count. The granted report is the only ceiling; no fixed maximum exists.
+   *
+   * A browser typically grants a single processed channel while
+   * `echoCancellation` or `noiseSuppression` is enabled, so a multichannel
+   * grant generally requires both disabled.
+   * @default undefined (the average of every granted channel)
+   */
+  channelMap?: number[];
 
   /**
    * Frames per audio chunk. Controls chunk size and delivery interval.

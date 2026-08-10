@@ -6,9 +6,10 @@
  * If you change logic here, you MUST regenerate worklet-inline.js.
  *
  * Runs in a dedicated audio thread. Receives Float32 samples at the
- * browser's native sample rate, resamples to the target rate via linear
- * interpolation, optionally converts to Int16, and posts chunks to the
- * main thread.
+ * browser's native sample rate, collapses the granted channels to the
+ * delivered mono (the average of every channel, or the channel the map
+ * selects), resamples to the target rate via linear interpolation,
+ * optionally converts to Int16, and posts chunks to the main thread.
  *
  * This file cannot import other modules (AudioWorklet restriction).
  *
@@ -23,21 +24,66 @@ class DecibriProcessor extends AudioWorkletProcessor {
     this.format = opts.format;
     this.ratio = opts.nativeSampleRate / opts.targetSampleRate;
     this.needsResample = opts.nativeSampleRate !== opts.targetSampleRate;
+    // Optional list of 0-based channel indices into the granted track's
+    // channels; null delivers the average of every granted channel. Where the
+    // browser reports the granted channel count, the main thread checked the
+    // entries before this worklet was built; the per-block guard in process()
+    // is the authority where it does not.
+    this.channelMap = opts.channelMap ?? null;
+    this.mapError = false;
     this.position = 0;
     this.buffer = new Float32Array(this.framesPerBuffer);
     this.bufferIndex = 0;
   }
 
   process(inputs, _outputs, _parameters) {
-    const input = inputs[0]?.[0];
-    if (!input || input.length === 0) return true;
+    const input = inputs[0];
+    if (!input || input.length === 0 || !input[0] || input[0].length === 0) return true;
+
+    const channels = input.length;
+    let mono;
+
+    if (this.channelMap) {
+      // The granted track's channel count is the only ceiling. A map entry
+      // the block cannot serve is reported once and stops the processor; it
+      // is never silently substituted.
+      if (this.mapError) return false;
+      for (let j = 0; j < this.channelMap.length; j++) {
+        if (this.channelMap[j] >= channels) {
+          this.mapError = true;
+          this.port.postMessage({
+            type: 'error',
+            message: 'the channel map names device channel ' + this.channelMap[j] +
+              '; the device reports ' + channels + ' input channels',
+          });
+          return false;
+        }
+      }
+      mono = input[this.channelMap[0]];
+    } else if (channels === 1) {
+      mono = input[0];
+    } else {
+      // The documented average of every granted channel: each frame's
+      // arithmetic mean, accumulated at single precision (Math.fround per
+      // step) and stored as f32, matching the engine's average sample for
+      // sample.
+      const frames = input[0].length;
+      mono = new Float32Array(frames);
+      for (let i = 0; i < frames; i++) {
+        let sum = 0;
+        for (let c = 0; c < channels; c++) {
+          sum = Math.fround(sum + input[c][i]);
+        }
+        mono[i] = sum / channels;
+      }
+    }
 
     let samples;
 
     if (this.needsResample) {
-      samples = this.resample(input);
+      samples = this.resample(mono);
     } else {
-      samples = input;
+      samples = mono;
     }
 
     // Accumulate resampled frames into the buffer

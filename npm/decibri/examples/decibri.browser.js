@@ -63,7 +63,7 @@ var decibri = (function() {
 	//#endregion
 	//#region npm/decibri/src/browser/worklet-inline.js
 	var require_worklet_inline = /* @__PURE__ */ __commonJSMin(((exports, module) => {
-		module.exports = { WORKLET_SOURCE: "var u=class extends AudioWorkletProcessor{constructor(r){super();let e=r.processorOptions;this.framesPerBuffer=e.framesPerBuffer,this.format=e.format,this.ratio=e.nativeSampleRate/e.targetSampleRate,this.needsResample=e.nativeSampleRate!==e.targetSampleRate,this.position=0,this.buffer=new Float32Array(this.framesPerBuffer),this.bufferIndex=0}process(r,e,s){let t=r[0]?.[0];if(!t||t.length===0)return!0;let f;this.needsResample?f=this.resample(t):f=t;let a=0;for(;a<f.length;){let i=this.framesPerBuffer-this.bufferIndex,o=f.length-a,n=Math.min(i,o);this.buffer.set(f.subarray(a,a+n),this.bufferIndex),this.bufferIndex+=n,a+=n,this.bufferIndex>=this.framesPerBuffer&&this.flush()}return!0}resample(r){let e=r.length,s=0,t=this.position;for(;t<e-1;)s++,t+=this.ratio;let f=new Float32Array(s);t=this.position;for(let a=0;a<s;a++){let i=Math.floor(t),o=t-i;f[a]=r[i]*(1-o)+r[i+1]*o,t+=this.ratio}return this.position=Math.max(0,t-e),f}flush(){let r;if(this.format===\"int16\"){let e=new Int16Array(this.framesPerBuffer);for(let s=0;s<this.framesPerBuffer;s++)e[s]=Math.max(-32768,Math.min(32767,Math.round(this.buffer[s]*32768)));r=e.buffer}else r=this.buffer.slice(0,this.framesPerBuffer).buffer;this.port.postMessage(r,[r]),this.buffer=new Float32Array(this.framesPerBuffer),this.bufferIndex=0}};registerProcessor(\"decibri-processor\",u);\n" };
+		module.exports = { WORKLET_SOURCE: "var e=class extends AudioWorkletProcessor{constructor(e){super();let t=e.processorOptions;this.framesPerBuffer=t.framesPerBuffer,this.format=t.format,this.ratio=t.nativeSampleRate/t.targetSampleRate,this.needsResample=t.nativeSampleRate!==t.targetSampleRate,this.channelMap=t.channelMap??null,this.mapError=!1,this.position=0,this.buffer=new Float32Array(this.framesPerBuffer),this.bufferIndex=0}process(e,t,n){let r=e[0];if(!r||r.length===0||!r[0]||r[0].length===0)return!0;let i=r.length,a;if(this.channelMap){if(this.mapError)return!1;for(let e=0;e<this.channelMap.length;e++)if(this.channelMap[e]>=i)return this.mapError=!0,this.port.postMessage({type:`error`,message:`the channel map names device channel `+this.channelMap[e]+`; the device reports `+i+` input channels`}),!1;a=r[this.channelMap[0]]}else if(i===1)a=r[0];else{let e=r[0].length;a=new Float32Array(e);for(let t=0;t<e;t++){let e=0;for(let n=0;n<i;n++)e=Math.fround(e+r[n][t]);a[t]=e/i}}let o;o=this.needsResample?this.resample(a):a;let s=0;for(;s<o.length;){let e=this.framesPerBuffer-this.bufferIndex,t=o.length-s,n=Math.min(e,t);this.buffer.set(o.subarray(s,s+n),this.bufferIndex),this.bufferIndex+=n,s+=n,this.bufferIndex>=this.framesPerBuffer&&this.flush()}return!0}resample(e){let t=e.length,n=0,r=this.position;for(;r<t-1;)n++,r+=this.ratio;let i=new Float32Array(n);r=this.position;for(let t=0;t<n;t++){let n=Math.floor(r),a=r-n;i[t]=e[n]*(1-a)+e[n+1]*a,r+=this.ratio}return this.position=Math.max(0,r-t),i}flush(){let e;if(this.format===`int16`){let t=new Int16Array(this.framesPerBuffer);for(let e=0;e<this.framesPerBuffer;e++)t[e]=Math.max(-32768,Math.min(32767,Math.round(this.buffer[e]*32768)));e=t.buffer}else e=this.buffer.slice(0,this.framesPerBuffer).buffer;this.port.postMessage(e,[e]),this.buffer=new Float32Array(this.framesPerBuffer),this.bufferIndex=0}};registerProcessor(`decibri-processor`,e);" };
 	}));
 	//#endregion
 	//#region npm/decibri/src/browser/decibri-browser.js
@@ -125,6 +125,7 @@ var decibri = (function() {
 				this._silenceTimer = null;
 				this._sampleRate = options.sampleRate ?? 16e3;
 				this._channels = options.channels ?? 1;
+				this._channelMap = options.channelMap;
 				this._framesPerBuffer = options.framesPerBuffer ?? 1600;
 				this._device = options.device;
 				this._dtype = options.dtype ?? "int16";
@@ -135,6 +136,15 @@ var decibri = (function() {
 				if (this._channels < 1) throw new RangeError("channels must be at least 1");
 				if (this._channels > 1) throw new RangeError("multichannel capture is not supported; channels must be 1 (mono)");
 				if (this._channels < 1 || this._channels > 32) throw new TypeError(`channels must be between 1 and 32, got ${this._channels}`);
+				const channelMap = this._channelMap;
+				if (channelMap !== void 0) {
+					if (!Array.isArray(channelMap)) throw new TypeError(`Invalid channelMap value: ${JSON.stringify(channelMap)}. Expected an array of 0-based device channel indices, such as [0].`);
+					for (const entry of channelMap) {
+						if (typeof entry !== "number" || !Number.isInteger(entry)) throw new TypeError("channelMap entries must be integers");
+						if (entry < 0 || entry > 65535) throw new RangeError("channelMap entries must be between 0 and 65535");
+					}
+					if (channelMap.length !== this._channels) throw new RangeError("channelMap must have exactly one entry per channel");
+				}
 				if (this._framesPerBuffer < 64 || this._framesPerBuffer > 65536) throw new TypeError(`frames per buffer must be between 64 and 65536, got ${this._framesPerBuffer}`);
 				if (this._dtype !== "int16" && this._dtype !== "float32") throw new TypeError("dtype must be 'int16' or 'float32'");
 			}
@@ -215,7 +225,7 @@ var decibri = (function() {
 				const nativeSampleRate = this._audioContext.sampleRate;
 				await this._audioContext.resume();
 				const audioConstraints = {
-					channelCount: this._channels,
+					channelCount: { ideal: 32 },
 					echoCancellation: this._echoCancellation,
 					noiseSuppression: this._noiseSuppression
 				};
@@ -228,6 +238,21 @@ var decibri = (function() {
 					const error = this._mapError(err);
 					this.emit("error", error);
 					throw error;
+				}
+				if (this._channelMap !== void 0) {
+					const track = this._stream.getAudioTracks()[0];
+					const granted = (track && typeof track.getSettings === "function" ? track.getSettings() : {}).channelCount;
+					if (typeof granted === "number") {
+						for (const entry of this._channelMap) if (entry >= granted) {
+							this._stream.getTracks().forEach((t) => t.stop());
+							this._stream = null;
+							await this._audioContext.close();
+							this._audioContext = null;
+							const error = /* @__PURE__ */ new Error(`the channel map names device channel ${entry}; the device reports ${granted} input channels`);
+							this.emit("error", error);
+							throw error;
+						}
+					}
 				}
 				let blobUrl = null;
 				const workletUrl = this._workletUrl ?? (blobUrl = this._createBlobUrl());
@@ -249,11 +274,20 @@ var decibri = (function() {
 					framesPerBuffer: this._framesPerBuffer,
 					format: this._dtype,
 					nativeSampleRate,
-					targetSampleRate: this._sampleRate
+					targetSampleRate: this._sampleRate,
+					channelMap: this._channelMap ?? null
 				} });
 				this._workletNode.port.onmessage = (event) => {
-					const buffer = event.data;
-					const chunk = this._dtype === "int16" ? new Int16Array(buffer) : new Float32Array(buffer);
+					const data = event.data;
+					if (!(data instanceof ArrayBuffer)) {
+						if (data && data.type === "error") {
+							const error = new Error(data.message);
+							this.emit("error", error);
+							this.stop();
+						}
+						return;
+					}
+					const chunk = this._dtype === "int16" ? new Int16Array(data) : new Float32Array(data);
 					this.emit("data", chunk);
 					if (this._vad) this._processVad(chunk);
 				};
