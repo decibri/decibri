@@ -494,6 +494,9 @@ impl File {
             input_rate,
             target_rate,
             Transforms {
+                // The offline path collapses a multichannel source to the
+                // documented average; no channel map is offered on it.
+                channel_map: None,
                 dc_removal: config.dc_removal,
                 denoise,
                 highpass: config.highpass,

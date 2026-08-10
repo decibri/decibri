@@ -101,14 +101,47 @@ impl HighpassFilter {
 pub struct MicrophoneConfig {
     /// Sample rate in Hz. Range: 1000–384000. Default: 16000.
     pub sample_rate: u32,
-    /// Number of input channels. Mono only: the only accepted value is 1
-    /// (the default), and a value greater than 1 is rejected by
+    /// Number of channels the stream DELIVERS. Mono only: the only accepted
+    /// value is 1 (the default), and a value greater than 1 is rejected by
     /// [`validate`](Self::validate) with
     /// [`DecibriError::MultichannelNotSupported`]. The field is kept (rather
     /// than removed) for forward compatibility: a future release may honour a
     /// value greater than 1 by delivering true interleaved multichannel, which
     /// widens the accepted set without breaking callers. Default: 1.
+    ///
+    /// The device itself is opened at its own native channel count, exactly as
+    /// it is opened at its native rate: decibri collapses the captured audio
+    /// to this delivered count with the documented average of every opened
+    /// channel, or with the channels [`channel_map`](Self::channel_map)
+    /// selects. This mirrors [`sample_rate`](Self::sample_rate), which is also
+    /// the delivered figure rather than the device-open one. The playback
+    /// counterpart, [`crate::speaker::SpeakerConfig::channels`], is the count
+    /// offered to the device, because playback has no delivered side; on both
+    /// surfaces the field is the shape of the audio you exchange with decibri.
     pub channels: u16,
+    /// Optional list of 0-based DEVICE channel indices selecting which device
+    /// channels feed the delivered channels: delivered channel `j` carries
+    /// device channel `channel_map[j]`. The length must equal
+    /// [`channels`](Self::channels), so the accepted length is 1 (the map
+    /// selects the one delivered channel). `None` (the default) delivers the
+    /// documented average of every opened channel.
+    ///
+    /// The same shape as CoreAudio AUHAL's channel map
+    /// (`kAudioOutputUnitProperty_ChannelMap`: an array of device channel
+    /// indices, one entry per client channel). NOT miniaudio's `channelMap`,
+    /// which names a spatial layout (which channel is front-left, and so on).
+    /// sounddevice's `mapping` is the same idea 1-based; decibri is 0-based,
+    /// matching [`crate::device::DeviceSelector::Index`].
+    ///
+    /// Validated when the stream starts, against the resolved device's own
+    /// report: every entry must be below the device's native channel count
+    /// ([`DecibriError::ChannelMapOutOfRange`] otherwise), and the length must
+    /// equal [`channels`](Self::channels)
+    /// ([`DecibriError::ChannelMapLengthMismatch`] otherwise). The device's
+    /// report is the only ceiling; no fixed maximum exists. Not checked by
+    /// [`validate`](Self::validate), which has no device in scope. Default:
+    /// `None`.
+    pub channel_map: Option<Vec<u16>>,
     /// Frames per audio callback buffer. Range: 64–65536. Default: 1600.
     pub frames_per_buffer: u32,
     /// Device selection. Default: system default input.
@@ -231,6 +264,7 @@ impl Default for MicrophoneConfig {
         Self {
             sample_rate: 16000,
             channels: 1,
+            channel_map: None,
             frames_per_buffer: 1600,
             device: DeviceSelector::Default,
             dc_removal: false,
@@ -896,7 +930,9 @@ impl MicrophoneStream {
         self.sample_rate
     }
 
-    /// The channel count this stream was opened with.
+    /// The channel count this stream delivers, the count every delivered
+    /// chunk's samples are interleaved at. The device itself is opened at its
+    /// own native count; the capture chain collapses to this one.
     pub fn channels(&self) -> u16 {
         self.channels
     }
@@ -1200,6 +1236,45 @@ fn delivered_channels(capture_stage: Option<&CaptureStage>, device_channels: u16
     capture_stage.map_or(device_channels, CaptureStage::output_channels)
 }
 
+/// Validate a channel map against the delivered count the configuration names
+/// and the channel count the resolved device reports.
+///
+/// The map carries one entry per delivered channel, so its length must equal
+/// `target_channels`, and every entry names a device channel, so each must be
+/// below `device_channels`. The device's report is the only ceiling: no fixed
+/// maximum appears here or anywhere else on the path, and a device reporting
+/// any count accepts an index right up to it. Duplicate entries are permitted
+/// (each delivered channel is an independent copy of its source) and order is
+/// meaningful.
+///
+/// A pure function so the rules are assertable without a device to resolve;
+/// [`Microphone::start`] is its one production caller, passing the same device
+/// report that sets the capture open count. It does not belong in
+/// [`MicrophoneConfig::validate`], which has no device in scope: any ceiling
+/// enforced there would be an invented one.
+#[cfg(feature = "capture")]
+fn validate_channel_map(
+    map: &[u16],
+    target_channels: u16,
+    device_channels: u16,
+) -> Result<(), DecibriError> {
+    if map.len() != target_channels as usize {
+        return Err(DecibriError::ChannelMapLengthMismatch {
+            entries: map.len(),
+            channels: target_channels,
+        });
+    }
+    for &index in map {
+        if index >= device_channels {
+            return Err(DecibriError::ChannelMapOutOfRange {
+                index,
+                available: device_channels,
+            });
+        }
+    }
+    Ok(())
+}
+
 #[cfg(feature = "capture")]
 impl Microphone {
     /// Create a microphone: validates the [`MicrophoneConfig`] and resolves the
@@ -1224,23 +1299,32 @@ impl Microphone {
         let running = Arc::new(AtomicBool::new(true));
         let running_clone = running.clone();
 
-        // The requested rate is the TARGET the consumer receives. The device is
-        // opened at its native rate, settled here from its default supported
-        // format, and the capture chain resamples native -> target so delivery
-        // is at exactly the requested rate.
+        // The requested rate and channel count are the TARGET the consumer
+        // receives. The device is opened at its native rate and native channel
+        // count, both settled here from its default supported format, and the
+        // capture chain resamples and collapses native -> target so delivery
+        // is at exactly the requested format.
         let target_rate = self.config.sample_rate;
         let native_rate = CpalBackend.native_input_rate(&self.device)?;
-        let channels = self.config.channels;
+        let native_channels = CpalBackend.native_input_channels(&self.device)?;
         let frames_per_buffer = self.config.frames_per_buffer;
 
         // Build the normalize chain for this device. The target is mono (1
-        // channel) at the requested rate: `build_capture_stage` adds a downmix
-        // for a multichannel device and a resample when the native rate differs,
-        // and returns `None` only for a mono device already at the target rate.
-        // The stream reports the OUTPUT channel count (mono when the chain
-        // downmixes, which is what the exact-size `samples` math is counted in)
-        // and the target rate.
+        // channel) at the requested rate: `build_capture_stage` adds a channel
+        // stage for a multichannel device (the average, or the gather the
+        // channel map selects) and a resample when the native rate differs,
+        // and returns `None` only for a mono device already at the target rate
+        // with no map. The stream reports the OUTPUT channel count (mono when
+        // the chain collapses, which is what the exact-size `samples` math is
+        // counted in) and the target rate.
         let target_channels: u16 = 1;
+
+        // The channel map names device channels, so it is checked here, after
+        // device resolution, against the same report that sets the open count.
+        // Never checked in `validate()`, which has no device in scope.
+        if let Some(map) = &self.config.channel_map {
+            validate_channel_map(map, self.config.channels, native_channels)?;
+        }
         // Denoise is enabled only when a model AND its path are both set; with a
         // model but no path (or vice versa) the chain leaves denoise off. The
         // path is borrowed for construction only (the stage loads the model and
@@ -1274,11 +1358,12 @@ impl Microphone {
             None => (None, None),
         };
         let capture_stage = build_capture_stage(
-            channels,
+            native_channels,
             target_channels,
             native_rate,
             target_rate,
             Transforms {
+                channel_map: self.config.channel_map.as_deref(),
                 dc_removal: self.config.dc_removal,
                 denoise,
                 highpass: self.config.highpass,
@@ -1288,7 +1373,7 @@ impl Microphone {
                 aec,
             },
         )?;
-        let output_channels = delivered_channels(capture_stage.as_ref(), channels);
+        let output_channels = delivered_channels(capture_stage.as_ref(), native_channels);
 
         let err_running = running.clone();
         let last_error = Arc::new(Mutex::new(None));
@@ -1307,7 +1392,7 @@ impl Microphone {
             let chunk = AudioChunk {
                 data: data.to_vec(),
                 sample_rate: native_rate,
-                channels,
+                channels: native_channels,
             };
             // Non-blocking send: the realtime audio thread must never block. On
             // a full channel (a stalled consumer) drop this chunk and count it
@@ -1333,10 +1418,11 @@ impl Microphone {
             err_running.store(false, Ordering::Relaxed);
         });
 
-        // Open the device at its native rate; the capture chain resamples to the
-        // target. A device already at the target rate has no resample stage.
+        // Open the device at its native rate and native channel count; the
+        // capture chain resamples and collapses to the target. A mono device
+        // already at the target rate has neither stage.
         let params = StreamParams {
-            channels,
+            channels: native_channels,
             sample_rate: native_rate,
             frames_per_buffer: Some(frames_per_buffer),
         };
@@ -1355,7 +1441,7 @@ impl Microphone {
         // count stands in.
         let tap_channels = capture_stage
             .as_ref()
-            .map_or(channels, CaptureStage::tap_channels);
+            .map_or(native_channels, CaptureStage::tap_channels);
         let vad_tap_cap = target_rate as usize * VAD_TAP_BOUND_SECS;
         // The tap memory bound must sit far above the chain's conditioning
         // latency, so an actively draining detector never reaches it even when a
@@ -2737,6 +2823,133 @@ mod tests {
         assert!(
             matches!(cfg.validate(), Err(DecibriError::ChannelsOutOfRange)),
             "zero channels stays a plain range error, not a multichannel one"
+        );
+    }
+
+    /// A channel map whose length differs from the configured delivered count
+    /// is a configuration error naming both figures. The empty map is the
+    /// same mismatch, not a special case.
+    #[test]
+    fn channel_map_length_must_match_the_delivered_count() {
+        assert!(
+            validate_channel_map(&[0], 1, 2).is_ok(),
+            "one entry for one delivered channel validates"
+        );
+        assert!(
+            matches!(
+                validate_channel_map(&[0, 1], 1, 2),
+                Err(DecibriError::ChannelMapLengthMismatch {
+                    entries: 2,
+                    channels: 1
+                })
+            ),
+            "two entries against one delivered channel is a length mismatch"
+        );
+        assert!(
+            matches!(
+                validate_channel_map(&[], 1, 2),
+                Err(DecibriError::ChannelMapLengthMismatch {
+                    entries: 0,
+                    channels: 1
+                })
+            ),
+            "an empty map against one delivered channel is a length mismatch"
+        );
+    }
+
+    /// A map entry at or above the device's reported count is rejected with
+    /// the entry and the report both named; every entry below the report is
+    /// accepted, right up to the report itself.
+    ///
+    /// The accepting arm is this path's negative control against the
+    /// no-fixed-maximum rule: index 59999 on a device reporting 60000
+    /// channels must pass, so a fixed maximum added later fails loudly here.
+    #[test]
+    fn channel_map_entries_are_bounded_only_by_the_device_report() {
+        assert!(
+            matches!(
+                validate_channel_map(&[2], 1, 2),
+                Err(DecibriError::ChannelMapOutOfRange {
+                    index: 2,
+                    available: 2
+                })
+            ),
+            "the first index past a 2-channel report is rejected"
+        );
+        assert!(
+            validate_channel_map(&[1], 1, 2).is_ok(),
+            "the last channel of a 2-channel report is accepted"
+        );
+        assert!(
+            validate_channel_map(&[0], 1, 1).is_ok(),
+            "channel 0 of a mono report is accepted"
+        );
+        assert!(
+            validate_channel_map(&[59_999], 1, 60_000).is_ok(),
+            "the top index of a 60000-channel report is accepted"
+        );
+        assert!(
+            matches!(
+                validate_channel_map(&[60_000], 1, 60_000),
+                Err(DecibriError::ChannelMapOutOfRange {
+                    index: 60_000,
+                    available: 60_000
+                })
+            ),
+            "the first index past a 60000-channel report is rejected"
+        );
+        // Duplicates are permitted at the general width: each delivered
+        // channel is an independent copy of its source.
+        assert!(
+            validate_channel_map(&[1, 1], 2, 2).is_ok(),
+            "a duplicated entry validates"
+        );
+    }
+
+    /// A stream whose chain gathers device channel 1 delivers exactly that
+    /// channel's samples: the consumer-path twin of the stage-level selection
+    /// test, driven through `try_next_chunk` with injected native stereo
+    /// blocks and no device.
+    #[test]
+    fn selected_channel_flows_through_the_consumer_path() {
+        let map = [1_u16];
+        let stage = build_capture_stage(
+            2,
+            1,
+            16_000,
+            16_000,
+            Transforms {
+                channel_map: Some(&map),
+                ..Default::default()
+            },
+        )
+        .unwrap()
+        .expect("a mapped stereo device builds a select chain");
+        let (stream, sender, running) = test_stream_with(Some(stage), 1);
+
+        // Two native stereo blocks; channel 0 carries positives, channel 1
+        // negatives.
+        sender
+            .send(AudioChunk {
+                data: vec![1.0, -1.0, 2.0, -2.0],
+                sample_rate: 16_000,
+                channels: 2,
+            })
+            .unwrap();
+        sender
+            .send(AudioChunk {
+                data: vec![3.0, -3.0, 4.0, -4.0],
+                sample_rate: 16_000,
+                channels: 2,
+            })
+            .unwrap();
+        drop(sender);
+        running.store(false, Ordering::Relaxed);
+
+        assert_eq!(
+            drain_try(&stream, 2),
+            vec![-1.0, -2.0, -3.0, -4.0],
+            "the delivered stream is device channel 1 exactly"
         );
     }
 

@@ -155,6 +155,7 @@ class AsyncMicrophone:
         limiter: float | None = None,
         dc_removal: bool = False,
         aec: str | Aec | None = None,
+        channel_map: list[int] | None = None,
     ) -> None:
         """Construct an AsyncMicrophone audio capture instance.
 
@@ -339,6 +340,27 @@ class AsyncMicrophone:
                 f"limiter must be in [-3.0, 0.0]; got {limiter}"
             )
 
+        # Validate the channel map's shape. Same logic as the sync Microphone:
+        # a list of integers in the channel count's width, one entry per
+        # delivered channel (the core names the length failure, so the wrapper
+        # raises its class). Whether each entry exists on the device is the
+        # core's check against the resolved device's report at start().
+        if channel_map is not None:
+            for entry in channel_map:
+                if not isinstance(entry, int) or isinstance(entry, bool):
+                    raise TypeError(
+                        f"channel_map entries must be integers; got {entry!r}"
+                    )
+                if not 0 <= entry <= 65535:
+                    raise ValueError(
+                        f"channel_map entries must be in [0, 65535]; got {entry}"
+                    )
+            if len(channel_map) != channels:
+                raise exceptions.ChannelMapLengthMismatch(
+                    f"the channel map has {len(channel_map)} entries; it must "
+                    f"have exactly one entry per delivered channel ({channels})"
+                )
+
         # Decompose ``aec`` into the bridge's flat fields. Same logic as the
         # sync Microphone: None (off; default), a model-name shorthand such as
         # "tau", or an Aec config object (which self-validates its tuning
@@ -412,6 +434,7 @@ class AsyncMicrophone:
             aec_suppression=aec_suppression,
             aec_reference_sample_rate=aec_reference_sample_rate,
             aec_reference_channels=aec_reference_channels,
+            channel_map=channel_map,
         )
 
         self._vad_enabled = vad_enabled

@@ -173,6 +173,32 @@ pub enum DecibriError {
         reason: String,
     },
 
+    /// A capture channel map named a device channel the device does not have.
+    ///
+    /// `index` is the offending 0-based entry from
+    /// [`crate::microphone::MicrophoneConfig::channel_map`]; `available` is the
+    /// device's own channel count, read from the same query that sets the
+    /// capture open count. Checked against the resolved device when the stream
+    /// starts, never in [`crate::microphone::MicrophoneConfig::validate`],
+    /// which has no device in scope: the device's report is the only ceiling,
+    /// and no fixed maximum is enforced anywhere. Device-relative like
+    /// [`Self::SpeakerChannelsUnsupported`]; the leading `the channel map
+    /// names` clause is the stable part.
+    #[error("the channel map names device channel {index}; the device reports {available} input channels")]
+    ChannelMapOutOfRange { index: u16, available: u16 },
+
+    /// A capture channel map's length differs from the configured delivered
+    /// channel count.
+    ///
+    /// [`crate::microphone::MicrophoneConfig::channel_map`] carries one entry
+    /// per delivered channel, so its length must equal
+    /// [`crate::microphone::MicrophoneConfig::channels`]. `entries` is the
+    /// map's length; `channels` is the configured count. Checked alongside
+    /// [`Self::ChannelMapOutOfRange`] when the stream starts; the leading
+    /// `the channel map has` clause is the stable part.
+    #[error("the channel map has {entries} entries; it must have exactly one entry per delivered channel ({channels})")]
+    ChannelMapLengthMismatch { entries: usize, channels: u16 },
+
     #[error("Microphone permission denied. {}", PERMISSION_HINT)]
     PermissionDenied,
 
@@ -657,6 +683,16 @@ error_identity! {
             available: 2,
             reason: "sample".to_string(),
         };
+    DecibriError::ChannelMapOutOfRange { .. } => "ChannelMapOutOfRange", "CHANNEL_MAP_OUT_OF_RANGE",
+        DecibriError::ChannelMapOutOfRange {
+            index: 2,
+            available: 2,
+        };
+    DecibriError::ChannelMapLengthMismatch { .. } => "ChannelMapLengthMismatch", "CHANNEL_MAP_LENGTH_MISMATCH",
+        DecibriError::ChannelMapLengthMismatch {
+            entries: 2,
+            channels: 1,
+        };
     DecibriError::PermissionDenied => "PermissionDenied", "PERMISSION_DENIED",
         DecibriError::PermissionDenied;
     DecibriError::MicrophoneStreamClosed => "MicrophoneStreamClosed", "MICROPHONE_STREAM_CLOSED",
@@ -1087,6 +1123,37 @@ mod tests {
             err.to_string(),
             "the output device does not support 124 output channels; it reports 2: \
              the device said no"
+        );
+    }
+
+    /// The `ChannelMapOutOfRange` Display message keeps its frozen leading
+    /// clause, which the Node binding matches to assign the error its stable
+    /// code, and names the offending entry plus the device's own count.
+    #[test]
+    fn channel_map_out_of_range_message_names_entry_and_device_count() {
+        let err = DecibriError::ChannelMapOutOfRange {
+            index: 5,
+            available: 2,
+        };
+        assert_eq!(
+            err.to_string(),
+            "the channel map names device channel 5; the device reports 2 input channels"
+        );
+    }
+
+    /// The `ChannelMapLengthMismatch` Display message keeps its frozen leading
+    /// clause, which the Node binding matches to classify the error as a
+    /// RangeError, and names both lengths.
+    #[test]
+    fn channel_map_length_mismatch_message_names_both_lengths() {
+        let err = DecibriError::ChannelMapLengthMismatch {
+            entries: 2,
+            channels: 1,
+        };
+        assert_eq!(
+            err.to_string(),
+            "the channel map has 2 entries; it must have exactly one entry per \
+             delivered channel (1)"
         );
     }
 

@@ -228,6 +228,74 @@ impl Stage for Downmix {
     }
 }
 
+/// Gather named device channels out of interleaved multichannel audio.
+///
+/// The map is a list of 0-based device channel indices, one entry per
+/// delivered channel: delivered channel `j` of each output frame is device
+/// channel `map[j]` of the matching input frame, in the order the map gives.
+/// The same shape as CoreAudio AUHAL's channel map
+/// (`kAudioOutputUnitProperty_ChannelMap`, an array of device channel indices,
+/// one per client channel); NOT miniaudio's `channelMap`, which is a spatial
+/// layout. Duplicate entries are permitted (each delivered channel is an
+/// independent copy of its source) and order is meaningful.
+///
+/// Pushed in place of [`Downmix`] when
+/// [`crate::microphone::MicrophoneConfig::channel_map`] names a map; the
+/// entries are validated against the device's own report before the chain is
+/// built, and no fixed maximum is enforced anywhere in this stage.
+struct Select {
+    /// The device channel count each interleaved input frame carries.
+    channels: u16,
+    /// The 0-based device channel indices to gather, one per delivered
+    /// channel. Every entry is below `channels`; the caller validated that
+    /// against the device's report.
+    map: Vec<u16>,
+}
+
+impl Select {
+    fn new(channels: u16, map: &[u16]) -> Self {
+        Self {
+            channels,
+            map: map.to_vec(),
+        }
+    }
+}
+
+impl Stage for Select {
+    fn process(&mut self, input: Block<'_>, out: &mut Vec<f32>) -> Result<(), DecibriError> {
+        // The count the stage was built for and the count the block carries are
+        // the same number reaching it by two routes, exactly as for `Downmix`.
+        debug_assert_eq!(
+            input.channels(),
+            self.channels,
+            "the select was built for {} channels and handed {}",
+            self.channels,
+            input.channels()
+        );
+        let frames = input.frames();
+        out.reserve(frames * self.map.len());
+        // `chunks_exact` truncates a trailing partial frame, matching
+        // `Block::frames` and `sample::downmix_to_mono`.
+        for frame in input.samples().chunks_exact(self.channels as usize) {
+            for &index in &self.map {
+                out.push(frame[index as usize]);
+            }
+        }
+        debug_assert_eq!(
+            out.len(),
+            frames * self.map.len(),
+            "the select emits exactly one sample per map entry per input frame"
+        );
+        Ok(())
+    }
+
+    /// The map's own length: one delivered channel per entry, whatever the
+    /// input count.
+    fn output_channels(&self, _input_channels: u16) -> u16 {
+        self.map.len() as u16
+    }
+}
+
 /// Resample mono interleaved audio from the device's native rate to the
 /// requested target rate, wrapping the owned [`PolyphaseResampler`].
 ///
@@ -1199,9 +1267,9 @@ impl CaptureStage {
 
 /// The opt-in processing [`build_capture_stage`] applies, bundled into one
 /// argument so that adding a capability is a new field rather than another
-/// positional parameter. The first five fields map one-to-one to the transform
-/// stages, listed in chain order; `aec` maps to the last stage of the
-/// `normalize` segment.
+/// positional parameter. `dc_removal` through `limiter` map one-to-one to the
+/// transform stages, listed in chain order; `channel_map` maps to the first
+/// stage of the `normalize` segment and `aec` to its last.
 ///
 /// [`Default`] is every field off, the configuration that pushes no optional
 /// stage at all, so a caller names only what it enables. A field added here must
@@ -1210,6 +1278,13 @@ impl CaptureStage {
 /// holds that line.
 #[derive(Default)]
 pub(crate) struct Transforms<'a> {
+    /// Gather the named device channels (the [`Select`] stage) instead of
+    /// averaging them; `None` (the default) keeps the documented average of
+    /// every opened channel (the [`Downmix`] stage). One 0-based device
+    /// channel index per delivered channel, so the length equals
+    /// `target_channels`; the caller validated every entry against the
+    /// device's own report.
+    pub channel_map: Option<&'a [u16]>,
     /// Remove a constant DC offset (the [`DcBlocker`]).
     pub dc_removal: bool,
     /// Denoise model selector with its model-file path and optional ORT library
@@ -1226,10 +1301,10 @@ pub(crate) struct Transforms<'a> {
     /// Echo-cancellation settings with the shared far-end reference queue;
     /// `None` leaves echo cancellation off.
     ///
-    /// The one field here whose stage lands in `normalize` rather than
-    /// `transform`: it rides in this bundle because that keeps a new capability
-    /// a field on one struct instead of a parameter on
-    /// [`build_capture_stage`]'s signature.
+    /// Its stage lands last in `normalize` rather than in `transform`, as
+    /// `channel_map`'s lands first there: both ride in this bundle because
+    /// that keeps a new capability a field on one struct instead of a
+    /// parameter on [`build_capture_stage`]'s signature.
     #[cfg(feature = "aec")]
     pub aec: Option<AecSettings>,
 }
@@ -1237,8 +1312,10 @@ pub(crate) struct Transforms<'a> {
 /// Build the capture stage chain that normalizes a device to the output format
 /// and applies any opt-in enhancement.
 ///
-/// Pushes [`Downmix`] when the device delivers more channels than the output
-/// target (averaging down to the target, which is mono here), then
+/// Pushes [`Select`] when `channel_map` names a map (gathering the named
+/// device channels, in the order given), otherwise [`Downmix`] when the device
+/// delivers more channels than the output target (averaging down to the
+/// target, which is mono here), then
 /// [`ResampleStage`] when the device's `native_rate` differs from `target_rate`
 /// (converting the captured audio to the requested rate), then the
 /// [`AecStage`] when `aec` names settings (and the `aec` feature is compiled
@@ -1276,6 +1353,7 @@ pub(crate) fn build_capture_stage(
     // Unpack the bundle back into locals so the build below reads one field per
     // stage, in chain order.
     let Transforms {
+        channel_map,
         dc_removal,
         denoise,
         highpass,
@@ -1287,12 +1365,29 @@ pub(crate) fn build_capture_stage(
 
     let mut normalize: Vec<Box<dyn Stage>> = Vec::new();
 
-    if device_channels > target_channels {
-        normalize.push(Box::new(Downmix::new(device_channels)));
+    // A named map gathers; without one, more device channels than the target
+    // collapse to the documented average. The map carries one entry per
+    // delivered channel, so its length is the target count by contract; the
+    // capture path validated that (with the entry range) against the resolved
+    // device before building the chain.
+    match channel_map {
+        Some(map) => {
+            debug_assert_eq!(
+                map.len(),
+                target_channels as usize,
+                "the channel map carries one entry per delivered channel"
+            );
+            normalize.push(Box::new(Select::new(device_channels, map)));
+        }
+        None if device_channels > target_channels => {
+            normalize.push(Box::new(Downmix::new(device_channels)));
+        }
+        None => {}
     }
 
     if native_rate != target_rate {
-        // Downmix (if any) ran first, so the resampler receives mono.
+        // The channel stage (Select or Downmix, if any) ran first, so the
+        // resampler receives mono.
         // Construction validates the rate pair; the `?` bridges a failure to
         // DecibriError::ResampleConfigInvalid via From<ResamplerError>.
         let resampler = PolyphaseResampler::new(native_rate, target_rate)?;
@@ -1666,6 +1761,178 @@ mod tests {
         assert!((out[1] - 0.5).abs() < 1e-6);
         // Reusing sample::downmix_to_mono guarantees identical math.
         assert_eq!(out, sample::downmix_to_mono(&[0.5, 0.3, 0.4, 0.6], 2));
+    }
+
+    // ── Channel selection (the Select gather stage) ────────────────────
+
+    /// A map of `[0]` and a map of `[1]` over a stereo source with different
+    /// content per channel return exactly those channels, sample for sample.
+    ///
+    /// Regression: a gather taking the wrong index, or an off-by-one in the
+    /// interleaved stride, compiles and produces plausible audio; this pins
+    /// the delivered samples to the named device channel exactly.
+    #[test]
+    fn select_gathers_exactly_the_named_device_channel() {
+        // Two channels with unmistakably different content: channel 0 counts
+        // up from 1.0, channel 1 counts down from -1.0.
+        let interleaved = [1.0, -1.0, 2.0, -2.0, 3.0, -3.0, 4.0, -4.0];
+        for (map, expected) in [
+            (vec![0_u16], vec![1.0_f32, 2.0, 3.0, 4.0]),
+            (vec![1_u16], vec![-1.0_f32, -2.0, -3.0, -4.0]),
+        ] {
+            let mut chain = build_capture_stage(
+                2,
+                1,
+                16_000,
+                16_000,
+                Transforms {
+                    channel_map: Some(&map),
+                    ..Default::default()
+                },
+            )
+            .unwrap()
+            .expect("a mapped stereo source builds a select chain");
+            assert_eq!(
+                chain.output_channels(),
+                1,
+                "the select chain delivers the map's one channel"
+            );
+            let out = chain.run(&interleaved).expect("select runs");
+            assert_eq!(out, expected, "map {map:?} returns exactly that channel");
+        }
+    }
+
+    /// With no map, a multichannel source still produces the documented
+    /// average, byte-identical to `sample::downmix_to_mono`: the map's absence
+    /// leaves the collapse exactly as it was.
+    #[test]
+    fn no_map_keeps_the_average_byte_identical() {
+        let interleaved = [0.9, -0.3, 0.0, 0.6, 0.0, -0.6, -0.5, 0.5, 0.5];
+        let mut chain = build_capture_stage(3, 1, 16_000, 16_000, Transforms::default())
+            .unwrap()
+            .expect("a 3-channel source builds a downmix chain");
+        let out = chain.run(&interleaved).expect("downmix runs").to_vec();
+        assert_eq!(
+            out,
+            sample::downmix_to_mono(&interleaved, 3),
+            "the no-map collapse is the documented average, byte for byte"
+        );
+    }
+
+    /// The gather takes entries in map order at its general width, and a
+    /// duplicated entry is an independent copy of its source channel.
+    #[test]
+    fn select_gathers_in_map_order_at_general_width() {
+        // One 3-channel frame (7.0, 8.0, 9.0), gathered as (channel 2,
+        // channel 0), then as (channel 1, channel 1).
+        let interleaved = [7.0, 8.0, 9.0, 70.0, 80.0, 90.0];
+        let mut reorder = build_capture_stage(
+            3,
+            2,
+            16_000,
+            16_000,
+            Transforms {
+                channel_map: Some(&[2, 0]),
+                ..Default::default()
+            },
+        )
+        .unwrap()
+        .expect("a reordering gather builds a chain");
+        assert_eq!(reorder.output_channels(), 2, "two delivered channels");
+        let out = reorder.run(&interleaved).expect("gather runs");
+        assert_eq!(out, &[9.0, 7.0, 90.0, 70.0], "entries land in map order");
+
+        let mut duplicate = build_capture_stage(
+            3,
+            2,
+            16_000,
+            16_000,
+            Transforms {
+                channel_map: Some(&[1, 1]),
+                ..Default::default()
+            },
+        )
+        .unwrap()
+        .expect("a duplicating gather builds a chain");
+        let out = duplicate.run(&interleaved).expect("gather runs");
+        assert_eq!(
+            out,
+            &[8.0, 8.0, 80.0, 80.0],
+            "a duplicated entry copies its source channel independently"
+        );
+    }
+
+    /// The gather accepts an index bounded only by the device's own report:
+    /// a device reporting 60000 channels accepts index 59999.
+    ///
+    /// The negative control for the no-fixed-maximum rule: a constant, an
+    /// array-sized state, or a `1..=N` bound added anywhere on this path
+    /// later fails loudly here.
+    #[test]
+    fn select_accepts_an_index_bounded_only_by_the_device_report() {
+        const DEVICE_CHANNELS: u16 = 60_000;
+        let map = [DEVICE_CHANNELS - 1];
+        let mut chain = build_capture_stage(
+            DEVICE_CHANNELS,
+            1,
+            16_000,
+            16_000,
+            Transforms {
+                channel_map: Some(&map),
+                ..Default::default()
+            },
+        )
+        .unwrap()
+        .expect("a top-index gather builds a chain");
+        // Two frames whose last channel carries a marker value.
+        let mut interleaved = vec![0.0_f32; DEVICE_CHANNELS as usize * 2];
+        interleaved[DEVICE_CHANNELS as usize - 1] = 0.25;
+        interleaved[DEVICE_CHANNELS as usize * 2 - 1] = 0.75;
+        let out = chain.run(&interleaved).expect("gather runs");
+        assert_eq!(
+            out,
+            &[0.25, 0.75],
+            "the top index of a 60000-channel report is served"
+        );
+    }
+
+    /// A map composes with the resampler: the gather runs first in
+    /// `normalize`, so the resampler receives the selected mono channel, and
+    /// the chain's output equals resampling that channel alone.
+    #[test]
+    fn select_then_resample_matches_resampling_the_selected_channel() {
+        let frames = 24_000;
+        let left: Vec<f32> = (0..frames).map(|n| (n as f32 * 0.01).sin()).collect();
+        let right: Vec<f32> = (0..frames).map(|n| (n as f32 * 0.02).cos()).collect();
+        let interleaved: Vec<f32> = left
+            .iter()
+            .zip(&right)
+            .flat_map(|(&l, &r)| [l, r])
+            .collect();
+
+        let mut chain = build_capture_stage(
+            2,
+            1,
+            48_000,
+            16_000,
+            Transforms {
+                channel_map: Some(&[1]),
+                ..Default::default()
+            },
+        )
+        .unwrap()
+        .expect("select + resample chain");
+        let mut out = chain.run(&interleaved).expect("chain runs").to_vec();
+        chain.flush(&mut out).expect("chain flushes");
+
+        let mut resampler = PolyphaseResampler::new(48_000, 16_000).unwrap();
+        let mut expected = Vec::new();
+        resampler.process(&right, &mut expected).unwrap();
+        resampler.flush(&mut expected);
+        assert_eq!(
+            out, expected,
+            "the chain equals resampling the selected channel alone"
+        );
     }
 
     /// A non-target native rate yields a resample chain whose output tracks the
@@ -3415,6 +3682,7 @@ mod tests {
     #[test]
     fn default_is_the_all_off_literal() {
         let all_off = Transforms {
+            channel_map: None,
             dc_removal: false,
             denoise: None,
             highpass: None,
@@ -3424,6 +3692,10 @@ mod tests {
             aec: None,
         };
         let default = Transforms::default();
+        assert_eq!(
+            default.channel_map, all_off.channel_map,
+            "the default must not gather channels"
+        );
         assert_eq!(
             default.dc_removal, all_off.dc_removal,
             "the default must not remove DC"

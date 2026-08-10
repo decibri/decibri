@@ -529,6 +529,18 @@ class Microphone:
     the captured audio passes through unchanged; omit it (the default
     ``None``) to leave echo cancellation off.
 
+    The ``channel_map`` parameter selects which device channel feeds the
+    delivered audio: a list of 0-based device channel indices, one entry per
+    delivered channel, so with ``channels=1`` the accepted length is 1 (for
+    example ``channel_map=[1]`` delivers the device's second channel). Omit it
+    (the default ``None``) to deliver the average of every device channel. The
+    same shape as CoreAudio AUHAL's channel map
+    (``kAudioOutputUnitProperty_ChannelMap``: an array of device channel
+    indices, one per client channel); NOT miniaudio's ``channelMap``, which
+    names a spatial layout. Entries are checked against the device's own
+    channel count when the stream starts (``ChannelMapOutOfRange`` names an
+    entry the device does not have); the device's report is the only ceiling.
+
     This class is synchronous. For async iteration, use ``AsyncMicrophone``.
 
     Cleanup and disconnect:
@@ -572,6 +584,7 @@ class Microphone:
         limiter: float | None = None,
         dc_removal: bool = False,
         aec: str | Aec | None = None,
+        channel_map: list[int] | None = None,
     ) -> None:
         """Construct a Microphone audio capture instance.
 
@@ -789,6 +802,28 @@ class Microphone:
                 f"limiter must be in [-3.0, 0.0]; got {limiter}"
             )
 
+        # Validate the channel map's shape: a list of integers in the channel
+        # count's width, with one entry per delivered channel (the core names
+        # the length failure, so the wrapper raises its class). Whether each
+        # entry exists on the device is the core's check, made against the
+        # resolved device's own report at start(), because only the device can
+        # say how many channels it has; no fixed maximum exists on this path.
+        if channel_map is not None:
+            for entry in channel_map:
+                if not isinstance(entry, int) or isinstance(entry, bool):
+                    raise TypeError(
+                        f"channel_map entries must be integers; got {entry!r}"
+                    )
+                if not 0 <= entry <= 65535:
+                    raise ValueError(
+                        f"channel_map entries must be in [0, 65535]; got {entry}"
+                    )
+            if len(channel_map) != channels:
+                raise exceptions.ChannelMapLengthMismatch(
+                    f"the channel map has {len(channel_map)} entries; it must "
+                    f"have exactly one entry per delivered channel ({channels})"
+                )
+
         # Decompose ``aec`` into the bridge's flat fields. ``aec`` accepts None
         # (off; default), a model-name shorthand such as "tau", or an Aec
         # config object (which self-validates its tuning fields at
@@ -870,6 +905,7 @@ class Microphone:
             aec_suppression=aec_suppression,
             aec_reference_sample_rate=aec_reference_sample_rate,
             aec_reference_channels=aec_reference_channels,
+            channel_map=channel_map,
         )
 
         self._vad_enabled = vad_enabled

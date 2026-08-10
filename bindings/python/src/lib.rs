@@ -148,6 +148,8 @@ const EXCEPTION_NAMES: &[&str] = &[
     "StreamOpenFailed",
     "StreamStartFailed",
     "SpeakerChannelsUnsupported",
+    "ChannelMapOutOfRange",
+    "ChannelMapLengthMismatch",
     "VadSampleRateUnsupported",
     "VadThresholdOutOfRange",
     "AecSampleRateUnsupported",
@@ -941,6 +943,7 @@ impl MicrophoneBridge {
         aec_suppression = None,
         aec_reference_sample_rate = None,
         aec_reference_channels = None,
+        channel_map = None,
     ))]
     #[allow(clippy::too_many_arguments)]
     fn new(
@@ -968,6 +971,7 @@ impl MicrophoneBridge {
         aec_suppression: Option<String>,
         aec_reference_sample_rate: Option<u32>,
         aec_reference_channels: Option<u16>,
+        channel_map: Option<Vec<u16>>,
     ) -> PyResult<Self> {
         let parsed_format = parse_sample_format(&format).map_err(|e| to_py_err(py, e))?;
         let device_selector = build_device_selector(device.as_ref())?;
@@ -979,6 +983,12 @@ impl MicrophoneBridge {
         capture_config.channels = channels;
         capture_config.frames_per_buffer = frames_per_buffer;
         capture_config.device = device_selector;
+
+        // Channel map: thread the 0-based device channel indices through. The
+        // wrapper performs the user-facing shape checks; whether each entry
+        // exists on the device is the core's own check, made against the
+        // resolved device's report at start().
+        capture_config.channel_map = channel_map;
 
         // DC removal: a same-length one-pole DC-blocking high-pass, the first
         // transform stage (before denoise). `false` (the default) leaves it off,
@@ -1644,6 +1654,7 @@ impl AsyncMicrophoneBridge {
         aec_suppression = None,
         aec_reference_sample_rate = None,
         aec_reference_channels = None,
+        channel_map = None,
     ))]
     #[allow(clippy::too_many_arguments)]
     fn new(
@@ -1671,6 +1682,7 @@ impl AsyncMicrophoneBridge {
         aec_suppression: Option<String>,
         aec_reference_sample_rate: Option<u32>,
         aec_reference_channels: Option<u16>,
+        channel_map: Option<Vec<u16>>,
     ) -> PyResult<Self> {
         let inner = MicrophoneBridge::new(
             py,
@@ -1697,6 +1709,7 @@ impl AsyncMicrophoneBridge {
             aec_suppression,
             aec_reference_sample_rate,
             aec_reference_channels,
+            channel_map,
         )?;
         Ok(AsyncMicrophoneBridge {
             inner: Arc::new(inner),

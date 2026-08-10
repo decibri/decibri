@@ -20,6 +20,8 @@ from decibri._decibri import VersionInfo as VersionInfo
 from decibri.exceptions import AgcTargetOutOfRange as AgcTargetOutOfRange
 from decibri.exceptions import AlreadyRunning as AlreadyRunning
 from decibri.exceptions import MicrophoneStreamClosed as MicrophoneStreamClosed
+from decibri.exceptions import ChannelMapLengthMismatch as ChannelMapLengthMismatch
+from decibri.exceptions import ChannelMapOutOfRange as ChannelMapOutOfRange
 from decibri.exceptions import ChannelsOutOfRange as ChannelsOutOfRange
 from decibri.exceptions import MultichannelNotSupported as MultichannelNotSupported
 from decibri.exceptions import DecibriError as DecibriError

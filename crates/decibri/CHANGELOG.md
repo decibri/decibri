@@ -9,6 +9,23 @@ For other decibri packages, see:
 - npm package: [npm/decibri/CHANGELOG.md](../../npm/decibri/CHANGELOG.md)
 - Python package: [bindings/python/CHANGELOG.md](../../bindings/python/CHANGELOG.md)
 
+## [Unreleased]
+
+### Breaking changes
+
+- **Capture opens the device at its native channel count, and decibri performs the collapse to the delivered mono.** The device was opened at the configured count of 1, so on a multichannel device the operating system collapsed the channels before decibri saw them, and it did so differently on each platform: the Windows audio engine applies an unpublished mixing matrix, macOS's default channel map selects device channel zero rather than mixing, and on Linux the result depends on which PCM the device name resolved to (a `plug` device routes under a named policy, a raw `hw` device refuses the open). The capture stream now receives every device channel and decibri averages them into the delivered audio, the same documented average `File` applies to a multichannel container. The delivered audio changes for any device whose native count is above one: on macOS it changes from device channel zero to the average of every channel; on Windows the engine's stereo mix is replaced by the average, which is close to it but not guaranteed identical; above two channels every platform's mix differs from a plain average. A device already delivering one channel is unaffected, byte for byte. `MicrophoneConfig::channels` keeps its accepted value of 1 and now names the DELIVERED count, exactly as `sample_rate` names the delivered rate.
+
+### Added
+
+- `MicrophoneConfig::channel_map`, an optional list of 0-based device channel indices selecting which device channels feed the delivered channels: delivered channel `j` carries device channel `channel_map[j]`. The length must equal `channels`, so the accepted length is 1 (the map selects the one delivered channel). `None` (the default) delivers the average of every opened channel, the previous behaviour. The same shape as CoreAudio AUHAL's channel map (`kAudioOutputUnitProperty_ChannelMap`: an array of device channel indices, one entry per client channel), not miniaudio's `channelMap`, which names a spatial layout. Validated when the stream starts, against the resolved device's own report; the device's report is the only ceiling, and no fixed maximum exists.
+- `DecibriError::ChannelMapOutOfRange`, reported from `Microphone::start` when the channel map names a device channel the device does not have. Carries the offending entry and the device's own channel count, the figure `MicrophoneInfo::max_input_channels` reports.
+- `DecibriError::ChannelMapLengthMismatch`, reported from `Microphone::start` when the channel map's length differs from `channels`. Carries both figures.
+
+### Changed
+
+- An input channel count above 16383 is refused before the platform audio library sees it, as `StreamOpenFailed` naming that limit: the capture mirror of the output-side guard. The capture open count is the device's own report, so the only input this refuses is a report the platform's own data structure cannot express.
+- The capture queue's fixed 64-buffer bound now holds buffers at the device's native channel width, so its memory scales with the device's channel count: roughly 123 KB per channel at a 48 kHz native rate with a typical 10 millisecond driver period.
+
 ## [6.1.0] - 2026-08-10
 
 ### Breaking changes

@@ -82,6 +82,18 @@ assertThrows(() => new Microphone({ channels: 0 }), RangeError, 'channels must b
 assertThrows(() => new Microphone({ channels: 2 }), RangeError, 'multichannel capture is not supported; channels must be 1 (mono)');
 assertThrows(() => new Microphone({ channels: 33 }), RangeError, 'multichannel capture is not supported; channels must be 1 (mono)');
 
+// channelMap: shape-only checks in the wrapper (an array of integers in the
+// channel count's width, one entry per channel). Whether each entry exists on
+// the device is the core's check against the resolved device's report at
+// start(), so it is not exercised here.
+assertThrows(() => new Microphone({ channelMap: 0 }), TypeError, 'Invalid channelMap value');
+assertThrows(() => new Microphone({ channelMap: [0.5] }), TypeError, 'channelMap entries must be integers');
+assertThrows(() => new Microphone({ channelMap: ['0'] }), TypeError, 'channelMap entries must be integers');
+assertThrows(() => new Microphone({ channelMap: [-1] }), RangeError, 'channelMap entries must be between 0 and 65535');
+assertThrows(() => new Microphone({ channelMap: [65536] }), RangeError, 'channelMap entries must be between 0 and 65535');
+assertThrows(() => new Microphone({ channelMap: [0, 1] }), RangeError, 'channelMap must have exactly one entry per channel');
+assertThrows(() => new Microphone({ channelMap: [] }), RangeError, 'channelMap must have exactly one entry per channel');
+
 // framesPerBuffer
 assertThrows(() => new Microphone({ framesPerBuffer: 63 }), RangeError, 'frames per buffer must be between 64 and 65536');
 assertThrows(() => new Microphone({ framesPerBuffer: 65537 }), RangeError, 'frames per buffer must be between 64 and 65536');
@@ -120,6 +132,9 @@ assertThrows(
 // boundary values that SHOULD work
 try { const m = new Microphone({ sampleRate: 1000 }); m.stop(); passed++; }
 catch (e) { console.log(`  FAIL: sampleRate 1000 rejected: ${e.message}`); failed++; }
+
+try { const m = new Microphone({ channelMap: [0] }); m.stop(); passed++; }
+catch (e) { console.log(`  FAIL: channelMap [0] rejected at construction: ${e.message}`); failed++; }
 
 try { const m = new Microphone({ sampleRate: 384000 }); m.stop(); passed++; }
 catch (e) { console.log(`  FAIL: sampleRate 384000 rejected: ${e.message}`); failed++; }
@@ -486,6 +501,7 @@ const BUILTIN_VARIANTS = [
   'FramesPerBufferOutOfRange',
   'AgcTargetOutOfRange',
   'LimiterCeilingOutOfRange',
+  'ChannelMapLengthMismatch',
   'FlacCompressionOutOfRange',
   'InvalidFormat',
   'DeviceIndexOutOfRange',

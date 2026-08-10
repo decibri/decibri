@@ -157,6 +157,36 @@ class Microphone extends Readable {
       throw new RangeError('multichannel capture is not supported; channels must be 1 (mono)');
     }
 
+    // ── Validate channel map ─────────────────────────────────────────────────
+
+    // An optional list of 0-based device channel indices, one per delivered
+    // channel: delivered channel j carries device channel channelMap[j].
+    // Absence delivers the documented average of every opened channel. The
+    // checks here are shape-only (an array of integers that fit the channel
+    // count's width, with one entry per channel); whether each entry exists on
+    // the device is the core's check, made against the resolved device's own
+    // report when the stream starts, because only the device can say how many
+    // channels it has. No fixed maximum exists on this path.
+    const channelMap = options.channelMap;
+    if (channelMap !== undefined) {
+      if (!Array.isArray(channelMap)) {
+        throw new TypeError(
+          `Invalid channelMap value: ${JSON.stringify(channelMap)}. Expected an array of 0-based device channel indices, such as [0].`
+        );
+      }
+      for (const entry of channelMap) {
+        if (typeof entry !== 'number' || !Number.isInteger(entry)) {
+          throw new TypeError('channelMap entries must be integers');
+        }
+        if (entry < 0 || entry > 65535) {
+          throw new RangeError('channelMap entries must be between 0 and 65535');
+        }
+      }
+      if (channelMap.length !== channels) {
+        throw new RangeError('channelMap must have exactly one entry per channel');
+      }
+    }
+
     const framesPerBuffer = options.framesPerBuffer ?? 1600;
     if (framesPerBuffer < 64 || framesPerBuffer > 65536) {
       throw new RangeError('frames per buffer must be between 64 and 65536');
@@ -433,6 +463,7 @@ class Microphone extends Readable {
       nativeOptions: {
         sampleRate,
         channels,
+        channelMap,
         framesPerBuffer,
         format: dtype,
         device: resolvedDevice,

@@ -29,6 +29,8 @@ from decibri._decibri import (
 from decibri.exceptions import (
     AgcTargetOutOfRange,
     AlreadyRunning,
+    ChannelMapLengthMismatch,
+    ChannelMapOutOfRange,
     ChannelsOutOfRange,
     DecibriError,
     DeviceEnumerationFailed,
