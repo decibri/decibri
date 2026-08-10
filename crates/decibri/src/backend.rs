@@ -73,30 +73,47 @@ pub(crate) struct StreamParams {
     pub frames_per_buffer: Option<u32>,
 }
 
-/// The largest channel count an output stream may carry.
+/// The largest channel count a stream, input or output, may carry.
 ///
 /// `WAVEFORMATEX.nBlockAlign` is a `u16` in the Windows API, and the platform
 /// library computes it as `channels * bytes_per_sample` in `u16` arithmetic.
-/// decibri opens output as `f32`, four bytes per sample, which fixes the
-/// multiplier at 4 and puts the product outside the type above 16383. A build
-/// with overflow checks on panics on that multiply inside the platform library,
-/// where no error path of decibri's runs, so the count is refused here instead.
-/// The other two platform backends compute the same figure in a wider type, so
-/// the limit is Windows' own; it is enforced on every platform so the accepted
-/// set does not vary by host.
+/// decibri opens both directions as `f32`, four bytes per sample, which fixes
+/// the multiplier at 4 and puts the product outside the type above 16383. A
+/// build with overflow checks on panics on that multiply inside the platform
+/// library, where no error path of decibri's runs, so the count is refused
+/// here instead. The other two platform backends compute the same figure in a
+/// wider type, so the limit is Windows' own; it is enforced on every platform
+/// so the accepted set does not vary by host.
 ///
-/// Not a bound on what a device serves. Every count at or below it is offered to
-/// the device, which answers for itself.
-#[cfg(feature = "playback")]
-const MAX_OUTPUT_STREAM_CHANNELS: u16 = 16383;
+/// Not a bound on what a device serves. Every count at or below it is offered
+/// to the device, which answers for itself. On capture the count offered is
+/// the device's own report, so this guard can only refuse a report the
+/// platform's own data structure cannot express.
+#[cfg(any(feature = "capture", feature = "playback"))]
+const MAX_STREAM_CHANNELS: u16 = 16383;
 
 /// Refuse an output channel count the platform cannot express, before it
-/// reaches the platform library. See [`MAX_OUTPUT_STREAM_CHANNELS`].
+/// reaches the platform library. See [`MAX_STREAM_CHANNELS`].
 #[cfg(feature = "playback")]
 fn check_output_stream_channels(channels: u16) -> Result<(), DecibriError> {
-    if channels > MAX_OUTPUT_STREAM_CHANNELS {
+    if channels > MAX_STREAM_CHANNELS {
         return Err(DecibriError::StreamOpenFailed(format!(
-            "the platform supports at most {MAX_OUTPUT_STREAM_CHANNELS} output channels, \
+            "the platform supports at most {MAX_STREAM_CHANNELS} output channels, \
+             and {channels} were requested"
+        )));
+    }
+    Ok(())
+}
+
+/// Refuse an input channel count the platform cannot express, before it
+/// reaches the platform library: the capture mirror of
+/// [`check_output_stream_channels`], so the accepted set is identical on both
+/// paths. See [`MAX_STREAM_CHANNELS`].
+#[cfg(feature = "capture")]
+fn check_input_stream_channels(channels: u16) -> Result<(), DecibriError> {
+    if channels > MAX_STREAM_CHANNELS {
+        return Err(DecibriError::StreamOpenFailed(format!(
+            "the platform supports at most {MAX_STREAM_CHANNELS} input channels, \
              and {channels} were requested"
         )));
     }
@@ -162,6 +179,12 @@ pub(crate) trait AudioBackend: Send + Sync {
     /// capture chain resamples to the requested target rate.
     #[cfg(feature = "capture")]
     fn native_input_rate(&self, device: &BackendDevice) -> Result<u32, DecibriError>;
+
+    /// Report the device's native input channel count: the count of its default
+    /// supported format, which the capture stream is opened at before the
+    /// capture chain collapses to the delivered count.
+    #[cfg(feature = "capture")]
+    fn native_input_channels(&self, device: &BackendDevice) -> Result<u16, DecibriError>;
 
     /// Resolve a selector to an output device handle.
     #[cfg(feature = "playback")]
@@ -229,6 +252,19 @@ impl AudioBackend for CpalBackend {
             .map_err(|e| DecibriError::DeviceEnumerationFailed(e.to_string()))
     }
 
+    #[cfg(feature = "capture")]
+    fn native_input_channels(&self, device: &BackendDevice) -> Result<u16, DecibriError> {
+        // The same query the rate seam reads and the one that populates the
+        // enumerated `max_input_channels`, so the count opened is the count a
+        // listing reports. Opening at it is always accepted; the capture chain
+        // collapses to the delivered count.
+        device
+            .inner
+            .default_input_config()
+            .map(|config| config.channels())
+            .map_err(|e| DecibriError::DeviceEnumerationFailed(e.to_string()))
+    }
+
     #[cfg(feature = "playback")]
     fn resolve_output_device(
         &self,
@@ -247,6 +283,10 @@ impl AudioBackend for CpalBackend {
         mut on_data: InputDataCallback,
         mut on_error: StreamErrorCallback,
     ) -> Result<BackendStream, DecibriError> {
+        // Before the platform library sees the count: above this the product it
+        // computes leaves its own type. See `MAX_STREAM_CHANNELS`.
+        check_input_stream_channels(params.channels)?;
+
         let stream = device
             .inner
             .build_input_stream(
@@ -596,14 +636,14 @@ mod tests {
     #[cfg(feature = "playback")]
     #[test]
     fn output_channel_guard_brackets_the_platform_limit() {
-        for channels in [1_u16, 2, 8, 33, 123, 1024, MAX_OUTPUT_STREAM_CHANNELS] {
+        for channels in [1_u16, 2, 8, 33, 123, 1024, MAX_STREAM_CHANNELS] {
             assert!(
                 check_output_stream_channels(channels).is_ok(),
                 "{channels} channels is within what the platform can express"
             );
         }
 
-        for channels in [MAX_OUTPUT_STREAM_CHANNELS + 1, 32768, u16::MAX] {
+        for channels in [MAX_STREAM_CHANNELS + 1, 32768, u16::MAX] {
             let err = check_output_stream_channels(channels)
                 .expect_err("a count above the limit must be refused");
             assert!(
@@ -613,6 +653,42 @@ mod tests {
             let msg = err.to_string();
             assert!(
                 msg.contains("16383") && msg.contains(&channels.to_string()),
+                "the refusal names the limit and the count asked for: {msg}"
+            );
+        }
+    }
+
+    /// The input-channel guard mirrors the output one exactly: every count the
+    /// platform can express passes, the first it cannot is refused, and the
+    /// refusal names the limit and the count asked for.
+    ///
+    /// Regression: the guard is what keeps a pathological device report from
+    /// reaching the platform library, where the multiply it feeds panics in a
+    /// build with overflow checks on. The bound is the platform's own
+    /// structural limit, not a bound on what a device may report at or below
+    /// it.
+    #[cfg(feature = "capture")]
+    #[test]
+    fn input_channel_guard_brackets_the_platform_limit() {
+        for channels in [1_u16, 2, 8, 33, 123, 1024, MAX_STREAM_CHANNELS] {
+            assert!(
+                check_input_stream_channels(channels).is_ok(),
+                "{channels} channels is within what the platform can express"
+            );
+        }
+
+        for channels in [MAX_STREAM_CHANNELS + 1, 32768, u16::MAX] {
+            let err = check_input_stream_channels(channels)
+                .expect_err("a count above the limit must be refused");
+            assert!(
+                matches!(err, DecibriError::StreamOpenFailed(_)),
+                "the refusal is an open failure, got {err:?}"
+            );
+            let msg = err.to_string();
+            assert!(
+                msg.contains("16383")
+                    && msg.contains("input channels")
+                    && msg.contains(&channels.to_string()),
                 "the refusal names the limit and the count asked for: {msg}"
             );
         }

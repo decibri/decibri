@@ -56,6 +56,13 @@ enum SampleFormat {
 pub struct DecibriOptions {
     pub sample_rate: Option<u32>,
     pub channels: Option<u32>,
+    /// Capture channel map: 0-based device channel indices, one per delivered
+    /// channel (the shape of CoreAudio AUHAL's channel map, an index list, not
+    /// miniaudio's spatial `channelMap`). Absent delivers the documented
+    /// average of every opened channel. Entries are validated against the
+    /// resolved device's own report when the stream starts; no fixed maximum
+    /// exists.
+    pub channel_map: Option<Vec<u32>>,
     pub frames_per_buffer: Option<u32>,
     pub format: Option<String>,
     pub device: Option<serde_json::Value>,
@@ -195,6 +202,24 @@ fn build_microphone_parts(options: Option<DecibriOptions>) -> Result<MicrophoneP
     config.channels = channels;
     config.frames_per_buffer = frames_per_buffer;
     config.device = device;
+
+    // Channel map: narrow each JS number to the core's u16 (the JS wrapper
+    // performs the user-facing integer and range checks; this is the native
+    // backstop) and thread the list through. Whether each entry exists on the
+    // device is the core's own check, made against the resolved device's
+    // report when the stream starts.
+    if let Some(map) = opts.channel_map {
+        let mut entries: Vec<u16> = Vec::with_capacity(map.len());
+        for entry in map {
+            entries.push(entry.try_into().map_err(|_| {
+                Error::new(
+                    Status::InvalidArg,
+                    "channelMap entries must be between 0 and 65535".to_string(),
+                )
+            })?);
+        }
+        config.channel_map = Some(entries);
+    }
 
     // DC removal: a same-length one-pole DC-blocking high-pass, the first
     // transform stage (before denoise). Absent or `false` leaves it off (the

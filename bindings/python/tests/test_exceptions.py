@@ -1,7 +1,7 @@
 """Exception hierarchy tests.
 
-Covers all 55 exception classes shipped in the public ``decibri`` namespace:
-1 base (DecibriError) + 33 direct subclasses + DeviceError intermediate
+Covers all 57 exception classes shipped in the public ``decibri`` namespace:
+1 base (DecibriError) + 35 direct subclasses + DeviceError intermediate
 + 8 direct DeviceError subclasses + OrtError intermediate + 8 direct
 OrtError subclasses + OrtPathError intermediate + 2 direct OrtPathError
 subclasses.
@@ -29,6 +29,8 @@ from decibri import (
     AgcTargetOutOfRange,
     AlreadyRunning,
     MicrophoneStreamClosed,
+    ChannelMapLengthMismatch,
+    ChannelMapOutOfRange,
     ChannelsOutOfRange,
     MultichannelNotSupported,
     DecibriError,
@@ -84,19 +86,21 @@ import pytest
 
 
 # ---------------------------------------------------------------------------
-# All 55 classes are reachable and inherit from Exception via DecibriError.
+# All 57 classes are reachable and inherit from Exception via DecibriError.
 # ---------------------------------------------------------------------------
 
 
 ALL_DECIBRI_ERROR_CLASSES = (
     DecibriError,
-    # 33 direct DecibriError subclasses (non-device, non-ORT). DeviceFailed
+    # 35 direct DecibriError subclasses (non-device, non-ORT). DeviceFailed
     # is a runtime device/driver failure (distinct from the DeviceError
     # enumeration/selection family); OnnxBackendFailed is the non-ORT ONNX
     # backend catch-all (distinct from the OrtError family); FileConsumed and
     # FileEngaged are the File single-pass lifecycle errors.
     AlreadyRunning,
     MicrophoneStreamClosed,
+    ChannelMapLengthMismatch,
+    ChannelMapOutOfRange,
     ChannelsOutOfRange,
     MultichannelNotSupported,
     FramesPerBufferOutOfRange,
@@ -155,11 +159,12 @@ ALL_DECIBRI_ERROR_CLASSES = (
 
 
 def test_class_count() -> None:
-    # 55 total: 1 base + 33 direct + DeviceError + 8 device + OrtError
-    # + 8 ORT direct + OrtPathError + 2 path. The change over the prior 54 is
-    # SpeakerChannelsUnsupported, for an output device that cannot serve the
-    # requested channel count.
-    assert len(ALL_DECIBRI_ERROR_CLASSES) == 55
+    # 57 total: 1 base + 35 direct + DeviceError + 8 device + OrtError
+    # + 8 ORT direct + OrtPathError + 2 path. The change over the prior 55 is
+    # the capture channel-map pair: ChannelMapOutOfRange (an entry the device
+    # does not have) and ChannelMapLengthMismatch (a map whose length differs
+    # from the channels count).
+    assert len(ALL_DECIBRI_ERROR_CLASSES) == 57
 
 
 def test_all_inherit_from_decibri_error() -> None:
@@ -485,8 +490,8 @@ def _core_variant_names() -> list[str]:
     assert "PermissionDenied" in names, "known variant missing from the parsed table"
     # The count is pinned deliberately and must be updated when a core variant
     # is added or removed.
-    assert len(names) == 50, (
-        f"parsed {len(names)} variants from the core identity table, expected 50;"
+    assert len(names) == 52, (
+        f"parsed {len(names)} variants from the core identity table, expected 52;"
         " the count is pinned deliberately and must be updated when a core"
         " variant is added or removed"
     )

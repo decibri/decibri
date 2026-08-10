@@ -9,6 +9,21 @@ For other decibri packages, see:
 - Rust core: [crates/decibri/CHANGELOG.md](../../crates/decibri/CHANGELOG.md)
 - Python package: [bindings/python/CHANGELOG.md](../../bindings/python/CHANGELOG.md)
 
+## [Unreleased]
+
+### Breaking changes
+
+- **`Microphone` opens the device at its native channel count, and decibri performs the collapse to the delivered mono.** The device was opened at the configured count of 1, so on a multichannel device the operating system collapsed the channels before decibri saw them, and it did so differently on each platform: the Windows audio engine applies an unpublished mixing matrix, macOS's default channel map selects device channel zero rather than mixing, and on Linux the result depends on which PCM the device name resolved to (a `plug` device routes under a named policy, a raw `hw` device refuses the open). The capture stream now receives every device channel and decibri averages them into the delivered audio, the same documented average `File` applies to a multichannel container. The delivered audio changes for any device whose native count is above one: on macOS it changes from device channel zero to the average of every channel; on Windows the engine's stereo mix is replaced by the average, which is close to it but not guaranteed identical; above two channels every platform's mix differs from a plain average. A device already delivering one channel is unaffected, byte for byte. The `channels` option keeps its accepted value of 1 and now names the DELIVERED count, exactly as `sampleRate` names the delivered rate. The browser `Microphone` is unchanged.
+
+### Added
+
+- `channelMap` on the `Microphone` options: an optional array of 0-based device channel indices selecting which device channels feed the delivered channels, so `channelMap: [1]` delivers the device's second channel alone. The length must equal `channels`, so the accepted length is 1; a longer, shorter or malformed array throws a `RangeError` or `TypeError` from the constructor. Absent delivers the average of every opened channel, the previous behaviour. The same shape as CoreAudio AUHAL's channel map (an array of device channel indices, one entry per client channel), not miniaudio's `channelMap`, which names a spatial layout. Entries are checked against the resolved device's own report when the stream starts; the device's report is the only ceiling, and no fixed maximum exists.
+- Error code `CHANNEL_MAP_OUT_OF_RANGE` on `DecibriError`, emitted on the `'error'` event when the channel map names a device channel the device does not have. The message names the offending entry and the count the device reports, the figure `MicrophoneInfo.maxInputChannels` carries.
+
+### Changed
+
+- The capture queue's fixed 64-buffer bound now holds buffers at the device's native channel width, so its memory scales with the device's channel count: roughly 123 KB per channel at a 48 kHz native rate with a typical 10 millisecond driver period.
+
 ## [5.5.0] - 2026-08-10
 
 ### Breaking changes

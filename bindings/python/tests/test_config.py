@@ -31,6 +31,7 @@ and live in test_vad.py Section A alongside the rest of the VAD surface.
 import pytest
 
 from decibri import (
+    ChannelMapLengthMismatch,
     ChannelsOutOfRange,
     Microphone,
     FramesPerBufferOutOfRange,
@@ -133,6 +134,49 @@ def test_multichannel_request_is_rejected(channels: int) -> None:
         str(exc_info.value)
         == "multichannel capture is not supported; channels must be 1 (mono)"
     )
+
+
+@pytest.mark.parametrize(
+    "channel_map",
+    [
+        pytest.param([0, 1], id="map_two_entries"),
+        pytest.param([], id="map_empty"),
+    ],
+)
+def test_channel_map_length_mismatch_is_rejected(channel_map: list[int]) -> None:
+    """A channel map without exactly one entry per delivered channel raises
+    ChannelMapLengthMismatch at construction, naming both figures. Whether an
+    entry exists on the device is a separate check, made against the resolved
+    device's own report at start().
+    """
+    with pytest.raises(ChannelMapLengthMismatch) as exc_info:
+        Microphone(channel_map=channel_map)
+    assert str(exc_info.value) == (
+        f"the channel map has {len(channel_map)} entries; it must have "
+        "exactly one entry per delivered channel (1)"
+    )
+
+
+def test_channel_map_entry_shape_is_checked() -> None:
+    """Channel map entries must be integers in the channel count's width:
+    a non-integer raises TypeError, an out-of-width value ValueError.
+    """
+    with pytest.raises(TypeError):
+        Microphone(channel_map=[0.5])  # type: ignore[list-item]
+    with pytest.raises(TypeError):
+        Microphone(channel_map=[True])
+    with pytest.raises(ValueError):
+        Microphone(channel_map=[-1])
+    with pytest.raises(ValueError):
+        Microphone(channel_map=[65536])
+
+
+def test_channel_map_of_one_entry_constructs() -> None:
+    """A one-entry map passes the shape checks and reaches the bridge:
+    construction is hardware-free (the device is resolved at start()).
+    """
+    mic = Microphone(channel_map=[0])
+    assert mic is not None
 
 
 @pytest.mark.parametrize(

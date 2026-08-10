@@ -199,14 +199,38 @@ export interface MicrophoneOptions extends ReadableOptions {
   sampleRate?: number;
 
   /**
-   * Number of input channels. Mono only: the only accepted value is `1`, and a
-   * value greater than `1` throws a `RangeError` (multichannel capture is not
-   * supported) rather than being silently downmixed. The option is kept for
-   * forward compatibility: a future release may accept a value greater than `1`
-   * by delivering true interleaved multichannel.
+   * Number of channels the stream delivers. Mono only: the only accepted value
+   * is `1`, and a value greater than `1` throws a `RangeError` (multichannel
+   * capture is not supported) rather than being silently downmixed. The option
+   * is kept for forward compatibility: a future release may accept a value
+   * greater than `1` by delivering true interleaved multichannel.
+   *
+   * The device itself is opened at its own native channel count, exactly as it
+   * is opened at its native rate: decibri collapses the captured audio to this
+   * delivered count with the documented average of every opened channel, or
+   * with the channels `channelMap` selects.
    * @default 1
    */
   channels?: number;
+
+  /**
+   * Optional list of 0-based device channel indices selecting which device
+   * channels feed the delivered channels: delivered channel `j` carries device
+   * channel `channelMap[j]`. The length must equal `channels`, so the accepted
+   * length is `1` (the map selects the one delivered channel). Absent delivers
+   * the documented average of every opened channel.
+   *
+   * The same shape as CoreAudio AUHAL's channel map
+   * (`kAudioOutputUnitProperty_ChannelMap`: an array of device channel
+   * indices, one entry per client channel). NOT miniaudio's `channelMap`,
+   * which names a spatial layout. Entries are validated against the resolved
+   * device's own report when the stream starts: an entry the device does not
+   * have throws a `DecibriError` with code `'CHANNEL_MAP_OUT_OF_RANGE'` naming
+   * the entry and the count the device reports. The device's report is the
+   * only ceiling; no fixed maximum exists.
+   * @default undefined (the average of every opened channel)
+   */
+  channelMap?: number[];
 
   /**
    * Frames per audio callback buffer. Controls chunk size and delivery interval.

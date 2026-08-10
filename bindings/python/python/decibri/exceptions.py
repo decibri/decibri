@@ -168,6 +168,25 @@ class SpeakerChannelsUnsupported(DecibriError):
     """
 
 
+class ChannelMapOutOfRange(DecibriError):
+    """Raised when a capture channel map names a device channel that does not exist.
+
+    ``channel_map`` entries are 0-based device channel indices, checked
+    against the resolved device's own channel count when the stream starts
+    (only the device can say how many channels it has; no fixed maximum
+    exists). The message names the offending entry and the count the device
+    reports.
+    """
+
+
+class ChannelMapLengthMismatch(DecibriError):
+    """Raised when a capture channel map's length differs from ``channels``.
+
+    ``channel_map`` carries one entry per delivered channel, so its length
+    must equal the ``channels`` count. The message names both figures.
+    """
+
+
 class PermissionDenied(DecibriError):
     """Raised when the OS denies microphone access.
 
