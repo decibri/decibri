@@ -94,6 +94,7 @@ class Microphone extends Emitter {
     // ── Options ───────────────────────────────────────────────────────────
     this._sampleRate = options.sampleRate ?? 16000;
     this._channels = options.channels ?? 1;
+    this._channelMap = options.channelMap;
     this._framesPerBuffer = options.framesPerBuffer ?? 1600;
     this._device = options.device;
     this._dtype = options.dtype ?? 'int16';
@@ -105,9 +106,10 @@ class Microphone extends Emitter {
     if (this._sampleRate < 1000 || this._sampleRate > 384000) {
       throw new RangeError('sample rate must be between 1000 and 384000');
     }
-    // Mono only: the worklet reads a single channel. The classes and the
-    // messages are the node entry's, so the same value is rejected the same
-    // way in both runtimes.
+    // Mono only: the delivered audio is a single channel, collapsed from
+    // every granted channel (the average, or the channel the map selects).
+    // The classes and the messages are the node entry's, so the same value
+    // is rejected the same way in both runtimes.
     if (this._channels < 1) {
       throw new RangeError('channels must be at least 1');
     }
@@ -120,6 +122,34 @@ class Microphone extends Emitter {
     // below only.
     if (this._channels < 1 || this._channels > 32) {
       throw new TypeError(`channels must be between 1 and 32, got ${this._channels}`);
+    }
+    // An optional list of 0-based device channel indices, one per delivered
+    // channel: delivered channel j carries device channel channelMap[j].
+    // Absence delivers the documented average of every granted channel. The
+    // checks here are shape-only (an array of integers that fit the channel
+    // count's width, with one entry per channel), the node entry's classes
+    // and messages; whether each entry exists on the track is checked when
+    // the stream starts, against the granted track's own report, because
+    // only the grant can say how many channels it carries. No fixed maximum
+    // exists on this path.
+    const channelMap = this._channelMap;
+    if (channelMap !== undefined) {
+      if (!Array.isArray(channelMap)) {
+        throw new TypeError(
+          `Invalid channelMap value: ${JSON.stringify(channelMap)}. Expected an array of 0-based device channel indices, such as [0].`
+        );
+      }
+      for (const entry of channelMap) {
+        if (typeof entry !== 'number' || !Number.isInteger(entry)) {
+          throw new TypeError('channelMap entries must be integers');
+        }
+        if (entry < 0 || entry > 65535) {
+          throw new RangeError('channelMap entries must be between 0 and 65535');
+        }
+      }
+      if (channelMap.length !== this._channels) {
+        throw new RangeError('channelMap must have exactly one entry per channel');
+      }
     }
     if (this._framesPerBuffer < 64 || this._framesPerBuffer > 65536) {
       throw new TypeError(`frames per buffer must be between 64 and 65536, got ${this._framesPerBuffer}`);
@@ -240,8 +270,14 @@ class Microphone extends Emitter {
     await this._audioContext.resume();
 
     // 2. Request microphone access
+    // The channel ask is 32 with ideal semantics, the count the Web Audio
+    // specification requires an implementation to support: the browser
+    // grants what it can serve and never rejects on this constraint. The
+    // granted track's own report, not this ask, is the authority for
+    // everything downstream, so a grant above the ask flows through
+    // unclamped.
     const audioConstraints = {
-      channelCount: this._channels,
+      channelCount: { ideal: 32 },
       echoCancellation: this._echoCancellation,
       noiseSuppression: this._noiseSuppression,
     };
@@ -257,6 +293,33 @@ class Microphone extends Emitter {
       const error = this._mapError(err);
       this.emit('error', error);
       throw error;
+    }
+
+    // The granted track's report is the capture-side authority, as the
+    // resolved device's report is on the node path: the map is checked
+    // against it here, before the worklet is built, with the node entry's
+    // message for the same condition. A browser that omits channelCount from
+    // getSettings() defers the check to the worklet, which sees the true
+    // channel count of every block it processes.
+    if (this._channelMap !== undefined) {
+      const track = this._stream.getAudioTracks()[0];
+      const settings = track && typeof track.getSettings === 'function' ? track.getSettings() : {};
+      const granted = settings.channelCount;
+      if (typeof granted === 'number') {
+        for (const entry of this._channelMap) {
+          if (entry >= granted) {
+            this._stream.getTracks().forEach(t => t.stop());
+            this._stream = null;
+            await this._audioContext.close();
+            this._audioContext = null;
+            const error = new Error(
+              `the channel map names device channel ${entry}; the device reports ${granted} input channels`
+            );
+            this.emit('error', error);
+            throw error;
+          }
+        }
+      }
     }
 
     // 3. Load AudioWorklet processor
@@ -286,15 +349,30 @@ class Microphone extends Emitter {
         format: this._dtype,
         nativeSampleRate,
         targetSampleRate: this._sampleRate,
+        channelMap: this._channelMap ?? null,
       },
     });
 
     // 5. Wire up data from worklet
     this._workletNode.port.onmessage = (event) => {
-      const buffer = event.data;
+      const data = event.data;
+
+      // The port carries raw ArrayBuffer chunks and tagged control objects,
+      // as on the output worklet's port. The one control message is the
+      // worklet's channel-map failure: surface it and stop, so a map naming
+      // a channel the track does not carry is never silent.
+      if (!(data instanceof ArrayBuffer)) {
+        if (data && data.type === 'error') {
+          const error = new Error(data.message);
+          this.emit('error', error);
+          this.stop();
+        }
+        return;
+      }
+
       const chunk = this._dtype === 'int16'
-        ? new Int16Array(buffer)
-        : new Float32Array(buffer);
+        ? new Int16Array(data)
+        : new Float32Array(data);
 
       this.emit('data', chunk);
 

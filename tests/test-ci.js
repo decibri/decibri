@@ -764,6 +764,36 @@ const parityCases = [
     type: RangeError,
     message: 'multichannel capture is not supported; channels must be 1 (mono)',
   },
+  {
+    label: "channelMap 'left'",
+    options: { channelMap: 'left' },
+    type: TypeError,
+    message: 'Invalid channelMap value: "left". Expected an array of 0-based device channel indices, such as [0].',
+  },
+  {
+    label: 'channelMap [0.5]',
+    options: { channelMap: [0.5] },
+    type: TypeError,
+    message: 'channelMap entries must be integers',
+  },
+  {
+    label: 'channelMap [-1]',
+    options: { channelMap: [-1] },
+    type: RangeError,
+    message: 'channelMap entries must be between 0 and 65535',
+  },
+  {
+    label: 'channelMap [65536]',
+    options: { channelMap: [65536] },
+    type: RangeError,
+    message: 'channelMap entries must be between 0 and 65535',
+  },
+  {
+    label: 'channelMap [0, 1]',
+    options: { channelMap: [0, 1] },
+    type: RangeError,
+    message: 'channelMap must have exactly one entry per channel',
+  },
 ];
 
 for (const { label, options, type, message } of parityCases) {

@@ -5,8 +5,11 @@ import pkg from '../../npm/decibri/package.json';
 // ── Browser API mocks ────────────────────────────────────────────────────────
 
 const mockTrackStop = vi.fn();
+const mockGetSettings = vi.fn().mockReturnValue({ channelCount: 1 });
+const mockTrack = { stop: mockTrackStop, getSettings: mockGetSettings };
 const mockStream = {
-  getTracks: () => [{ stop: mockTrackStop }],
+  getTracks: () => [mockTrack],
+  getAudioTracks: () => [mockTrack],
 };
 
 const mockPortOnMessage = { onmessage: null };
@@ -106,6 +109,7 @@ function resetMocks() {
   mockAddModule.mockResolvedValue(undefined);
   mockContextClose.mockResolvedValue(undefined);
   mockContextResume.mockResolvedValue(undefined);
+  mockGetSettings.mockReturnValue({ channelCount: 1 });
 }
 
 // ── Tests ────────────────────────────────────────────────────────────────────
@@ -233,6 +237,119 @@ describe('Microphone constructor validation', () => {
   });
 });
 
+describe('Microphone channelMap validation', () => {
+  beforeEach(resetMocks);
+
+  // The classes and the messages are the node entry's, so the same map is
+  // rejected the same way in both runtimes (Group 7d asserts the pairing).
+
+  it('rejects a non-array with the node entry message', () => {
+    const err = thrownBy(() => new Microphone({ channelMap: 'left' }));
+    expect(err).toBeInstanceOf(TypeError);
+    expect(err.message).toBe(
+      'Invalid channelMap value: "left". Expected an array of 0-based device channel indices, such as [0].'
+    );
+  });
+
+  it('rejects non-integer entries', () => {
+    for (const entry of [0.5, '0', NaN, null]) {
+      const err = thrownBy(() => new Microphone({ channelMap: [entry] }));
+      expect(err).toBeInstanceOf(TypeError);
+      expect(err.message).toBe('channelMap entries must be integers');
+    }
+  });
+
+  it('rejects entries outside the 16-bit carrier', () => {
+    for (const entry of [-1, 65536]) {
+      const err = thrownBy(() => new Microphone({ channelMap: [entry] }));
+      expect(err).toBeInstanceOf(RangeError);
+      expect(err.message).toBe('channelMap entries must be between 0 and 65535');
+    }
+  });
+
+  it('rejects a length that differs from channels', () => {
+    for (const channelMap of [[], [0, 1]]) {
+      const err = thrownBy(() => new Microphone({ channelMap }));
+      expect(err).toBeInstanceOf(RangeError);
+      expect(err.message).toBe('channelMap must have exactly one entry per channel');
+    }
+  });
+
+  it('accepts a shape-valid single entry, with no fixed maximum at construction', () => {
+    expect(new Microphone({ channelMap: [0] })).toBeInstanceOf(Microphone);
+    expect(new Microphone({ channelMap: [65535] })).toBeInstanceOf(Microphone);
+  });
+});
+
+describe('Microphone channelMap at start', () => {
+  beforeEach(resetMocks);
+
+  it('validates the map against the granted track report and rejects with the engine message', async () => {
+    mockGetSettings.mockReturnValue({ channelCount: 2 });
+    const mic = new Microphone({ channelMap: [2] });
+    const errorFn = vi.fn();
+    mic.on('error', errorFn);
+
+    await expect(mic.start()).rejects.toThrow(
+      'the channel map names device channel 2; the device reports 2 input channels'
+    );
+    expect(errorFn).toHaveBeenCalledTimes(1);
+    expect(mockTrackStop).toHaveBeenCalled();
+    expect(mockContextClose).toHaveBeenCalled();
+    expect(mockAddModule).not.toHaveBeenCalled();
+    expect(mic.isOpen).toBe(false);
+  });
+
+  it('accepts a map the granted report covers and hands it to the worklet', async () => {
+    mockGetSettings.mockReturnValue({ channelCount: 2 });
+    const mic = new Microphone({ channelMap: [1] });
+    await mic.start();
+    expect(capturedWorkletOptions.processorOptions.channelMap).toEqual([1]);
+    mic.stop();
+  });
+
+  it('accepts a large index when the grant reports that many channels', async () => {
+    // The negative control: the granted report is the only ceiling, so an
+    // index far above the Web Audio 32 floor must pass when the grant covers
+    // it. A fixed maximum added to this path later fails loudly here.
+    mockGetSettings.mockReturnValue({ channelCount: 4096 });
+    const mic = new Microphone({ channelMap: [4095] });
+    await mic.start();
+    expect(mic.isOpen).toBe(true);
+    mic.stop();
+  });
+
+  it('defers the check to the worklet when the browser reports no channel count', async () => {
+    mockGetSettings.mockReturnValue({});
+    const mic = new Microphone({ channelMap: [5] });
+    const errorFn = vi.fn();
+    mic.on('error', errorFn);
+
+    await mic.start();
+    expect(mic.isOpen).toBe(true);
+
+    // The worklet reports the failure as a tagged control object on the same
+    // port the chunks ride; the wrapper surfaces it and stops.
+    mockPort.onmessage({
+      data: { type: 'error', message: 'the channel map names device channel 5; the device reports 1 input channels' },
+    });
+    expect(errorFn).toHaveBeenCalledTimes(1);
+    expect(errorFn.mock.calls[0][0].message).toBe(
+      'the channel map names device channel 5; the device reports 1 input channels'
+    );
+    expect(mic.isOpen).toBe(false);
+    expect(mockTrackStop).toHaveBeenCalled();
+  });
+
+  it('does not read the granted report without a map', async () => {
+    const mic = new Microphone();
+    await mic.start();
+    expect(mockGetSettings).not.toHaveBeenCalled();
+    expect(capturedWorkletOptions.processorOptions.channelMap).toBe(null);
+    mic.stop();
+  });
+});
+
 describe('Microphone.start()', () => {
   beforeEach(resetMocks);
 
@@ -240,9 +357,11 @@ describe('Microphone.start()', () => {
     const mic = new Microphone({ channels: 1, echoCancellation: true, noiseSuppression: false });
     await mic.start();
 
+    // The channel ask is the Web Audio 32 floor with ideal semantics, never
+    // the delivered count: the granted track's report is the authority.
     expect(mockGetUserMedia).toHaveBeenCalledWith({
       audio: {
-        channelCount: 1,
+        channelCount: { ideal: 32 },
         echoCancellation: true,
         noiseSuppression: false,
       },
@@ -273,6 +392,7 @@ describe('Microphone.start()', () => {
       format: 'int16',
       nativeSampleRate: 48000,
       targetSampleRate: 16000,
+      channelMap: null,
     });
 
     mic.stop();
