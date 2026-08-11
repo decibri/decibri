@@ -3,11 +3,14 @@
 //! A [`CaptureStage`] conditions raw device capture into the canonical format the
 //! consumer receives, running between the cpal callback's native buffers and the
 //! exact-size reblock in [`crate::microphone`]. The chain has two segments. The
-//! `normalize` segment holds up to three stages: [`Downmix`], which averages a
-//! multichannel device down to mono, then [`ResampleStage`], which converts the
-//! device's native sample rate to the requested target rate, then the echo
-//! canceller, which removes the echo of caller-supplied far-end audio. Downmix
-//! runs first so the resampler receives mono, the format it expects; the echo
+//! `normalize` segment holds up to four stages: [`Downmix`], which averages a
+//! multichannel device down to mono (or the [`Select`] gather a channel map
+//! replaces it with), then [`Deinterleave`] when more than one channel
+//! continues past that point, then [`ResampleStage`], which converts the
+//! device's native sample rate to the requested target rate with one engine
+//! per carried channel, then the echo canceller, which removes the echo of
+//! caller-supplied far-end audio. The channel stage runs first so every later
+//! stage sees the delivered channel count; the echo
 //! canceller runs last so it receives mono at the target rate, the only format
 //! it accepts. The optional `transform` segment runs after `normalize`, holding
 //! the conditioning a consumer opts into: the same-length [`DcBlocker`]
@@ -25,11 +28,16 @@
 //!
 //! # Channel layout
 //!
-//! A block crossing a stage boundary is INTERLEAVED and carries the channel
-//! count it is interleaved at, as a [`Block`]. Inside a stage that reads across
-//! channels the samples are PLANAR: one contiguous run per channel,
-//! deinterleaved once at the head of the chain, at the position [`Downmix`]
-//! occupies, and re-interleaved at delivery. Interleaved at the boundaries and
+//! Audio enters the chain INTERLEAVED, and every signal that leaves it (the
+//! delivered output and the detector tap) is interleaved again; in between,
+//! the chain runs PLANAR: one contiguous run per channel. A block crossing a
+//! stage boundary carries the channel count it is laid out at, as a
+//! [`Block`]. The [`Deinterleave`] stage rearranges the block once at the
+//! head of the chain, in the position [`Downmix`] occupies or immediately
+//! after the channel stage standing there (that stage reads the interleaved
+//! device frames), and the block is re-interleaved at each delivery. At one
+//! channel the two layouts are the same arrangement, so no rearrangement is
+//! built. Interleaved at the boundaries and
 //! planar inside is the single arrangement this chain uses. A stage that picks
 //! the other one at either point is what this convention exists to rule out,
 //! because two stages disagreeing about the layout of the buffer between them
@@ -296,47 +304,174 @@ impl Stage for Select {
     }
 }
 
-/// Resample mono interleaved audio from the device's native rate to the
-/// requested target rate, wrapping the owned [`PolyphaseResampler`].
+/// Rearrange one interleaved buffer into the planar layout, appended to `dst`:
+/// `channels` contiguous runs, one per channel, each run holding that
+/// channel's sample from every frame in order. Any trailing partial frame is
+/// truncated, matching [`Block::frames`] and [`sample::downmix_to_mono`].
+fn deinterleave_into(samples: &[f32], channels: u16, dst: &mut Vec<f32>) {
+    let channels = channels.max(1) as usize;
+    let frames = samples.len() / channels;
+    dst.reserve(frames * channels);
+    for channel in 0..channels {
+        dst.extend(samples.chunks_exact(channels).map(|frame| frame[channel]));
+    }
+}
+
+/// Rearrange one planar buffer (as [`deinterleave_into`] lays it out) back
+/// into interleaved frames, appended to `dst`. The buffer's length must be a
+/// multiple of `channels`: the chain only re-interleaves buffers whose runs it
+/// built at equal length.
+fn interleave_into(planar: &[f32], channels: u16, dst: &mut Vec<f32>) {
+    let channels = channels.max(1) as usize;
+    debug_assert!(
+        planar.len().is_multiple_of(channels),
+        "a planar buffer holds equal-length runs: {} samples cannot split into {} channels",
+        planar.len(),
+        channels
+    );
+    let frames = planar.len() / channels;
+    dst.reserve(frames * channels);
+    for frame in 0..frames {
+        dst.extend((0..channels).map(|channel| planar[channel * frames + frame]));
+    }
+}
+
+/// Splice one planar buffer onto another run by run: run i of `carried`
+/// becomes carried's run i followed by `tail`'s run i, so a stage's drained
+/// tail continues each channel's own run. With `carried` empty the result is
+/// `tail`'s runs unchanged. Both buffers hold `channels` equal-length runs.
+fn splice_planar_tail(carried: &mut Vec<f32>, tail: &[f32], channels: u16) {
+    let channels = channels.max(1) as usize;
+    debug_assert!(
+        carried.len().is_multiple_of(channels) && tail.len().is_multiple_of(channels),
+        "planar buffers hold equal-length runs: {} and {} samples cannot both split into {} channels",
+        carried.len(),
+        tail.len(),
+        channels
+    );
+    let carried_frames = carried.len() / channels;
+    let tail_frames = tail.len() / channels;
+    let mut spliced = Vec::with_capacity(carried.len() + tail.len());
+    for channel in 0..channels {
+        spliced
+            .extend_from_slice(&carried[channel * carried_frames..(channel + 1) * carried_frames]);
+        spliced.extend_from_slice(&tail[channel * tail_frames..(channel + 1) * tail_frames]);
+    }
+    *carried = spliced;
+}
+
+/// Rearrange interleaved frames into the planar layout the chain runs inside:
+/// one contiguous run per channel. Pushed once at the head of the `normalize`
+/// segment when more than one channel continues past the channel stage; a
+/// chain carrying one channel builds no rearrangement, the two layouts being
+/// the same arrangement there. The count passes through unchanged.
+struct Deinterleave;
+
+impl Stage for Deinterleave {
+    fn process(&mut self, input: Block<'_>, out: &mut Vec<f32>) -> Result<(), DecibriError> {
+        deinterleave_into(input.samples(), input.channels(), out);
+        Ok(())
+    }
+}
+
+/// Resample planar audio from the device's native rate to the requested target
+/// rate: one owned [`PolyphaseResampler`] per carried channel, each engine
+/// processing its channel's contiguous run.
 ///
 /// [`build_capture_stage`] adds this stage only when the native and target
 /// rates differ; a device already at the target rate omits it. It is placed
-/// after [`Downmix`] in the chain so the resampler receives mono, the format it
-/// expects.
-struct ResampleStage(PolyphaseResampler);
+/// after the channel stage (and [`Deinterleave`]) in the chain, so each engine
+/// receives one channel's run, the mono stream its documented contract
+/// requires. Every engine is constructed from the same rate pair, so the
+/// engine choice, the coefficient table and the group delay are identical
+/// across channels, and equal-length input runs yield equal-length output
+/// runs on every call: the emission cadence is a function of the rate pair
+/// and the count of samples fed, never of their values.
+struct ResampleStage {
+    /// One engine per carried channel, index i processing planar run i. The
+    /// length is resolved at chain build time; no fixed maximum exists.
+    engines: Vec<PolyphaseResampler>,
+}
+
+impl ResampleStage {
+    /// Build `channels` engines for the `native_rate` to `target_rate` pair.
+    /// Construction validates the rate pair once per engine, identically; the
+    /// `?` bridges a failure to `DecibriError::ResampleConfigInvalid` via
+    /// `From<ResamplerError>`.
+    fn new(native_rate: u32, target_rate: u32, channels: u16) -> Result<Self, DecibriError> {
+        let engines = (0..channels.max(1))
+            .map(|_| PolyphaseResampler::new(native_rate, target_rate))
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(Self { engines })
+    }
+}
 
 impl Stage for ResampleStage {
     fn process(&mut self, input: Block<'_>, out: &mut Vec<f32>) -> Result<(), DecibriError> {
-        // The wrapped engine is mono by documented contract, and reading an
-        // interleaved block as one time series would filter across channels
-        // rather than along each. Stated here rather than assumed, so a chain
-        // that ever hands this stage more than one channel says so.
+        // The count the stage was built for and the count the block carries are
+        // the same number reaching it by two routes, exactly as for `Downmix`
+        // and `Select`. A block at another count would hand at least one engine
+        // a run that is not one channel's samples.
         debug_assert_eq!(
-            input.channels(),
-            1,
-            "the resampler requires mono, got {} channels",
+            input.channels() as usize,
+            self.engines.len(),
+            "the resampler was built for {} channels and handed {}",
+            self.engines.len(),
             input.channels()
         );
-        // The resampler appends to `out`. Its one steady-path error rejects a
-        // block that arrives after the flush; the callers stop feeding a flushed
-        // chain, so it is propagated rather than assumed away.
-        self.0.process(input.samples(), out)?;
+        // Each engine appends its channel's output; equal-length runs in yield
+        // equal-length runs out, which is what keeps the planar layout valid
+        // downstream. The one steady-path error rejects a block that arrives
+        // after the flush; the callers stop feeding a flushed chain, so it is
+        // propagated rather than assumed away, and it strikes every engine at
+        // the same call or none.
+        let frames = input.frames();
+        let mut emitted = None;
+        for (channel, engine) in self.engines.iter_mut().enumerate() {
+            let before = out.len();
+            engine.process(
+                &input.samples()[channel * frames..(channel + 1) * frames],
+                out,
+            )?;
+            let count = out.len() - before;
+            debug_assert!(
+                emitted.is_none_or(|e: usize| e == count),
+                "identical engines fed equal-length runs emit equal-length runs"
+            );
+            emitted = Some(count);
+        }
         Ok(())
     }
 
     fn flush(&mut self, out: &mut Vec<f32>) -> Result<(), DecibriError> {
-        // Drain the resampler's group-delay tail (and any partial-frame carry)
-        // into `out`. Called once at close; the resampler appends and is
-        // infallible, so wrap it as `Ok(())`.
-        self.0.flush(out);
+        // Drain each engine's group-delay tail (and any partial-frame carry)
+        // into `out`, in channel order, so the appended tail is planar like
+        // every processed block. Called once at close; the engines append and
+        // are infallible, so wrap it as `Ok(())`. Identical engines hold
+        // identical-length tails, which the assertion states.
+        let mut emitted = None;
+        for engine in self.engines.iter_mut() {
+            let before = out.len();
+            engine.flush(out);
+            let count = out.len() - before;
+            debug_assert!(
+                emitted.is_none_or(|e: usize| e == count),
+                "identical engines hold equal-length tails"
+            );
+            emitted = Some(count);
+        }
         Ok(())
     }
 
     fn latency_samples(&self) -> usize {
-        // Forward the resampler's own group delay. It is already expressed at
-        // the output rate, and is zero when the rates match and the resampler is
-        // a passthrough.
-        self.0.latency_samples()
+        // Forward one engine's group delay: every engine is constructed from
+        // the same rate pair, so the figure is identical across channels and
+        // the channels stay aligned. It is already expressed at the output
+        // rate, and is zero when the rates match and the engine is a
+        // passthrough.
+        self.engines
+            .first()
+            .map_or(0, |engine| engine.latency_samples())
     }
 }
 
@@ -812,8 +947,8 @@ impl Stage for AecStage {
 }
 
 /// A same-length DSP step: filters a buffer of samples in place, producing
-/// exactly as many output samples as it received. The adapter [`InPlace`] wraps
-/// any `InPlaceDsp` as a [`Stage`].
+/// exactly as many output samples as it received. The adapter [`PerChannel`]
+/// wraps any `InPlaceDsp` as a [`Stage`], one instance per channel.
 ///
 /// `Send` so the wrapped step can live behind the stream's `Mutex`, matching the
 /// [`Stage`] bound. `pub(crate)` so a stage authored in another module (the
@@ -824,31 +959,86 @@ pub(crate) trait InPlaceDsp: Send {
     fn process_in_place(&mut self, samples: &mut [f32]);
 }
 
-/// Adapts an [`InPlaceDsp`] to the [`Stage`] interface. `process` copies the
-/// input into `out` then filters it in place, so the output length equals the
-/// input length; `flush` keeps the [`Stage`] default no-op, since a same-length
-/// DSP holds no end-of-stream tail.
-struct InPlace<T: InPlaceDsp>(T);
+/// Adapts an [`InPlaceDsp`] to the [`Stage`] interface over any channel count:
+/// one wrapped instance per channel, each filtering its own planar run in
+/// place, so the recursive state every `InPlaceDsp` carries (the DC blocker's
+/// and biquad's filter memory) advances along one channel and never across
+/// two. The output length equals the input length; `flush` keeps the
+/// [`Stage`] default no-op, since a same-length DSP holds no end-of-stream
+/// tail.
+struct PerChannel<T: InPlaceDsp> {
+    /// One instance per channel, index i filtering planar run i. The length is
+    /// resolved at chain build time; no fixed maximum exists.
+    instances: Vec<T>,
+}
 
-impl<T: InPlaceDsp> Stage for InPlace<T> {
+impl<T: InPlaceDsp> PerChannel<T> {
+    /// One `instance()` per channel. A count of zero is floored to one, as
+    /// [`Block::new`] floors its channel count.
+    fn new(channels: u16, instance: impl Fn() -> T) -> Self {
+        Self {
+            instances: (0..channels.max(1)).map(|_| instance()).collect(),
+        }
+    }
+}
+
+impl<T: InPlaceDsp> Stage for PerChannel<T> {
     fn process(&mut self, input: Block<'_>, out: &mut Vec<f32>) -> Result<(), DecibriError> {
-        // Every `InPlaceDsp` behind this wrapper carries recursive state across
-        // samples (the DC blocker's and biquad's filter memory, the level
-        // control's and limiter's gain estimate), and a flat pass over an
-        // interleaved block would run that state across channels rather than
-        // along each. Stated here rather than assumed, so a chain that ever
-        // hands this wrapper more than one channel says so.
+        // The count the wrapper was built for and the count the block carries
+        // are the same number reaching it by two routes, exactly as for
+        // `Downmix` and `Select`. A block at another count would hand at least
+        // one instance a run that is not one channel's samples, filtering its
+        // recursive state across a channel boundary.
         debug_assert_eq!(
-            input.channels(),
-            1,
-            "the scalar in-place wrapper requires mono, got {} channels",
+            input.channels() as usize,
+            self.instances.len(),
+            "the per-channel wrapper was built for {} channels and handed {}",
+            self.instances.len(),
             input.channels()
         );
+        let frames = input.frames();
+        debug_assert_eq!(
+            input.len(),
+            frames * self.instances.len(),
+            "a planar block holds equal-length runs"
+        );
         // The caller clears `out` first, so this is an exact-length copy of the
-        // input that the DSP then rewrites in place: one input sample, one output
-        // sample.
+        // input that each instance then rewrites in place over its own run: one
+        // input sample, one output sample.
         out.extend_from_slice(input.samples());
-        self.0.process_in_place(out);
+        for (channel, instance) in self.instances.iter_mut().enumerate() {
+            instance.process_in_place(&mut out[channel * frames..(channel + 1) * frames]);
+        }
+        Ok(())
+    }
+}
+
+/// A same-length DSP step whose detection runs across channels: filters a
+/// planar buffer in place, reading each frame across every channel and
+/// applying one shared gain to all of them, the length unchanged. The adapter
+/// [`Linked`] wraps any `LinkedDsp` as a [`Stage`].
+///
+/// `Send` for the same reason as [`InPlaceDsp`]; `pub(crate)` so the engines
+/// authored in [`crate::gain`] can implement it.
+pub(crate) trait LinkedDsp: Send {
+    /// Filter `planar` in place: `channels` contiguous equal-length runs, one
+    /// detector reading per frame across the channels, one gain applied to
+    /// every channel of that frame.
+    fn process_planar(&mut self, planar: &mut [f32], channels: u16);
+}
+
+/// Adapts a [`LinkedDsp`] to the [`Stage`] interface. `process` copies the
+/// input into `out` then filters it in place at the block's own channel
+/// count, so the output length equals the input length; `flush` keeps the
+/// [`Stage`] default no-op. The wrapped engine holds one detector and one
+/// gain whatever the count, so no per-instance count is stored; the chain's
+/// resolved-count assertions in the walks hold the count steady.
+struct Linked<T: LinkedDsp>(T);
+
+impl<T: LinkedDsp> Stage for Linked<T> {
+    fn process(&mut self, input: Block<'_>, out: &mut Vec<f32>) -> Result<(), DecibriError> {
+        out.extend_from_slice(input.samples());
+        self.0.process_planar(out, input.channels());
         Ok(())
     }
 }
@@ -859,7 +1049,8 @@ impl<T: InPlaceDsp> Stage for InPlace<T> {
 /// below 1 so the corner sits close to DC.
 ///
 /// Same-length and sample-by-sample (one input sample yields one output sample),
-/// so it is an [`InPlaceDsp`] driven through [`InPlace`]. The filter memory
+/// so it is an [`InPlaceDsp`] driven through [`PerChannel`], one instance per
+/// carried channel. The filter memory
 /// (`x_prev`, `y_prev`) carries across blocks, so the response is continuous at
 /// chunk boundaries; it holds no end-of-stream tail, so it keeps the default
 /// no-op flush.
@@ -903,7 +1094,7 @@ impl InPlaceDsp for DcBlocker {
 /// higher-cornered filter than the always-near-DC [`DcBlocker`].
 ///
 /// Same-length and sample-by-sample (one input sample yields one output
-/// sample), so it is an [`InPlaceDsp`] driven through [`InPlace`], the same
+/// sample), so it is an [`InPlaceDsp`] driven through [`PerChannel`], the same
 /// wrapper the [`DcBlocker`] uses. It runs as a Direct Form II Transposed
 /// section carrying two state samples (`z1`, `z2`) across blocks, so the
 /// response is continuous at chunk boundaries; it holds no end-of-stream tail,
@@ -1038,7 +1229,7 @@ impl CaptureStage {
     /// nothing), and only the conditioned path pays for it: an unconditioned capture
     /// has no chain, so it keeps its zero-cost direct delivery.
     pub(crate) fn run(&mut self, input: &[f32]) -> Result<&[f32], DecibriError> {
-        self.run_normalize(input)?;
+        self.run_normalize_planar(input)?;
         self.capture_tap();
         let mut channels = self.tap_channels;
         Self::run_segment(
@@ -1052,11 +1243,12 @@ impl CaptureStage {
             "the chain walk ended at {} channels but the chain declares {}",
             channels, self.output_channels
         );
+        self.reinterleave_work(self.output_channels);
         Ok(&self.work)
     }
 
     /// Run one native block through the `normalize` segment alone, returning
-    /// the post-`normalize`, pre-`transform` signal.
+    /// the post-`normalize`, pre-`transform` signal, interleaved.
     ///
     /// Seeds and sanitizes `work` exactly as [`run`](Self::run) does, then
     /// ping-pongs it across the `normalize` stages only. The returned slice is
@@ -1064,6 +1256,16 @@ impl CaptureStage {
     /// caller that reads the pre-`transform` signal and never delivers the
     /// conditioned output takes this instead of a full [`run`](Self::run).
     pub(crate) fn run_normalize(&mut self, input: &[f32]) -> Result<&[f32], DecibriError> {
+        self.run_normalize_planar(input)?;
+        self.reinterleave_work(self.tap_channels);
+        Ok(&self.work)
+    }
+
+    /// The shared body of [`run`](Self::run) and
+    /// [`run_normalize`](Self::run_normalize): seed and sanitize `work`, then
+    /// walk the `normalize` stages, leaving `work` in the chain's internal
+    /// layout at [`tap_channels`](Self::tap_channels).
+    fn run_normalize_planar(&mut self, input: &[f32]) -> Result<(), DecibriError> {
         self.work.clear();
         self.work.extend_from_slice(input);
         for sample in self.work.iter_mut() {
@@ -1083,17 +1285,38 @@ impl CaptureStage {
             "the normalize walk ended at {} channels but the chain declares {}",
             channels, self.tap_channels
         );
-        Ok(&self.work)
+        Ok(())
+    }
+
+    /// Convert `work` from the chain's internal planar layout back to
+    /// interleaved frames at `channels`, via `scratch`. A no-op at one
+    /// channel, where the two layouts are the same arrangement. Every signal
+    /// that leaves the chain passes through this: the delivered output, the
+    /// post-`normalize` return, and (through [`capture_tap`](Self::capture_tap))
+    /// the detector tap.
+    fn reinterleave_work(&mut self, channels: u16) {
+        if channels > 1 {
+            self.scratch.clear();
+            interleave_into(&self.work, channels, &mut self.scratch);
+            std::mem::swap(&mut self.work, &mut self.scratch);
+        }
     }
 
     /// Snapshot `work` (the post-`normalize`, pre-`transform` signal) into `tap`,
     /// but only when `transform` is non-empty. With no transform the delivered
     /// output already is this signal, so nothing is captured and `tap` stays empty
-    /// (zero overhead on the no-transform path).
+    /// (zero overhead on the no-transform path). The tap crosses the chain
+    /// boundary to the detector, so it is interleaved like every delivery;
+    /// `MicrophoneStream::detector_feed` collapses it as interleaved frames at
+    /// [`tap_channels`](Self::tap_channels).
     fn capture_tap(&mut self) {
         if !self.transform.is_empty() {
             self.tap.clear();
-            self.tap.extend_from_slice(&self.work);
+            if self.tap_channels > 1 {
+                interleave_into(&self.work, self.tap_channels, &mut self.tap);
+            } else {
+                self.tap.extend_from_slice(&self.work);
+            }
         }
     }
 
@@ -1135,7 +1358,7 @@ impl CaptureStage {
     pub(crate) fn flush(&mut self, out: &mut Vec<f32>) -> Result<(), DecibriError> {
         // `work` is carried unbroken from the `normalize` walk into the
         // `transform` walk.
-        self.flush_normalize()?;
+        self.flush_normalize_planar()?;
         // Capture the post-`normalize` tail (the resampler's group-delay tail)
         // before it passes through `transform`, so the tap stays aligned with the
         // delivered output across the close path too.
@@ -1152,17 +1375,29 @@ impl CaptureStage {
             "the chain flush ended at {} channels but the chain declares {}",
             channels, self.output_channels
         );
+        self.reinterleave_work(self.output_channels);
         out.extend_from_slice(&self.work);
         Ok(())
     }
 
-    /// Drain the `normalize` segment's end-of-stream tail alone, returning it.
+    /// Drain the `normalize` segment's end-of-stream tail alone, returning it
+    /// interleaved.
     ///
     /// The counterpart of [`run_normalize`](Self::run_normalize) on the close
     /// path: the resampler's group-delay tail, before it passes through
-    /// `transform`. `work` starts empty because there is no new input at end of
-    /// stream, only each stage's drained tail.
+    /// `transform`.
     pub(crate) fn flush_normalize(&mut self) -> Result<&[f32], DecibriError> {
+        self.flush_normalize_planar()?;
+        self.reinterleave_work(self.tap_channels);
+        Ok(&self.work)
+    }
+
+    /// The shared body of [`flush`](Self::flush) and
+    /// [`flush_normalize`](Self::flush_normalize): walk the `normalize`
+    /// stages' tails, leaving `work` in the chain's internal layout at
+    /// [`tap_channels`](Self::tap_channels). `work` starts empty because there
+    /// is no new input at end of stream, only each stage's drained tail.
+    fn flush_normalize_planar(&mut self) -> Result<(), DecibriError> {
         self.work.clear();
         let mut channels = self.input_channels;
         Self::flush_segment(
@@ -1176,7 +1411,7 @@ impl CaptureStage {
             "the normalize flush ended at {} channels but the chain declares {}",
             channels, self.tap_channels
         );
-        Ok(&self.work)
+        Ok(())
     }
 
     /// The post-`normalize`, pre-`transform` signal captured by the most recent
@@ -1243,8 +1478,16 @@ impl CaptureStage {
     ///
     /// `channels` is the running channel count, advanced past each stage exactly
     /// as [`run_segment`](Self::run_segment) advances it. A stage's drained tail
-    /// is interleaved at that stage's OUTPUT count, so the count advances once
+    /// is laid out at that stage's OUTPUT count, so the count advances once
     /// per stage, after both the carried block and the tail have been written.
+    ///
+    /// At one emitted channel a stage's own tail is appended directly after the
+    /// processed carry, which continues the one run. Above one, the tail
+    /// continues EACH channel's run, so the two planar buffers are spliced run
+    /// by run instead of appended whole; an appended whole tail would land
+    /// channel 0's tail inside channel 0's neighbour and shift every later run.
+    /// The splice allocates, which the close path (this walk's only caller)
+    /// pays once per stream.
     fn flush_segment(
         work: &mut Vec<f32>,
         scratch: &mut Vec<f32>,
@@ -1257,7 +1500,15 @@ impl CaptureStage {
             if !work.is_empty() {
                 stage.process(Block::new(work, *channels), scratch)?;
             }
-            stage.flush(scratch)?;
+            if emitted > 1 {
+                let mut tail = Vec::new();
+                stage.flush(&mut tail)?;
+                if !tail.is_empty() {
+                    splice_planar_tail(scratch, &tail, emitted);
+                }
+            } else {
+                stage.flush(scratch)?;
+            }
             *channels = emitted;
             std::mem::swap(work, scratch);
         }
@@ -1315,9 +1566,12 @@ pub(crate) struct Transforms<'a> {
 /// Pushes [`Select`] when `channel_map` names a map (gathering the named
 /// device channels, in the order given), otherwise [`Downmix`] when the device
 /// delivers more channels than the output target (averaging down to the
-/// target, which is mono here), then
+/// target, which is mono here), then [`Deinterleave`] when more than one
+/// channel continues past that point (rearranging the block into the planar
+/// layout the rest of the chain runs in), then
 /// [`ResampleStage`] when the device's `native_rate` differs from `target_rate`
-/// (converting the captured audio to the requested rate), then the
+/// (converting the captured audio to the requested rate, one engine per
+/// carried channel), then the
 /// [`AecStage`] when `aec` names settings (and the `aec` feature is compiled
 /// in), last in the `normalize` segment so the canceller receives mono at the
 /// target rate and the VAD tap carries the echo-removed signal. When `dc_removal` is
@@ -1333,7 +1587,10 @@ pub(crate) struct Transforms<'a> {
 /// [`crate::gain::Limiter`] stage last, immediately after the level control
 /// (also when the `gain` feature is compiled in), so it catches any peak the
 /// upstream level control would let through. All transform stages run after
-/// `normalize` on the mono signal at the target rate.
+/// `normalize` on the delivered channels at the target rate: the two filters
+/// through [`PerChannel`] with one instance per channel, the denoise stage
+/// with one cache set per channel, and the two gain stages through [`Linked`]
+/// with one detector across the channels and one gain applied to all.
 /// Returns `Some(chain)` when at least one stage is needed and `None` when no
 /// segment has any (a mono device already at the target rate with no enhancement
 /// enabled), leaving the capture path on its direct, zero-cost reblock.
@@ -1385,13 +1642,28 @@ pub(crate) fn build_capture_stage(
         None => {}
     }
 
+    // The count carried past the channel stage, resolved by walking what was
+    // actually built, exactly as the segment counts below are. When it is
+    // above one, the block is rearranged into the planar layout here, once,
+    // at the head of the chain; at one channel the two layouts coincide and
+    // no stage is built.
+    let chain_channels = normalize.iter().fold(device_channels, |channels, stage| {
+        stage.output_channels(channels)
+    });
+    if chain_channels > 1 {
+        normalize.push(Box::new(Deinterleave));
+    }
+
     if native_rate != target_rate {
-        // The channel stage (Select or Downmix, if any) ran first, so the
-        // resampler receives mono.
+        // The channel stage (Select or Downmix, if any) ran first, so each
+        // engine receives one channel's run.
         // Construction validates the rate pair; the `?` bridges a failure to
         // DecibriError::ResampleConfigInvalid via From<ResamplerError>.
-        let resampler = PolyphaseResampler::new(native_rate, target_rate)?;
-        normalize.push(Box::new(ResampleStage(resampler)));
+        normalize.push(Box::new(ResampleStage::new(
+            native_rate,
+            target_rate,
+            chain_channels,
+        )?));
     }
 
     // Echo cancellation runs LAST in the normalize segment, after the downmix
@@ -1405,15 +1677,25 @@ pub(crate) fn build_capture_stage(
         normalize.push(Box::new(AecStage::new(settings, target_rate)?));
     }
 
+    // Resolve the channel count the `normalize` segment ends at by asking the
+    // stages that were actually built, in the order they run. Named nowhere: a
+    // count written here as a literal would agree with the stages today and
+    // stop agreeing the moment a stage that changes the count is added or
+    // removed. The transform stages below are built at this count.
+    let tap_channels = normalize.iter().fold(device_channels, |channels, stage| {
+        stage.output_channels(channels)
+    });
+
     let mut transform: Vec<Box<dyn Stage>> = Vec::new();
 
     if dc_removal {
-        // Runs after `normalize`, on the mono signal at the target rate.
-        transform.push(Box::new(InPlace(DcBlocker::new())));
+        // Runs after `normalize`, on the delivered channels at the target
+        // rate: one filter instance per channel, each over its own run.
+        transform.push(Box::new(PerChannel::new(tap_channels, DcBlocker::new)));
     }
 
     // Denoise runs immediately AFTER DC removal (chain order: DcRemoval ->
-    // Denoise), on the DC-blocked mono signal at the target rate. The order is
+    // Denoise), on the DC-blocked signal at the target rate. The order is
     // load-bearing (denoise wants a clean-rate, DC-free input) and is pinned by
     // this push order and `build_orders_denoise_after_dc`. Unlike the same-length
     // DcBlocker, denoise is framed and latency-introducing, so it sits in the
@@ -1424,6 +1706,7 @@ pub(crate) fn build_capture_stage(
             model,
             path,
             ort_library_path,
+            tap_channels,
         )?));
     }
     // Without the `denoise` feature the parameter is accepted but unused.
@@ -1432,25 +1715,25 @@ pub(crate) fn build_capture_stage(
 
     // High-pass (user rumble cut) runs immediately AFTER denoise (chain order:
     // Denoise -> HighPass), so the denoise model receives near-full-band input.
-    // It is a same-length, sample-in-sample-out biquad, so it wraps via `InPlace`
-    // exactly like the DC blocker and adds no latency. The cutoff comes from the
-    // named variant, not a magic number here.
+    // It is a same-length, sample-in-sample-out biquad, so it wraps via
+    // `PerChannel` exactly like the DC blocker and adds no latency. The cutoff
+    // comes from the named variant, not a magic number here.
     if let Some(filter) = highpass {
-        transform.push(Box::new(InPlace(Biquad::highpass(
-            filter.cutoff_hz(),
-            target_rate as f32,
-        ))));
+        transform.push(Box::new(PerChannel::new(tap_channels, || {
+            Biquad::highpass(filter.cutoff_hz(), target_rate as f32)
+        })));
     }
 
     // Level control (AGC) runs after high-pass, reserving the slot that sits
-    // before the limiter in the full chain order. It is a same-length,
-    // sample-in-sample-out engine, so it wraps via `InPlace` like the DC blocker
-    // and high-pass and adds no latency. Gated on the `gain` feature, like
+    // before the limiter in the full chain order. It is a same-length engine
+    // whose detection runs linked across the channels (one detector, one gain
+    // applied to all, so the inter-channel balance is preserved), so it wraps
+    // via `Linked` and adds no latency. Gated on the `gain` feature, like
     // denoise is gated on `denoise`; without the feature the target is accepted
     // but unused.
     #[cfg(feature = "gain")]
     if let Some(target_db) = agc {
-        transform.push(Box::new(InPlace(crate::gain::LevelControl::agc(
+        transform.push(Box::new(Linked(crate::gain::LevelControl::agc(
             target_db,
             target_rate,
         ))));
@@ -1460,13 +1743,14 @@ pub(crate) fn build_capture_stage(
 
     // The limiter runs LAST in the transform tier, immediately after the level
     // control, so it catches any peak the upstream gain would let exceed the
-    // ceiling. It is a same-length, sample-in-sample-out stage, so it wraps via
-    // `InPlace` like the level control and adds no latency. Gated on the same
-    // `gain` feature as the level-control engine (the pair); without the feature
-    // the ceiling is accepted but unused. Nothing runs after it.
+    // ceiling. It is a same-length stage detecting linked across the channels
+    // like the level control, so it wraps via `Linked` and adds no latency.
+    // Gated on the same `gain` feature as the level-control engine (the pair);
+    // without the feature the ceiling is accepted but unused. Nothing runs
+    // after it.
     #[cfg(feature = "gain")]
     if let Some(ceiling_db) = limiter {
-        transform.push(Box::new(InPlace(crate::gain::Limiter::new(
+        transform.push(Box::new(Linked(crate::gain::Limiter::new(
             ceiling_db,
             target_rate,
         ))));
@@ -1474,13 +1758,6 @@ pub(crate) fn build_capture_stage(
     #[cfg(not(feature = "gain"))]
     let _ = limiter;
 
-    // Resolve the channel count each segment ends at by asking the stages that
-    // were actually built, in the order they run. Named nowhere: a count written
-    // here as a literal would agree with the stages today and stop agreeing the
-    // moment a stage that changes the count is added or removed.
-    let tap_channels = normalize.iter().fold(device_channels, |channels, stage| {
-        stage.output_channels(channels)
-    });
     let output_channels = transform.iter().fold(tap_channels, |channels, stage| {
         stage.output_channels(channels)
     });
@@ -1933,6 +2210,420 @@ mod tests {
             out, expected,
             "the chain equals resampling the selected channel alone"
         );
+    }
+
+    // ── The planar carriage (multichannel through the chain) ────────────
+    //
+    // No production configuration reaches these paths while the accepted
+    // channel count is 1, so these tests are the only thing exercising them:
+    // the planar rearrangement pair, the per-channel and linked wrappers, the
+    // per-channel resampler engines, and the flush splice. Each drives the
+    // machinery directly or through `build_capture_stage` with a target above
+    // one.
+
+    /// The rearrangement pair is exact: deinterleave then interleave returns
+    /// the original buffer bit for bit, at counts that do not divide common
+    /// block sizes and at `u16::MAX`. A trailing partial frame is truncated by
+    /// the deinterleave, matching `Block::frames` and the downmix.
+    #[test]
+    fn deinterleave_and_interleave_round_trip_exactly() {
+        for (channels, frames) in [(2u16, 53usize), (3, 53), (5, 7), (7, 160), (48, 3)] {
+            let interleaved: Vec<f32> = (0..frames)
+                .flat_map(|frame| {
+                    (0..channels).map(move |channel| channel as f32 + frame as f32 * 0.001)
+                })
+                .collect();
+            let mut planar = Vec::new();
+            deinterleave_into(&interleaved, channels, &mut planar);
+            assert_eq!(planar.len(), interleaved.len());
+            // Run i holds channel i's samples in frame order.
+            for channel in 0..channels as usize {
+                for frame in 0..frames {
+                    assert_eq!(
+                        planar[channel * frames + frame],
+                        interleaved[frame * channels as usize + channel],
+                        "channel {channel} frame {frame} lands in its run"
+                    );
+                }
+            }
+            let mut back = Vec::new();
+            interleave_into(&planar, channels, &mut back);
+            assert_eq!(
+                back, interleaved,
+                "the round trip is exact at {channels} channels"
+            );
+        }
+
+        // The count is bounded only by its type: the pair round-trips at
+        // `u16::MAX`. A fixed maximum added to either function fails here.
+        let channels = u16::MAX;
+        let interleaved: Vec<f32> = (0..2usize)
+            .flat_map(|frame| (0..channels).map(move |channel| channel as f32 + frame as f32 * 0.5))
+            .collect();
+        let mut planar = Vec::new();
+        deinterleave_into(&interleaved, channels, &mut planar);
+        let mut back = Vec::new();
+        interleave_into(&planar, channels, &mut back);
+        assert_eq!(
+            back, interleaved,
+            "the round trip is exact at u16::MAX channels"
+        );
+
+        // A trailing partial frame is dropped, not misread as a whole one.
+        let mut truncated = Vec::new();
+        deinterleave_into(&[1.0, 2.0, 3.0, 4.0, 5.0], 2, &mut truncated);
+        assert_eq!(
+            truncated,
+            &[1.0, 3.0, 2.0, 4.0],
+            "the partial frame is truncated, matching Block::frames"
+        );
+    }
+
+    /// `PerChannel` applies the wrapped stage to every channel independently:
+    /// each channel's output equals a fresh single-channel engine run over
+    /// that channel alone, bit for bit, across block boundaries. The channels
+    /// carry unmistakably different content (a sine, exact silence, a
+    /// constant offset), so a stride or offset error that mixes recursive
+    /// state across channels breaks the equality rather than passing
+    /// plausibly.
+    #[test]
+    fn per_channel_runs_the_wrapped_stage_independently() {
+        let frames = 480;
+        let sine: Vec<f32> = (0..2 * frames).map(|n| (n as f32 * 0.05).sin()).collect();
+        let silence = vec![0.0f32; 2 * frames];
+        let offset = vec![0.5f32; 2 * frames];
+
+        // Two consecutive planar blocks, so the per-channel state must carry
+        // across the boundary along each channel.
+        let mut stage = PerChannel::new(3, DcBlocker::new);
+        let mut delivered = Vec::new();
+        for range in [0..frames, frames..2 * frames] {
+            let planar: Vec<f32> = sine[range.clone()]
+                .iter()
+                .chain(&silence[range.clone()])
+                .chain(&offset[range.clone()])
+                .copied()
+                .collect();
+            let mut out = Vec::new();
+            stage
+                .process(Block::new(&planar, 3), &mut out)
+                .expect("the wrapper processes a planar block");
+            assert_eq!(out.len(), planar.len(), "same-length per block");
+            delivered.push(out);
+        }
+
+        // Reference: one fresh engine per channel over that channel alone.
+        for (channel, input) in [(0usize, &sine), (1, &silence), (2, &offset)] {
+            let mut engine = DcBlocker::new();
+            let mut expected = input.to_vec();
+            engine.process_in_place(&mut expected);
+            for (block_index, range) in [0..frames, frames..2 * frames].into_iter().enumerate() {
+                let run = &delivered[block_index][channel * frames..(channel + 1) * frames];
+                assert_eq!(
+                    run, &expected[range],
+                    "channel {channel} equals its own engine, bit for bit (block {block_index})"
+                );
+            }
+        }
+    }
+
+    /// A silent channel stays exactly silent through a full multichannel
+    /// chain (rearrangement, per-channel resampling, per-channel filters,
+    /// flush splice), and the sounding channel is bit-identical to the mono
+    /// chain over its signal alone. This is the per-channel independence
+    /// property at chain scope: a stride bug leaks the sine into the silence
+    /// or the recursive state across the boundary, and either breaks an exact
+    /// assertion here.
+    #[test]
+    fn a_silent_channel_stays_silent_through_the_chain() {
+        let frames = 24_000;
+        let sine: Vec<f32> = (0..frames).map(|n| (n as f32 * 0.01).sin()).collect();
+        let transforms = || Transforms {
+            dc_removal: true,
+            highpass: Some(HighpassFilter::Hz80),
+            ..Default::default()
+        };
+
+        // Stereo device, stereo target: no channel stage, so the chain is
+        // Deinterleave, the two resampler engines, then the per-channel
+        // filters, with the flush splicing each engine's tail onto its own
+        // run.
+        let interleaved: Vec<f32> = sine.iter().flat_map(|&s| [s, 0.0]).collect();
+        let mut chain = build_capture_stage(2, 2, 48_000, 16_000, transforms())
+            .unwrap()
+            .expect("a rate change builds a chain");
+        assert_eq!(chain.output_channels(), 2);
+        let mut delivered = chain.run(&interleaved).expect("the chain runs").to_vec();
+        chain.flush(&mut delivered).expect("the chain flushes");
+
+        // The mono reference: the identical configuration over the sine alone.
+        let mut mono = build_capture_stage(1, 1, 48_000, 16_000, transforms())
+            .unwrap()
+            .expect("the mono chain builds");
+        let mut expected = mono.run(&sine).expect("the mono chain runs").to_vec();
+        mono.flush(&mut expected).expect("the mono chain flushes");
+
+        assert_eq!(
+            delivered.len(),
+            2 * expected.len(),
+            "two delivered channels, one frame per mono sample"
+        );
+        for (frame, &value) in expected.iter().enumerate() {
+            assert_eq!(
+                delivered[2 * frame],
+                value,
+                "frame {frame}: the sounding channel equals the mono chain bit for bit"
+            );
+            assert_eq!(
+                delivered[2 * frame + 1],
+                0.0,
+                "frame {frame}: the silent channel stays exactly silent"
+            );
+        }
+    }
+
+    /// The chain resolves K device channels to a smaller delivered count
+    /// through the gather: each delivered channel equals resampling the
+    /// mapped device channel alone, bit for bit, through run and flush.
+    #[test]
+    fn the_chain_resolves_k_in_to_target_out_through_the_walk() {
+        let frames = 24_000;
+        let a: Vec<f32> = (0..frames).map(|n| (n as f32 * 0.01).sin()).collect();
+        let b: Vec<f32> = (0..frames).map(|n| (n as f32 * 0.02).cos()).collect();
+        // Four device channels; channel 3 carries `a`, channel 0 carries `b`,
+        // the middle two carry distinct decoys.
+        let interleaved: Vec<f32> = (0..frames)
+            .flat_map(|n| [b[n], 0.25, -0.75, a[n]])
+            .collect();
+
+        let map = [3u16, 0];
+        let mut chain = build_capture_stage(
+            4,
+            2,
+            48_000,
+            16_000,
+            Transforms {
+                channel_map: Some(&map),
+                ..Default::default()
+            },
+        )
+        .unwrap()
+        .expect("a mapped multichannel gather builds a chain");
+        assert_eq!(
+            chain.output_channels(),
+            2,
+            "the map's two delivered channels"
+        );
+        let mut delivered = chain.run(&interleaved).expect("the chain runs").to_vec();
+        chain.flush(&mut delivered).expect("the chain flushes");
+
+        for (channel, source) in [(0usize, &a), (1, &b)] {
+            let mut resampler = PolyphaseResampler::new(48_000, 16_000).unwrap();
+            let mut expected = Vec::new();
+            resampler.process(source, &mut expected).unwrap();
+            resampler.flush(&mut expected);
+            assert_eq!(delivered.len(), 2 * expected.len());
+            for (frame, &value) in expected.iter().enumerate() {
+                assert_eq!(
+                    delivered[2 * frame + channel],
+                    value,
+                    "delivered channel {channel} equals resampling its mapped device channel"
+                );
+            }
+        }
+    }
+
+    /// The tap is interleaved at the post-`normalize` count: with a transform
+    /// present and nothing in `normalize` but the rearrangement, the tap
+    /// equals the original interleaved input bit for bit, which is the layout
+    /// `detector_feed` collapses at `tap_channels`.
+    #[test]
+    fn the_tap_is_interleaved_at_the_post_normalize_count() {
+        let interleaved = [0.1f32, -0.4, 0.2, -0.3, 0.3, -0.2, 0.4, -0.1];
+        let mut chain = build_capture_stage(
+            2,
+            2,
+            16_000,
+            16_000,
+            Transforms {
+                dc_removal: true,
+                ..Default::default()
+            },
+        )
+        .unwrap()
+        .expect("a transform builds a chain");
+        assert_eq!(chain.tap_channels(), 2);
+        chain.run(&interleaved).expect("the chain runs");
+        assert_eq!(
+            chain.tap(),
+            &interleaved,
+            "the tap crosses the boundary interleaved, so the pre-transform \
+             snapshot equals the input here"
+        );
+        assert_eq!(
+            sample::downmix_to_mono(chain.tap(), 2),
+            &[
+                (0.1 + -0.4) / 2.0,
+                (0.2 + -0.3) / 2.0,
+                (0.3 + -0.2) / 2.0,
+                (0.4 + -0.1) / 2.0
+            ],
+            "the tap collapses as interleaved frames"
+        );
+    }
+
+    /// The gain tier the builder wires detects across channels: driving a
+    /// stereo chain with one channel at exactly half the other's amplitude
+    /// delivers outputs whose ratio is still exactly one half, sample for
+    /// sample, while the level control materially raises the quiet signal.
+    /// Detection per channel would drive both channels toward the same
+    /// target, erasing the ratio, so this pins the linked wiring.
+    #[cfg(feature = "gain")]
+    #[test]
+    fn the_chain_gain_tier_preserves_inter_channel_balance() {
+        let frames = 16_000;
+        // A quiet but present tone (above the noise floor, below the target).
+        let loud: Vec<f32> = (0..frames)
+            .map(|n| 0.02 * (n as f32 * 0.09).sin())
+            .collect();
+        let interleaved: Vec<f32> = loud.iter().flat_map(|&s| [s, 0.5 * s]).collect();
+
+        let mut chain = build_capture_stage(
+            2,
+            2,
+            16_000,
+            16_000,
+            Transforms {
+                agc: Some(-18),
+                ..Default::default()
+            },
+        )
+        .unwrap()
+        .expect("a gain chain builds");
+        let delivered = chain.run(&interleaved).expect("the chain runs").to_vec();
+
+        for frame in 0..frames {
+            assert_eq!(
+                delivered[2 * frame + 1],
+                0.5 * delivered[2 * frame],
+                "frame {frame}: one shared gain keeps the exact inter-channel ratio"
+            );
+        }
+        // Not vacuous: the level control moved the quiet signal toward the
+        // target rather than leaving the gain at unity.
+        let tail = &delivered[delivered.len() - 4000..];
+        let input_tail = &interleaved[interleaved.len() - 4000..];
+        let rms = |s: &[f32]| (s.iter().map(|x| x * x).sum::<f32>() / s.len() as f32).sqrt();
+        assert!(
+            rms(tail) > 2.0 * rms(input_tail),
+            "the level control raised the quiet signal materially"
+        );
+    }
+
+    /// The mono chain is byte-identical to composing the engines directly:
+    /// the delivered output of a DC + high-pass + AGC + limiter chain equals
+    /// running the four unchanged engines in sequence over the same blocks.
+    /// The wrappers the builder installs are exactly transparent at one
+    /// channel, which is this change set's safety property on the reachable
+    /// path.
+    #[cfg(feature = "gain")]
+    #[test]
+    fn the_mono_chain_is_byte_identical_to_the_primitive_composition() {
+        let input: Vec<f32> = (0..12_000)
+            .map(|n| 0.3 * (n as f32 * 0.03).sin() + 0.05)
+            .collect();
+        let blocks = [
+            &input[..1000],
+            &input[1000..1001],
+            &input[1001..7321],
+            &input[7321..],
+        ];
+
+        let mut chain = build_capture_stage(
+            1,
+            1,
+            16_000,
+            16_000,
+            Transforms {
+                dc_removal: true,
+                highpass: Some(HighpassFilter::Hz80),
+                agc: Some(-18),
+                limiter: Some(-1.0),
+                ..Default::default()
+            },
+        )
+        .unwrap()
+        .expect("a transform chain builds");
+        let mut delivered = Vec::new();
+        for block in blocks {
+            delivered.extend_from_slice(chain.run(block).expect("the chain runs"));
+        }
+        chain.flush(&mut delivered).expect("the chain flushes");
+
+        // The reference composition: the same four engines, driven directly.
+        let mut dc = DcBlocker::new();
+        let mut highpass = Biquad::highpass(HighpassFilter::Hz80.cutoff_hz(), 16_000.0);
+        let mut agc = crate::gain::LevelControl::agc(-18, 16_000);
+        let mut limiter = crate::gain::Limiter::new(-1.0, 16_000);
+        let mut expected = Vec::new();
+        for block in blocks {
+            let mut buf = block.to_vec();
+            dc.process_in_place(&mut buf);
+            highpass.process_in_place(&mut buf);
+            agc.process_in_place(&mut buf);
+            limiter.process_in_place(&mut buf);
+            expected.extend_from_slice(&buf);
+        }
+
+        assert_eq!(
+            delivered, expected,
+            "the chain equals the engine composition, bit for bit"
+        );
+    }
+
+    /// Every piece of the planar carriage serves `u16::MAX` channels: the
+    /// negative control for the no-fixed-maximum rule on the paths this
+    /// change adds. A constant, an array-sized state, or a `1..=N` bound
+    /// added to the rearrangement, the per-channel wrapper, or the builder
+    /// fails loudly here.
+    #[test]
+    fn the_planar_carriage_serves_u16_max_channels() {
+        const CHANNELS: u16 = u16::MAX;
+        let frames = 2usize;
+        // Channel c carries [c, c + 0.25]: distinct per channel and per frame.
+        let interleaved: Vec<f32> = (0..frames)
+            .flat_map(|frame| (0..CHANNELS).map(move |c| c as f32 + frame as f32 * 0.25))
+            .collect();
+
+        let mut chain = build_capture_stage(
+            CHANNELS,
+            CHANNELS,
+            16_000,
+            16_000,
+            Transforms {
+                dc_removal: true,
+                ..Default::default()
+            },
+        )
+        .unwrap()
+        .expect("a transform chain builds at the type's full width");
+        assert_eq!(chain.output_channels(), CHANNELS);
+        let delivered = chain.run(&interleaved).expect("the chain runs").to_vec();
+
+        // Each channel equals its own fresh engine, at the top of the range
+        // as at the bottom.
+        for channel in [0u16, 1, 32_767, CHANNELS - 2, CHANNELS - 1] {
+            let mut engine = DcBlocker::new();
+            let mut expected = vec![channel as f32, channel as f32 + 0.25];
+            engine.process_in_place(&mut expected);
+            for frame in 0..frames {
+                assert_eq!(
+                    delivered[frame * CHANNELS as usize + channel as usize],
+                    expected[frame],
+                    "channel {channel} frame {frame} is served at full width"
+                );
+            }
+        }
     }
 
     /// A non-target native rate yields a resample chain whose output tracks the
@@ -2395,7 +3086,7 @@ mod tests {
     #[test]
     fn dc_stage_is_send() {
         fn assert_send<T: Send>() {}
-        assert_send::<InPlace<DcBlocker>>();
+        assert_send::<PerChannel<DcBlocker>>();
     }
 
     // ── Denoise (framed transform) ──────────────────────────────────────
@@ -2727,7 +3418,7 @@ mod tests {
             expected > 0,
             "downsampling 48k -> 16k has a nonzero group delay"
         );
-        let stage = ResampleStage(PolyphaseResampler::new(48_000, 16_000).unwrap());
+        let stage = ResampleStage::new(48_000, 16_000, 1).unwrap();
         assert_eq!(
             stage.latency_samples(),
             expected,
@@ -2735,7 +3426,7 @@ mod tests {
         );
 
         // An identity resampler forwards zero.
-        let identity = ResampleStage(PolyphaseResampler::new(16_000, 16_000).unwrap());
+        let identity = ResampleStage::new(16_000, 16_000, 1).unwrap();
         assert_eq!(
             identity.latency_samples(),
             0,
@@ -2793,7 +3484,7 @@ mod tests {
     // ── High-pass (same-length biquad transform) ────────────────────────
     //
     // The high-pass is a second-order Butterworth biquad: a same-length,
-    // sample-in-sample-out `InPlace` stage (like the DC blocker) that runs after
+    // sample-in-sample-out `PerChannel` stage (like the DC blocker) that runs after
     // denoise in the transform segment. These cover its magnitude response, its
     // cross-block state continuity, that it builds no stage when off, its chain
     // placement, and its zero latency.
@@ -3100,13 +3791,13 @@ mod tests {
         );
     }
 
-    /// `InPlace<Biquad>` is `Send`, so a chain carrying the high-pass in its
+    /// `PerChannel<Biquad>` is `Send`, so a chain carrying the high-pass in its
     /// `transform` segment stays `Send` and can live behind the stream's `Mutex`,
     /// matching the DC blocker.
     #[test]
     fn highpass_stage_is_send() {
         fn assert_send<T: Send>() {}
-        assert_send::<InPlace<Biquad>>();
+        assert_send::<PerChannel<Biquad>>();
     }
 
     /// Chain placement with denoise present: DC removal, then the framed denoise
@@ -3148,8 +3839,8 @@ mod tests {
 
     // ── Level control (AGC, same-length transform) ──────────────────────
     //
-    // AGC is the LevelControl engine driven through `InPlace`, a same-length,
-    // sample-in-sample-out stage like the DC blocker and high-pass. These cover
+    // AGC is the LevelControl engine driven through `Linked`, a same-length
+    // stage whose detection runs across the delivered channels. These cover
     // its chain placement (after high-pass), that it builds no stage when off,
     // that it adds no latency, and that it conditions delivered audio. The
     // engine's temporal behaviour (cold start, convergence, gating) is covered by
@@ -3311,20 +4002,20 @@ mod tests {
         );
     }
 
-    /// `InPlace<LevelControl>` is `Send`, so a chain carrying AGC in its
+    /// `Linked<LevelControl>` is `Send`, so a chain carrying AGC in its
     /// `transform` segment stays `Send` and can live behind the stream's `Mutex`,
     /// matching the DC blocker and high-pass.
     #[cfg(feature = "gain")]
     #[test]
     fn agc_stage_is_send() {
         fn assert_send<T: Send>() {}
-        assert_send::<InPlace<crate::gain::LevelControl>>();
+        assert_send::<Linked<crate::gain::LevelControl>>();
     }
 
     // ── Limiter (same-length transform, last in the chain) ──────────────
     //
-    // The limiter is the Limiter stage driven through `InPlace`, a same-length,
-    // sample-in-sample-out stage like AGC. These cover its chain placement (last,
+    // The limiter is the Limiter stage driven through `Linked`, a same-length
+    // stage detecting across the delivered channels like AGC. These cover its chain placement (last,
     // after AGC), that it builds no stage when off, that it adds no latency, that
     // it caps delivered audio at the ceiling end to end, and that it builds
     // standalone (with AGC off). The stage's own guarantees (the absolute ceiling,
@@ -3491,14 +4182,14 @@ mod tests {
         );
     }
 
-    /// `InPlace<Limiter>` is `Send`, so a chain carrying the limiter in its
+    /// `Linked<Limiter>` is `Send`, so a chain carrying the limiter in its
     /// `transform` segment stays `Send` and can live behind the stream's `Mutex`,
     /// matching the DC blocker, high-pass, and AGC.
     #[cfg(feature = "gain")]
     #[test]
     fn limiter_stage_is_send() {
         fn assert_send<T: Send>() {}
-        assert_send::<InPlace<crate::gain::Limiter>>();
+        assert_send::<Linked<crate::gain::Limiter>>();
     }
 
     // ── Non-finite input guard ──────────────────────────────────────────

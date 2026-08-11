@@ -1,11 +1,14 @@
-//! Single-channel speech enhancement (denoise) for the capture path.
+//! Speech enhancement (denoise) for the capture path: a single-channel model
+//! run over each carried channel.
 //!
 //! Wraps the bundled FastEnhancer-T ONNX model as a capture [`Stage`]. The model
 //! is the waveform-in / waveform-out variant: it bakes the complete spectral path
 //! (windowing, the forward and inverse DFT, power compression, and overlap-add)
 //! into its graph, so this stage owns no spectral DSP. The host's job is purely
-//! to re-block the captured waveform into the model's analysis frames, carry the
-//! three streaming caches across calls, and concatenate the returned hops.
+//! to re-block the captured waveform into the model's analysis frames, carry
+//! each channel's three streaming caches across calls, and concatenate the
+//! returned hops. One session serves every channel: the weights are loaded
+//! once, and each channel keeps only its own cache set.
 //!
 //! # Streaming contract (verified against the model and an offline reference)
 //!
@@ -15,7 +18,7 @@
 //! the three updated caches. Frames advance by the hop (256), so consecutive
 //! windows overlap by 512 - 256 = 256 samples, and the caches must be fed back
 //! each call. The stream is left-padded by one (window - hop) = 256-sample
-//! half-window of zeros (the [`accumulator`](Denoise::accumulator) takes 256 zeros
+//! half-window of zeros (each channel's accumulator takes 256 zeros
 //! when its first sample arrives) so the first analysis window is
 //! `[zeros(256), samples(256)]`, which matches how the upstream streaming export
 //! initialises its internal buffer. The
@@ -51,29 +54,20 @@ const CACHE0_LEN: usize = 256;
 /// Length of each recurrent cache `cache_*_1`/`cache_*_2[1, 16, 20]`, flattened.
 const CACHE_REC_LEN: usize = 16 * 20;
 
-/// FastEnhancer-T denoise stage: a framed, stateful capture [`Stage`] that maps a
-/// stream of noisy speech samples to enhanced speech samples.
-///
-/// Length-changing and latency-introducing: each [`process`](Stage::process)
-/// emits whole 256-sample hops as enough input accumulates, buffering the
-/// remainder, so its output count trails its input by the framing latency until
-/// [`flush`](Stage::flush) drains the tail at close. The tail exists to frame the
-/// audio the stage received, so a stage that received none emits nothing at
-/// flush. It runs in the `transform` segment after the VAD tap, so that latency
-/// surfaces as a bounded tap lead and never reaches the detector.
-pub(crate) struct Denoise {
-    /// The model behind the shared ONNX session seam. Loaded from a caller-
-    /// supplied path; the crate embeds no model bytes.
-    session: Box<dyn OnnxSession>,
-    /// Pending samples not yet consumed by a frame. Empty until the stage
-    /// receives its first sample, when [`process`](Stage::process) seeds it with
+/// One channel's streaming state: the framing accumulator and the three model
+/// caches. The stage holds one of these per carried channel against the one
+/// shared session, so the model weights are loaded once however many channels
+/// run through them.
+struct ChannelState {
+    /// Pending samples not yet consumed by a frame. Empty until the channel
+    /// receives its first sample, when [`Stage::process`] seeds it with
     /// `WINDOW - HOP` zeros (the left-pad half-window); each frame then consumes
     /// `HOP` from the front and retains the `WINDOW - HOP`-sample overlap for the
     /// next window, so once seeded it never empties again until
-    /// [`flush`](Stage::flush) clears it.
+    /// [`Stage::flush`] clears it.
     ///
-    /// Invariant, which [`flush`](Stage::flush) reads: an empty accumulator means
-    /// the stage holds no audio to frame, so it has nothing to drain.
+    /// Invariant, which [`Stage::flush`] reads: an empty accumulator means
+    /// the channel holds no audio to frame, so it has nothing to drain.
     accumulator: Vec<f32>,
     /// The model's overlap-add tail buffer (`cache_*_0`), carried across calls.
     cache0: Vec<f32>,
@@ -83,11 +77,50 @@ pub(crate) struct Denoise {
     cache2: Vec<f32>,
 }
 
+impl ChannelState {
+    fn new() -> Self {
+        Self {
+            // Empty until the first sample arrives; `process` lays down the
+            // left-pad half-window then.
+            accumulator: Vec::new(),
+            cache0: vec![0.0; CACHE0_LEN],
+            cache1: vec![0.0; CACHE_REC_LEN],
+            cache2: vec![0.0; CACHE_REC_LEN],
+        }
+    }
+}
+
+/// FastEnhancer-T denoise stage: a framed, stateful capture [`Stage`] that maps a
+/// stream of noisy speech samples to enhanced speech samples, every carried
+/// channel through the one shared model session with its own cache set.
+///
+/// Length-changing and latency-introducing: each [`process`](Stage::process)
+/// emits whole 256-sample hops as enough input accumulates, buffering the
+/// remainder, so its output count trails its input by the framing latency until
+/// [`flush`](Stage::flush) drains the tail at close. The tail exists to frame the
+/// audio the stage received, so a stage that received none emits nothing at
+/// flush. It runs in the `transform` segment after the VAD tap, so that latency
+/// surfaces as a bounded tap lead and never reaches the detector. Above one
+/// channel the block is planar and every channel's run is framed by its own
+/// [`ChannelState`], in channel order; equal-length runs in yield equal-length
+/// runs out, since every accumulator advances by the same count.
+pub(crate) struct Denoise {
+    /// The model behind the shared ONNX session seam. Loaded from a caller-
+    /// supplied path; the crate embeds no model bytes. One session serves
+    /// every channel.
+    session: Box<dyn OnnxSession>,
+    /// One streaming state per carried channel, index i framing planar run i.
+    /// The length is resolved at chain build time; no fixed maximum exists.
+    states: Vec<ChannelState>,
+}
+
 impl Denoise {
     /// Build the stage, loading the model from `path` through the shared ONNX
     /// session seam (the same path Silero VAD loads through). Initialises ORT
     /// once per process, like [`crate::vad::SileroVad::new`], so a denoise-only
-    /// build still works without a VAD.
+    /// build still works without a VAD. `channels` is the carried channel
+    /// count the stage frames, one cache set per channel; a count of zero is
+    /// floored to one.
     ///
     /// # Errors
     /// - [`DecibriError::ModelLoadFailed`] if the model file cannot be opened.
@@ -96,6 +129,7 @@ impl Denoise {
         model: DenoiseModel,
         path: &Path,
         ort_library_path: Option<&Path>,
+        channels: u16,
     ) -> Result<Self, DecibriError> {
         // ORT initialises exactly once per process (first-wins). A VAD in the
         // same process may have done it already; if not, denoise does it here,
@@ -116,28 +150,27 @@ impl Denoise {
 
         Ok(Self {
             session,
-            // Empty until the first sample arrives; `process` lays down the
-            // left-pad half-window then.
-            accumulator: Vec::new(),
-            cache0: vec![0.0; CACHE0_LEN],
-            cache1: vec![0.0; CACHE_REC_LEN],
-            cache2: vec![0.0; CACHE_REC_LEN],
+            states: (0..channels.max(1)).map(|_| ChannelState::new()).collect(),
         })
     }
 
     /// Run one analysis window through the model, appending the enhanced hop to
-    /// `out` and advancing the three caches. Reads the front `WINDOW` samples of
-    /// the accumulator; the caller drains `HOP` afterward.
-    fn run_frame(&mut self, out: &mut Vec<f32>) -> Result<(), DecibriError> {
+    /// `out` and advancing the channel's three caches. Reads the front `WINDOW`
+    /// samples of the channel's accumulator; the caller drains `HOP` afterward.
+    fn run_frame(
+        session: &mut dyn OnnxSession,
+        state: &mut ChannelState,
+        out: &mut Vec<f32>,
+    ) -> Result<(), DecibriError> {
         // Copy the window out so the accumulator can be drained afterward and so
-        // the borrow of `self.accumulator` does not overlap the `&mut self.session`
+        // the borrow of the accumulator does not overlap the `&mut` session
         // call (mirrors SileroVad::infer_window building its own input buffer).
-        let window: Vec<f32> = self.accumulator[..WINDOW].to_vec();
+        let window: Vec<f32> = state.accumulator[..WINDOW].to_vec();
         let wav_in_shape = [1i64, WINDOW as i64];
         let cache0_shape = [1i64, CACHE0_LEN as i64];
         let cache_rec_shape = [1i64, 16, 20];
 
-        let outputs = self.session.run(OnnxInputs {
+        let outputs = session.run(OnnxInputs {
             items: &[
                 (
                     "wav_in",
@@ -150,21 +183,21 @@ impl Denoise {
                     "cache_in_0",
                     OnnxTensorView {
                         shape: &cache0_shape,
-                        data: OnnxTensorData::F32(&self.cache0),
+                        data: OnnxTensorData::F32(&state.cache0),
                     },
                 ),
                 (
                     "cache_in_1",
                     OnnxTensorView {
                         shape: &cache_rec_shape,
-                        data: OnnxTensorData::F32(&self.cache1),
+                        data: OnnxTensorData::F32(&state.cache1),
                     },
                 ),
                 (
                     "cache_in_2",
                     OnnxTensorView {
                         shape: &cache_rec_shape,
-                        data: OnnxTensorData::F32(&self.cache2),
+                        data: OnnxTensorData::F32(&state.cache2),
                     },
                 ),
             ],
@@ -176,18 +209,23 @@ impl Denoise {
         }
         out.extend_from_slice(wav_out);
 
-        copy_cache(&outputs, "cache_out_0", &mut self.cache0)?;
-        copy_cache(&outputs, "cache_out_1", &mut self.cache1)?;
-        copy_cache(&outputs, "cache_out_2", &mut self.cache2)?;
+        copy_cache(&outputs, "cache_out_0", &mut state.cache0)?;
+        copy_cache(&outputs, "cache_out_1", &mut state.cache1)?;
+        copy_cache(&outputs, "cache_out_2", &mut state.cache2)?;
         Ok(())
     }
 
-    /// Emit every whole frame the accumulator currently holds, advancing by `HOP`
-    /// each time and retaining the `WINDOW - HOP` overlap for the next window.
-    fn drain_ready(&mut self, out: &mut Vec<f32>) -> Result<(), DecibriError> {
-        while self.accumulator.len() >= WINDOW {
-            self.run_frame(out)?;
-            self.accumulator.drain(..HOP);
+    /// Emit every whole frame the channel's accumulator currently holds,
+    /// advancing by `HOP` each time and retaining the `WINDOW - HOP` overlap
+    /// for the next window.
+    fn drain_ready(
+        session: &mut dyn OnnxSession,
+        state: &mut ChannelState,
+        out: &mut Vec<f32>,
+    ) -> Result<(), DecibriError> {
+        while state.accumulator.len() >= WINDOW {
+            Self::run_frame(session, state, out)?;
+            state.accumulator.drain(..HOP);
         }
         Ok(())
     }
@@ -195,54 +233,90 @@ impl Denoise {
 
 impl Stage for Denoise {
     fn process(&mut self, input: Block<'_>, out: &mut Vec<f32>) -> Result<(), DecibriError> {
-        // The model takes one channel, and the accumulator below frames a single
-        // time series: an interleaved block pushed through it would be framed
-        // across channels rather than along each. Stated here rather than
-        // assumed, so a chain that ever hands this stage more than one channel
-        // says so.
+        // The count the stage was built for and the count the block carries are
+        // the same number reaching it by two routes, exactly as for the other
+        // per-channel stages. Each accumulator frames a single time series: a
+        // block at another count would frame at least one channel's samples
+        // across a channel boundary.
         debug_assert_eq!(
-            input.channels(),
-            1,
-            "the denoise model requires mono, got {} channels",
+            input.channels() as usize,
+            self.states.len(),
+            "the denoise stage was built for {} channels and handed {}",
+            self.states.len(),
             input.channels()
         );
         if input.is_empty() {
             return Ok(());
         }
-        if self.accumulator.is_empty() {
-            // Left-pad the stream by one half-window of zeros so the first
-            // analysis window is `[zeros(256), first 256 samples]`. Laid down on
-            // the first sample rather than at construction, so an accumulator
-            // that is still empty means the stage has received no audio.
-            self.accumulator.resize(WINDOW - HOP, 0.0);
+        let frames = input.frames();
+        let Denoise { session, states } = self;
+        let mut emitted = None;
+        for (channel, state) in states.iter_mut().enumerate() {
+            if state.accumulator.is_empty() {
+                // Left-pad the stream by one half-window of zeros so the first
+                // analysis window is `[zeros(256), first 256 samples]`. Laid
+                // down on the first sample rather than at construction, so an
+                // accumulator that is still empty means the channel has
+                // received no audio.
+                state.accumulator.resize(WINDOW - HOP, 0.0);
+            }
+            state
+                .accumulator
+                .extend_from_slice(&input.samples()[channel * frames..(channel + 1) * frames]);
+            let before = out.len();
+            Self::drain_ready(session.as_mut(), state, out)?;
+            let count = out.len() - before;
+            // Equal-length runs in yield equal-length runs out: every
+            // accumulator advances by the same count, so every channel emits
+            // the same number of whole hops, which is what keeps the planar
+            // layout valid downstream.
+            debug_assert!(
+                emitted.is_none_or(|e: usize| e == count),
+                "equally fed channels emit equally many hops"
+            );
+            emitted = Some(count);
         }
-        self.accumulator.extend_from_slice(input.samples());
-        self.drain_ready(out)
+        Ok(())
     }
 
     fn flush(&mut self, out: &mut Vec<f32>) -> Result<(), DecibriError> {
-        // The tail drains the audio still inside the model's framing, so a stage
-        // holding none contributes nothing. An empty accumulator means either no
-        // sample ever arrived or the tail has already been drained; both emit
-        // nothing here.
-        if self.accumulator.is_empty() {
-            return Ok(());
+        // The tail drains the audio still inside the model's framing, so a
+        // channel holding none contributes nothing. An empty accumulator means
+        // either no sample ever arrived or the tail has already been drained;
+        // both emit nothing here. The channels are fed equally, so either
+        // every accumulator holds audio or none does, and the drained tails
+        // are equally long: the appended tail is planar like every processed
+        // block.
+        let Denoise { session, states } = self;
+        let mut emitted = None;
+        for state in states.iter_mut() {
+            if state.accumulator.is_empty() {
+                continue;
+            }
+
+            // Pad the stream out by one full window of zeros (the upstream
+            // offline recipe right-pads by n_fft) so the leftover real samples
+            // and the model's overlap-add tail are pushed out as final hops,
+            // then drain.
+            let padded_len = state.accumulator.len() + WINDOW;
+            state.accumulator.resize(padded_len, 0.0);
+            let before = out.len();
+            Self::drain_ready(session.as_mut(), state, out)?;
+            let count = out.len() - before;
+            debug_assert!(
+                emitted.is_none_or(|e: usize| e == count),
+                "equally fed channels drain equally long tails"
+            );
+            emitted = Some(count);
+
+            // Leave the channel reusable: drop the pending samples and zero the
+            // streaming caches, so a subsequent stream starts clean and lays
+            // down its own left-pad on its first sample.
+            state.accumulator.clear();
+            state.cache0.fill(0.0);
+            state.cache1.fill(0.0);
+            state.cache2.fill(0.0);
         }
-
-        // Pad the stream out by one full window of zeros (the upstream offline
-        // recipe right-pads by n_fft) so the leftover real samples and the
-        // model's overlap-add tail are pushed out as final hops, then drain.
-        let padded_len = self.accumulator.len() + WINDOW;
-        self.accumulator.resize(padded_len, 0.0);
-        self.drain_ready(out)?;
-
-        // Leave the stage reusable: drop the pending samples and zero the
-        // streaming caches, so a subsequent stream starts clean and lays down its
-        // own left-pad on its first sample.
-        self.accumulator.clear();
-        self.cache0.fill(0.0);
-        self.cache1.fill(0.0);
-        self.cache2.fill(0.0);
         Ok(())
     }
 
@@ -342,12 +416,12 @@ mod tests {
     /// tracks the input minus the framing latency.
     #[test]
     fn denoise_stage_processes_and_advances_caches() {
-        let mut stage = Denoise::new(DenoiseModel::FastEnhancerT, &model_path(), None)
+        let mut stage = Denoise::new(DenoiseModel::FastEnhancerT, &model_path(), None, 1)
             .expect("bundled FastEnhancer-T model loads");
 
         // Caches start zeroed and the accumulator is empty until fed.
-        assert!(stage.accumulator.is_empty());
-        assert!(stage.cache0.iter().all(|&v| v == 0.0));
+        assert!(stage.states[0].accumulator.is_empty());
+        assert!(stage.states[0].cache0.iter().all(|&v| v == 0.0));
 
         let input = noisy(4096);
         let mut out = Vec::new();
@@ -369,11 +443,12 @@ mod tests {
 
         // The caches advanced (the model wrote streaming state back).
         assert!(
-            stage.cache0.iter().any(|&v| v != 0.0),
+            stage.states[0].cache0.iter().any(|&v| v != 0.0),
             "the overlap-add cache advanced"
         );
         assert!(
-            stage.cache1.iter().any(|&v| v != 0.0) || stage.cache2.iter().any(|&v| v != 0.0),
+            stage.states[0].cache1.iter().any(|&v| v != 0.0)
+                || stage.states[0].cache2.iter().any(|&v| v != 0.0),
             "a recurrent cache advanced"
         );
     }
@@ -383,7 +458,7 @@ mod tests {
     /// the left-pad re-seeded).
     #[test]
     fn denoise_flush_drains_tail_and_resets() {
-        let mut stage = Denoise::new(DenoiseModel::FastEnhancerT, &model_path(), None)
+        let mut stage = Denoise::new(DenoiseModel::FastEnhancerT, &model_path(), None, 1)
             .expect("bundled FastEnhancer-T model loads");
 
         let mut out = Vec::new();
@@ -406,8 +481,70 @@ mod tests {
 
         // Reusable: caches re-zeroed, accumulator cleared so the next stream lays
         // down its own left-pad.
-        assert!(stage.cache0.iter().all(|&v| v == 0.0), "caches re-zeroed");
-        assert!(stage.accumulator.is_empty(), "pending samples cleared");
+        assert!(
+            stage.states[0].cache0.iter().all(|&v| v == 0.0),
+            "caches re-zeroed"
+        );
+        assert!(
+            stage.states[0].accumulator.is_empty(),
+            "pending samples cleared"
+        );
+    }
+
+    /// Every carried channel runs through the one shared session with its own
+    /// cache set: a two-channel stage fed the same signal on both channels
+    /// emits two identical runs, each bit-identical to a single-channel stage
+    /// over that signal alone, through process and flush. This pins the
+    /// per-channel machinery's shape (one session, one cache set per channel,
+    /// every delivered channel denoised): dropping a channel's cache set, or
+    /// running a channel through another channel's caches, breaks the
+    /// equality.
+    #[test]
+    fn every_channel_runs_through_its_own_cache_set() {
+        let input = noisy(4096);
+
+        // The single-channel reference, processed and flushed.
+        let mut mono = Denoise::new(DenoiseModel::FastEnhancerT, &model_path(), None, 1)
+            .expect("bundled FastEnhancer-T model loads");
+        let mut expected = Vec::new();
+        mono.process(Block::new(&input, 1), &mut expected)
+            .expect("mono process");
+        let expected_processed = expected.len();
+        mono.flush(&mut expected).expect("mono flush");
+
+        // The two-channel stage over a planar block carrying the signal twice.
+        let mut stereo = Denoise::new(DenoiseModel::FastEnhancerT, &model_path(), None, 2)
+            .expect("bundled FastEnhancer-T model loads");
+        assert_eq!(stereo.states.len(), 2, "one cache set per channel");
+        let planar: Vec<f32> = input.iter().chain(&input).copied().collect();
+        let mut out = Vec::new();
+        stereo
+            .process(Block::new(&planar, 2), &mut out)
+            .expect("stereo process");
+        assert_eq!(
+            out.len(),
+            2 * expected_processed,
+            "equally fed channels emit equally many hops"
+        );
+        assert_eq!(
+            &out[..expected_processed],
+            &expected[..expected_processed],
+            "channel 0 equals the single-channel stage, bit for bit"
+        );
+        assert_eq!(
+            &out[expected_processed..],
+            &expected[..expected_processed],
+            "channel 1 equals the single-channel stage, bit for bit"
+        );
+
+        // The flush drains both channels' tails as planar runs, each equal to
+        // the single-channel tail.
+        let mut tails = Vec::new();
+        stereo.flush(&mut tails).expect("stereo flush");
+        let tail = &expected[expected_processed..];
+        assert_eq!(tails.len(), 2 * tail.len(), "equally long tails");
+        assert_eq!(&tails[..tail.len()], tail, "channel 0's tail matches");
+        assert_eq!(&tails[tail.len()..], tail, "channel 1's tail matches");
     }
 
     /// A stage that received no audio emits nothing at flush: the padding exists
@@ -415,7 +552,7 @@ mod tests {
     /// so a tail of any length fails.
     #[test]
     fn unfed_flush_emits_nothing() {
-        let mut stage = Denoise::new(DenoiseModel::FastEnhancerT, &model_path(), None)
+        let mut stage = Denoise::new(DenoiseModel::FastEnhancerT, &model_path(), None, 1)
             .expect("bundled FastEnhancer-T model loads");
 
         let mut tail = Vec::new();
@@ -446,7 +583,7 @@ mod tests {
     /// padded stream forms.
     #[test]
     fn a_stage_fed_a_little_audio_still_drains_its_tail() {
-        let mut stage = Denoise::new(DenoiseModel::FastEnhancerT, &model_path(), None)
+        let mut stage = Denoise::new(DenoiseModel::FastEnhancerT, &model_path(), None, 1)
             .expect("bundled FastEnhancer-T model loads");
 
         let mut processed = Vec::new();
@@ -481,7 +618,7 @@ mod tests {
         let missing = Path::new(env!("CARGO_MANIFEST_DIR")).join("no-such-model.onnx");
         // Match on the Result (not `expect_err`) because `Denoise` holds a
         // `Box<dyn OnnxSession>` and is not `Debug`.
-        let err = match Denoise::new(DenoiseModel::FastEnhancerT, &missing, None) {
+        let err = match Denoise::new(DenoiseModel::FastEnhancerT, &missing, None, 1) {
             Ok(_) => panic!("a missing model file must fail to load"),
             Err(e) => e,
         };
@@ -721,7 +858,7 @@ mod tests {
     /// Run a signal through the real denoise stage (process then flush), exactly as
     /// the capture chain drives it, and return the enhanced output.
     fn run_denoise(model: &Path, input: &[f32]) -> Vec<f32> {
-        let mut stage = Denoise::new(DenoiseModel::FastEnhancerT, model, None)
+        let mut stage = Denoise::new(DenoiseModel::FastEnhancerT, model, None, 1)
             .expect("bundled FastEnhancer-T model loads");
         let mut out = Vec::new();
         stage

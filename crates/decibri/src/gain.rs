@@ -1,10 +1,13 @@
 //! Adaptive level control for the capture chain.
 //!
 //! [`LevelControl`] is one internal engine that drives a captured signal's level
-//! toward a target by applying a smoothed, rate-limited gain. It is a same-length,
-//! sample-in-sample-out stage: it reads one sample and writes one sample, carrying
-//! its level estimate and current gain across blocks, so it wraps through the
-//! chain's `InPlace` adapter exactly like the DC blocker and the high-pass biquad.
+//! toward a target by applying a smoothed, rate-limited gain. It is a same-length
+//! stage: it reads one frame and writes one frame, carrying
+//! its level estimate and current gain across blocks. In the chain it wraps
+//! through the `Linked` adapter: one detector reading each frame across every
+//! delivered channel, one gain applied to all of them, so the inter-channel
+//! balance is preserved. The per-sample [`InPlaceDsp`] form is the same
+//! control loop over a single run, and the two are identical at one channel.
 //! It adds no algorithmic delay (no look-ahead), so it declares zero latency.
 //!
 //! The engine is built around a [`LevelMode`] seam that selects what it measures
@@ -15,7 +18,7 @@
 //! variant plus its measurement and rate constants, with no change to the control
 //! loop, the chain wiring, or the byte-identical off path.
 
-use crate::stage::InPlaceDsp;
+use crate::stage::{InPlaceDsp, LinkedDsp};
 
 /// Convert a level in decibels relative to full scale to a linear amplitude
 /// (`1.0` = full scale). `0 dBFS` maps to `1.0`, `-20 dBFS` to `0.1`.
@@ -192,6 +195,66 @@ impl LevelControl {
             LevelMode::Agc => sample,
         }
     }
+
+    /// Advance the control loop by one frame whose weighted mean square across
+    /// its channels is `weighted_sq` (at one channel, the one weighted sample
+    /// squared). One call moves the level estimate, the presence gate and the
+    /// gain envelope by one step, whatever the channel count: the loop's time
+    /// constants count frames, which advance at the sample rate the engine was
+    /// built for.
+    fn update(&mut self, weighted_sq: f32) {
+        // Advance the level estimate. A fast-start blend (a running average
+        // until the steady-state coefficient takes over) primes the estimate
+        // from the opening samples, so the gain decision is correct within
+        // tens of milliseconds rather than over the full window.
+        let coeff = self.level_coeff.max(1.0 / (self.sample_count + 1) as f32);
+        self.level_sq += coeff * (weighted_sq - self.level_sq);
+        self.sample_count = self.sample_count.saturating_add(1);
+        let level = self.level_sq.sqrt();
+
+        // Presence gate (the noise-floor guard) with a hangover, so a silent
+        // or noise-only stretch holds the upward rise while a brief inter-word
+        // gap does not.
+        let present = if level > self.noise_floor_linear {
+            self.hangover_remaining = self.hangover_samples;
+            true
+        } else if self.hangover_remaining > 0 {
+            self.hangover_remaining -= 1;
+            true
+        } else {
+            false
+        };
+
+        if present {
+            let desired =
+                (self.target_linear / level).clamp(self.min_gain_linear, self.max_gain_linear);
+            if desired > self.gain {
+                // Upward: gated on presence (true here), rate-limited. Fast
+                // during the opening warm-up, then the gentle steady slope.
+                if self.warmup_remaining > 0 {
+                    self.gain += (desired - self.gain) * self.warmup_coeff;
+                } else {
+                    self.gain = (self.gain * self.rise_step).min(desired);
+                }
+            } else {
+                // Downward (attack): fast, never gated, so a loud onset is
+                // always pulled down promptly.
+                self.gain += (desired - self.gain) * self.attack_coeff;
+            }
+
+            // Spend the warm-up window only while signal is present, so a
+            // silent or noise-only opening does not burn the fast-start
+            // before the first real signal arrives. The fast convergence the
+            // warm-up buys is then applied to that first signal, not wasted
+            // on an opening pause.
+            if self.warmup_remaining > 0 {
+                self.warmup_remaining -= 1;
+            }
+        }
+        // When not present the gain is frozen and the warm-up is preserved:
+        // neither rise nor fall, so the level is held through silence and the
+        // fast-start is saved for the first present signal.
+    }
 }
 
 impl InPlaceDsp for LevelControl {
@@ -203,59 +266,33 @@ impl InPlaceDsp for LevelControl {
             // construction (unboosted), and the gain lags the measurement by one
             // sample (a feedback loop, no look-ahead, zero added latency).
             *sample = x * self.gain;
-
-            // Advance the level estimate. A fast-start blend (a running average
-            // until the steady-state coefficient takes over) primes the estimate
-            // from the opening samples, so the gain decision is correct within
-            // tens of milliseconds rather than over the full window.
             let weighted = self.weigh(x);
-            let coeff = self.level_coeff.max(1.0 / (self.sample_count + 1) as f32);
-            self.level_sq += coeff * (weighted * weighted - self.level_sq);
-            self.sample_count = self.sample_count.saturating_add(1);
-            let level = self.level_sq.sqrt();
+            self.update(weighted * weighted);
+        }
+    }
+}
 
-            // Presence gate (the noise-floor guard) with a hangover, so a silent
-            // or noise-only stretch holds the upward rise while a brief inter-word
-            // gap does not.
-            let present = if level > self.noise_floor_linear {
-                self.hangover_remaining = self.hangover_samples;
-                true
-            } else if self.hangover_remaining > 0 {
-                self.hangover_remaining -= 1;
-                true
-            } else {
-                false
-            };
-
-            if present {
-                let desired =
-                    (self.target_linear / level).clamp(self.min_gain_linear, self.max_gain_linear);
-                if desired > self.gain {
-                    // Upward: gated on presence (true here), rate-limited. Fast
-                    // during the opening warm-up, then the gentle steady slope.
-                    if self.warmup_remaining > 0 {
-                        self.gain += (desired - self.gain) * self.warmup_coeff;
-                    } else {
-                        self.gain = (self.gain * self.rise_step).min(desired);
-                    }
-                } else {
-                    // Downward (attack): fast, never gated, so a loud onset is
-                    // always pulled down promptly.
-                    self.gain += (desired - self.gain) * self.attack_coeff;
-                }
-
-                // Spend the warm-up window only while signal is present, so a
-                // silent or noise-only opening does not burn the fast-start
-                // before the first real signal arrives. The fast convergence the
-                // warm-up buys is then applied to that first signal, not wasted
-                // on an opening pause.
-                if self.warmup_remaining > 0 {
-                    self.warmup_remaining -= 1;
-                }
+impl LinkedDsp for LevelControl {
+    fn process_planar(&mut self, planar: &mut [f32], channels: u16) {
+        let channels = channels.max(1) as usize;
+        let frames = planar.len() / channels;
+        for frame in 0..frames {
+            // Apply the current gain to every channel of the frame first, then
+            // update the gain once from the frame's weighted mean square
+            // across the channels: one detector, one gain, so the
+            // inter-channel balance is exactly preserved and the gain lags the
+            // measurement by one frame, as the per-sample form lags by one
+            // sample. At one channel the mean is the one sample's square and
+            // this loop is the per-sample loop.
+            let mut sum_sq = 0.0f32;
+            for channel in 0..channels {
+                let sample = &mut planar[channel * frames + frame];
+                let x = *sample;
+                *sample = x * self.gain;
+                let weighted = self.weigh(x);
+                sum_sq += weighted * weighted;
             }
-            // When not present the gain is frozen and the warm-up is preserved:
-            // neither rise nor fall, so the level is held through silence and the
-            // fast-start is saved for the first present signal.
+            self.update(sum_sq / channels as f32);
         }
     }
 }
@@ -264,10 +301,13 @@ impl InPlaceDsp for LevelControl {
 /// safety net that catches a transient the level control's wound-up gain would
 /// otherwise let exceed full scale.
 ///
-/// It is a same-length, sample-in-sample-out stage with no look-ahead, so it
-/// wraps through the chain's `InPlace` adapter exactly like the DC blocker, the
-/// high-pass biquad, and [`LevelControl`], and declares zero latency. It runs
-/// last in the conditioning chain, after [`LevelControl`].
+/// It is a same-length stage with no look-ahead, so it declares zero latency,
+/// and it runs last in the conditioning chain, after [`LevelControl`]. In the
+/// chain it wraps through the `Linked` adapter like [`LevelControl`]: one
+/// detector reading each frame's sample peak across every delivered channel,
+/// one gain applied to all of them, with the hard clamp still applied to each
+/// sample. The per-sample [`InPlaceDsp`] form is the same two layers over a
+/// single run, and the two are identical at one channel.
 ///
 /// # Two layers
 /// The limiter combines fast feedback gain reduction with a hard-ceiling
@@ -339,44 +379,80 @@ impl Limiter {
             release_coeff: coeff(Self::RELEASE_TC_SECS),
         }
     }
+
+    /// Advance the feedback gain by one frame whose sample peak across its
+    /// channels is `magnitude` (at one channel, the one sample's magnitude).
+    fn update(&mut self, magnitude: f32) {
+        // Feedback gain reduction: the gain that would bring this peak to the
+        // ceiling (unity when the peak already sits below it). `magnitude` is
+        // strictly above the positive ceiling here, so the divide is safe.
+        let desired = if magnitude > self.ceiling_linear {
+            self.ceiling_linear / magnitude
+        } else {
+            1.0
+        };
+        // Pull down fast (attack) when more reduction is needed, recover
+        // slowly (release) otherwise.
+        let coeff = if desired < self.gain {
+            self.attack_coeff
+        } else {
+            self.release_coeff
+        };
+        self.gain += (desired - self.gain) * coeff;
+    }
+
+    /// The hard-ceiling backstop: the clamp is the final operation, so no
+    /// output sample can exceed the ceiling whatever the gain state, even
+    /// on the instantaneous worst case the smoothed gain has not yet
+    /// caught. A non-finite (NaN) sample, which the clamp would otherwise
+    /// pass through unchanged, is flushed to silence first, so every
+    /// delivered sample is finite and within the ceiling: the limiter is
+    /// the last conditioning stage, so a glitched device frame must not
+    /// reach the consumer or detector. A finite or infinite product is
+    /// bounded by the clamp (an infinity clamps to the ceiling).
+    fn clamp_to_ceiling(&self, y: f32) -> f32 {
+        if y.is_nan() {
+            0.0
+        } else {
+            y.clamp(-self.ceiling_linear, self.ceiling_linear)
+        }
+    }
 }
 
 impl InPlaceDsp for Limiter {
     fn process_in_place(&mut self, samples: &mut [f32]) {
         for sample in samples.iter_mut() {
             let x = *sample;
-            let mag = x.abs();
-            // Feedback gain reduction: the gain that would bring this peak to the
-            // ceiling (unity when the sample already sits below it). `mag` is
-            // strictly above the positive ceiling here, so the divide is safe.
-            let desired = if mag > self.ceiling_linear {
-                self.ceiling_linear / mag
-            } else {
-                1.0
-            };
-            // Pull down fast (attack) when more reduction is needed, recover
-            // slowly (release) otherwise.
-            let coeff = if desired < self.gain {
-                self.attack_coeff
-            } else {
-                self.release_coeff
-            };
-            self.gain += (desired - self.gain) * coeff;
-            // Hard-ceiling backstop: the clamp is the final operation, so no
-            // output sample can exceed the ceiling whatever the gain state, even
-            // on the instantaneous worst case the smoothed gain has not yet
-            // caught. A non-finite (NaN) sample, which the clamp would otherwise
-            // pass through unchanged, is flushed to silence first, so every
-            // delivered sample is finite and within the ceiling: the limiter is
-            // the last conditioning stage, so a glitched device frame must not
-            // reach the consumer or detector. A finite or infinite product is
-            // bounded by the clamp (an infinity clamps to the ceiling).
+            self.update(x.abs());
             let y = x * self.gain;
-            *sample = if y.is_nan() {
-                0.0
-            } else {
-                y.clamp(-self.ceiling_linear, self.ceiling_linear)
-            };
+            *sample = self.clamp_to_ceiling(y);
+        }
+    }
+}
+
+impl LinkedDsp for Limiter {
+    fn process_planar(&mut self, planar: &mut [f32], channels: u16) {
+        let channels = channels.max(1) as usize;
+        let frames = planar.len() / channels;
+        for frame in 0..frames {
+            // One detector reading per frame: the frame's sample peak across
+            // every channel. The gain then applies to all of the frame's
+            // channels, so a peak on one channel ducks every channel by the
+            // same amount and the inter-channel balance is preserved through
+            // the gain path; the hard clamp stays per sample. A non-finite
+            // sample contributes nothing to the peak (the fold starts at zero
+            // and `max` discards a NaN operand) and is flushed by the clamp,
+            // matching the per-sample form at one channel.
+            let mut peak = 0.0f32;
+            for channel in 0..channels {
+                peak = peak.max(planar[channel * frames + frame].abs());
+            }
+            self.update(peak);
+            for channel in 0..channels {
+                let sample = &mut planar[channel * frames + frame];
+                let y = *sample * self.gain;
+                *sample = self.clamp_to_ceiling(y);
+            }
         }
     }
 }
@@ -848,6 +924,142 @@ mod tests {
             out_rms > in_rms * 0.95,
             "the quiet passage recovers to ~unity after the loud transient \
              (in {in_rms}, out {out_rms})"
+        );
+    }
+
+    // ── The linked (across-channel) forms ───────────────────────────────
+    //
+    // The chain drives both engines through the `Linked` adapter: one
+    // detector reading each frame across every channel, one gain applied to
+    // all of them. These pin the two properties that define that form: it is
+    // bit-identical to the per-sample form at one channel, and above one
+    // channel it preserves the inter-channel balance that per-channel
+    // detection would destroy.
+
+    /// At one channel the linked level control is the per-sample form, bit
+    /// for bit, including non-finite samples: the two loops perform the same
+    /// operations in the same order, and the frame mean square over one
+    /// channel is that sample's square.
+    #[test]
+    fn linked_level_control_at_one_channel_matches_the_per_sample_form() {
+        let mut input = tone(amp_for_dbfs(-30.0), 220.0, 0.5);
+        input[100] = f32::NAN;
+        input[200] = f32::INFINITY;
+
+        let mut per_sample = LevelControl::agc(TARGET_DB, SR);
+        let mut a = input.clone();
+        per_sample.process_in_place(&mut a);
+
+        let mut linked = LevelControl::agc(TARGET_DB, SR);
+        let mut b = input.clone();
+        linked.process_planar(&mut b, 1);
+
+        assert_eq!(a.len(), b.len());
+        for (i, (x, y)) in a.iter().zip(&b).enumerate() {
+            assert!(
+                x.to_bits() == y.to_bits(),
+                "sample {i}: linked at one channel is bit-identical ({x} vs {y})"
+            );
+        }
+    }
+
+    /// At one channel the linked limiter is the per-sample form, bit for bit,
+    /// including non-finite samples (a NaN contributes nothing to the frame
+    /// peak, exactly as the per-sample detector treats it, and the clamp
+    /// flushes it either way).
+    #[test]
+    fn linked_limiter_at_one_channel_matches_the_per_sample_form() {
+        let mut input = tone(0.95, 1_000.0, 0.3);
+        input[0] = f32::NAN;
+        input[10] = f32::INFINITY;
+        input[20] = f32::NEG_INFINITY;
+
+        let mut per_sample = Limiter::new(-1.0, SR);
+        let mut a = input.clone();
+        per_sample.process_in_place(&mut a);
+
+        let mut linked = Limiter::new(-1.0, SR);
+        let mut b = input.clone();
+        linked.process_planar(&mut b, 1);
+
+        assert_eq!(a.len(), b.len());
+        for (i, (x, y)) in a.iter().zip(&b).enumerate() {
+            assert!(
+                x.to_bits() == y.to_bits(),
+                "sample {i}: linked at one channel is bit-identical ({x} vs {y})"
+            );
+        }
+    }
+
+    /// The linked level control preserves the inter-channel ratio exactly:
+    /// one gain applies to every channel of a frame, so a channel at half the
+    /// other's amplitude leaves at half the other's amplitude, sample for
+    /// sample, while the quiet signal is still driven up toward the target.
+    /// Per-channel detection would drive both channels toward the same
+    /// target, erasing the ratio; that is the named alternative for
+    /// separately-mic'd speakers, not this engine's behaviour.
+    #[test]
+    fn linked_level_control_preserves_the_inter_channel_ratio() {
+        let frames = SR as usize;
+        let loud = tone(amp_for_dbfs(-38.0), 220.0, 1.0);
+        // Planar: channel 0's run, then channel 1's at exactly half.
+        let mut planar: Vec<f32> = loud
+            .iter()
+            .copied()
+            .chain(loud.iter().map(|&s| 0.5 * s))
+            .collect();
+
+        let mut linked = LevelControl::agc(TARGET_DB, SR);
+        linked.process_planar(&mut planar, 2);
+
+        for frame in 0..frames {
+            assert_eq!(
+                planar[frames + frame],
+                0.5 * planar[frame],
+                "frame {frame}: the shared gain keeps the exact half ratio"
+            );
+        }
+        // Not vacuous: the quiet pair was materially raised toward the target.
+        let tail = rms(&planar[frames - 4000..frames]);
+        let input_tail = rms(&loud[frames - 4000..]);
+        assert!(
+            tail > 2.0 * input_tail,
+            "the level control raised the signal materially ({input_tail} -> {tail})"
+        );
+    }
+
+    /// The linked limiter ducks every channel by the one shared gain: a peak
+    /// on one channel attenuates the other channel too, holding the balance,
+    /// where per-channel detection would leave the below-ceiling channel
+    /// untouched. The over-ceiling channel still settles at the ceiling.
+    #[test]
+    fn linked_limiter_ducks_every_channel_together() {
+        let ceiling_db = -1.0f32;
+        let ceiling = db_to_linear(ceiling_db);
+        let frames = (0.3 * SR as f32) as usize;
+        let hot = tone(1.2, 1_000.0, 0.3);
+        let quiet = tone(0.2, 1_000.0, 0.3);
+        let mut planar: Vec<f32> = hot.iter().chain(&quiet).copied().collect();
+
+        let mut linked = Limiter::new(ceiling_db, SR);
+        linked.process_planar(&mut planar, 2);
+
+        let win = (0.05 * SR as f32) as usize;
+        let hot_out = &planar[frames - win..frames];
+        let quiet_out = &planar[2 * frames - win..];
+
+        // The hot channel is held at or below the ceiling.
+        let peak = hot_out.iter().fold(0.0f32, |m, s| m.max(s.abs()));
+        assert!(peak <= ceiling, "the hot channel is capped ({peak})");
+
+        // The quiet channel, never itself above the ceiling, is attenuated by
+        // the same shared gain. A per-channel limiter would deliver it
+        // bit-identical to its input; the linked form must not.
+        let in_rms = rms(&quiet[frames - win..]);
+        let out_rms = rms(quiet_out);
+        assert!(
+            out_rms < 0.95 * in_rms,
+            "the quiet channel is ducked with the hot one ({in_rms} -> {out_rms})"
         );
     }
 

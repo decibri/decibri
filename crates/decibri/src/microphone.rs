@@ -1309,15 +1309,17 @@ impl Microphone {
         let native_channels = CpalBackend.native_input_channels(&self.device)?;
         let frames_per_buffer = self.config.frames_per_buffer;
 
-        // Build the normalize chain for this device. The target is mono (1
-        // channel) at the requested rate: `build_capture_stage` adds a channel
+        // Build the normalize chain for this device. The target is the
+        // configured delivered count at the requested rate:
+        // `build_capture_stage` adds a channel
         // stage for a multichannel device (the average, or the gather the
         // channel map selects) and a resample when the native rate differs,
         // and returns `None` only for a mono device already at the target rate
-        // with no map. The stream reports the OUTPUT channel count (mono when
-        // the chain collapses, which is what the exact-size `samples` math is
-        // counted in) and the target rate.
-        let target_channels: u16 = 1;
+        // with no map. The stream reports the OUTPUT channel count (the count
+        // the exact-size `samples` math is counted in) and the target rate.
+        // `validate()` bounds the accepted set of `channels`, so the value
+        // reaching the chain here is a validated one.
+        let target_channels: u16 = self.config.channels;
 
         // The channel map names device channels, so it is checked here, after
         // device resolution, against the same report that sets the open count.
