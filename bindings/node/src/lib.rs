@@ -846,6 +846,9 @@ fn to_napi_error(e: decibri::error::DecibriError) -> Error {
         | AecSampleRateUnsupported(_)
         | AecMultichannelUnsupported { .. }
         | BlockSizeNotFrameAligned { .. }
+        | FileChannelsUnsupported { .. }
+        | FileChannelSelectionAmbiguous { .. }
+        | FileChannelMapOutOfRange { .. }
         | AudioFormatUnsupported { .. }
         | AudioFileMalformed { .. }
         | AudioFileTruncated { .. }
@@ -1330,15 +1333,22 @@ impl DecibriOutputBridge {
 // ---------------------------------------------------------------------------
 
 /// Options passed from the JS `File` wrapper. The conditioning fields mirror
-/// `DecibriOptions` exactly; the live-capture-only fields (device, channels,
-/// framesPerBuffer) do not apply to an offline source. `vadThreshold` and
-/// `vadHoldoffMs` are internal plumbing (the user passes them on the `vad`
-/// config object; the wrapper resolves them), hidden from the generated
-/// TypeScript like `ortLibraryPath`.
+/// `DecibriOptions` exactly, as do `channels` and `channelMap`, with the
+/// source's own channel count standing where the device's report stands; the
+/// live-capture-only fields (device, framesPerBuffer) do not apply to an
+/// offline source. `inputChannels` is the interleave of the caller's own
+/// samples and is honoured by `FileHandle::buffer` alone (a path's count
+/// comes from its header; the JS wrapper refuses the option on the open
+/// path). `vadThreshold` and `vadHoldoffMs` are internal plumbing (the user
+/// passes them on the `vad` config object; the wrapper resolves them),
+/// hidden from the generated TypeScript like `ortLibraryPath`.
 #[napi(object)]
 #[derive(Default)]
 pub struct FileOptions {
     pub sample_rate: Option<u32>,
+    pub channels: Option<u16>,
+    pub channel_map: Option<Vec<u16>>,
+    pub input_channels: Option<u16>,
     pub format: Option<String>,
     pub vad_mode: Option<String>,
     #[napi(skip_typescript)]
@@ -1500,6 +1510,11 @@ fn build_file_config(opts: &FileOptions) -> Result<FileConfig> {
     // public fields rather than using a struct literal.
     let mut config = FileConfig::default();
     config.sample_rate = sample_rate;
+    // The delivered count and the map cross unchecked beyond the wrapper's
+    // shape checks: the source's own channel count is the only ceiling, and
+    // only the core knows it once the source is opened.
+    config.channels = opts.channels.unwrap_or(1);
+    config.channel_map = opts.channel_map.clone();
     config.dc_removal = opts.dc_removal.unwrap_or(false);
 
     if let Some(name) = opts.denoise.as_deref() {
@@ -1751,8 +1766,9 @@ impl FileHandle {
         AsyncTask::new(OpenFileTask { path, options })
     }
 
-    /// Wrap in-memory samples as an offline source. `samples` are mono f32 in
-    /// [-1.0, 1.0]; `inputRate` is their native rate (raw samples carry no
+    /// Wrap in-memory samples as an offline source. `samples` are f32 in
+    /// [-1.0, 1.0], frame-interleaved at the options' `inputChannels` (1
+    /// when unset); `inputRate` is their native rate (raw samples carry no
     /// header). No I/O, so construction is synchronous.
     #[napi(factory)]
     pub fn buffer(
@@ -1773,7 +1789,9 @@ impl FileHandle {
             }
         };
         let config = build_file_config(opts)?;
-        let file = CoreFile::buffer(samples.to_vec(), input_rate, config).map_err(to_napi_error)?;
+        let input_channels = opts.input_channels.unwrap_or(1);
+        let file = CoreFile::buffer(samples.to_vec(), input_rate, input_channels, config)
+            .map_err(to_napi_error)?;
         Ok(FileParts {
             file,
             format,

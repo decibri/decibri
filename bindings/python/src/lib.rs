@@ -153,6 +153,9 @@ const EXCEPTION_NAMES: &[&str] = &[
     "MicrophoneChannelsUnsupported",
     "ChannelSelectionAmbiguous",
     "BlockSizeNotFrameAligned",
+    "FileChannelsUnsupported",
+    "FileChannelSelectionAmbiguous",
+    "FileChannelMapOutOfRange",
     "VadSampleRateUnsupported",
     "VadThresholdOutOfRange",
     "AecSampleRateUnsupported",
@@ -2159,6 +2162,8 @@ struct FileBridge {
 #[allow(clippy::too_many_arguments)]
 fn build_file_config(
     sample_rate: u32,
+    channels: u16,
+    channel_map: Option<Vec<u16>>,
     vad: bool,
     vad_threshold: f32,
     vad_mode: &str,
@@ -2176,6 +2181,11 @@ fn build_file_config(
     // public fields rather than using a struct literal.
     let mut config = FileConfig::default();
     config.sample_rate = sample_rate;
+    // The delivered count and the map cross unchecked beyond the wrapper's
+    // shape checks: the source's own channel count is the only ceiling, and
+    // only the core knows it once the source is opened.
+    config.channels = channels;
+    config.channel_map = channel_map;
     config.dc_removal = dc_removal;
 
     if let Some(name) = denoise {
@@ -2252,6 +2262,8 @@ impl FileBridge {
     #[pyo3(signature = (
         path,
         sample_rate = 16000,
+        channels = 1_u16,
+        channel_map = None,
         format = "int16".to_string(),
         vad = false,
         vad_threshold = 0.5_f32,
@@ -2272,6 +2284,8 @@ impl FileBridge {
         py: Python<'_>,
         path: PathBuf,
         sample_rate: u32,
+        channels: u16,
+        channel_map: Option<Vec<u16>>,
         format: String,
         vad: bool,
         vad_threshold: f32,
@@ -2290,6 +2304,8 @@ impl FileBridge {
         let parsed_format = parse_sample_format(&format).map_err(|e| to_py_err(py, e))?;
         let config = build_file_config(
             sample_rate,
+            channels,
+            channel_map,
             vad,
             vad_threshold,
             &vad_mode,
@@ -2318,13 +2334,17 @@ impl FileBridge {
     }
 
     /// Wrap in-memory samples as an offline source. `samples` is a list of
-    /// floats or raw f32 little-endian bytes; `input_rate` is their native
-    /// rate (raw samples carry no header).
+    /// floats or raw f32 little-endian bytes, frame-interleaved at
+    /// `input_channels`; `input_rate` is their native rate (raw samples
+    /// carry no header, so both are explicit).
     #[staticmethod]
     #[pyo3(signature = (
         samples,
         input_rate,
+        input_channels = 1_u16,
         sample_rate = 16000,
+        channels = 1_u16,
+        channel_map = None,
         format = "int16".to_string(),
         vad = false,
         vad_threshold = 0.5_f32,
@@ -2345,7 +2365,10 @@ impl FileBridge {
         py: Python<'_>,
         samples: Bound<'_, PyAny>,
         input_rate: u32,
+        input_channels: u16,
         sample_rate: u32,
+        channels: u16,
+        channel_map: Option<Vec<u16>>,
         format: String,
         vad: bool,
         vad_threshold: f32,
@@ -2365,6 +2388,8 @@ impl FileBridge {
         let data = extract_buffer_samples(&samples)?;
         let config = build_file_config(
             sample_rate,
+            channels,
+            channel_map,
             vad,
             vad_threshold,
             &vad_mode,
@@ -2378,7 +2403,8 @@ impl FileBridge {
             limiter,
             dc_removal,
         )?;
-        let file = CoreFile::buffer(data, input_rate, config).map_err(|e| to_py_err(py, e))?;
+        let file = CoreFile::buffer(data, input_rate, input_channels, config)
+            .map_err(|e| to_py_err(py, e))?;
         Ok(Self::from_core(
             file,
             parsed_format,

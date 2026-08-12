@@ -253,6 +253,62 @@ pub enum DecibriError {
     #[error("the requested block size of {samples} samples is not a whole number of {channels}-channel frames")]
     BlockSizeNotFrameAligned { samples: usize, channels: u16 },
 
+    /// A file-source configuration asked for more delivered channels than the
+    /// source has, without naming them in a channel map.
+    ///
+    /// `requested` is the count [`crate::file::FileConfig::channels`] carried;
+    /// `available` is the source's own channel count, read from the
+    /// container's header (or stated as the `input_channels` of
+    /// [`crate::file::File::buffer`]). decibri delivers source channels, so it
+    /// cannot manufacture one the source does not have. Checked when the
+    /// `File` is constructed, where the source's count is first known, never
+    /// in [`crate::file::FileConfig::validate`], which has no source in scope:
+    /// the source's count is the only ceiling, and no fixed maximum is
+    /// enforced anywhere. The offline counterpart of
+    /// [`Self::MicrophoneChannelsUnsupported`], carrying its own message
+    /// because that one names a device and a file has no device. The leading
+    /// `the file does not have` clause is the stable part. Additive variant
+    /// permitted by `#[non_exhaustive]`.
+    #[cfg(feature = "capture")]
+    #[error("the file does not have {requested} channels to deliver; it has {available}")]
+    FileChannelsUnsupported { requested: u16, available: u16 },
+
+    /// A file-source configuration asked for more than one delivered channel,
+    /// but fewer than the source has, without naming which channels to
+    /// deliver.
+    ///
+    /// `requested` is the count [`crate::file::FileConfig::channels`] carried;
+    /// `available` is the source's own channel count. Delivering every source
+    /// channel (`requested == available`) and collapsing every source channel
+    /// to one (`requested == 1`, the documented average) both have a single
+    /// meaning; delivering a strict subset above one does not, so
+    /// [`crate::file::FileConfig::channel_map`] has to name the source
+    /// channels rather than decibri choosing them. Checked when the `File` is
+    /// constructed, where the source's count is first known. The offline
+    /// counterpart of [`Self::ChannelSelectionAmbiguous`], carrying its own
+    /// message because that one names a device and a file has no device. The
+    /// leading `delivering` clause is the stable part. Additive variant
+    /// permitted by `#[non_exhaustive]`.
+    #[cfg(feature = "capture")]
+    #[error("delivering {requested} of the file's {available} channels requires a channel map")]
+    FileChannelSelectionAmbiguous { requested: u16, available: u16 },
+
+    /// A file-source channel map named a channel the source does not have.
+    ///
+    /// `index` is the offending 0-based entry from
+    /// [`crate::file::FileConfig::channel_map`]; `available` is the source's
+    /// own channel count, read from the container's header (or stated as the
+    /// `input_channels` of [`crate::file::File::buffer`]). Checked when the
+    /// `File` is constructed, where the source's count is first known: the
+    /// source's count is the only ceiling, and no fixed maximum is enforced
+    /// anywhere. The offline counterpart of [`Self::ChannelMapOutOfRange`],
+    /// carrying its own message because that one names a device and a file
+    /// has no device. The leading `the file channel map names` clause is the
+    /// stable part. Additive variant permitted by `#[non_exhaustive]`.
+    #[cfg(feature = "capture")]
+    #[error("the file channel map names channel {index}; the file has {available} channels")]
+    FileChannelMapOutOfRange { index: u16, available: u16 },
+
     #[error("Microphone permission denied. {}", PERMISSION_HINT)]
     PermissionDenied,
 
@@ -791,6 +847,24 @@ error_identity! {
             samples: 1601,
             channels: 2,
         };
+    #[cfg(feature = "capture")]
+    DecibriError::FileChannelsUnsupported { .. } => "FileChannelsUnsupported", "FILE_CHANNELS_UNSUPPORTED",
+        DecibriError::FileChannelsUnsupported {
+            requested: 4,
+            available: 2,
+        };
+    #[cfg(feature = "capture")]
+    DecibriError::FileChannelSelectionAmbiguous { .. } => "FileChannelSelectionAmbiguous", "FILE_CHANNEL_SELECTION_AMBIGUOUS",
+        DecibriError::FileChannelSelectionAmbiguous {
+            requested: 2,
+            available: 6,
+        };
+    #[cfg(feature = "capture")]
+    DecibriError::FileChannelMapOutOfRange { .. } => "FileChannelMapOutOfRange", "FILE_CHANNEL_MAP_OUT_OF_RANGE",
+        DecibriError::FileChannelMapOutOfRange {
+            index: 2,
+            available: 2,
+        };
     DecibriError::PermissionDenied => "PermissionDenied", "PERMISSION_DENIED",
         DecibriError::PermissionDenied;
     DecibriError::MicrophoneStreamClosed => "MicrophoneStreamClosed", "MICROPHONE_STREAM_CLOSED",
@@ -1254,6 +1328,60 @@ mod tests {
             err.to_string(),
             "the channel map has 2 entries; it must have exactly one entry per \
              delivered channel (1)"
+        );
+    }
+
+    /// The `FileChannelsUnsupported` Display message keeps its frozen leading
+    /// clause, which the Node binding matches to assign the error its stable
+    /// code, and names both counts. Regression: a reworded clause silently
+    /// demotes the error to the unclassified bucket in the Node binding.
+    #[cfg(feature = "capture")]
+    #[test]
+    fn file_channels_unsupported_message_names_both_counts() {
+        let err = DecibriError::FileChannelsUnsupported {
+            requested: 4,
+            available: 2,
+        };
+        assert_eq!(
+            err.to_string(),
+            "the file does not have 4 channels to deliver; it has 2"
+        );
+    }
+
+    /// The `FileChannelSelectionAmbiguous` Display message keeps its frozen
+    /// leading clause, which the Node binding matches to assign the error its
+    /// stable code, and names both counts. The clause deliberately differs
+    /// from `ChannelSelectionAmbiguous`'s leading `a channel map is required`,
+    /// which the Node binding already claims for the capture variant.
+    #[cfg(feature = "capture")]
+    #[test]
+    fn file_channel_selection_ambiguous_message_names_both_counts() {
+        let err = DecibriError::FileChannelSelectionAmbiguous {
+            requested: 2,
+            available: 6,
+        };
+        assert_eq!(
+            err.to_string(),
+            "delivering 2 of the file's 6 channels requires a channel map"
+        );
+    }
+
+    /// The `FileChannelMapOutOfRange` Display message keeps its frozen
+    /// leading clause, which the Node binding matches to assign the error its
+    /// stable code, and names the offending entry plus the source's own
+    /// count. The clause deliberately differs from `ChannelMapOutOfRange`'s
+    /// leading `the channel map names`, which the Node binding already claims
+    /// for the capture variant.
+    #[cfg(feature = "capture")]
+    #[test]
+    fn file_channel_map_out_of_range_message_names_entry_and_count() {
+        let err = DecibriError::FileChannelMapOutOfRange {
+            index: 5,
+            available: 2,
+        };
+        assert_eq!(
+            err.to_string(),
+            "the file channel map names channel 5; the file has 2 channels"
         );
     }
 

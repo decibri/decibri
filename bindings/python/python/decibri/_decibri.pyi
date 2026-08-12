@@ -71,6 +71,8 @@ class FileBridge:
     def open(
         path: str | Path,
         sample_rate: int = 16000,
+        channels: int = 1,
+        channel_map: list[int] | None = None,
         format: str = "int16",
         vad: bool = False,
         vad_threshold: float = 0.5,
@@ -90,7 +92,10 @@ class FileBridge:
     def buffer(
         samples: list[float] | bytes,
         input_rate: int,
+        input_channels: int = 1,
         sample_rate: int = 16000,
+        channels: int = 1,
+        channel_map: list[int] | None = None,
         format: str = "int16",
         vad: bool = False,
         vad_threshold: float = 0.5,

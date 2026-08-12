@@ -500,6 +500,41 @@ export interface FileOptions extends ReadableOptions {
   sampleRate?: number;
 
   /**
+   * Number of channels the File delivers, interleaved frame by frame in the
+   * emitted chunks. Bounded below at `1` (the default); bounded above by the
+   * source's own channel count alone, read from the container's header (or
+   * `inputChannels` for `File.buffer`). No fixed maximum exists. The same
+   * meaning the option has on `Microphone`, with the source's count standing
+   * where the device's report stands.
+   *
+   * Without a `channelMap`: `1` delivers the documented average of every
+   * source channel; a count equal to the source's own delivers every source
+   * channel in source order; a count above the source's own throws a
+   * `DecibriError` carrying the code `'FILE_CHANNELS_UNSUPPORTED'`; and a
+   * count above `1` and below the source's own throws one with
+   * `'FILE_CHANNEL_SELECTION_AMBIGUOUS'`, because which channels it means
+   * has no single answer, so `channelMap` names them.
+   * @default 1
+   */
+  channels?: number;
+
+  /**
+   * Optional list of 0-based source channel indices selecting which source
+   * channels feed the delivered channels: delivered channel `j` carries
+   * source channel `channelMap[j]`. The length must equal `channels`.
+   * Entries may repeat and may appear in any order, so a map both selects
+   * and permutes, and may name more delivered channels than the source has.
+   * Absent derives the delivered channels from `channels` as documented
+   * there. The same shape and semantics as the `Microphone` option, with
+   * source channels in the device channels' place. An entry the source does
+   * not have throws a `DecibriError` with code
+   * `'FILE_CHANNEL_MAP_OUT_OF_RANGE'` naming the entry and the source's own
+   * count. The source's count is the only ceiling; no fixed maximum exists.
+   * @default undefined (the derivation `channels` documents)
+   */
+  channelMap?: number[];
+
+  /**
    * Sample encoding data type of the delivered chunks.
    * - `'int16'`: 16-bit signed integer, little-endian (2 bytes per sample)
    * - `'float32'`: 32-bit IEEE 754 float, little-endian (4 bytes per sample)
@@ -562,7 +597,7 @@ export interface FileOptions extends ReadableOptions {
   limiter?: number;
 }
 
-/** Options for `File.buffer`: `FileOptions` plus the samples' native rate. */
+/** Options for `File.buffer`: `FileOptions` plus the samples' own shape. */
 export interface FileBufferOptions extends FileOptions {
   /**
    * The native rate of the in-memory samples in Hz. Required: raw samples
@@ -571,6 +606,18 @@ export interface FileBufferOptions extends FileOptions {
    * @range 1000–384000
    */
   inputRate: number;
+
+  /**
+   * The interleave of the in-memory samples: how many channels each frame
+   * carries. Raw samples carry no header to read a count from, so above
+   * mono it is stated here, the channel counterpart of `inputRate`. The
+   * samples' length must be a whole number of frames at this count. Applies
+   * to `File.buffer` alone: a file's count is read from its own header, and
+   * the option is refused on the open path.
+   * @default 1
+   * @range 1–65535
+   */
+  inputChannels?: number;
 }
 
 /**
@@ -804,10 +851,17 @@ export interface AudioWriterOptions extends SaveOptions, WritableOptions {
   sampleRate: number;
 
   /**
-   * Number of channels. Audio is written mono; only `1` is accepted.
+   * Number of channels the incoming bytes are interleaved at, written into
+   * the file's header. The stream's total sample count must be a whole
+   * number of frames at this count. Bounded below at `1` (the default);
+   * above it, each container's own ceiling applies (a FLAC frame carries at
+   * most 8 channels; a WAV `fmt ` chunk's `nBlockAlign` is a 16-bit field,
+   * so 16-bit samples allow at most 32767), reported when the stream
+   * finishes as the container layer's own refusal. decibri enforces no
+   * ceiling of its own.
    * @default 1
    */
-  channels?: 1;
+  channels?: number;
 
   /**
    * Sample encoding of the incoming bytes.

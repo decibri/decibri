@@ -88,6 +88,9 @@ from decibri.exceptions import (
     AudioFormatUnsupported,
     AudioFileMalformed,
     AudioFileTruncated,
+    FileChannelsUnsupported,
+    FileChannelSelectionAmbiguous,
+    FileChannelMapOutOfRange,
 )
 
 __version__ = "0.10.0"
@@ -271,7 +274,7 @@ __all__ = [
     # Exception hierarchy entry points:
     # only the catch-target roots plus ForkAfterOrtInit are surfaced in
     # __all__ to keep `from decibri import *` legible. The full
-    # 60-class hierarchy remains importable via top-level attribute
+    # 63-class hierarchy remains importable via top-level attribute
     # lookup (``decibri.<Class>``) AND via the explicit submodule
     # (``decibri.exceptions.<Class>``); see decibri.exceptions for the
     # complete list. The four catch-target names cover catch-anything,
