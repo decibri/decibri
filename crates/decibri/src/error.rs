@@ -40,31 +40,26 @@ pub enum DecibriError {
     /// Reached from both surfaces by a zero channel count:
     /// [`crate::microphone::MicrophoneConfig::validate`] and
     /// [`crate::speaker::SpeakerConfig::validate`] each return it for `channels
-    /// == 0`. Neither surface has an upper bound in its own validation: capture
-    /// is mono only and reports [`Self::MultichannelNotSupported`] above one,
-    /// and playback leaves the maximum to the device, which answers when the
-    /// stream is opened ([`Self::SpeakerChannelsUnsupported`]). The message
-    /// names the floor only, because no upper bound is enforced anywhere. It is
+    /// == 0`. Neither surface has an upper bound in its own validation: both
+    /// leave the maximum to the device, which answers when the stream is
+    /// opened ([`Self::MicrophoneChannelsUnsupported`] on capture,
+    /// [`Self::SpeakerChannelsUnsupported`] on playback). The message names
+    /// the floor only, because no upper bound is enforced anywhere. It is
     /// an exact-match string that downstream consumers branch on, so it is
     /// frozen at the text below.
     #[error("channels must be at least 1")]
     ChannelsOutOfRange,
 
-    /// A microphone capture configuration requested more than one channel.
+    /// Retained for compatibility; no decibri operation returns it.
     ///
-    /// Microphone capture is mono only:
-    /// [`crate::microphone::MicrophoneConfig::validate`] rejects `channels > 1`
-    /// rather than silently downmixing it to mono. The `channels` field is
-    /// retained, so honouring `channels > 1` later (by delivering true
-    /// interleaved multichannel) stays an additive change: the accepted set
-    /// widens from `{1}` outward, breaking no caller. A dedicated variant
-    /// rather than reusing [`Self::ChannelsOutOfRange`] reads more
-    /// intentionally and signals the mono-only constraint explicitly; a zero
-    /// channel count remains [`Self::ChannelsOutOfRange`]. The speaker path is
-    /// unaffected: output may be multichannel, and the count it accepts is the
-    /// device's to state, reported through
-    /// [`Self::SpeakerChannelsUnsupported`]. Static message to keep the text
-    /// stable.
+    /// It reported a capture configuration requesting more than one channel,
+    /// while capture was mono only. Capture now delivers the requested channel
+    /// count, bounded only by the resolved device, so the condition this named
+    /// no longer exists. A count of 0 remains [`Self::ChannelsOutOfRange`]; a
+    /// count above the device's own report is
+    /// [`Self::MicrophoneChannelsUnsupported`]. The variant, its identity and
+    /// its message text are unchanged, so code matching either still compiles
+    /// and still matches. Static message to keep the text stable.
     #[error("multichannel capture is not supported; channels must be 1 (mono)")]
     MultichannelNotSupported,
 
@@ -199,6 +194,65 @@ pub enum DecibriError {
     #[error("the channel map has {entries} entries; it must have exactly one entry per delivered channel ({channels})")]
     ChannelMapLengthMismatch { entries: usize, channels: u16 },
 
+    /// A capture configuration asked for more delivered channels than the
+    /// resolved device has.
+    ///
+    /// `requested` is the count
+    /// [`crate::microphone::MicrophoneConfig::channels`] carried; `available`
+    /// is the device's own channel count, the same figure
+    /// [`crate::device::MicrophoneInfo::max_input_channels`] reports and the
+    /// same query that sets the capture open count. decibri delivers device
+    /// channels, so it cannot manufacture one the device does not have.
+    /// Checked against the resolved device when the stream starts, never in
+    /// [`crate::microphone::MicrophoneConfig::validate`], which has no device
+    /// in scope: the device's report is the only ceiling, and no fixed maximum
+    /// is enforced anywhere. The capture counterpart of
+    /// [`Self::SpeakerChannelsUnsupported`], which carries a platform message
+    /// because it reports a failed open; this one is decided from the device's
+    /// report before the open, so there is no platform text to carry. The
+    /// leading `the input device does not support` clause is the stable part.
+    /// Additive variant permitted by `#[non_exhaustive]`.
+    #[error(
+        "the input device does not support {requested} delivered channels; it reports {available}"
+    )]
+    MicrophoneChannelsUnsupported { requested: u16, available: u16 },
+
+    /// A capture configuration asked for more than one delivered channel, but
+    /// fewer than the device has, without naming which channels to deliver.
+    ///
+    /// `requested` is the count
+    /// [`crate::microphone::MicrophoneConfig::channels`] carried; `available`
+    /// is the resolved device's own channel count. Delivering every device
+    /// channel (`requested == available`) and collapsing every device channel
+    /// to one (`requested == 1`, the documented average) both have a single
+    /// meaning; delivering a strict subset above one does not, so
+    /// [`crate::microphone::MicrophoneConfig::channel_map`] has to name the
+    /// device channels rather than decibri choosing them. Checked against the
+    /// resolved device when the stream starts, never in
+    /// [`crate::microphone::MicrophoneConfig::validate`], which has no device
+    /// in scope. The leading `a channel map is required` clause is the stable
+    /// part. Additive variant permitted by `#[non_exhaustive]`.
+    #[error(
+        "a channel map is required to deliver {requested} of the device's {available} input channels"
+    )]
+    ChannelSelectionAmbiguous { requested: u16, available: u16 },
+
+    /// A read asked for a block size that is not a whole number of frames.
+    ///
+    /// `samples` is the requested block size and `channels` the stream's
+    /// delivered channel count.
+    /// [`crate::microphone::MicrophoneStream::try_next_chunk`] and
+    /// [`crate::microphone::MicrophoneStream::next_chunk`] take a size in
+    /// interleaved samples, so a size that is not a multiple of the channel
+    /// count would cut a frame across the chunk boundary and rotate the
+    /// channel identities of every following chunk. Reported rather than
+    /// rounded, because a rotated chunk carries no signature a consumer can
+    /// detect. Unreachable on a mono stream, where every size is a whole
+    /// number of frames. The leading `the requested block size` clause is the
+    /// stable part. Additive variant permitted by `#[non_exhaustive]`.
+    #[error("the requested block size of {samples} samples is not a whole number of {channels}-channel frames")]
+    BlockSizeNotFrameAligned { samples: usize, channels: u16 },
+
     #[error("Microphone permission denied. {}", PERMISSION_HINT)]
     PermissionDenied,
 
@@ -312,6 +366,35 @@ pub enum DecibriError {
     /// permitted by `#[non_exhaustive]`.
     #[error("echo canceller configuration error: {reason}")]
     AecConfigInvalid { reason: String },
+
+    /// Echo cancellation was requested together with more than one delivered
+    /// channel.
+    ///
+    /// `channels` is the offending count
+    /// [`crate::microphone::MicrophoneConfig::channels`] carried. The
+    /// canceller reads one near-end channel and one mono reference, so it
+    /// cannot process an interleaved multichannel capture: fed one it reads
+    /// interleaved samples as time, never acquires its delay, and returns the
+    /// capture unchanged while reporting no fault, and at a channel count that
+    /// does not divide its internal framing it also cuts frames at chunk
+    /// boundaries. Neither outcome is detectable from the delivered audio, so
+    /// the combination is refused at
+    /// [`crate::microphone::MicrophoneConfig::validate`], which has both
+    /// fields in scope, rather than accepted and left to corrupt.
+    ///
+    /// A dedicated variant rather than a reason string on
+    /// [`Self::AecConfigInvalid`] reads more intentionally, matching the
+    /// reasoning recorded on [`Self::MultichannelNotSupported`]. This is a
+    /// cross-field rejection between two configuration fields and not a
+    /// ceiling on `channels`, which is bounded only by the device.
+    /// Cancellation on one channel of a multichannel device is unaffected:
+    /// `channels: 1` with a
+    /// [`crate::microphone::MicrophoneConfig::channel_map`] naming that
+    /// channel is accepted. Deliberately not feature-gated, so the identity
+    /// table's coverage stays unconditional. Additive variant permitted by
+    /// `#[non_exhaustive]`.
+    #[error("echo cancellation requires a single delivered channel; channels is {channels}")]
+    AecMultichannelUnsupported { channels: u16 },
 
     // ── Offline file source errors ─────────────────────────────────────
     /// An offline audio file could not be read from disk.
@@ -693,6 +776,21 @@ error_identity! {
             entries: 2,
             channels: 1,
         };
+    DecibriError::MicrophoneChannelsUnsupported { .. } => "MicrophoneChannelsUnsupported", "MICROPHONE_CHANNELS_UNSUPPORTED",
+        DecibriError::MicrophoneChannelsUnsupported {
+            requested: 4,
+            available: 2,
+        };
+    DecibriError::ChannelSelectionAmbiguous { .. } => "ChannelSelectionAmbiguous", "CHANNEL_SELECTION_AMBIGUOUS",
+        DecibriError::ChannelSelectionAmbiguous {
+            requested: 2,
+            available: 6,
+        };
+    DecibriError::BlockSizeNotFrameAligned { .. } => "BlockSizeNotFrameAligned", "BLOCK_SIZE_NOT_FRAME_ALIGNED",
+        DecibriError::BlockSizeNotFrameAligned {
+            samples: 1601,
+            channels: 2,
+        };
     DecibriError::PermissionDenied => "PermissionDenied", "PERMISSION_DENIED",
         DecibriError::PermissionDenied;
     DecibriError::MicrophoneStreamClosed => "MicrophoneStreamClosed", "MICROPHONE_STREAM_CLOSED",
@@ -719,6 +817,8 @@ error_identity! {
         DecibriError::AecSampleRateUnsupported(96000);
     DecibriError::AecConfigInvalid { .. } => "AecConfigInvalid", "AEC_CONFIG_INVALID",
         DecibriError::AecConfigInvalid { reason: "sample".to_string() };
+    DecibriError::AecMultichannelUnsupported { .. } => "AecMultichannelUnsupported", "AEC_MULTICHANNEL_UNSUPPORTED",
+        DecibriError::AecMultichannelUnsupported { channels: 2 };
 
     #[cfg(feature = "capture")]
     DecibriError::FileReadFailed { .. } => "FileReadFailed", "FILE_READ_FAILED",

@@ -76,11 +76,35 @@ assertThrows(() => new Microphone({ sampleRate: 0 }), RangeError, 'sample rate m
 assertThrows(() => new Microphone({ sampleRate: 999 }), RangeError, 'sample rate must be between 1000 and 384000');
 assertThrows(() => new Microphone({ sampleRate: 384001 }), RangeError, 'sample rate must be between 1000 and 384000');
 
-// channels: mono only. A value below 1 is a plain range error; a value above
-// 1 is rejected as multichannel (not silently downmixed to mono).
+// channels: bounded below only. A value below 1 is a plain range error; the
+// count is otherwise bounded by the resolved device alone, which answers at
+// start(), so the wrapper refuses no value above 1. Construction does not
+// touch the device, so acceptance is unconditional here. Regression: a fixed
+// maximum reintroduced into the wrapper refuses the large counts below.
 assertThrows(() => new Microphone({ channels: 0 }), RangeError, 'channels must be at least 1');
-assertThrows(() => new Microphone({ channels: 2 }), RangeError, 'multichannel capture is not supported; channels must be 1 (mono)');
-assertThrows(() => new Microphone({ channels: 33 }), RangeError, 'multichannel capture is not supported; channels must be 1 (mono)');
+for (const channels of [2, 33, 1024]) {
+  try {
+    new Microphone({ channels }).stop();
+    assert(true, `channels: ${channels} is accepted at construction`);
+  } catch (e) {
+    assert(
+      false,
+      `channels: ${channels} is refused at construction (got ${e.constructor.name}: ${e.message})`
+    );
+  }
+}
+// A map with one entry per delivered channel is the accepted shape at any
+// count, and a map both selects and permutes, so entries may repeat and may
+// appear in any order.
+try {
+  new Microphone({ channels: 2, channelMap: [1, 0] }).stop();
+  assert(true, 'channels: 2 with channelMap [1, 0] is accepted at construction');
+} catch (e) {
+  assert(
+    false,
+    `channels: 2 with channelMap [1, 0] is refused at construction (got ${e.constructor.name}: ${e.message})`
+  );
+}
 
 // channelMap: shape-only checks in the wrapper (an array of integers in the
 // channel count's width, one entry per channel). Whether each entry exists on
@@ -508,6 +532,8 @@ const BUILTIN_VARIANTS = [
   'VadSampleRateUnsupported',
   'VadThresholdOutOfRange',
   'AecSampleRateUnsupported',
+  'AecMultichannelUnsupported',
+  'BlockSizeNotFrameAligned',
   'VadNotConfigured',
 ];
 
@@ -759,10 +785,10 @@ const parityCases = [
     message: 'channels must be at least 1',
   },
   {
-    label: 'channels 2',
-    options: { channels: 2 },
+    label: 'channelMap of 2 entries with channels 3',
+    options: { channels: 3, channelMap: [0, 1] },
     type: RangeError,
-    message: 'multichannel capture is not supported; channels must be 1 (mono)',
+    message: 'channelMap must have exactly one entry per channel',
   },
   {
     label: "channelMap 'left'",
@@ -818,6 +844,33 @@ for (const { label, options, type, message } of parityCases) {
       thrown.node.message === thrown.browser.message,
       `both entries throw the same message for ${label}`
     );
+  }
+}
+
+// Acceptance parity: a value one entry accepts has to be accepted by the
+// other, or the two surfaces have diverged just as silently as with a
+// mismatched refusal. The channel count is bounded by the device alone,
+// which answers at start(), so no count above 1 is refused at construction
+// on either entry. The 1024 row is the regression control: a fixed maximum
+// reintroduced on either surface fails it loudly.
+for (const options of [
+  { channels: 2 },
+  { channels: 33 },
+  { channels: 1024 },
+  { channels: 2, channelMap: [1, 0] },
+]) {
+  const label = JSON.stringify(options);
+  for (const [entry, Ctor] of [['node', Microphone], ['browser', BrowserMicrophone]]) {
+    try {
+      const instance = new Ctor(options);
+      if (entry === 'node') instance.stop();
+      assert(true, `${entry} entry accepts ${label} at construction`);
+    } catch (e) {
+      assert(
+        false,
+        `${entry} entry refuses ${label} at construction (got ${e.constructor.name}: ${e.message})`
+      );
+    }
   }
 }
 
@@ -1119,6 +1172,30 @@ try {
   high.stop();
 } catch (e) {
   console.log(`  FAIL: aec object-form construction rejected: ${e.message}`);
+  failed++;
+}
+
+// The canceller reads one near-end channel, so it is refused together with a
+// delivered count above 1, naming the count. The refusal is the cross-field
+// pair and not a ceiling on channels: the same counts without the canceller
+// are accepted (Group 1), and one channel selected from an array still
+// cancels. Catches the fence dropping out of the core's validate.
+assertThrows(
+  () => new Microphone({ channels: 2, aec: 'tau' }),
+  RangeError,
+  'echo cancellation requires a single delivered channel; channels is 2'
+);
+assertThrows(
+  () => new Microphone({ channels: 8, aec: { model: 'tau' } }),
+  RangeError,
+  'echo cancellation requires a single delivered channel; channels is 8'
+);
+try {
+  const m = new Microphone({ channels: 1, channelMap: [3], aec: 'tau' });
+  assert(m instanceof Microphone, 'one channel selected from an array constructs with the canceller');
+  m.stop();
+} catch (e) {
+  console.log(`  FAIL: aec with channelMap [3] construction rejected: ${e.message}`);
   failed++;
 }
 

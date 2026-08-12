@@ -26,6 +26,7 @@ function createProcessor(opts = {}) {
     format: opts.format ?? 'float32',
     nativeSampleRate: opts.nativeSampleRate ?? 48000,
     targetSampleRate: opts.targetSampleRate ?? 48000,
+    channels: opts.channels ?? 1,
     channelMap: opts.channelMap ?? null,
   };
   return new registeredProcessor.ctor({ processorOptions });
@@ -271,6 +272,144 @@ describe('DecibriProcessor channel average (no map)', () => {
   });
 });
 
+describe('DecibriProcessor multichannel delivery', () => {
+  it('delivers two channels interleaved frame by frame', () => {
+    // The engine's select vectors: channel 0 counts up, channel 1 counts
+    // down. A stride slip or a channel swap produces plausible audio; the
+    // interleaved order pins both.
+    const proc = createProcessor({ framesPerBuffer: 4, channels: 2 });
+    proc.process(
+      [[new Float32Array([1.0, 2.0, 3.0, 4.0]), new Float32Array([-1.0, -2.0, -3.0, -4.0])]],
+      [[]],
+      {}
+    );
+    expect(proc.port.postMessage).toHaveBeenCalledTimes(1);
+    const result = new Float32Array(proc.port.postMessage.mock.calls[0][0]);
+    expect(Array.from(result)).toEqual([1.0, -1.0, 2.0, -2.0, 3.0, -3.0, 4.0, -4.0]);
+  });
+
+  it('delivers every granted channel in granted order at the identity', () => {
+    const proc = createProcessor({ framesPerBuffer: 2, channels: 3 });
+    proc.process(
+      [[new Float32Array([0.1, 0.2]), new Float32Array([0.3, 0.4]), new Float32Array([0.5, 0.6])]],
+      [[]],
+      {}
+    );
+    const result = new Float32Array(proc.port.postMessage.mock.calls[0][0]);
+    expect(result.length).toBe(6);
+    expect(result[0]).toBeCloseTo(0.1);
+    expect(result[1]).toBeCloseTo(0.3);
+    expect(result[2]).toBeCloseTo(0.5);
+    expect(result[3]).toBeCloseTo(0.2);
+    expect(result[4]).toBeCloseTo(0.4);
+    expect(result[5]).toBeCloseTo(0.6);
+  });
+
+  it('delivers a channel count bounded only by the grant', () => {
+    // The negative control for the no-fixed-maximum rule: 40 delivered
+    // channels, well above the Web Audio 32 floor. A fixed ceiling added to
+    // the delivery later fails loudly here.
+    const channels = [];
+    for (let c = 0; c < 40; c++) channels.push(new Float32Array(2).fill(c));
+    const proc = createProcessor({ framesPerBuffer: 2, channels: 40 });
+    proc.process([channels], [[]], {});
+    expect(proc.port.postMessage).toHaveBeenCalledTimes(1);
+    const result = new Float32Array(proc.port.postMessage.mock.calls[0][0]);
+    expect(result.length).toBe(80);
+    for (let c = 0; c < 40; c++) {
+      expect(result[c]).toBe(c);
+      expect(result[40 + c]).toBe(c);
+    }
+  });
+
+  it('gathers the named channels in map order at width', () => {
+    // The map both selects and permutes: [3, 1] on six granted channels
+    // delivers channel 3 then channel 1 of every frame, in that order.
+    const granted = [];
+    for (let c = 0; c < 6; c++) granted.push(new Float32Array([c + 0.5, -(c + 0.5)]));
+    const proc = createProcessor({ framesPerBuffer: 2, channelMap: [3, 1] });
+    proc.process([granted], [[]], {});
+    const result = new Float32Array(proc.port.postMessage.mock.calls[0][0]);
+    expect(Array.from(result)).toEqual([3.5, 1.5, -3.5, -1.5]);
+  });
+
+  it('a map may deliver more channels than the grant carries', () => {
+    // The deliberate asymmetry: entries are checked one at a time and may
+    // repeat, so [0, 0, 0, 0] on a mono grant is four copies of its one
+    // channel, while the bare count 4 is refused below.
+    const proc = createProcessor({ framesPerBuffer: 1, channelMap: [0, 0, 0, 0] });
+    proc.process([[new Float32Array([0.25, -0.5])]], [[]], {});
+    expect(proc.port.postMessage).toHaveBeenCalledTimes(2);
+    expect(Array.from(new Float32Array(proc.port.postMessage.mock.calls[0][0])))
+      .toEqual([0.25, 0.25, 0.25, 0.25]);
+    expect(Array.from(new Float32Array(proc.port.postMessage.mock.calls[1][0])))
+      .toEqual([-0.5, -0.5, -0.5, -0.5]);
+  });
+
+  it('refuses an unmapped strict subset once, with the engine message, and stops', () => {
+    const six = () => {
+      const chans = [];
+      for (let c = 0; c < 6; c++) chans.push(new Float32Array([0.1, 0.2]));
+      return chans;
+    };
+    const proc = createProcessor({ framesPerBuffer: 2, channels: 2 });
+    expect(proc.process([six()], [[]], {})).toBe(false);
+    expect(proc.port.postMessage).toHaveBeenCalledTimes(1);
+    expect(proc.port.postMessage.mock.calls[0][0]).toEqual({
+      type: 'error',
+      message: "a channel map is required to deliver 2 of the device's 6 input channels",
+    });
+
+    // The failure is terminal: no second report and no audio.
+    expect(proc.process([six()], [[]], {})).toBe(false);
+    expect(proc.port.postMessage).toHaveBeenCalledTimes(1);
+  });
+
+  it('refuses a count above the grant once, with the engine message, and stops', () => {
+    const stereo = () => [new Float32Array([0.1, 0.2]), new Float32Array([0.3, 0.4])];
+    const proc = createProcessor({ framesPerBuffer: 2, channels: 4 });
+    expect(proc.process([stereo()], [[]], {})).toBe(false);
+    expect(proc.port.postMessage).toHaveBeenCalledTimes(1);
+    expect(proc.port.postMessage.mock.calls[0][0]).toEqual({
+      type: 'error',
+      message: 'the input device does not support 4 delivered channels; it reports 2',
+    });
+    expect(proc.process([stereo()], [[]], {})).toBe(false);
+    expect(proc.port.postMessage).toHaveBeenCalledTimes(1);
+  });
+
+  it('resamples every channel in lockstep with the mono path', () => {
+    // Each delivered channel of a stereo 3:1 downsample must equal the mono
+    // downsample of the same signal, sample for sample: one shared position
+    // drives every channel, so a frame stays a frame across the rate change.
+    const ramp = () => {
+      const a = new Float32Array(12);
+      for (let i = 0; i < 12; i++) a[i] = i / 11;
+      return a;
+    };
+    const mono = createProcessor({ framesPerBuffer: 4, nativeSampleRate: 48000, targetSampleRate: 16000 });
+    mono.process([[ramp()]], [[]], {});
+    const monoOut = Array.from(new Float32Array(mono.port.postMessage.mock.calls[0][0]));
+
+    const stereo = createProcessor({ framesPerBuffer: 4, channels: 2, nativeSampleRate: 48000, targetSampleRate: 16000 });
+    stereo.process([[ramp(), ramp()]], [[]], {});
+    expect(stereo.port.postMessage).toHaveBeenCalledTimes(1);
+    const interleaved = Array.from(new Float32Array(stereo.port.postMessage.mock.calls[0][0]));
+    expect(interleaved.length).toBe(8);
+    const left = interleaved.filter((_, i) => i % 2 === 0);
+    const right = interleaved.filter((_, i) => i % 2 === 1);
+    expect(left).toEqual(monoOut);
+    expect(right).toEqual(monoOut);
+  });
+
+  it('converts interleaved channels to int16', () => {
+    const proc = createProcessor({ framesPerBuffer: 2, channels: 2, format: 'int16' });
+    proc.process([[new Float32Array([0.5, -0.5]), new Float32Array([-0.5, 0.5])]], [[]], {});
+    const result = new Int16Array(proc.port.postMessage.mock.calls[0][0]);
+    expect(Array.from(result)).toEqual([16384, -16384, -16384, 16384]);
+  });
+});
+
 describe('DecibriProcessor channel-map failure', () => {
   it('reports a map entry the block cannot serve once, with the engine message, and stops', () => {
     const proc = createProcessor({ framesPerBuffer: 4, channelMap: [2] });
@@ -321,6 +460,7 @@ describe('worklet-inline parity', () => {
         format: 'float32',
         nativeSampleRate: 48000,
         targetSampleRate: 48000,
+        channels: 1,
         channelMap: null,
         ...opts,
       },
@@ -339,6 +479,47 @@ describe('worklet-inline parity', () => {
     expect(bad.port.postMessage.mock.calls[0][0]).toEqual({
       type: 'error',
       message: 'the channel map names device channel 2; the device reports 2 input channels',
+    });
+  });
+
+  it('the minified runtime string delivers and refuses channel counts like the source', () => {
+    const { ctor } = evaluateInline();
+    const mk = (opts) => new ctor({
+      processorOptions: {
+        framesPerBuffer: 2,
+        format: 'float32',
+        nativeSampleRate: 48000,
+        targetSampleRate: 48000,
+        channels: 1,
+        channelMap: null,
+        ...opts,
+      },
+    });
+
+    const identity = mk({ channels: 2 });
+    identity.process([[new Float32Array([1.0, 2.0]), new Float32Array([-1.0, -2.0])]], [[]], {});
+    expect(Array.from(new Float32Array(identity.port.postMessage.mock.calls[0][0])))
+      .toEqual([1.0, -1.0, 2.0, -2.0]);
+
+    const wide = mk({ channelMap: [1, 0] });
+    wide.process([[new Float32Array([0.25, 0.5]), new Float32Array([0.75, -0.25])]], [[]], {});
+    expect(Array.from(new Float32Array(wide.port.postMessage.mock.calls[0][0])))
+      .toEqual([0.75, 0.25, -0.25, 0.5]);
+
+    const subset = mk({ channels: 2 });
+    const six = [];
+    for (let c = 0; c < 6; c++) six.push(new Float32Array([0.1, 0.2]));
+    expect(subset.process([six], [[]], {})).toBe(false);
+    expect(subset.port.postMessage.mock.calls[0][0]).toEqual({
+      type: 'error',
+      message: "a channel map is required to deliver 2 of the device's 6 input channels",
+    });
+
+    const above = mk({ channels: 4 });
+    expect(above.process([[new Float32Array([0.1]), new Float32Array([0.2])]], [[]], {})).toBe(false);
+    expect(above.port.postMessage.mock.calls[0][0]).toEqual({
+      type: 'error',
+      message: 'the input device does not support 4 delivered channels; it reports 2',
     });
   });
 });

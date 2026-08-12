@@ -199,16 +199,23 @@ export interface MicrophoneOptions extends ReadableOptions {
   sampleRate?: number;
 
   /**
-   * Number of channels the stream delivers. Mono only: the only accepted value
-   * is `1`, and a value greater than `1` throws a `RangeError` (multichannel
-   * capture is not supported) rather than being silently downmixed. The option
-   * is kept for forward compatibility: a future release may accept a value
-   * greater than `1` by delivering true interleaved multichannel.
+   * Number of channels the stream delivers, interleaved frame by frame in the
+   * emitted chunks. Bounded below at `1` (the default); bounded above by the
+   * resolved device alone, which reports its own count when the stream
+   * starts. No fixed maximum exists.
    *
-   * The device itself is opened at its own native channel count, exactly as it
-   * is opened at its native rate: decibri collapses the captured audio to this
-   * delivered count with the documented average of every opened channel, or
-   * with the channels `channelMap` selects.
+   * The device itself is opened at its own native channel count, exactly as
+   * it is opened at its native rate, and decibri derives the delivered
+   * channels from it. Without a `channelMap`: `1` delivers the documented
+   * average of every opened channel; a count equal to the device's own
+   * delivers every device channel in device order; a count above the
+   * device's own fails `start()` with a `DecibriError` carrying the code
+   * `'MICROPHONE_CHANNELS_UNSUPPORTED'`; and a count above `1` and below the
+   * device's own fails it with `'CHANNEL_SELECTION_AMBIGUOUS'`, because
+   * which channels it means has no single answer, so `channelMap` names
+   * them. A count above `1` combined with `aec` throws a `RangeError`: echo
+   * cancellation reads a single delivered channel, and one channel selected
+   * from an array by `channelMap` still cancels.
    * @default 1
    */
   channels?: number;
@@ -216,9 +223,10 @@ export interface MicrophoneOptions extends ReadableOptions {
   /**
    * Optional list of 0-based device channel indices selecting which device
    * channels feed the delivered channels: delivered channel `j` carries device
-   * channel `channelMap[j]`. The length must equal `channels`, so the accepted
-   * length is `1` (the map selects the one delivered channel). Absent delivers
-   * the documented average of every opened channel.
+   * channel `channelMap[j]`. The length must equal `channels`. Entries may
+   * repeat and may appear in any order, so a map both selects and permutes,
+   * and may name more delivered channels than the device has. Absent derives
+   * the delivered channels from `channels` as documented there.
    *
    * The same shape as CoreAudio AUHAL's channel map
    * (`kAudioOutputUnitProperty_ChannelMap`: an array of device channel
@@ -228,12 +236,13 @@ export interface MicrophoneOptions extends ReadableOptions {
    * have throws a `DecibriError` with code `'CHANNEL_MAP_OUT_OF_RANGE'` naming
    * the entry and the count the device reports. The device's report is the
    * only ceiling; no fixed maximum exists.
-   * @default undefined (the average of every opened channel)
+   * @default undefined (the derivation `channels` documents)
    */
   channelMap?: number[];
 
   /**
    * Frames per audio callback buffer. Controls chunk size and delivery interval.
+   * A chunk holds this many frames of the delivered channel count.
    * At 16 kHz mono, 1600 frames = 100 ms chunks of 3200 bytes (int16).
    * @default 1600
    * @range 64–65536
@@ -412,8 +421,10 @@ export declare class Microphone extends Readable {
 
   /**
    * Number of capture buffers dropped because the consumer could not keep pace.
-   * 0 while the consumer keeps up, or before capture starts. A rising value
-   * means audio is being dropped to bound memory.
+   * 0 while the consumer keeps up, before capture starts, and after `stop()`,
+   * which releases the stream the counter lives on. Read it before stopping to
+   * see a session's total. A rising value means audio is being dropped to
+   * bound memory.
    */
   readonly overrunCount: number;
 

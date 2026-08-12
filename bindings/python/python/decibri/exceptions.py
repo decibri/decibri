@@ -10,13 +10,14 @@ shape the core never sees. An out-of-range agc target raises
 AgcTargetOutOfRange; a malformed vad, denoise or highpass value raises
 ValueError.
 
-52 instance classes plus 3 intermediate parent classes (DeviceError,
-OrtError, OrtPathError) for catch ergonomics, totaling 55 class
-definitions. Single-inheritance hierarchy per CPython convention.
+57 instance classes plus 3 intermediate parent classes (DeviceError,
+OrtError, OrtPathError) for catch ergonomics, totaling 60 class
+definitions beneath DecibriError. Single-inheritance hierarchy per
+CPython convention.
 
 Hierarchy:
     DecibriError
-    + 33 direct subclasses (config + runtime errors that don't involve
+    + 39 direct subclasses (config + runtime errors that don't involve
       device enumeration or ORT, including DeviceFailed and OnnxBackendFailed)
     + DeviceError (intermediate; no instances; catches device-related)
         + 8 direct device subclasses (MicrophoneNotFound, SpeakerNotFound,
@@ -58,14 +59,16 @@ class ChannelsOutOfRange(DecibriError):
 
 
 class MultichannelNotSupported(DecibriError):
-    """Raised when a microphone is asked to capture more than one channel.
+    """Retained for compatibility; nothing raises it.
 
-    Microphone capture is mono only: the only accepted ``channels`` value is
-    1. A value greater than 1 raises this exception rather than being silently
-    downmixed to mono. The ``channels`` parameter is kept for forward
-    compatibility (a future release may accept a value greater than 1 by
-    delivering true interleaved multichannel). A zero channel count raises the
-    plain ``ChannelsOutOfRange`` instead.
+    It was raised when a microphone was asked to capture more than one
+    channel, while capture was mono only. Capture now delivers the
+    requested channel count, bounded only by the resolved device, so the
+    condition this named no longer exists. ``channels=0`` still raises
+    ``ChannelsOutOfRange``, and a count above the device's own report
+    raises ``MicrophoneChannelsUnsupported``. The class and its position
+    in the hierarchy are unchanged, so code that catches it still
+    imports and still runs.
     """
 
 
@@ -187,6 +190,41 @@ class ChannelMapLengthMismatch(DecibriError):
     """
 
 
+class MicrophoneChannelsUnsupported(DecibriError):
+    """Raised when a capture ``channels`` count exceeds the device's own.
+
+    decibri delivers device channels, so it cannot manufacture one the
+    device does not have. Checked against the resolved device at
+    ``start()``; the message names the count asked for and the count the
+    device reports. A ``channel_map`` lifts this, because a map may repeat
+    a channel: ``channels=4`` with ``channel_map=[0, 0, 0, 0]`` on a mono
+    device is accepted.
+    """
+
+
+class ChannelSelectionAmbiguous(DecibriError):
+    """Raised when a capture asks for a strict subset of the device's channels.
+
+    ``channels=1`` delivers the average of every device channel and a
+    count equal to the device's own delivers them all, in device order.
+    A count between the two does not say which channels it means, so
+    ``channel_map`` names them rather than decibri choosing. Checked
+    against the resolved device at ``start()``; the message names the
+    count asked for and the count the device reports.
+    """
+
+
+class BlockSizeNotFrameAligned(DecibriError):
+    """Raised when a read asks for a block that is not a whole number of frames.
+
+    Block sizes count interleaved samples, so above one channel the size
+    must be a multiple of ``channels``. A size that is not would cut a
+    frame at the chunk boundary and rotate the channels of every chunk
+    after it, which nothing in the delivered audio would reveal. Cannot
+    be raised by a mono capture.
+    """
+
+
 class PermissionDenied(DecibriError):
     """Raised when the OS denies microphone access.
 
@@ -229,6 +267,20 @@ class AecSampleRateUnsupported(DecibriError):
     The canceller supports 8000 to 48000 Hz, narrower than the range sample_rate
     otherwise accepts, so a rate that is valid for a plain capture is rejected
     once echo cancellation is on.
+    """
+
+
+class AecMultichannelUnsupported(DecibriError):
+    """Raised when echo cancellation is combined with more than one channel.
+
+    The canceller reads one near-end channel. Fed an interleaved
+    multichannel capture it never acquires its delay, returns the audio
+    unchanged and reports no fault, and at a channel count that does not
+    divide its framing it also cuts frames at the chunk boundaries.
+    Neither is visible in the delivered audio, so the combination is
+    refused at construction. Cancellation on one channel of an array is
+    unaffected: ``channels=1`` with a ``channel_map`` naming that channel
+    is accepted. The message names the offending count.
     """
 
 

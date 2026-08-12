@@ -529,11 +529,25 @@ class Microphone:
     the captured audio passes through unchanged; omit it (the default
     ``None``) to leave echo cancellation off.
 
-    The ``channel_map`` parameter selects which device channel feeds the
-    delivered audio: a list of 0-based device channel indices, one entry per
-    delivered channel, so with ``channels=1`` the accepted length is 1 (for
-    example ``channel_map=[1]`` delivers the device's second channel). Omit it
-    (the default ``None``) to deliver the average of every device channel. The
+    The ``channels`` parameter is the number of channels delivered,
+    interleaved frame by frame. Bounded below at 1 (the default); bounded above
+    by the resolved device alone, with no fixed maximum. Without a
+    ``channel_map``, ``channels=1`` delivers the average of every device
+    channel and a count equal to the device's own delivers them all in device
+    order; a count above the device's raises
+    ``MicrophoneChannelsUnsupported`` at ``start()`` and a strict subset above
+    one raises ``ChannelSelectionAmbiguous``, because which channels it means
+    has no single answer. Above one channel, ``read()`` block sizes count
+    interleaved samples and must be a whole number of frames, and echo
+    cancellation is refused with ``AecMultichannelUnsupported``.
+
+    The ``channel_map`` parameter selects which device channels feed the
+    delivered channels: a list of 0-based device channel indices, one entry per
+    delivered channel, so its length must equal ``channels`` (for
+    example ``channel_map=[1]`` delivers the device's second channel alone, and
+    ``channel_map=[1, 0]`` delivers the first two swapped). Entries may repeat
+    and may appear in any order, so a map both selects and permutes. Omit it
+    (the default ``None``) to take the derivation ``channels`` documents. The
     same shape as CoreAudio AUHAL's channel map
     (``kAudioOutputUnitProperty_ChannelMap``: an array of device channel
     indices, one per client channel); NOT miniaudio's ``channelMap``, which
@@ -998,9 +1012,10 @@ class Microphone:
 
         Return type:
         - When ``as_ndarray=False`` (default), returns ``bytes``.
-        - When ``as_ndarray=True``, returns a 1-D ``numpy.ndarray`` with
+        - When ``as_ndarray=True``, returns a ``numpy.ndarray`` with
           dtype matching the configured ``dtype`` (np.int16 or
-          np.float32). Capture is mono, so the array is always 1-D.
+          np.float32) and shape matching the channel count: 1-D at
+          ``channels=1``, 2-D ``(frames, channels)`` above it.
 
         Use ``read_with_metadata()`` to receive a typed ``Chunk`` with
         ``.data``, ``.timestamp``, ``.sequence``, ``.is_speaking``, and
@@ -1137,8 +1152,10 @@ class Microphone:
         """Number of capture buffers dropped because the consumer could not
         keep pace.
 
-        0 while the consumer keeps up, or before capture starts. A rising
-        value means audio is being dropped to bound memory.
+        0 while the consumer keeps up, before capture starts, and after
+        ``stop()``, which releases the stream the counter lives on. Read
+        it before stopping to see a session's total. A rising value means
+        audio is being dropped to bound memory.
         """
         return self._bridge.overrun_count
 
@@ -1981,7 +1998,7 @@ class File:
         if chunk is None:
             return None
         chunk_start = self._position
-        chunk_end = chunk_start + self._chunk_samples(chunk) / self._sample_rate
+        chunk_end = chunk_start + self._chunk_frames(chunk) / self._sample_rate
         self._position = chunk_end
         if self._vad_enabled:
             self._vad.process_chunk(
@@ -1990,11 +2007,19 @@ class File:
         self._sequence += 1
         return chunk
 
-    def _chunk_samples(self, chunk: SampleData) -> int:
-        """Number of mono samples in one delivered chunk."""
+    def _chunk_frames(self, chunk: SampleData) -> int:
+        """Number of frames in one delivered chunk.
+
+        A frame carries one sample per delivered channel, and file time
+        advances by frames, so a chunk's length is divided by the count it
+        was interleaved at. The bytes path carries interleaved samples and
+        is divided explicitly; the numpy path is 1-D ``(frames,)`` at one
+        channel and 2-D ``(frames, channels)`` above it, so its length is
+        the frame count on either shape.
+        """
         if isinstance(chunk, bytes):
-            return len(chunk) // (2 if self._format == "int16" else 4)
-        # numpy path: mono 1-D array; its length is the sample count.
+            samples = len(chunk) // (2 if self._format == "int16" else 4)
+            return samples // self._bridge.channels
         return int(len(chunk))
 
     def read_with_metadata(self) -> Chunk | None:

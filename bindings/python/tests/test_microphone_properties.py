@@ -45,7 +45,6 @@ from decibri import (
     FramesPerBufferOutOfRange,
     InvalidFormat,
     Microphone,
-    MultichannelNotSupported,
     SampleRateOutOfRange,
 )
 
@@ -66,10 +65,10 @@ _invalid_sample_rate = st.one_of(
     st.integers(min_value=384_001, max_value=10_000_000),
 )
 
-# Capture is mono only: the sole valid channel count is 1. A zero channel
-# count is a plain range error (ChannelsOutOfRange); any value above 1 is a
-# multichannel request (MultichannelNotSupported). Upper bound 65000 stays
-# inside u16.
+# Construction bounds channels below only: a zero count is a plain range
+# error (ChannelsOutOfRange), and every count above it constructs, because
+# the only ceiling is the resolved device's and the device answers at
+# start(), not here. Upper bound 65000 stays inside u16.
 _multichannel_channels = st.integers(min_value=2, max_value=65_000)
 
 # Valid frames_per_buffer range is [64, 65536]. Invalid: below 64 or above
@@ -108,12 +107,12 @@ def test_invalid_sample_rate_property(sample_rate: int) -> None:
 
 @given(channels=_multichannel_channels)
 @settings(max_examples=20, deadline=None)
-def test_multichannel_channels_property(channels: int) -> None:
-    """Any channel count above 1 raises MultichannelNotSupported at construction
-    (capture is mono only: the request is rejected, not silently downmixed).
+def test_channel_counts_above_one_construct_property(channels: int) -> None:
+    """Any channel count above 1 constructs: no fixed maximum lives at
+    construction, so the only refusals are the zero floor here and the
+    resolved device's own report at start().
     """
-    with pytest.raises(MultichannelNotSupported):
-        Microphone(channels=channels)
+    Microphone(channels=channels)
 
 
 def test_zero_channels_is_out_of_range() -> None:

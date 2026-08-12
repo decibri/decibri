@@ -12,7 +12,9 @@ const VERSION = '5.5.0';
  * Browser microphone capture.
  *
  * Uses getUserMedia + AudioWorklet for real-time audio capture in browsers.
- * Emits 'data' events with Int16Array or Float32Array chunks.
+ * Emits 'data' events with Int16Array or Float32Array chunks holding
+ * framesPerBuffer frames of the delivered channel count, interleaved frame
+ * by frame.
  *
  * Ported from decibri-web decibri.ts. Logic identical, types removed.
  *
@@ -106,26 +108,20 @@ class Microphone extends Emitter {
     if (this._sampleRate < 1000 || this._sampleRate > 384000) {
       throw new RangeError('sample rate must be between 1000 and 384000');
     }
-    // Mono only: the delivered audio is a single channel, collapsed from
-    // every granted channel (the average, or the channel the map selects).
-    // The classes and the messages are the node entry's, so the same value
-    // is rejected the same way in both runtimes.
+    // The number of channels delivered, interleaved frame by frame. Bounded
+    // below here; bounded above by the granted track alone, which answers
+    // when the stream starts. No fixed maximum exists on this path. The
+    // classes and the messages are the node entry's, so the same value is
+    // rejected the same way in both runtimes.
     if (this._channels < 1) {
       throw new RangeError('channels must be at least 1');
     }
-    if (this._channels > 1) {
-      throw new RangeError('multichannel capture is not supported; channels must be 1 (mono)');
-    }
-    // The Web Audio specification's floor, as on the browser Speaker: an
-    // implementation is required to support up to 32 channels and says nothing
-    // above that. Deliberately unlike the native surface, which bounds channels
-    // below only.
-    if (this._channels < 1 || this._channels > 32) {
-      throw new TypeError(`channels must be between 1 and 32, got ${this._channels}`);
-    }
     // An optional list of 0-based device channel indices, one per delivered
     // channel: delivered channel j carries device channel channelMap[j].
-    // Absence delivers the documented average of every granted channel. The
+    // Entries may repeat and may appear in any order, so a map both selects
+    // and permutes. Absence derives the delivered channels from the count
+    // alone: 1 delivers the documented average of every granted channel, and
+    // the granted count delivers every granted channel in granted order. The
     // checks here are shape-only (an array of integers that fit the channel
     // count's width, with one entry per channel), the node entry's classes
     // and messages; whether each entry exists on the track is checked when
@@ -233,6 +229,8 @@ class Microphone extends Emitter {
   /**
    * Most recent VAD score: the normalized RMS of the last chunk in `'energy'`
    * mode, or 0 when VAD is disabled or before the first chunk is processed.
+   * A chunk carrying more than one channel is collapsed to the average of its
+   * channels before the RMS, so the score reflects one channel's level.
    * @returns {number}
    */
   get vadScore() {
@@ -296,28 +294,44 @@ class Microphone extends Emitter {
     }
 
     // The granted track's report is the capture-side authority, as the
-    // resolved device's report is on the node path: the map is checked
-    // against it here, before the worklet is built, with the node entry's
-    // message for the same condition. A browser that omits channelCount from
-    // getSettings() defers the check to the worklet, which sees the true
-    // channel count of every block it processes.
-    if (this._channelMap !== undefined) {
+    // resolved device's report is on the node path: the map's entries, or
+    // the unmapped count's derivation, are checked against it here, before
+    // the worklet is built, with the node entry's message for the same
+    // condition. Without a map, only two derivations have a single meaning:
+    // 1 delivers the average of every granted channel, and the granted count
+    // delivers every granted channel in granted order; a count above the
+    // grant does not exist to deliver, and a strict subset above one does
+    // not say which channels it means, so the map has to name them. A
+    // browser that omits channelCount from getSettings() defers the check to
+    // the worklet, which sees the true channel count of every block it
+    // processes. At one delivered channel with no map there is nothing to
+    // check: the average serves any granted count.
+    if (this._channelMap !== undefined || this._channels > 1) {
       const track = this._stream.getAudioTracks()[0];
       const settings = track && typeof track.getSettings === 'function' ? track.getSettings() : {};
       const granted = settings.channelCount;
       if (typeof granted === 'number') {
-        for (const entry of this._channelMap) {
-          if (entry >= granted) {
-            this._stream.getTracks().forEach(t => t.stop());
-            this._stream = null;
-            await this._audioContext.close();
-            this._audioContext = null;
-            const error = new Error(
-              `the channel map names device channel ${entry}; the device reports ${granted} input channels`
-            );
-            this.emit('error', error);
-            throw error;
+        let message = null;
+        if (this._channelMap !== undefined) {
+          for (const entry of this._channelMap) {
+            if (entry >= granted) {
+              message = `the channel map names device channel ${entry}; the device reports ${granted} input channels`;
+              break;
+            }
           }
+        } else if (this._channels > granted) {
+          message = `the input device does not support ${this._channels} delivered channels; it reports ${granted}`;
+        } else if (this._channels < granted) {
+          message = `a channel map is required to deliver ${this._channels} of the device's ${granted} input channels`;
+        }
+        if (message !== null) {
+          this._stream.getTracks().forEach(t => t.stop());
+          this._stream = null;
+          await this._audioContext.close();
+          this._audioContext = null;
+          const error = new Error(message);
+          this.emit('error', error);
+          throw error;
         }
       }
     }
@@ -349,6 +363,7 @@ class Microphone extends Emitter {
         format: this._dtype,
         nativeSampleRate,
         targetSampleRate: this._sampleRate,
+        channels: this._channels,
         channelMap: this._channelMap ?? null,
       },
     });
@@ -437,11 +452,33 @@ class Microphone extends Emitter {
   }
 
   _computeRms(chunk) {
-    let sum = 0;
     const n = chunk.length;
     if (n === 0) return 0;
+    const channels = this._channels;
+    const isFloat = chunk instanceof Float32Array;
 
-    if (chunk instanceof Float32Array) {
+    if (channels > 1) {
+      // Score one channel's level, as the node path's detector feed does:
+      // collapse each interleaved frame to the engine's average
+      // (single-precision accumulation, f32 quotient), then take the RMS of
+      // the collapsed signal.
+      const frames = Math.floor(n / channels);
+      if (frames === 0) return 0;
+      let sum = 0;
+      for (let f = 0; f < frames; f++) {
+        let acc = 0;
+        for (let c = 0; c < channels; c++) {
+          const s = isFloat ? chunk[f * channels + c] : chunk[f * channels + c] / 32768;
+          acc = Math.fround(acc + s);
+        }
+        const mono = Math.fround(acc / channels);
+        sum += mono * mono;
+      }
+      return Math.sqrt(sum / frames);
+    }
+
+    let sum = 0;
+    if (isFloat) {
       for (let i = 0; i < n; i++) sum += chunk[i] * chunk[i];
     } else {
       for (let i = 0; i < n; i++) {

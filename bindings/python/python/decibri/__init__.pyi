@@ -20,8 +20,13 @@ from decibri._decibri import VersionInfo as VersionInfo
 from decibri.exceptions import AgcTargetOutOfRange as AgcTargetOutOfRange
 from decibri.exceptions import AlreadyRunning as AlreadyRunning
 from decibri.exceptions import MicrophoneStreamClosed as MicrophoneStreamClosed
+from decibri.exceptions import BlockSizeNotFrameAligned as BlockSizeNotFrameAligned
 from decibri.exceptions import ChannelMapLengthMismatch as ChannelMapLengthMismatch
 from decibri.exceptions import ChannelMapOutOfRange as ChannelMapOutOfRange
+from decibri.exceptions import ChannelSelectionAmbiguous as ChannelSelectionAmbiguous
+from decibri.exceptions import (
+    MicrophoneChannelsUnsupported as MicrophoneChannelsUnsupported,
+)
 from decibri.exceptions import ChannelsOutOfRange as ChannelsOutOfRange
 from decibri.exceptions import MultichannelNotSupported as MultichannelNotSupported
 from decibri.exceptions import DecibriError as DecibriError
@@ -71,6 +76,9 @@ from decibri.exceptions import VadSampleRateUnsupported as VadSampleRateUnsuppor
 from decibri.exceptions import VadThresholdOutOfRange as VadThresholdOutOfRange
 from decibri.exceptions import AecSampleRateUnsupported as AecSampleRateUnsupported
 from decibri.exceptions import AecConfigInvalid as AecConfigInvalid
+from decibri.exceptions import (
+    AecMultichannelUnsupported as AecMultichannelUnsupported,
+)
 from decibri.exceptions import AudioFormatUnsupported as AudioFormatUnsupported
 from decibri.exceptions import AudioFileMalformed as AudioFileMalformed
 from decibri.exceptions import AudioFileTruncated as AudioFileTruncated

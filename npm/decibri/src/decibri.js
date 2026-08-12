@@ -145,16 +145,12 @@ class Microphone extends Readable {
       throw new RangeError('sample rate must be between 1000 and 384000');
     }
 
-    // Mono only: the capture path delivers a single channel. A value below 1
-    // is a plain range error; a value above 1 is rejected as multichannel
-    // (not silently downmixed) so a later move to true multichannel stays
-    // additive. The `channels` option is kept for that forward compatibility.
+    // The number of channels delivered, interleaved frame by frame. Bounded
+    // below here; bounded above by the resolved device alone, which answers
+    // when the stream starts. No fixed maximum exists on this path.
     const channels = options.channels ?? 1;
     if (channels < 1) {
       throw new RangeError('channels must be at least 1');
-    }
-    if (channels > 1) {
-      throw new RangeError('multichannel capture is not supported; channels must be 1 (mono)');
     }
 
     // ── Validate channel map ─────────────────────────────────────────────────

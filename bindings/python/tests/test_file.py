@@ -19,6 +19,7 @@ import math
 import struct
 import wave
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -340,6 +341,48 @@ def test_iter_with_metadata_reports_file_time() -> None:
         assert chunk.sequence == i
         assert isinstance(chunk.is_speaking, bool)
         assert 0.0 <= chunk.vad_score <= 1.0
+
+
+def test_chunk_timing_counts_frames_not_samples() -> None:
+    """File time advances by frames, so a chunk's length is divided by the
+    count it was interleaved at.
+
+    The delivered stream carries one channel, where a frame is a sample and
+    the division cannot be observed. The stand-in pins the arithmetic above
+    one channel, where counting interleaved samples instead would over-report
+    every chunk's duration by exactly the channel count and carry that error
+    into the VAD segment timestamps.
+    """
+    file = File.buffer(sine_samples(16000, 0.2), input_rate=16000)
+    chunk = file.read()
+    assert isinstance(chunk, bytes)
+    assert file._bridge.channels == 1
+    assert file._chunk_frames(chunk) == 1600
+    file.close()
+
+    class _Delivered:
+        """Stands in for a File delivering ``channels`` interleaved channels."""
+
+        def __init__(self, channels: int) -> None:
+            self._bridge = SimpleNamespace(channels=channels)
+            self._format = "int16"
+
+    # 800 frames encoded at one, two and three channels. Each is 800 frames;
+    # a sample count would read 800, 1600 and 2400.
+    for channels in (1, 2, 3):
+        payload = b"\x00" * (800 * 2 * channels)
+        assert File._chunk_frames(_Delivered(channels), payload) == 800
+
+    # The two return shapes must agree: numpy is 2-D (frames, channels) above
+    # one channel, so its length is already the frame count.
+    np = pytest.importorskip("numpy")
+    for channels in (1, 2, 3):
+        array = (
+            np.zeros(800, dtype=np.int16)
+            if channels == 1
+            else np.zeros((800, channels), dtype=np.int16)
+        )
+        assert File._chunk_frames(_Delivered(channels), array) == 800
 
 
 def test_file_time_holdoff_is_processing_speed_independent() -> None:

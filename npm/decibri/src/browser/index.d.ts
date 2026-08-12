@@ -47,17 +47,24 @@ export interface MicrophoneOptions {
   sampleRate?: number;
 
   /**
-   * Number of channels the stream delivers. Mono only: the only accepted value
-   * is `1`, and a value greater than `1` throws a `RangeError` (multichannel
-   * capture is not supported) rather than being silently downmixed. The option
-   * is kept for forward compatibility: a future release may accept a value
-   * greater than `1` by delivering true interleaved multichannel.
+   * Number of channels the stream delivers, interleaved frame by frame in the
+   * emitted chunks. Bounded below at `1` (the default); bounded above by the
+   * granted track alone, which reports its own count when the stream starts.
+   * No fixed maximum exists.
    *
    * The capture itself asks the browser for every channel it will grant (the
-   * Web Audio specification's 32-channel floor, with ideal semantics):
-   * decibri collapses the granted audio to this delivered count with the
-   * documented average of every granted channel, or with the channel
-   * `channelMap` selects.
+   * Web Audio specification's 32-channel floor, with ideal semantics), and
+   * decibri derives the delivered channels from the grant. Without a
+   * `channelMap`: `1` delivers the documented average of every granted
+   * channel; a count equal to the granted count delivers every granted
+   * channel in granted order; a count above the grant fails `start()` with
+   * an `Error` reading `the input device does not support N delivered
+   * channels; it reports M`; and a count above `1` and below the grant fails
+   * it with `a channel map is required to deliver N of the device's M input
+   * channels`, because which channels it means has no single answer, so
+   * `channelMap` names them. Where the browser does not report the granted
+   * channel count, the same `Error` is emitted on `'error'` and the capture
+   * stops as soon as the audio graph reports its true channel count.
    * @default 1
    */
   channels?: number;
@@ -65,9 +72,10 @@ export interface MicrophoneOptions {
   /**
    * Optional list of 0-based device channel indices selecting which granted
    * channels feed the delivered channels: delivered channel `j` carries device
-   * channel `channelMap[j]`. The length must equal `channels`, so the accepted
-   * length is `1` (the map selects the one delivered channel). Absent delivers
-   * the documented average of every granted channel.
+   * channel `channelMap[j]`. The length must equal `channels`. Entries may
+   * repeat and may appear in any order, so a map both selects and permutes,
+   * and may name more delivered channels than the grant carries. Absent
+   * derives the delivered channels from `channels` as documented there.
    *
    * The same shape as the Node entry's `channelMap`, validated with the same
    * classes and messages. Entries are checked against the granted track's own
@@ -80,12 +88,13 @@ export interface MicrophoneOptions {
    * A browser typically grants a single processed channel while
    * `echoCancellation` or `noiseSuppression` is enabled, so a multichannel
    * grant generally requires both disabled.
-   * @default undefined (the average of every granted channel)
+   * @default undefined (the derivation `channels` documents)
    */
   channelMap?: number[];
 
   /**
    * Frames per audio chunk. Controls chunk size and delivery interval.
+   * A chunk holds this many frames of the delivered channel count.
    * @default 1600
    * @range 64–65536
    */
@@ -175,6 +184,8 @@ export declare class Microphone {
   /**
    * Most recent VAD score: the normalized RMS of the last chunk in `'energy'`
    * mode, or 0 when VAD is disabled or before the first chunk is processed.
+   * A chunk carrying more than one channel is collapsed to the average of its
+   * channels before the RMS, so the score reflects one channel's level.
    */
   readonly vadScore: number;
 
