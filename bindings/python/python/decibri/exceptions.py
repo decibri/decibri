@@ -225,6 +225,43 @@ class BlockSizeNotFrameAligned(DecibriError):
     """
 
 
+class FileChannelsUnsupported(DecibriError):
+    """Raised when a file-source ``channels`` count exceeds the source's own.
+
+    decibri delivers source channels, so it cannot manufacture one the
+    source does not have. Checked at construction, where the source's
+    count is first known (the container's header, or ``input_channels``
+    for a buffer source); the message names the count asked for and the
+    count the source has. The offline counterpart of
+    ``MicrophoneChannelsUnsupported``. A ``channel_map`` lifts this,
+    because a map may repeat a channel.
+    """
+
+
+class FileChannelSelectionAmbiguous(DecibriError):
+    """Raised when a file source asks for a strict subset of its channels.
+
+    ``channels=1`` delivers the average of every source channel and a
+    count equal to the source's own delivers them all, in source order.
+    A count between the two does not say which channels it means, so
+    ``channel_map`` names them rather than decibri choosing. Checked at
+    construction, where the source's count is first known; the message
+    names both counts. The offline counterpart of
+    ``ChannelSelectionAmbiguous``.
+    """
+
+
+class FileChannelMapOutOfRange(DecibriError):
+    """Raised when a file-source channel map names a channel the source lacks.
+
+    Every ``channel_map`` entry names a 0-based source channel, so each
+    must be below the source's own count. Checked at construction, where
+    the source's count is first known; the message names the offending
+    entry and the count the source has. The offline counterpart of
+    ``ChannelMapOutOfRange``.
+    """
+
+
 class PermissionDenied(DecibriError):
     """Raised when the OS denies microphone access.
 

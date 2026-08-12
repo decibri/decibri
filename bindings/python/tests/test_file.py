@@ -27,7 +27,12 @@ import pytest
 import decibri
 from decibri import File, SaveReport, Segment, Vad, VadReport, VadWindow
 from decibri.exceptions import (
+    BlockSizeNotFrameAligned,
+    ChannelMapLengthMismatch,
     DecibriError,
+    FileChannelMapOutOfRange,
+    FileChannelSelectionAmbiguous,
+    FileChannelsUnsupported,
     FileConsumed,
     FileEngaged,
     AudioFormatUnsupported,
@@ -901,3 +906,180 @@ async def test_async_save_after_iteration_raises(tmp_path: Path) -> None:
     async for chunk in f:
         remaining += len(chunk)
     assert remaining > 0
+
+
+# ---------------------------------------------------------------------------
+# Channels: delivery, the map, and the widened save path
+# ---------------------------------------------------------------------------
+
+
+def stereo_interleaved(frames: int) -> list[float]:
+    """A stereo source with distinct channels on the 16-bit grid: L a
+    bounded ramp, R its negation, interleaved frame by frame."""
+    out: list[float] = []
+    for f in range(frames):
+        v = ((f % 1201) - 600) / 32768.0
+        out.extend((v, -v))
+    return out
+
+
+def test_channels_deliver_the_source_interleaved() -> None:
+    """channels=2 delivers both channels, unaveraged and unrotated."""
+    stereo = stereo_interleaved(2000)
+    out = read_all(
+        File.buffer(
+            stereo,
+            input_rate=16000,
+            input_channels=2,
+            channels=2,
+            dtype="float32",
+        )
+    )
+    values = struct.unpack(f"<{len(out) // 4}f", out)
+    assert list(values) == pytest.approx(stereo, abs=0.0)
+
+
+def test_channel_map_selects_and_permutes() -> None:
+    """channel_map=[1, 0] swaps the delivered channels; [1] selects one."""
+    stereo = stereo_interleaved(1000)
+    swapped = read_all(
+        File.buffer(
+            stereo,
+            input_rate=16000,
+            input_channels=2,
+            channels=2,
+            channel_map=[1, 0],
+            dtype="float32",
+        )
+    )
+    values = struct.unpack(f"<{len(swapped) // 4}f", swapped)
+    expected: list[float] = []
+    for f in range(1000):
+        expected.extend((stereo[f * 2 + 1], stereo[f * 2]))
+    assert list(values) == pytest.approx(expected, abs=0.0)
+
+    right = read_all(
+        File.buffer(
+            stereo,
+            input_rate=16000,
+            input_channels=2,
+            channels=1,
+            channel_map=[1],
+            dtype="float32",
+        )
+    )
+    right_values = struct.unpack(f"<{len(right) // 4}f", right)
+    assert list(right_values) == pytest.approx(
+        [stereo[f * 2 + 1] for f in range(1000)], abs=0.0
+    )
+
+
+def test_unmapped_over_ask_raises() -> None:
+    """A delivered count above the source's own is refused with both counts."""
+    with pytest.raises(
+        FileChannelsUnsupported,
+        match="the file does not have 4 channels to deliver; it has 2",
+    ):
+        File.buffer(
+            stereo_interleaved(8), input_rate=16000, input_channels=2, channels=4
+        )
+
+
+def test_unmapped_strict_subset_raises() -> None:
+    """A strict subset above one is refused, naming the channel map."""
+    with pytest.raises(
+        FileChannelSelectionAmbiguous,
+        match="delivering 2 of the file's 8 channels requires a channel map",
+    ):
+        File.buffer(
+            [0.0] * 64, input_rate=16000, input_channels=8, channels=2
+        )
+
+
+def test_map_entry_out_of_range_raises() -> None:
+    """A map entry the source does not have is refused with the entry named."""
+    with pytest.raises(
+        FileChannelMapOutOfRange,
+        match="the file channel map names channel 5; the file has 2 channels",
+    ):
+        File.buffer(
+            stereo_interleaved(8),
+            input_rate=16000,
+            input_channels=2,
+            channels=2,
+            channel_map=[0, 5],
+        )
+
+
+def test_map_length_mismatch_raises_in_the_wrapper() -> None:
+    """The wrapper raises the shared length error before the bridge runs."""
+    with pytest.raises(
+        ChannelMapLengthMismatch,
+        match="the channel map has 1 entries",
+    ):
+        File.buffer(
+            stereo_interleaved(8),
+            input_rate=16000,
+            input_channels=2,
+            channels=2,
+            channel_map=[0],
+        )
+
+
+def test_misaligned_buffer_raises() -> None:
+    """A sample count that is not a whole number of frames is refused."""
+    with pytest.raises(
+        BlockSizeNotFrameAligned,
+        match="the requested block size of 7 samples",
+    ):
+        File.buffer([0.0] * 7, input_rate=16000, input_channels=2, channels=2)
+
+
+def test_buffer_accepts_2d_frames_by_channels_array() -> None:
+    """Above one input channel a (frames, input_channels) ndarray is
+    accepted and C-order flattening interleaves it frame by frame; any
+    other multi-axis shape is rejected."""
+    np = pytest.importorskip("numpy")
+    stereo = stereo_interleaved(500)
+    arr = np.asarray(stereo, dtype=np.float32).reshape(500, 2)
+    out = read_all(
+        File.buffer(
+            arr, input_rate=16000, input_channels=2, channels=2, dtype="float32"
+        )
+    )
+    assert out == arr.tobytes()
+
+    with pytest.raises(ValueError, match="1-D interleaved or 2-D"):
+        File.buffer(
+            arr.reshape(2, 500), input_rate=16000, input_channels=2, channels=2
+        )
+
+
+def test_stereo_save_round_trip(tmp_path: Path) -> None:
+    """A stereo save writes a 2-channel header and reads back the identical
+    delivered stream: the channels survive in order through the container."""
+    stereo = stereo_interleaved(2000)
+    dest = tmp_path / "stereo.wav"
+    File.buffer(
+        stereo, input_rate=16000, input_channels=2, channels=2
+    ).save(dest)
+    with wave.open(str(dest), "rb") as w:
+        assert w.getnchannels() == 2
+    saved = read_all(
+        File.buffer(stereo, input_rate=16000, input_channels=2, channels=2)
+    )
+    back = read_all(File(dest, channels=2))
+    assert back == saved
+
+
+def test_flac_nine_channels_carries_the_containers_own_refusal(
+    tmp_path: Path,
+) -> None:
+    """FLAC's ceiling is the container's own, surfaced with its own text."""
+    with pytest.raises(
+        AudioFormatUnsupported,
+        match="9-channel audio is not a supported layout",
+    ):
+        File.buffer(
+            [0.0] * 9, input_rate=16000, input_channels=9, channels=9
+        ).save(tmp_path / "nine.flac")

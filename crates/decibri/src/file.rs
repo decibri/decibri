@@ -18,8 +18,9 @@
 //! [`FileConfig`], then open a path with [`File::open`] (or the
 //! [`File::new`] alias) or wrap in-memory samples with [`File::buffer`]. The
 //! path form reads the input rate and channel count from the file's own
-//! header; the buffer form takes the input rate explicitly because raw samples
-//! carry no header.
+//! header; the buffer form takes both explicitly because raw samples carry
+//! no header. [`FileConfig::channels`] and [`FileConfig::channel_map`] name
+//! what is delivered, in the capture surface's own vocabulary.
 
 use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
@@ -39,9 +40,10 @@ use decibri_resampler::{PolyphaseResampler, Resampler};
 /// the chain the same way.
 const FEED_FRAMES: usize = 1600;
 
-/// Number of output samples per delivered chunk (mono at the target rate),
-/// matching the microphone's default `frames_per_buffer`. The final chunk may
-/// be shorter once the chain's end-of-stream tail has been drained.
+/// Number of output frames per delivered chunk at the target rate (a chunk
+/// carries this many frames times the delivered channel count in interleaved
+/// samples), matching the microphone's default `frames_per_buffer`. The final
+/// chunk may be shorter once the chain's end-of-stream tail has been drained.
 const DELIVERY_FRAMES: usize = 1600;
 
 /// Memory bound for the detector feed queue, in seconds of audio at the
@@ -72,6 +74,50 @@ pub struct FileConfig {
     /// chain resamples the source's input rate to this rate. Range:
     /// 1000-384000. Default: 16000.
     pub sample_rate: u32,
+    /// Number of channels the `File` DELIVERS, interleaved frame by frame in
+    /// [`AudioChunk::data`]. Bounded below at 1 (the default) by
+    /// [`validate`](Self::validate); bounded above by the source's own
+    /// channel count alone, read from the container's header (or stated as
+    /// the `input_channels` of [`File::buffer`]). No fixed maximum exists.
+    ///
+    /// The same meaning as [`crate::MicrophoneConfig::channels`], with the
+    /// source's header count standing where the device's report stands on the
+    /// live path. How the delivered channels are derived from the source's,
+    /// when [`channel_map`](Self::channel_map) is `None`:
+    ///
+    /// - `1`: the documented average of every source channel.
+    /// - equal to the source's own count: every source channel, in source
+    ///   order.
+    /// - above the source's own count:
+    ///   [`DecibriError::FileChannelsUnsupported`] at construction.
+    /// - above 1 and below the source's own count:
+    ///   [`DecibriError::FileChannelSelectionAmbiguous`] at construction.
+    ///   Which of the source's channels those should be has no single answer,
+    ///   so [`channel_map`](Self::channel_map) names them rather than decibri
+    ///   choosing.
+    ///
+    /// A [`channel_map`](Self::channel_map) names the source channels
+    /// directly, so it answers every case above.
+    pub channels: u16,
+    /// Optional list of 0-based SOURCE channel indices selecting which source
+    /// channels feed the delivered channels: delivered channel `j` carries
+    /// source channel `channel_map[j]`. The length must equal
+    /// [`channels`](Self::channels). Entries may repeat and may appear in any
+    /// order, so a map both selects and permutes. `None` (the default)
+    /// derives the delivered channels as [`channels`](Self::channels)
+    /// documents.
+    ///
+    /// The same shape and semantics as
+    /// [`crate::MicrophoneConfig::channel_map`], with source channels in the
+    /// device channels' place. Validated at construction, against the
+    /// source's own channel count: every entry must be below it
+    /// ([`DecibriError::FileChannelMapOutOfRange`] otherwise), and the length
+    /// must equal [`channels`](Self::channels)
+    /// ([`DecibriError::ChannelMapLengthMismatch`] otherwise). The source's
+    /// count is the only ceiling; no fixed maximum exists. Not checked by
+    /// [`validate`](Self::validate), which has no source in scope. Default:
+    /// `None`.
+    pub channel_map: Option<Vec<u16>>,
     /// Remove a constant (DC) offset with a one-pole DC-blocking high-pass,
     /// applied after the channel and rate normalization. Default: false (off).
     pub dc_removal: bool,
@@ -124,6 +170,8 @@ impl Default for FileConfig {
     fn default() -> Self {
         Self {
             sample_rate: 16000,
+            channels: 1,
+            channel_map: None,
             dc_removal: false,
             denoise: None,
             denoise_model_path: None,
@@ -140,14 +188,16 @@ impl Default for FileConfig {
 }
 
 impl FileConfig {
-    /// Validate the configuration: the target sample rate, the AGC target, and
-    /// the limiter ceiling (each when set) must fall within the supported
-    /// ranges, matching the live capture path's validation exactly. With VAD
-    /// configured, the detector threshold is validated fail-fast as well.
+    /// Validate the configuration: the target sample rate, the channel floor,
+    /// the AGC target, and the limiter ceiling (each when set) must fall
+    /// within the supported ranges, matching the live capture path's
+    /// validation exactly. With VAD configured, the detector threshold is
+    /// validated fail-fast as well.
     ///
     /// # Errors
     /// - [`DecibriError::SampleRateOutOfRange`] when `sample_rate` is outside
     ///   1000-384000.
+    /// - [`DecibriError::ChannelsOutOfRange`] when `channels` is 0.
     /// - [`DecibriError::AgcTargetOutOfRange`] when `agc` is outside -40..=-3.
     /// - [`DecibriError::LimiterCeilingOutOfRange`] when `limiter` is outside
     ///   -3.0..=0.0.
@@ -157,6 +207,13 @@ impl FileConfig {
         if !(1000..=384000).contains(&self.sample_rate) {
             return Err(DecibriError::SampleRateOutOfRange);
         }
+        if self.channels == 0 {
+            return Err(DecibriError::ChannelsOutOfRange);
+        }
+        // No upper bound here. The delivered count is bounded by the source's
+        // own channel count alone, which is not in scope in this pure
+        // function, so the ceiling is applied at construction as
+        // `DecibriError::FileChannelsUnsupported`.
         if let Some(target) = self.agc {
             if !(-40..=-3).contains(&target) {
                 return Err(DecibriError::AgcTargetOutOfRange);
@@ -184,9 +241,10 @@ impl FileConfig {
 /// The container format a [`File::save`] call writes.
 ///
 /// Selected from the path's extension, or explicitly via
-/// [`SaveOptions::format`]. Every format writes 16-bit PCM mono at the
-/// `File`'s target rate; FLAC compresses it losslessly at
-/// [`SaveOptions::compression`].
+/// [`SaveOptions::format`]. Every format writes 16-bit PCM at the `File`'s
+/// target rate, frame-interleaved at the delivered channel count; FLAC
+/// compresses it losslessly at [`SaveOptions::compression`]. Each
+/// container's own channel ceiling applies, as [`File::save`] documents.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum SaveFormat {
@@ -367,8 +425,9 @@ pub struct File {
     /// The conditioning chain; `None` when the source is already mono at the
     /// target rate with no conditioning enabled (the zero-cost direct path).
     stage: Option<CaptureStage>,
-    /// Delivered-output re-block buffer: conditioned mono samples at the
-    /// target rate, drained in [`DELIVERY_FRAMES`] chunks.
+    /// Delivered-output re-block buffer: conditioned samples at the target
+    /// rate, interleaved at the delivered channel count, drained in
+    /// [`DELIVERY_FRAMES`]-frame chunks.
     reblock: VecDeque<f32>,
     /// Whether the chain's end-of-stream tail has been drained.
     flushed: bool,
@@ -423,6 +482,12 @@ impl File {
     ///   audio it declares.
     /// - [`DecibriError::SampleRateOutOfRange`] when the file's own rate is
     ///   outside 1000-384000.
+    /// - [`DecibriError::FileChannelsUnsupported`],
+    ///   [`DecibriError::FileChannelSelectionAmbiguous`],
+    ///   [`DecibriError::FileChannelMapOutOfRange`] and
+    ///   [`DecibriError::ChannelMapLengthMismatch`] exactly as
+    ///   [`FileConfig::channels`] and [`FileConfig::channel_map`] document,
+    ///   checked against the file's own header count.
     /// - Configuration errors exactly as [`FileConfig::validate`] reports.
     pub fn open(path: impl AsRef<Path>, config: FileConfig) -> Result<Self, DecibriError> {
         let path = path.as_ref();
@@ -453,22 +518,42 @@ impl File {
     }
 
     /// Wrap in-memory samples and prepare them for conditioning (and, with
-    /// VAD configured, analysis). `samples` are mono f32 in [-1.0, 1.0] at
-    /// `input_rate`; raw samples carry no header, so the rate is explicit.
+    /// VAD configured, analysis). `samples` are f32 in [-1.0, 1.0] at
+    /// `input_rate`, frame-interleaved at `input_channels` (1 for mono); raw
+    /// samples carry no header, so the rate and the channel count are both
+    /// explicit.
     ///
     /// # Errors
     /// - [`DecibriError::SampleRateOutOfRange`] when `input_rate` is outside
     ///   1000-384000.
-    /// - Configuration errors exactly as [`FileConfig::validate`] reports.
+    /// - [`DecibriError::ChannelsOutOfRange`] when `input_channels` is 0.
+    /// - [`DecibriError::BlockSizeNotFrameAligned`] when `samples` is not a
+    ///   whole number of `input_channels`-channel frames.
+    /// - Configuration and channel errors exactly as [`File::open`] reports.
     pub fn buffer(
         samples: Vec<f32>,
         input_rate: u32,
+        input_channels: u16,
         config: FileConfig,
     ) -> Result<Self, DecibriError> {
         if !(1000..=384000).contains(&input_rate) {
             return Err(DecibriError::SampleRateOutOfRange);
         }
-        Self::from_source(samples, input_rate, 1, config)
+        // A zero count describes no buffer at all, and a partial trailing
+        // frame would rotate the channel identities of everything after it,
+        // exactly as a mid-stream misalignment would on the live path. Both
+        // are refused before the source is accepted, so a refused call leaves
+        // nothing half-ingested.
+        if input_channels == 0 {
+            return Err(DecibriError::ChannelsOutOfRange);
+        }
+        if input_channels > 1 && !samples.len().is_multiple_of(input_channels as usize) {
+            return Err(DecibriError::BlockSizeNotFrameAligned {
+                samples: samples.len(),
+                channels: input_channels,
+            });
+        }
+        Self::from_source(samples, input_rate, input_channels, config)
     }
 
     /// Shared constructor tail: validate the configuration, build the chain
@@ -482,6 +567,43 @@ impl File {
         config.validate()?;
         let target_rate = config.sample_rate;
 
+        // The channel map names source channels, so it is checked here, where
+        // the source's own count is first known, against the same figure that
+        // sets the chain's input count. Never checked in `validate()`, which
+        // has no source in scope. The rules are the live capture path's, with
+        // the source's header count standing where the device's report
+        // stands; the errors are the file surface's own because the capture
+        // messages name a device.
+        if let Some(map) = &config.channel_map {
+            if map.len() != config.channels as usize {
+                return Err(DecibriError::ChannelMapLengthMismatch {
+                    entries: map.len(),
+                    channels: config.channels,
+                });
+            }
+            for &index in map {
+                if index >= input_channels {
+                    return Err(DecibriError::FileChannelMapOutOfRange {
+                        index,
+                        available: input_channels,
+                    });
+                }
+            }
+        } else {
+            if config.channels > input_channels {
+                return Err(DecibriError::FileChannelsUnsupported {
+                    requested: config.channels,
+                    available: input_channels,
+                });
+            }
+            if config.channels > 1 && config.channels < input_channels {
+                return Err(DecibriError::FileChannelSelectionAmbiguous {
+                    requested: config.channels,
+                    available: input_channels,
+                });
+            }
+        }
+
         // Denoise is enabled only when a model AND its path are both set,
         // exactly as on the live path.
         let denoise = config
@@ -490,13 +612,11 @@ impl File {
             .map(|(model, path)| (model, path, config.ort_library_path.as_deref()));
         let stage = build_capture_stage(
             input_channels,
-            1,
+            config.channels,
             input_rate,
             target_rate,
             Transforms {
-                // The offline path collapses a multichannel source to the
-                // documented average; no channel map is offered on it.
-                channel_map: None,
+                channel_map: config.channel_map.as_deref(),
                 dc_removal: config.dc_removal,
                 denoise,
                 highpass: config.highpass,
@@ -589,9 +709,12 @@ impl File {
     }
 
     /// Drain the detector feed accumulated since the previous drain: the
-    /// pre-conditioning signal, in file order. With VAD configured the feed
-    /// is at [`vad_rate`](Self::vad_rate); with only a conditioning transform
-    /// it stays at the target rate. Returns `None` when the feed is inactive
+    /// pre-conditioning signal, in file order, always mono (a signal carrying
+    /// more than one channel is collapsed to the frame average before it
+    /// enters the feed, the live path's own collapse). With VAD configured
+    /// the feed is at [`vad_rate`](Self::vad_rate); with only a conditioning
+    /// transform it stays at the target rate. Returns `None` when the feed is
+    /// inactive
     /// (no VAD and no transform), in which case the delivered chunk already
     /// is the pre-conditioning signal, exactly as
     /// [`crate::microphone::MicrophoneStream::vad_input`] contracts.
@@ -694,12 +817,20 @@ impl File {
     /// Write the conditioned recording to `path` as an audio file.
     ///
     /// Runs the recording once through the same conditioning pass iteration
-    /// delivers, whole, and writes the result as 16-bit PCM mono at the
-    /// target rate. The container comes from the path's extension (`.wav`,
-    /// `.aiff`, `.aif`, `.aifc` or `.flac`), or from [`SaveOptions::format`]
-    /// when set: decibri reads a file by its content and writes one by its
-    /// name. Consumes the `File`: the save is a single pass, separate from
-    /// iteration and analysis.
+    /// delivers, whole, and writes the result as 16-bit PCM at the target
+    /// rate, frame-interleaved at the delivered channel count (the count
+    /// every delivered [`AudioChunk`] carries). The container comes from the
+    /// path's extension (`.wav`, `.aiff`, `.aif`, `.aifc` or `.flac`), or
+    /// from [`SaveOptions::format`] when set: decibri reads a file by its
+    /// content and writes one by its name. Consumes the `File`: the save is
+    /// a single pass, separate from iteration and analysis.
+    ///
+    /// Each container's own channel ceiling applies, reported as
+    /// [`DecibriError::AudioFormatUnsupported`] carrying the container
+    /// layer's own text: a FLAC frame carries at most 8 channels, and a WAV
+    /// `fmt ` chunk's `nBlockAlign` is a 16-bit field, so at the 16-bit
+    /// samples decibri writes a WAV holds at most 32767 channels. decibri
+    /// enforces no ceiling of its own on any format.
     ///
     /// A finite sample outside `[-1.0, 1.0]`, which AGC or AEC without a
     /// limiter can produce, is clamped to full scale and counted in the
@@ -755,7 +886,11 @@ impl File {
         let non_finite_samples = replace_non_finite(&mut samples);
         let clipped_samples = clamp_overscale(&mut samples);
 
-        let spec = decibri_decode::AudioSpec::mono(self.target_rate);
+        // The written layout is the delivered layout: the same rate and the
+        // same interleaved channel count iteration stamps on every chunk.
+        // Each writer refuses a count its container cannot carry, with the
+        // container layer's own message forwarded unchanged.
+        let spec = decibri_decode::AudioSpec::new(self.target_rate, self.delivered_channels());
         let mut bytes = Vec::new();
         match format {
             SaveFormat::Wav => {
@@ -796,11 +931,18 @@ impl File {
         Some(range)
     }
 
+    /// Number of interleaved samples in one full delivered chunk:
+    /// [`DELIVERY_FRAMES`] frames at the delivered channel count.
+    fn delivery_samples(&self) -> usize {
+        DELIVERY_FRAMES * self.delivered_channels() as usize
+    }
+
     /// Feed source blocks through the chain until the re-block buffer can
     /// deliver one chunk or the source is exhausted and flushed. One step of
     /// the iteration pass, which delivers the conditioned audio.
     fn advance(&mut self) -> Result<(), DecibriError> {
-        while self.reblock.len() < DELIVERY_FRAMES && !self.flushed {
+        let delivery_samples = self.delivery_samples();
+        while self.reblock.len() < delivery_samples && !self.flushed {
             match self.next_range() {
                 Some(range) => self.ingest(range)?,
                 None => {
@@ -939,8 +1081,18 @@ impl File {
     }
 
     /// Append `scratch` (the pre-conditioning signal at the target rate) to
-    /// the detector feed, resampling to the detector rate when the two
+    /// the detector feed, collapsing it to mono first when it carries more
+    /// than one channel, resampling to the detector rate when the two
     /// differ, and enforce the feed's memory bound.
+    ///
+    /// The collapse is the live path's own: each interleaved frame becomes
+    /// one sample, the average of its channels
+    /// ([`crate::sample::downmix_to_mono`], the engine
+    /// [`crate::microphone::MicrophoneStream::detector_feed`] collapses
+    /// with), at the chain's own post-normalize channel count, the count the
+    /// scratch signal is interleaved at. The detector and the feed's
+    /// resampler both read mono, so the collapse precedes both. At one
+    /// channel the samples take the untouched path below, byte for byte.
     ///
     /// The detector-feed resampler rejects a block that arrives after its own
     /// flush. Every caller runs before that flush, so the rejection is
@@ -950,13 +1102,24 @@ impl File {
         if self.scratch.is_empty() {
             return Ok(());
         }
+        let feed_channels = self
+            .stage
+            .as_ref()
+            .map_or(self.input_channels, CaptureStage::tap_channels);
+        let collapsed;
+        let feed: &[f32] = if feed_channels > 1 {
+            collapsed = crate::sample::downmix_to_mono(&self.scratch, feed_channels);
+            &collapsed
+        } else {
+            &self.scratch
+        };
         match &mut self.vad_resampler {
             Some(resampler) => {
                 let mut out = Vec::new();
-                resampler.process(&self.scratch, &mut out)?;
+                resampler.process(feed, &mut out)?;
                 self.vad_queue.extend(out);
             }
-            None => self.vad_queue.extend(self.scratch.iter().copied()),
+            None => self.vad_queue.extend(feed.iter().copied()),
         }
         self.cap_vad_queue();
         Ok(())
@@ -990,9 +1153,12 @@ impl File {
 impl Iterator for File {
     type Item = Result<AudioChunk, DecibriError>;
 
-    /// Deliver the next conditioned chunk: [`DELIVERY_FRAMES`] mono samples
-    /// at the target rate, with a possibly shorter final chunk once the
-    /// chain's end-of-stream tail has been drained. Returns `None` after the
+    /// Deliver the next conditioned chunk: [`DELIVERY_FRAMES`] frames of
+    /// interleaved samples at the delivered channel count and the target
+    /// rate, with a possibly shorter final chunk once the chain's
+    /// end-of-stream tail has been drained. Every chunk is a whole number of
+    /// frames: the chunk boundary never cuts a frame, so the channel
+    /// identities cannot rotate across chunks. Returns `None` after the
     /// final chunk; an error ends the iteration.
     fn next(&mut self) -> Option<Self::Item> {
         // The one place iteration reaches the source: the adapters and the
@@ -1007,7 +1173,15 @@ impl Iterator for File {
             self.finished = true;
             return Some(Err(e));
         }
-        let take = self.reblock.len().min(DELIVERY_FRAMES);
+        let take = self.reblock.len().min(self.delivery_samples());
+        // The chain emits whole frames (its planar runs are equal-length by
+        // construction) and the full-chunk size is a whole number of frames,
+        // so the take is one too; a partial frame here would mean the chain
+        // itself broke that invariant.
+        debug_assert!(
+            take.is_multiple_of(self.delivered_channels() as usize),
+            "the delivered take must be a whole number of frames"
+        );
         if take == 0 {
             self.finished = true;
             return None;
@@ -1339,7 +1513,7 @@ mod tests {
     #[test]
     fn buffer_passthrough_is_byte_identical() {
         let input = sine(16000, 0.5); // 8000 samples
-        let file = File::buffer(input.clone(), 16000, FileConfig::default()).unwrap();
+        let file = File::buffer(input.clone(), 16000, 1, FileConfig::default()).unwrap();
         let mut sizes = Vec::new();
         let mut out = Vec::new();
         for chunk in file {
@@ -1357,7 +1531,7 @@ mod tests {
     #[test]
     fn buffer_resamples_and_flushes_tail() {
         let input = sine(48000, 0.25);
-        let file = File::buffer(input.clone(), 48000, FileConfig::default()).unwrap();
+        let file = File::buffer(input.clone(), 48000, 1, FileConfig::default()).unwrap();
         let out = collect(file);
 
         let mut resampler = PolyphaseResampler::new(48000, 16000).unwrap();
@@ -1378,7 +1552,7 @@ mod tests {
             dc_removal: true,
             ..Default::default()
         };
-        let file = File::buffer(input.clone(), 16000, config).unwrap();
+        let file = File::buffer(input.clone(), 16000, 1, config).unwrap();
         let out = collect(file);
 
         let mut chain = build_capture_stage(
@@ -1441,7 +1615,7 @@ mod tests {
     /// An empty source delivers no chunks and ends the iteration cleanly.
     #[test]
     fn empty_buffer_ends_immediately() {
-        let file = File::buffer(Vec::new(), 16000, FileConfig::default()).unwrap();
+        let file = File::buffer(Vec::new(), 16000, 1, FileConfig::default()).unwrap();
         assert_eq!(collect(file).len(), 0);
     }
 
@@ -1454,7 +1628,7 @@ mod tests {
             sample_rate: 16000,
             ..FileConfig::default()
         };
-        let file = File::buffer(Vec::new(), 48000, config).unwrap();
+        let file = File::buffer(Vec::new(), 48000, 1, config).unwrap();
         assert_eq!(
             collect(file).len(),
             0,
@@ -1473,7 +1647,7 @@ mod tests {
             denoise_model_path: Some(denoise_model_path()),
             ..FileConfig::default()
         };
-        let file = File::buffer(Vec::new(), 16000, config).unwrap();
+        let file = File::buffer(Vec::new(), 16000, 1, config).unwrap();
         assert_eq!(
             collect(file).len(),
             0,
@@ -1497,7 +1671,7 @@ mod tests {
         let source: Vec<f32> = (0..100)
             .map(|i| 0.5 * (2.0 * std::f32::consts::PI * 440.0 * i as f32 / 16_000.0).sin())
             .collect();
-        let file = File::buffer(source, 16000, config).unwrap();
+        let file = File::buffer(source, 16000, 1, config).unwrap();
         let out = collect(file);
         // Left-pad (256) + 100 real + one window of padding (512) = 868 samples,
         // which yields two whole 256-sample hops.
@@ -2138,8 +2312,8 @@ mod tests {
         }
     }
 
-    /// Configuration validation matches the live path: rate, AGC target, and
-    /// limiter ceiling ranges are enforced at construction.
+    /// Configuration validation matches the live path: rate, channel floor,
+    /// AGC target, and limiter ceiling ranges are enforced at construction.
     #[test]
     fn config_validation_matches_live_ranges() {
         let config = FileConfig {
@@ -2147,8 +2321,19 @@ mod tests {
             ..Default::default()
         };
         assert!(matches!(
-            File::buffer(vec![0.0], 16000, config),
+            File::buffer(vec![0.0], 16000, 1, config),
             Err(DecibriError::SampleRateOutOfRange)
+        ));
+
+        // The floor only, exactly as the live path's `validate`: no upper
+        // bound exists here, the source's own count answers at construction.
+        let config = FileConfig {
+            channels: 0,
+            ..Default::default()
+        };
+        assert!(matches!(
+            File::buffer(vec![0.0], 16000, 1, config),
+            Err(DecibriError::ChannelsOutOfRange)
         ));
 
         let config = FileConfig {
@@ -2156,7 +2341,7 @@ mod tests {
             ..Default::default()
         };
         assert!(matches!(
-            File::buffer(vec![0.0], 16000, config),
+            File::buffer(vec![0.0], 16000, 1, config),
             Err(DecibriError::AgcTargetOutOfRange)
         ));
 
@@ -2165,12 +2350,12 @@ mod tests {
             ..Default::default()
         };
         assert!(matches!(
-            File::buffer(vec![0.0], 16000, config),
+            File::buffer(vec![0.0], 16000, 1, config),
             Err(DecibriError::LimiterCeilingOutOfRange)
         ));
 
         assert!(matches!(
-            File::buffer(vec![0.0], 999, FileConfig::default()),
+            File::buffer(vec![0.0], 999, 1, FileConfig::default()),
             Err(DecibriError::SampleRateOutOfRange)
         ));
     }
@@ -2298,12 +2483,12 @@ mod tests {
     #[cfg(feature = "vad")]
     #[test]
     fn analyze_without_vad_errors() {
-        let file = File::buffer(sine(16000, 0.1), 16000, FileConfig::default()).unwrap();
+        let file = File::buffer(sine(16000, 0.1), 16000, 1, FileConfig::default()).unwrap();
         assert!(matches!(
             file.analyze(),
             Err(DecibriError::VadNotConfigured)
         ));
-        let file = File::buffer(sine(16000, 0.1), 16000, FileConfig::default()).unwrap();
+        let file = File::buffer(sine(16000, 0.1), 16000, 1, FileConfig::default()).unwrap();
         assert!(matches!(
             file.analyse(),
             Err(DecibriError::VadNotConfigured)
@@ -2319,12 +2504,12 @@ mod tests {
     #[cfg(feature = "vad")]
     #[test]
     fn analyze_after_partial_iteration_errors() {
-        let mut file = File::buffer(sine(16000, 0.5), 16000, FileConfig::default()).unwrap();
+        let mut file = File::buffer(sine(16000, 0.5), 16000, 1, FileConfig::default()).unwrap();
         let first = file.next();
         assert!(matches!(first, Some(Ok(_))), "the first chunk is delivered");
         assert!(matches!(file.analyze(), Err(DecibriError::FileEngaged)));
 
-        let mut file = File::buffer(sine(16000, 0.5), 16000, FileConfig::default()).unwrap();
+        let mut file = File::buffer(sine(16000, 0.5), 16000, 1, FileConfig::default()).unwrap();
         let _ = file.next();
         assert!(matches!(file.analyse(), Err(DecibriError::FileEngaged)));
     }
@@ -2343,7 +2528,7 @@ mod tests {
         /// Drive a fresh `File` through one iteration route, then report
         /// whether the analysis that follows refuses.
         fn refuses_after(drive: impl FnOnce(&mut File)) -> bool {
-            let mut file = File::buffer(sine(16000, 0.5), 16000, FileConfig::default()).unwrap();
+            let mut file = File::buffer(sine(16000, 0.5), 16000, 1, FileConfig::default()).unwrap();
             drive(&mut file);
             matches!(file.analyze(), Err(DecibriError::FileEngaged))
         }
@@ -2471,13 +2656,13 @@ mod tests {
     fn analyze_after_iteration_without_delivery_errors() {
         // An empty source: the first `next()` flushes the chain and returns
         // nothing, having delivered no chunk at all.
-        let mut file = File::buffer(Vec::new(), 16000, FileConfig::default()).unwrap();
+        let mut file = File::buffer(Vec::new(), 16000, 1, FileConfig::default()).unwrap();
         assert!(file.next().is_none(), "an empty source delivers no chunk");
         assert!(matches!(file.analyze(), Err(DecibriError::FileEngaged)));
 
         // A drained source: iteration ran to its end, which is the shape a
         // caller reaches by streaming the whole recording first.
-        let mut file = File::buffer(sine(16000, 0.5), 16000, FileConfig::default()).unwrap();
+        let mut file = File::buffer(sine(16000, 0.5), 16000, 1, FileConfig::default()).unwrap();
         file.by_ref().for_each(drop);
         assert!(matches!(file.analyze(), Err(DecibriError::FileEngaged)));
     }
@@ -2487,7 +2672,7 @@ mod tests {
     /// analysis alone.
     #[test]
     fn iteration_past_exhaustion_stays_quiet() {
-        let mut file = File::buffer(sine(16000, 0.5), 16000, FileConfig::default()).unwrap();
+        let mut file = File::buffer(sine(16000, 0.5), 16000, 1, FileConfig::default()).unwrap();
         let delivered = file.by_ref().filter(|chunk| chunk.is_ok()).count();
         assert!(delivered > 0, "the first pass delivers audio");
         assert!(file.next().is_none(), "a drained File ends quietly");
@@ -2703,10 +2888,10 @@ mod tests {
     fn vad_rate_follows_detector_native_targets() {
         let mut config = vad_file_config();
         config.sample_rate = 8000;
-        let file = File::buffer(sine(8000, 0.1), 8000, config).unwrap();
+        let file = File::buffer(sine(8000, 0.1), 8000, 1, config).unwrap();
         assert_eq!(file.vad_rate(), Some(8000));
 
-        let file = File::buffer(sine(16000, 0.1), 16000, FileConfig::default()).unwrap();
+        let file = File::buffer(sine(16000, 0.1), 16000, 1, FileConfig::default()).unwrap();
         assert_eq!(file.vad_rate(), None);
     }
 
@@ -2718,7 +2903,7 @@ mod tests {
         let input = sine(16000, 0.2);
         let mut config = vad_file_config();
         config.dc_removal = true;
-        let mut file = File::buffer(input.clone(), 16000, config).unwrap();
+        let mut file = File::buffer(input.clone(), 16000, 1, config).unwrap();
         let mut fed: Vec<f32> = Vec::new();
         loop {
             let chunk = match file.next() {
@@ -2733,7 +2918,7 @@ mod tests {
         // DC-removal transform it equals the input exactly.
         assert_eq!(fed, input);
 
-        let mut plain = File::buffer(input, 16000, FileConfig::default()).unwrap();
+        let mut plain = File::buffer(input, 16000, 1, FileConfig::default()).unwrap();
         assert!(plain.vad_input().is_none());
     }
 
@@ -2779,7 +2964,7 @@ mod tests {
             ("flac", &b"fLaC"[..]),
         ] {
             with_save_path(&format!("roundtrip.{ext}"), |path| {
-                let file = File::buffer(input.clone(), 16000, FileConfig::default()).unwrap();
+                let file = File::buffer(input.clone(), 16000, 1, FileConfig::default()).unwrap();
                 let report = file.save(path, SaveOptions::default()).unwrap();
                 assert_eq!(report.clipped_samples, 0, "{ext}: nothing to clip");
                 assert_eq!(report.non_finite_samples, 0, "{ext}: nothing to repair");
@@ -2811,13 +2996,13 @@ mod tests {
             ..Default::default()
         };
         let expected: Vec<f32> =
-            collect(File::buffer(input.clone(), 16000, config.clone()).unwrap())
+            collect(File::buffer(input.clone(), 16000, 1, config.clone()).unwrap())
                 .iter()
                 .map(|&s| quantise_i16(s))
                 .collect();
         assert_ne!(expected, input, "the conditioning changed the audio");
         with_save_path("conditioned.wav", |path| {
-            let file = File::buffer(input.clone(), 16000, config.clone()).unwrap();
+            let file = File::buffer(input.clone(), 16000, 1, config.clone()).unwrap();
             file.save(path, SaveOptions::default()).unwrap();
             let back = collect(File::open(path, FileConfig::default()).unwrap());
             assert_eq!(back, expected, "the file holds the conditioned stream");
@@ -2830,7 +3015,7 @@ mod tests {
     /// unread remainder of a partially streamed source.
     #[test]
     fn save_after_iteration_reports_file_engaged() {
-        let mut file = File::buffer(sine(16000, 0.1), 16000, FileConfig::default()).unwrap();
+        let mut file = File::buffer(sine(16000, 0.1), 16000, 1, FileConfig::default()).unwrap();
         let _ = file.next();
         with_save_path("engaged.wav", |path| {
             let err = file.save(path, SaveOptions::default()).unwrap_err();
@@ -2839,7 +3024,7 @@ mod tests {
 
         // Engaged wins over an invalid compression level, matching the
         // check order pinned for analyze.
-        let mut file = File::buffer(sine(16000, 0.1), 16000, FileConfig::default()).unwrap();
+        let mut file = File::buffer(sine(16000, 0.1), 16000, 1, FileConfig::default()).unwrap();
         let _ = file.next();
         with_save_path("engaged-order.flac", |path| {
             let options = SaveOptions {
@@ -2858,7 +3043,7 @@ mod tests {
     fn save_format_override_beats_the_extension() {
         let input = grid_samples(400);
         with_save_path("override.flac", |path| {
-            let file = File::buffer(input.clone(), 16000, FileConfig::default()).unwrap();
+            let file = File::buffer(input.clone(), 16000, 1, FileConfig::default()).unwrap();
             let options = SaveOptions {
                 format: Some(SaveFormat::Wav),
                 ..Default::default()
@@ -2868,7 +3053,7 @@ mod tests {
             assert_eq!(&bytes[..4], b"RIFF", "the override picked WAV");
         });
         with_save_path("override.dat", |path| {
-            let file = File::buffer(input.clone(), 16000, FileConfig::default()).unwrap();
+            let file = File::buffer(input.clone(), 16000, 1, FileConfig::default()).unwrap();
             let options = SaveOptions {
                 format: Some(SaveFormat::Flac),
                 ..Default::default()
@@ -2890,7 +3075,7 @@ mod tests {
     fn save_refuses_an_unrecognised_extension() {
         let input = grid_samples(400);
         with_save_path("refused.mp3", |path| {
-            let file = File::buffer(input.clone(), 16000, FileConfig::default()).unwrap();
+            let file = File::buffer(input.clone(), 16000, 1, FileConfig::default()).unwrap();
             let err = file.save(path, SaveOptions::default()).unwrap_err();
             match err {
                 DecibriError::AudioFormatUnsupported { reason } => {
@@ -2904,7 +3089,7 @@ mod tests {
             assert!(!path.exists(), "no file appears for a refused save");
         });
         with_save_path("refused-no-extension", |path| {
-            let file = File::buffer(input.clone(), 16000, FileConfig::default()).unwrap();
+            let file = File::buffer(input.clone(), 16000, 1, FileConfig::default()).unwrap();
             let err = file.save(path, SaveOptions::default()).unwrap_err();
             assert!(matches!(err, DecibriError::AudioFormatUnsupported { .. }));
             assert!(!path.exists());
@@ -2918,7 +3103,7 @@ mod tests {
         let input = grid_samples(400);
         for name in ["upper.WAV", "mixed.Flac", "short.aif", "compressed.aifc"] {
             with_save_path(name, |path| {
-                let file = File::buffer(input.clone(), 16000, FileConfig::default()).unwrap();
+                let file = File::buffer(input.clone(), 16000, 1, FileConfig::default()).unwrap();
                 file.save(path, SaveOptions::default()).unwrap();
                 let back = collect(File::open(path, FileConfig::default()).unwrap());
                 assert_eq!(back, input, "{name}: saved and read back");
@@ -2968,7 +3153,7 @@ mod tests {
         input[20] = -1.85;
         input[30] = 2.5;
         with_save_path("clipped.wav", |path| {
-            let file = File::buffer(input.clone(), 16000, FileConfig::default()).unwrap();
+            let file = File::buffer(input.clone(), 16000, 1, FileConfig::default()).unwrap();
             let report = file.save(path, SaveOptions::default()).unwrap();
             assert_eq!(
                 report.clipped_samples, 3,
@@ -2997,7 +3182,7 @@ mod tests {
         input[20] = f32::INFINITY;
         input[30] = f32::NEG_INFINITY;
         with_save_path("nonfinite.wav", |path| {
-            let file = File::buffer(input.clone(), 16000, FileConfig::default()).unwrap();
+            let file = File::buffer(input.clone(), 16000, 1, FileConfig::default()).unwrap();
             let report = file.save(path, SaveOptions::default()).unwrap();
             assert_eq!(
                 report.non_finite_samples, 3,
@@ -3078,7 +3263,7 @@ mod tests {
         let dest = std::env::temp_dir()
             .join("decibri-save-no-such-directory")
             .join("out.wav");
-        let file = File::buffer(grid_samples(400), 16000, FileConfig::default()).unwrap();
+        let file = File::buffer(grid_samples(400), 16000, 1, FileConfig::default()).unwrap();
         let err = file.save(&dest, SaveOptions::default()).unwrap_err();
         match &err {
             DecibriError::FileWriteFailed { path, .. } => {
@@ -3096,7 +3281,7 @@ mod tests {
     fn save_empty_source_writes_a_valid_empty_file() {
         for ext in ["wav", "aiff", "flac"] {
             with_save_path(&format!("empty.{ext}"), |path| {
-                let file = File::buffer(Vec::new(), 16000, FileConfig::default()).unwrap();
+                let file = File::buffer(Vec::new(), 16000, 1, FileConfig::default()).unwrap();
                 let report = file.save(path, SaveOptions::default()).unwrap();
                 assert_eq!(report.clipped_samples, 0);
                 assert_eq!(report.non_finite_samples, 0);
@@ -3104,5 +3289,386 @@ mod tests {
                 assert!(back.is_empty(), "{ext}: zero samples back");
             });
         }
+    }
+
+    // ── Channels: delivery, the map, the feed, and the writers ──────────
+
+    /// Collect every conditioned sample a `File` iteration delivers,
+    /// asserting each chunk carries the target rate and the expected
+    /// delivered channel count. The multichannel counterpart of `collect`.
+    fn collect_at(file: File, channels: u16) -> Vec<f32> {
+        let rate = file.sample_rate();
+        let mut out = Vec::new();
+        for chunk in file {
+            let chunk = chunk.expect("iteration should not error");
+            assert_eq!(chunk.sample_rate, rate);
+            assert_eq!(chunk.channels, channels);
+            out.extend(chunk.data);
+        }
+        out
+    }
+
+    /// A `FileConfig` naming a delivered channel count, everything else at
+    /// the defaults.
+    fn channels_config(channels: u16) -> FileConfig {
+        FileConfig {
+            channels,
+            ..Default::default()
+        }
+    }
+
+    /// A `FileConfig` naming a channel map, with `channels` set to the map's
+    /// own length as the map contract requires.
+    fn map_config(map: &[u16]) -> FileConfig {
+        FileConfig {
+            channels: map.len() as u16,
+            channel_map: Some(map.to_vec()),
+            ..Default::default()
+        }
+    }
+
+    /// A buffer that is not a whole number of frames is refused before the
+    /// source is accepted, with the offending sizes named, and a zero input
+    /// channel count is refused as describing no buffer at all. Catches a
+    /// buffer form that truncates or rotates instead of refusing.
+    #[test]
+    fn a_misaligned_buffer_is_refused_and_consumes_nothing() {
+        let err = File::buffer(vec![0.0; 7], 16000, 2, channels_config(2))
+            .err()
+            .expect("the construction should be refused");
+        assert!(
+            matches!(
+                err,
+                DecibriError::BlockSizeNotFrameAligned {
+                    samples: 7,
+                    channels: 2
+                }
+            ),
+            "got {err:?}"
+        );
+        let err = File::buffer(vec![0.0; 4], 16000, 0, FileConfig::default())
+            .err()
+            .expect("the construction should be refused");
+        assert!(
+            matches!(err, DecibriError::ChannelsOutOfRange),
+            "got {err:?}"
+        );
+    }
+
+    /// Without a map, a delivered count above the source's own is refused
+    /// with both counts named: decibri delivers source channels and cannot
+    /// manufacture one the source does not have.
+    #[test]
+    fn an_unmapped_over_ask_is_refused_by_the_source_count() {
+        let err = File::buffer(grid_samples(8), 16000, 2, channels_config(4))
+            .err()
+            .expect("the construction should be refused");
+        assert!(
+            matches!(
+                err,
+                DecibriError::FileChannelsUnsupported {
+                    requested: 4,
+                    available: 2
+                }
+            ),
+            "got {err:?}"
+        );
+    }
+
+    /// Without a map, a strict subset above one is refused, naming the
+    /// channel map as the answer: which source channels a subset means has
+    /// no single reading, so decibri declines to guess, exactly as capture
+    /// does.
+    #[test]
+    fn an_unmapped_strict_subset_requires_the_map() {
+        let err = File::buffer(grid_samples(16), 16000, 8, channels_config(2))
+            .err()
+            .expect("the construction should be refused");
+        assert!(
+            matches!(
+                err,
+                DecibriError::FileChannelSelectionAmbiguous {
+                    requested: 2,
+                    available: 8
+                }
+            ),
+            "got {err:?}"
+        );
+        assert!(
+            err.to_string().contains("channel map"),
+            "the refusal names the channel map: {err}"
+        );
+    }
+
+    /// The file-side map is validated exactly as capture's: the length must
+    /// match the delivered count, and every entry must name a channel the
+    /// source has. The length error is the shared variant; the range error
+    /// is the file surface's own.
+    #[test]
+    fn the_file_map_is_validated_like_captures() {
+        let config = FileConfig {
+            channels: 2,
+            channel_map: Some(vec![0]),
+            ..Default::default()
+        };
+        let err = File::buffer(grid_samples(8), 16000, 2, config)
+            .err()
+            .expect("the construction should be refused");
+        assert!(
+            matches!(
+                err,
+                DecibriError::ChannelMapLengthMismatch {
+                    entries: 1,
+                    channels: 2
+                }
+            ),
+            "got {err:?}"
+        );
+
+        let err = File::buffer(grid_samples(8), 16000, 2, map_config(&[0, 5]))
+            .err()
+            .expect("the construction should be refused");
+        assert!(
+            matches!(
+                err,
+                DecibriError::FileChannelMapOutOfRange {
+                    index: 5,
+                    available: 2
+                }
+            ),
+            "got {err:?}"
+        );
+    }
+
+    /// A map gathers, permutes and duplicates on the file path exactly as on
+    /// the capture path: `[1, 0]` swaps a stereo source, `[1, 1]` duplicates
+    /// one channel, `[1]` selects one alone, and `[0, 1, 0, 1]` delivers
+    /// more channels than the source has. Sample values prove the gather;
+    /// nothing is averaged.
+    #[test]
+    fn a_map_gathers_permutes_and_duplicates_on_the_file_path() {
+        let frames = 500;
+        let source = grid_samples(frames * 2);
+        let left: Vec<f32> = source.iter().copied().step_by(2).collect();
+        let right: Vec<f32> = source.iter().copied().skip(1).step_by(2).collect();
+
+        let swapped = collect_at(
+            File::buffer(source.clone(), 16000, 2, map_config(&[1, 0])).unwrap(),
+            2,
+        );
+        let expected: Vec<f32> = right
+            .iter()
+            .zip(&left)
+            .flat_map(|(&r, &l)| [r, l])
+            .collect();
+        assert_eq!(swapped, expected, "[1, 0] permutes");
+
+        let doubled = collect_at(
+            File::buffer(source.clone(), 16000, 2, map_config(&[1, 1])).unwrap(),
+            2,
+        );
+        let expected: Vec<f32> = right.iter().flat_map(|&r| [r, r]).collect();
+        assert_eq!(doubled, expected, "[1, 1] duplicates");
+
+        let selected = collect_at(
+            File::buffer(source.clone(), 16000, 2, map_config(&[1])).unwrap(),
+            1,
+        );
+        assert_eq!(selected, right, "[1] selects one channel alone");
+
+        let widened = collect_at(
+            File::buffer(source.clone(), 16000, 2, map_config(&[0, 1, 0, 1])).unwrap(),
+            4,
+        );
+        let expected: Vec<f32> = left
+            .iter()
+            .zip(&right)
+            .flat_map(|(&l, &r)| [l, r, l, r])
+            .collect();
+        assert_eq!(
+            widened, expected,
+            "a map may deliver more than the source has"
+        );
+    }
+
+    /// Multichannel delivery chunks in whole frames: at three channels a
+    /// full chunk is 1600 frames (4800 interleaved samples), the final chunk
+    /// carries the remainder, and the concatenation equals the source
+    /// exactly, so no chunk boundary rotates the channel identities.
+    #[test]
+    fn multichannel_delivery_chunks_whole_frames() {
+        let frames = 2000;
+        let source = grid_samples(frames * 3);
+        let file = File::buffer(source.clone(), 16000, 3, channels_config(3)).unwrap();
+        let mut sizes = Vec::new();
+        let mut out = Vec::new();
+        for chunk in file {
+            let chunk = chunk.expect("iteration should not error");
+            assert_eq!(chunk.channels, 3);
+            sizes.push(chunk.data.len());
+            out.extend(chunk.data);
+        }
+        assert_eq!(sizes, vec![4800, 1200], "whole frames per chunk");
+        assert_eq!(out, source, "the delivery is exact and unrotated");
+    }
+
+    /// At one channel the detector feed takes the untouched path: the drained
+    /// feed equals the source byte for byte, so adding the collapse changed
+    /// nothing on the mono path.
+    #[cfg(feature = "vad")]
+    #[test]
+    fn the_feed_collapse_is_identity_at_one_channel() {
+        let input = sine(16000, 0.3);
+        let mut file = File::buffer(input.clone(), 16000, 1, vad_file_config()).unwrap();
+        let mut fed = Vec::new();
+        loop {
+            let Some(chunk) = file.next() else { break };
+            chunk.expect("iteration should not error");
+            fed.extend(file.vad_input().expect("vad configured"));
+        }
+        assert_eq!(fed, input);
+    }
+
+    /// Above one channel the detector feed is the frame average, the live
+    /// path's own collapse: a stereo delivery feeds the detector mono, and
+    /// the whole-recording analysis of the stereo source equals the analysis
+    /// of its own average. Catches a feed that hands the detector
+    /// interleaved multichannel.
+    #[cfg(feature = "vad")]
+    #[test]
+    fn the_feed_collapse_averages_above_one() {
+        // Stereo carrying the golden speech on both channels, slightly
+        // offset in level so the average is a genuine function of both.
+        let mono = golden_samples();
+        let stereo: Vec<f32> = mono.iter().flat_map(|&s| [s * 0.8, s * 1.2]).collect();
+        let average = crate::sample::downmix_to_mono(&stereo, 2);
+
+        let config = FileConfig {
+            channels: 2,
+            ..vad_file_config()
+        };
+        let mut file = File::buffer(stereo.clone(), 16000, 2, config).unwrap();
+        let mut fed = Vec::new();
+        loop {
+            let Some(chunk) = file.next() else { break };
+            chunk.expect("iteration should not error");
+            fed.extend(file.vad_input().expect("vad configured"));
+        }
+        assert_eq!(fed, average, "the feed is the frame average");
+
+        let config = FileConfig {
+            channels: 2,
+            ..vad_file_config()
+        };
+        let stereo_report = File::buffer(stereo, 16000, 2, config)
+            .unwrap()
+            .analyze()
+            .unwrap();
+        let mono_report = File::buffer(average, 16000, 1, vad_file_config())
+            .unwrap()
+            .analyze()
+            .unwrap();
+        assert_eq!(stereo_report.scores, mono_report.scores);
+        assert_eq!(stereo_report.segments, mono_report.segments);
+    }
+
+    /// THE round trip: a three-channel source saved and re-read reproduces
+    /// its channels in order, exactly, through WAV and FLAC alike. The first
+    /// end-to-end proof that what goes in multichannel comes back
+    /// multichannel, unaveraged and unrotated.
+    #[test]
+    fn save_round_trip_preserves_channels_in_order() {
+        let source = grid_samples(2000 * 3);
+        for ext in ["wav", "flac"] {
+            with_save_path(&format!("channels.{ext}"), |path| {
+                let file = File::buffer(source.clone(), 16000, 3, channels_config(3)).unwrap();
+                let report = file.save(path, SaveOptions::default()).unwrap();
+                assert_eq!(report.clipped_samples, 0, "{ext}: nothing to clip");
+                let back = collect_at(File::open(path, channels_config(3)).unwrap(), 3);
+                assert_eq!(back, source, "{ext}: the channels survive in order");
+            });
+        }
+    }
+
+    /// FLAC's channel ceiling is the container's own: nine channels are
+    /// refused with the container layer's exact text forwarded, and eight,
+    /// the format's limit itself, are written and read back exactly.
+    #[test]
+    fn flac_limit_is_the_containers_own_at_eight() {
+        with_save_path("nine.flac", |path| {
+            let file = File::buffer(grid_samples(9), 16000, 9, channels_config(9)).unwrap();
+            let err = file
+                .save(path, SaveOptions::default())
+                .expect_err("the save should be refused");
+            match &err {
+                DecibriError::AudioFormatUnsupported { reason } => {
+                    assert_eq!(
+                        reason, "9-channel audio is not a supported layout",
+                        "the refusal is the container layer's own text"
+                    );
+                }
+                other => panic!("expected AudioFormatUnsupported, got {other:?}"),
+            }
+        });
+
+        let source = grid_samples(200 * 8);
+        with_save_path("eight.flac", |path| {
+            let file = File::buffer(source.clone(), 16000, 8, channels_config(8)).unwrap();
+            file.save(path, SaveOptions::default()).unwrap();
+            let back = collect_at(File::open(path, channels_config(8)).unwrap(), 8);
+            assert_eq!(back, source, "the limit itself is accepted");
+        });
+    }
+
+    /// WAV's ceiling is `nBlockAlign`, a 16-bit field holding the frame's
+    /// byte size: at the 16-bit samples decibri writes, 32767 channels fit
+    /// and 32768 do not. Both sides of the boundary are the container
+    /// layer's answer, not decibri's.
+    #[test]
+    fn wav_limit_is_block_align_not_decibris() {
+        with_save_path("over.wav", |path| {
+            let file =
+                File::buffer(vec![0.0; 32768], 16000, 32768, channels_config(32768)).unwrap();
+            let err = file
+                .save(path, SaveOptions::default())
+                .expect_err("the save should be refused");
+            assert!(
+                matches!(err, DecibriError::AudioFormatUnsupported { .. }),
+                "got {err:?}"
+            );
+        });
+        with_save_path("wide.wav", |path| {
+            let file =
+                File::buffer(grid_samples(32767), 16000, 32767, channels_config(32767)).unwrap();
+            file.save(path, SaveOptions::default()).unwrap();
+            let back = collect_at(File::open(path, channels_config(32767)).unwrap(), 32767);
+            assert_eq!(back.len(), 32767, "the boundary itself is accepted");
+        });
+    }
+
+    /// The negative control on the channel count: where no container limit
+    /// applies, the whole path serves `u16::MAX` channels, delivery and AIFF
+    /// save alike. An invented decibri-side maximum added anywhere on the
+    /// file path fails here loudly.
+    #[test]
+    fn no_invented_channel_maximum_on_the_file_path() {
+        let channels = u16::MAX;
+        let source = grid_samples(channels as usize);
+        let delivered = collect_at(
+            File::buffer(source.clone(), 16000, channels, channels_config(channels)).unwrap(),
+            channels,
+        );
+        assert_eq!(delivered, source, "delivery serves u16::MAX channels");
+
+        with_save_path("widest.aiff", |path| {
+            let file =
+                File::buffer(source.clone(), 16000, channels, channels_config(channels)).unwrap();
+            file.save(path, SaveOptions::default()).unwrap();
+            let back = collect_at(
+                File::open(path, channels_config(channels)).unwrap(),
+                channels,
+            );
+            assert_eq!(back, source, "AIFF carries the count unbounded");
+        });
     }
 }

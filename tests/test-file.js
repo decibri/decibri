@@ -190,9 +190,46 @@ async function fileTests(h) {
     'inputRate must be between 1000 and 384000'
   );
 
+  // inputChannels is the channel counterpart of inputRate: shape-checked on
+  // the buffer path, and refused on the open path, where the header answers.
+  assertThrows(
+    () => File.buffer(new Float32Array(16), { inputRate: 16000, inputChannels: 1.5 }),
+    TypeError,
+    'inputChannels must be an integer'
+  );
+  assertThrows(
+    () => File.buffer(new Float32Array(16), { inputRate: 16000, inputChannels: 0 }),
+    RangeError,
+    'inputChannels must be between 1 and 65535'
+  );
+  assertThrows(
+    () => new File(wavPath, { inputChannels: 2 }),
+    TypeError,
+    'inputChannels applies only to File.buffer'
+  );
+  await assertRejects(
+    () => File.open(wavPath, { inputChannels: 2 }),
+    TypeError,
+    'inputChannels applies only to File.buffer'
+  );
+  // A sample count that is not a whole number of frames at the declared
+  // interleave is the core's refusal, surfaced as the same RangeError class
+  // the live block-size refusal carries.
+  assertThrows(
+    () => File.buffer(new Float32Array(7), { inputRate: 16000, inputChannels: 2, channels: 2 }),
+    RangeError,
+    'the requested block size of 7 samples is not a whole number of 2-channel frames'
+  );
+
   console.log('File: option validation mirrors Microphone');
 
   assertThrows(() => new File(wavPath, { sampleRate: 999 }), RangeError, 'sample rate must be between');
+  // The channel options carry the Microphone's own checks and messages.
+  assertThrows(() => new File(wavPath, { channels: 0 }), RangeError, 'channels must be at least 1');
+  assertThrows(() => new File(wavPath, { channelMap: 'left' }), TypeError, 'Invalid channelMap value');
+  assertThrows(() => new File(wavPath, { channels: 1, channelMap: [0.5] }), TypeError, 'channelMap entries must be integers');
+  assertThrows(() => new File(wavPath, { channels: 1, channelMap: [-1] }), RangeError, 'channelMap entries must be between 0 and 65535');
+  assertThrows(() => new File(wavPath, { channels: 2, channelMap: [0] }), RangeError, 'channelMap must have exactly one entry per channel');
   assertThrows(() => new File(wavPath, { vad: true }), TypeError, 'vad: true is no longer supported');
   assertThrows(() => new File(wavPath, { vad: 'bogus' }), TypeError, 'Invalid vad value');
   // The flat vadThreshold/vadHoldoff forms raise the same migration error a
@@ -774,9 +811,11 @@ async function fileTests(h) {
     'a plain PCM stream writes a file that reads back sample for sample'
   );
 
-  // The writer's own validation: the rate is required and ranged, the audio
-  // is mono, the dtype is one of the two encodings, and a byte stream that
-  // does not divide into whole samples is refused rather than truncated.
+  // The writer's own validation: the rate is required and ranged, the
+  // channel count is floor-bounded only (each container's own ceiling
+  // answers at the write), the dtype is one of the two encodings, and a
+  // byte stream that does not divide into whole samples is refused rather
+  // than truncated.
   assertThrows(() => new AudioWriter(42, { sampleRate: 16000 }), TypeError, 'path must be a string');
   assertThrows(() => new AudioWriter(path.join(tmp, 'w.wav'), {}), TypeError, 'sampleRate is required');
   assertThrows(
@@ -785,9 +824,9 @@ async function fileTests(h) {
     'sample rate must be between 1000 and 384000'
   );
   assertThrows(
-    () => new AudioWriter(path.join(tmp, 'w.wav'), { sampleRate: 16000, channels: 2 }),
+    () => new AudioWriter(path.join(tmp, 'w.wav'), { sampleRate: 16000, channels: 0 }),
     RangeError,
-    'multichannel write is not supported'
+    'channels must be at least 1'
   );
   assertThrows(
     () => new AudioWriter(path.join(tmp, 'w.wav'), { sampleRate: 16000, dtype: 'int8' }),
@@ -807,6 +846,167 @@ async function fileTests(h) {
       ),
     RangeError,
     'do not divide into whole int16 samples'
+  );
+
+  console.log('File: channels and the map reach the file surface');
+
+  // A stereo source with distinct channels, on the 16-bit grid so every
+  // comparison is exact: L a bounded ramp, R its negation.
+  const stereoFrames = 4000;
+  const stereo = new Float32Array(stereoFrames * 2);
+  for (let f = 0; f < stereoFrames; f++) {
+    const v = ((f % 1201) - 600) / 32768;
+    stereo[f * 2] = v;
+    stereo[f * 2 + 1] = -v;
+  }
+
+  // channels: 2 delivers both channels interleaved, unaveraged, unrotated.
+  const bothOut = await readAll(
+    File.buffer(stereo, { inputRate: 16000, inputChannels: 2, channels: 2, dtype: 'float32' })
+  );
+  assert(
+    bothOut.length === stereo.length * 4,
+    `two channels deliver every interleaved sample (got ${bothOut.length / 4})`
+  );
+  let stereoIdentical = true;
+  for (let i = 0; i < stereo.length; i++) {
+    if (bothOut.readFloatLE(i * 4) !== stereo[i]) {
+      stereoIdentical = false;
+      break;
+    }
+  }
+  assert(stereoIdentical, 'the delivered stream is the source, channel for channel');
+
+  // A map selects and permutes: [1, 0] swaps the two channels.
+  const swappedOut = await readAll(
+    File.buffer(stereo, {
+      inputRate: 16000,
+      inputChannels: 2,
+      channels: 2,
+      channelMap: [1, 0],
+      dtype: 'float32',
+    })
+  );
+  let swapOk = true;
+  for (let f = 0; f < stereoFrames; f++) {
+    if (
+      swappedOut.readFloatLE(f * 8) !== stereo[f * 2 + 1] ||
+      swappedOut.readFloatLE(f * 8 + 4) !== stereo[f * 2]
+    ) {
+      swapOk = false;
+      break;
+    }
+  }
+  assert(swapOk, 'channelMap [1, 0] permutes the delivered channels');
+
+  // The refusals carry the file surface's own identities: an over-ask, an
+  // unmapped strict subset, and a map entry the source does not have.
+  let overAsk = null;
+  try {
+    File.buffer(stereo, { inputRate: 16000, inputChannels: 2, channels: 4 });
+  } catch (e) {
+    overAsk = e;
+  }
+  assert(
+    overAsk instanceof DecibriError &&
+      overAsk.code === 'FILE_CHANNELS_UNSUPPORTED' &&
+      overAsk.message === 'the file does not have 4 channels to deliver; it has 2',
+    `an unmapped over-ask carries FILE_CHANNELS_UNSUPPORTED (got ${overAsk && overAsk.code}: ${overAsk && overAsk.message})`
+  );
+  const eight = new Float32Array(64); // 8 frames of 8 channels
+  let subset = null;
+  try {
+    File.buffer(eight, { inputRate: 16000, inputChannels: 8, channels: 2 });
+  } catch (e) {
+    subset = e;
+  }
+  assert(
+    subset instanceof DecibriError &&
+      subset.code === 'FILE_CHANNEL_SELECTION_AMBIGUOUS' &&
+      subset.message === "delivering 2 of the file's 8 channels requires a channel map",
+    `an unmapped strict subset carries FILE_CHANNEL_SELECTION_AMBIGUOUS (got ${subset && subset.code}: ${subset && subset.message})`
+  );
+  let outOfRange = null;
+  try {
+    File.buffer(stereo, { inputRate: 16000, inputChannels: 2, channels: 2, channelMap: [0, 5] });
+  } catch (e) {
+    outOfRange = e;
+  }
+  assert(
+    outOfRange instanceof DecibriError &&
+      outOfRange.code === 'FILE_CHANNEL_MAP_OUT_OF_RANGE' &&
+      outOfRange.message === 'the file channel map names channel 5; the file has 2 channels',
+    `a map entry the source lacks carries FILE_CHANNEL_MAP_OUT_OF_RANGE (got ${outOfRange && outOfRange.code}: ${outOfRange && outOfRange.message})`
+  );
+
+  // The round trip: a stereo save re-read delivers the identical stream,
+  // and the written header carries the channel count.
+  const stereoDest = path.join(tmp, 'stereo.wav');
+  await File.buffer(stereo, {
+    inputRate: 16000,
+    inputChannels: 2,
+    channels: 2,
+  }).save(stereoDest);
+  const stereoHeader = fs.readFileSync(stereoDest);
+  assert(
+    stereoHeader.readUInt16LE(22) === 2,
+    `the saved WAV header carries 2 channels (got ${stereoHeader.readUInt16LE(22)})`
+  );
+  const stereoBack = await readAll(new File(stereoDest, { channels: 2 }));
+  const stereoSaved = await readAll(
+    File.buffer(stereo, { inputRate: 16000, inputChannels: 2, channels: 2 })
+  );
+  assert(
+    stereoBack.equals(stereoSaved),
+    'the stereo round trip reproduces the delivered stream exactly'
+  );
+
+  // The multichannel writer: a stereo pipe writes the identical file the
+  // stereo save writes.
+  const stereoPipe = path.join(tmp, 'stereo-pipe.wav');
+  await pipeline(
+    File.buffer(stereo, { inputRate: 16000, inputChannels: 2, channels: 2 }),
+    new AudioWriter(stereoPipe, { sampleRate: 16000, channels: 2 })
+  );
+  assert(
+    fs.readFileSync(stereoDest).equals(fs.readFileSync(stereoPipe)),
+    'the stereo pipe and save() produce byte-identical files'
+  );
+
+  // FLAC's ceiling is the container's own, surfaced with its own text.
+  await assertRejects(
+    () =>
+      File.buffer(new Float32Array(9), {
+        inputRate: 16000,
+        inputChannels: 9,
+        channels: 9,
+      }).save(path.join(tmp, 'nine.flac')),
+    DecibriError,
+    '9-channel audio is not a supported layout'
+  );
+
+  // File-time VAD advances by frames, not by interleaved samples: a stereo
+  // tail of 0.25 s of silence sits inside the 300 ms holdoff, so no silence
+  // event fires; counted in raw samples it would read as 0.5 s and fire.
+  const loudStereo = new Float32Array(16000 * 2 * 0.5 + 16000 * 2 * 0.25);
+  for (let f = 0; f < 8000; f++) {
+    const v = 0.5 * Math.sin((2 * Math.PI * 440 * f) / 16000);
+    loudStereo[f * 2] = v;
+    loudStereo[f * 2 + 1] = v;
+  }
+  const stereoVad = File.buffer(loudStereo, {
+    inputRate: 16000,
+    inputChannels: 2,
+    channels: 2,
+    vad: 'energy',
+  });
+  const stereoEvents = [];
+  stereoVad.on('speech', () => stereoEvents.push('speech'));
+  stereoVad.on('silence', () => stereoEvents.push('silence'));
+  await readAll(stereoVad);
+  assert(
+    stereoEvents.length === 1 && stereoEvents[0] === 'speech',
+    `file time advances by frames: a 0.25 s stereo tail stays inside the holdoff (got ${JSON.stringify(stereoEvents)})`
   );
 
   console.log('Microphone: wall-clock VAD state machine characterization');

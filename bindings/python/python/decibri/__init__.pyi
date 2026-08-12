@@ -82,6 +82,11 @@ from decibri.exceptions import (
 from decibri.exceptions import AudioFormatUnsupported as AudioFormatUnsupported
 from decibri.exceptions import AudioFileMalformed as AudioFileMalformed
 from decibri.exceptions import AudioFileTruncated as AudioFileTruncated
+from decibri.exceptions import FileChannelsUnsupported as FileChannelsUnsupported
+from decibri.exceptions import (
+    FileChannelSelectionAmbiguous as FileChannelSelectionAmbiguous,
+)
+from decibri.exceptions import FileChannelMapOutOfRange as FileChannelMapOutOfRange
 
 __version__: str
 __all__: list[str]

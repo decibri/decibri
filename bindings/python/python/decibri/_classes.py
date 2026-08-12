@@ -1641,6 +1641,8 @@ class File:
         path: str | Path,
         *,
         sample_rate: int = 16000,
+        channels: int = 1,
+        channel_map: list[int] | None = None,
         dtype: str = "int16",
         vad: bool | str | Vad = False,
         model_path: str | Path | None = None,
@@ -1657,13 +1659,24 @@ class File:
         Reads WAV, AIFF, AIFF-C and FLAC. The container is identified from
         the file's own bytes, so the path's extension does not decide how it
         is read. The input rate and channel count come from the file's
-        header; a multichannel file is downmixed, so the delivered stream is
-        mono. ``sample_rate`` is the target output rate, the same meaning it
-        has on ``Microphone``.
+        header. ``sample_rate`` is the target output rate, and ``channels``
+        and ``channel_map`` name what is delivered, all with the same
+        meanings they have on ``Microphone``, the source's header count
+        standing where the device's report stands: ``channels=1`` (the
+        default) delivers the average of every source channel, a count
+        equal to the source's own delivers every channel in source order,
+        and a ``channel_map`` of 0-based source channel indices selects and
+        permutes. An unmapped count above the source's own raises
+        ``FileChannelsUnsupported``; an unmapped strict subset above one
+        raises ``FileChannelSelectionAmbiguous``; a map entry the source
+        does not have raises ``FileChannelMapOutOfRange``. The source's
+        count is the only ceiling; no fixed maximum exists.
         """
         self._init_common(
             ("path", str(Path(path))),
             sample_rate=sample_rate,
+            channels=channels,
+            channel_map=channel_map,
             dtype=dtype,
             vad=vad,
             model_path=model_path,
@@ -1695,7 +1708,10 @@ class File:
         samples: "list[float] | np.ndarray[Any, Any]",
         *,
         input_rate: int,
+        input_channels: int = 1,
         sample_rate: int = 16000,
+        channels: int = 1,
+        channel_map: list[int] | None = None,
         dtype: str = "int16",
         vad: bool | str | Vad = False,
         model_path: str | Path | None = None,
@@ -1709,19 +1725,28 @@ class File:
     ) -> "File":
         """Wrap in-memory samples as an offline source.
 
-        ``samples`` is a list of floats or a numpy ndarray of mono
-        samples in ``[-1.0, 1.0]``. An ndarray must be one channel with a
-        floating dtype: a redundant axis (``(N, 1)`` or ``(1, N)``) is
-        accepted, an array with more than one axis longer than 1 raises
+        ``samples`` is a list of floats or a numpy ndarray of samples in
+        ``[-1.0, 1.0]``, frame-interleaved at ``input_channels`` (1, mono,
+        by default). At ``input_channels=1`` an ndarray must be one channel
+        with a floating dtype: a redundant axis (``(N, 1)`` or ``(1, N)``)
+        is accepted, an array with more than one axis longer than 1 raises
         ``ValueError``, and a non-floating dtype (int16 PCM, for example)
-        raises ``ValueError`` rather than being cast. Raw samples carry no
-        header, so ``input_rate`` (their native rate) is required;
-        ``sample_rate`` stays the target output rate.
+        raises ``ValueError`` rather than being cast. Above one input
+        channel an ndarray is either 1-D interleaved or 2-D
+        ``(frames, input_channels)``; any other shape raises ``ValueError``.
+        A sample count that is not a whole number of frames raises
+        ``BlockSizeNotFrameAligned``. Raw samples carry no header, so
+        ``input_rate`` (their native rate) is required and
+        ``input_channels`` is its channel counterpart; ``sample_rate``
+        stays the target output rate, and ``channels`` and ``channel_map``
+        name what is delivered, exactly as on ``File(path)``.
         """
         self = object.__new__(cls)
         self._init_common(
-            ("buffer", samples, input_rate),
+            ("buffer", samples, input_rate, input_channels),
             sample_rate=sample_rate,
+            channels=channels,
+            channel_map=channel_map,
             dtype=dtype,
             vad=vad,
             model_path=model_path,
@@ -1740,6 +1765,8 @@ class File:
         source: tuple[Any, ...],
         *,
         sample_rate: int,
+        channels: int,
+        channel_map: list[int] | None,
         dtype: str,
         vad: bool | str | Vad,
         model_path: str | Path | None,
@@ -1872,6 +1899,29 @@ class File:
                 f"limiter must be in [-3.0, 0.0]; got {limiter}"
             )
 
+        # Validate the channel map's shape exactly as Microphone.__init__
+        # does: a list of integers in the channel count's width, with one
+        # entry per delivered channel (the core names the length failure, so
+        # the wrapper raises its class). Whether each entry exists on the
+        # source is the core's check, made against the source's own count at
+        # construction, because only the opened source can say how many
+        # channels it has; no fixed maximum exists on this path.
+        if channel_map is not None:
+            for entry in channel_map:
+                if not isinstance(entry, int) or isinstance(entry, bool):
+                    raise TypeError(
+                        f"channel_map entries must be integers; got {entry!r}"
+                    )
+                if not 0 <= entry <= 65535:
+                    raise ValueError(
+                        f"channel_map entries must be in [0, 65535]; got {entry}"
+                    )
+            if len(channel_map) != channels:
+                raise exceptions.ChannelMapLengthMismatch(
+                    f"the channel map has {len(channel_map)} entries; it must "
+                    f"have exactly one entry per delivered channel ({channels})"
+                )
+
         resolved_ort_path: str | None = None
         if (vad_enabled and vad_mode == "silero") or denoise is not None:
             from decibri._ort_resolver import resolve_ort_dylib_path
@@ -1882,6 +1932,8 @@ class File:
 
         bridge_kwargs: dict[str, Any] = {
             "sample_rate": sample_rate,
+            "channels": channels,
+            "channel_map": channel_map,
             "format": dtype,
             "vad": vad_enabled,
             "vad_threshold": vad_threshold,
@@ -1902,6 +1954,7 @@ class File:
             self._bridge = _decibri.FileBridge.open(source[1], **bridge_kwargs)
         else:
             samples = source[1]
+            input_channels = source[3]
             # Lists pass through directly; numpy arrays are transported as
             # raw f32 little-endian bytes to avoid a per-sample boundary
             # cost. Anything else is rejected before it can be misread.
@@ -1918,15 +1971,29 @@ class File:
                     raise TypeError(
                         "samples must be a list of floats or a numpy ndarray"
                     )
-                # One channel means at most one axis longer than 1: a
-                # redundant axis squeezes away without reordering, while a
-                # second long axis carries channels the C-order flatten
-                # below would splice into the sample stream.
-                if sum(1 for length in samples.shape if length > 1) > 1:
+                if input_channels == 1:
+                    # One channel means at most one axis longer than 1: a
+                    # redundant axis squeezes away without reordering, while
+                    # a second long axis carries channels the C-order
+                    # flatten below would splice into the sample stream.
+                    if sum(1 for length in samples.shape if length > 1) > 1:
+                        raise ValueError(
+                            "samples must be one channel; got an array of shape "
+                            f"{samples.shape}. Select a single channel or mix "
+                            "down to mono before passing it."
+                        )
+                elif not (
+                    samples.ndim == 1
+                    or (samples.ndim == 2 and samples.shape[1] == input_channels)
+                ):
+                    # Above one input channel the array is either already
+                    # interleaved (1-D) or laid out one frame per row, one
+                    # channel per column, which the C-order flatten below
+                    # interleaves frame by frame.
                     raise ValueError(
-                        "samples must be one channel; got an array of shape "
-                        f"{samples.shape}. Select a single channel or mix "
-                        "down to mono before passing it."
+                        "samples must be 1-D interleaved or 2-D "
+                        f"(frames, input_channels); got shape {samples.shape} "
+                        f"with input_channels={input_channels}"
                     )
                 if not np.issubdtype(samples.dtype, np.floating):
                     raise ValueError(
@@ -1936,7 +2003,7 @@ class File:
                     )
                 samples = np.ascontiguousarray(samples, dtype=np.float32).tobytes()
             self._bridge = _decibri.FileBridge.buffer(
-                samples, source[2], **bridge_kwargs
+                samples, source[2], input_channels, **bridge_kwargs
             )
 
         self._vad_enabled = vad_enabled

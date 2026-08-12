@@ -782,6 +782,15 @@ class File extends Readable {
   constructor(filePath, options = {}, _internal = undefined) {
     super({ highWaterMark: options.highWaterMark, objectMode: false });
 
+    // The open path reads the source's channel count from the file's own
+    // header, so a caller-stated interleave has nothing to describe here;
+    // it is refused rather than ignored.
+    if (!_internal && options.inputChannels !== undefined) {
+      throw new TypeError(
+        'inputChannels applies only to File.buffer; a file carries its channel count in its own header'
+      );
+    }
+
     const prepared = _internal ? _internal.prepared : File._prepareOptions(options);
 
     // ── Store config ───────────────────────────────────────────────────────
@@ -799,6 +808,9 @@ class File extends Readable {
     this._silenceStartPos = null;
     this._position = 0;
     this._sampleRate = prepared.nativeOptions.sampleRate;
+    // The delivered channel count: file time advances by frames, so the
+    // interleaved sample count divides by it before it divides by the rate.
+    this._channels = prepared.channels;
     this._bytesPerSample = prepared.dtype === 'int16' ? 2 : 4;
     this._ended = false;
     // Set the moment the consumer asks the stream for data, which is earlier
@@ -835,6 +847,42 @@ class File extends Readable {
     const sampleRate = options.sampleRate ?? 16000;
     if (sampleRate < 1000 || sampleRate > 384000) {
       throw new RangeError('sample rate must be between 1000 and 384000');
+    }
+
+    // The number of channels delivered, interleaved frame by frame. Bounded
+    // below here; bounded above by the source's own channel count alone,
+    // which the core reads from the header (or takes from inputChannels)
+    // when the source is opened. No fixed maximum exists on this path.
+    const channels = options.channels ?? 1;
+    if (channels < 1) {
+      throw new RangeError('channels must be at least 1');
+    }
+
+    // An optional list of 0-based source channel indices, one per delivered
+    // channel: delivered channel j carries source channel channelMap[j].
+    // Absence delivers the documented average of every source channel. The
+    // checks here are shape-only, exactly as the Microphone's: whether each
+    // entry exists on the source is the core's check, made against the
+    // source's own count, because only the opened source can say how many
+    // channels it has. No fixed maximum exists on this path.
+    const channelMap = options.channelMap;
+    if (channelMap !== undefined) {
+      if (!Array.isArray(channelMap)) {
+        throw new TypeError(
+          `Invalid channelMap value: ${JSON.stringify(channelMap)}. Expected an array of 0-based source channel indices, such as [0].`
+        );
+      }
+      for (const entry of channelMap) {
+        if (typeof entry !== 'number' || !Number.isInteger(entry)) {
+          throw new TypeError('channelMap entries must be integers');
+        }
+        if (entry < 0 || entry > 65535) {
+          throw new RangeError('channelMap entries must be between 0 and 65535');
+        }
+      }
+      if (channelMap.length !== channels) {
+        throw new RangeError('channelMap must have exactly one entry per channel');
+      }
     }
 
     const dtype = options.dtype ?? 'int16';
@@ -950,12 +998,15 @@ class File extends Readable {
 
     return {
       dtype,
+      channels,
       vadEnabled,
       vadMode,
       vadThreshold: vadThreshold ?? (vadMode === 'silero' ? 0.5 : 0.01),
       vadHoldoff: vadHoldoff ?? 300,
       nativeOptions: {
         sampleRate,
+        channels,
+        channelMap,
         format: dtype,
         // Pass the mode to native only when VAD is enabled, exactly as the
         // Microphone options do; absent means VAD off in native.
@@ -991,6 +1042,13 @@ class File extends Readable {
     if (typeof filePath !== 'string') {
       throw new TypeError('path must be a string');
     }
+    // The same refusal the synchronous constructor makes: a path's channel
+    // count comes from its own header.
+    if (options.inputChannels !== undefined) {
+      throw new TypeError(
+        'inputChannels applies only to File.buffer; a file carries its channel count in its own header'
+      );
+    }
     const prepared = File._prepareOptions(options);
     let native;
     try {
@@ -1003,12 +1061,13 @@ class File extends Readable {
 
   /**
    * Wrap in-memory samples as an offline source. `samples` must be a
-   * `Float32Array` of mono samples in [-1.0, 1.0]; a raw `Buffer` of PCM
-   * bytes is rejected as ambiguous (encoded bytes, int16 PCM, and f32
-   * samples are indistinguishable, and decibri's own capture output is a
-   * `Buffer`). Raw samples carry no header, so `inputRate` (their native
-   * rate) is required; `sampleRate` stays the target output rate. No I/O,
-   * so construction is synchronous.
+   * `Float32Array` of samples in [-1.0, 1.0], frame-interleaved at
+   * `inputChannels` (1, mono, by default); a raw `Buffer` of PCM bytes is
+   * rejected as ambiguous (encoded bytes, int16 PCM, and f32 samples are
+   * indistinguishable, and decibri's own capture output is a `Buffer`). Raw
+   * samples carry no header, so `inputRate` (their native rate) is
+   * required; `sampleRate` stays the target output rate. No I/O, so
+   * construction is synchronous.
    *
    * @param {Float32Array} samples
    * @param {import('./decibri').FileBufferOptions} [options]
@@ -1030,10 +1089,23 @@ class File extends Readable {
     if (inputRate < 1000 || inputRate > 384000) {
       throw new RangeError('inputRate must be between 1000 and 384000');
     }
+    // The channel counterpart of inputRate: the interleave of the caller's
+    // own samples. Shape-checked here; whether the samples divide into
+    // whole frames at this count is the core's check.
+    const inputChannels = options.inputChannels ?? 1;
+    if (typeof inputChannels !== 'number' || !Number.isInteger(inputChannels)) {
+      throw new TypeError('inputChannels must be an integer');
+    }
+    if (inputChannels < 1 || inputChannels > 65535) {
+      throw new RangeError('inputChannels must be between 1 and 65535');
+    }
     const prepared = File._prepareOptions(options);
     let native;
     try {
-      native = FileHandle.buffer(samples, inputRate, prepared.nativeOptions);
+      native = FileHandle.buffer(samples, inputRate, {
+        ...prepared.nativeOptions,
+        inputChannels,
+      });
     } catch (err) {
       throw wrapNativeError(err);
     }
@@ -1121,7 +1193,9 @@ class File extends Readable {
       // before the opt-in conditioning step, exactly as the live pump does.
       this._processVadValue(this._native.vadProbability, chunk.length);
     } else {
-      this._position += chunk.length / this._bytesPerSample / this._sampleRate;
+      // Bytes to interleaved samples to frames to seconds of file time.
+      this._position +=
+        chunk.length / this._bytesPerSample / this._channels / this._sampleRate;
     }
     this.push(chunk);
   }
@@ -1135,7 +1209,9 @@ class File extends Readable {
    */
   _processVadValue(value, chunkBytes) {
     const chunkStart = this._position;
-    const chunkEnd = chunkStart + chunkBytes / this._bytesPerSample / this._sampleRate;
+    // Bytes to interleaved samples to frames to seconds of file time.
+    const chunkEnd =
+      chunkStart + chunkBytes / this._bytesPerSample / this._channels / this._sampleRate;
     this._position = chunkEnd;
     this._vadScore = value;
     if (value >= this._vadThreshold) {
@@ -1328,7 +1404,9 @@ class AudioWriter extends Writable {
    *
    * Chunks are raw PCM bytes in `dtype` ('int16' little-endian by default,
    * matching what a `File` or `Microphone` emits; 'float32' for raw f32
-   * bytes). Audio is written mono: `channels` may only be 1. `sampleRate` is
+   * bytes), frame-interleaved at `channels` (1, mono, by default; the
+   * stream's total sample count must divide into whole frames, and each
+   * container's own channel ceiling applies at the write). `sampleRate` is
    * required, because raw audio carries no header to read one from.
    *
    * The file is written when the stream finishes ('finish' fires after the
@@ -1351,9 +1429,12 @@ class AudioWriter extends Writable {
     if (sampleRate < 1000 || sampleRate > 384000) {
       throw new RangeError('sample rate must be between 1000 and 384000');
     }
-    const channels = options.channels;
-    if (channels !== undefined && channels !== 1) {
-      throw new RangeError('multichannel write is not supported; channels must be 1 (mono)');
+    // Bounded below here; above, each container's own ceiling answers at
+    // the write, with the container layer's own message. No decibri-side
+    // maximum exists on this path.
+    const channels = options.channels ?? 1;
+    if (channels < 1) {
+      throw new RangeError('channels must be at least 1');
     }
     const dtype = options.dtype ?? 'int16';
     if (dtype !== 'int16' && dtype !== 'float32') {
@@ -1364,6 +1445,7 @@ class AudioWriter extends Writable {
     this._saveOptions = File._prepareSaveOptions(options);
     this._filePath = filePath;
     this._sampleRate = sampleRate;
+    this._channels = channels;
     this._dtype = dtype;
     this._chunks = [];
     this._report = null;
@@ -1411,13 +1493,17 @@ class AudioWriter extends Writable {
         samples[i] = bytes.readFloatLE(i * 4);
       }
     }
-    // The write is File.save on a source at the writer's own rate: the same
-    // encode path, so the two spellings produce the same bytes.
+    // The write is File.save on a source at the writer's own rate and
+    // interleave: the same encode path, so the two spellings produce the
+    // same bytes. A stream that does not divide into whole frames is the
+    // core's refusal, surfaced here when the stream finishes.
     let file;
     try {
       file = File.buffer(samples, {
         inputRate: this._sampleRate,
+        inputChannels: this._channels,
         sampleRate: this._sampleRate,
+        channels: this._channels,
       });
     } catch (err) {
       callback(err);

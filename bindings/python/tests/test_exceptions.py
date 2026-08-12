@@ -1,7 +1,7 @@
 """Exception hierarchy tests.
 
-Covers all 61 exception classes shipped in the public ``decibri`` namespace:
-1 base (DecibriError) + 39 direct subclasses + DeviceError intermediate
+Covers all 64 exception classes shipped in the public ``decibri`` namespace:
+1 base (DecibriError) + 42 direct subclasses + DeviceError intermediate
 + 8 direct DeviceError subclasses + OrtError intermediate + 8 direct
 OrtError subclasses + OrtPathError intermediate + 2 direct OrtPathError
 subclasses.
@@ -85,18 +85,21 @@ from decibri import (
     AudioFormatUnsupported,
     AudioFileMalformed,
     AudioFileTruncated,
+    FileChannelsUnsupported,
+    FileChannelSelectionAmbiguous,
+    FileChannelMapOutOfRange,
 )
 import pytest
 
 
 # ---------------------------------------------------------------------------
-# All 61 classes are reachable and inherit from Exception via DecibriError.
+# All 64 classes are reachable and inherit from Exception via DecibriError.
 # ---------------------------------------------------------------------------
 
 
 ALL_DECIBRI_ERROR_CLASSES = (
     DecibriError,
-    # 39 direct DecibriError subclasses (non-device, non-ORT). DeviceFailed
+    # 42 direct DecibriError subclasses (non-device, non-ORT). DeviceFailed
     # is a runtime device/driver failure (distinct from the DeviceError
     # enumeration/selection family); OnnxBackendFailed is the non-ORT ONNX
     # backend catch-all (distinct from the OrtError family); FileConsumed and
@@ -110,6 +113,9 @@ ALL_DECIBRI_ERROR_CLASSES = (
     MicrophoneChannelsUnsupported,
     MultichannelNotSupported,
     BlockSizeNotFrameAligned,
+    FileChannelsUnsupported,
+    FileChannelSelectionAmbiguous,
+    FileChannelMapOutOfRange,
     AecMultichannelUnsupported,
     FramesPerBufferOutOfRange,
     AgcTargetOutOfRange,
@@ -167,13 +173,15 @@ ALL_DECIBRI_ERROR_CLASSES = (
 
 
 def test_class_count() -> None:
-    # 61 total: 1 base + 39 direct + DeviceError + 8 device + OrtError
-    # + 8 ORT direct + OrtPathError + 2 path. The change over the prior 57 is
-    # the capture channel quartet: MicrophoneChannelsUnsupported (a count the
-    # device does not have), ChannelSelectionAmbiguous (an unmapped strict
-    # subset), BlockSizeNotFrameAligned (a read that would split a frame) and
-    # AecMultichannelUnsupported (the canceller with a count above one).
-    assert len(ALL_DECIBRI_ERROR_CLASSES) == 61
+    # 64 total: 1 base + 42 direct + DeviceError + 8 device + OrtError
+    # + 8 ORT direct + OrtPathError + 2 path. The change over the prior 61 is
+    # the file channel trio: FileChannelsUnsupported (a count the source does
+    # not have), FileChannelSelectionAmbiguous (an unmapped strict subset of
+    # the source's channels) and FileChannelMapOutOfRange (a map entry the
+    # source does not have), the offline counterparts of the capture channel
+    # refusals, with their own messages because the capture ones name a
+    # device.
+    assert len(ALL_DECIBRI_ERROR_CLASSES) == 64
 
 
 def test_all_inherit_from_decibri_error() -> None:
@@ -499,8 +507,8 @@ def _core_variant_names() -> list[str]:
     assert "PermissionDenied" in names, "known variant missing from the parsed table"
     # The count is pinned deliberately and must be updated when a core variant
     # is added or removed.
-    assert len(names) == 56, (
-        f"parsed {len(names)} variants from the core identity table, expected 56;"
+    assert len(names) == 59, (
+        f"parsed {len(names)} variants from the core identity table, expected 59;"
         " the count is pinned deliberately and must be updated when a core"
         " variant is added or removed"
     )
