@@ -509,9 +509,9 @@ impl DecibriBridge {
         self.running.store(true, Ordering::Relaxed);
         let running = self.running.clone();
         let format = self.format;
-        // After the engine's normalize chain the output is mono, so the block
-        // size is counted in OUTPUT channels (read from the stream), not the
-        // device channels.
+        // The block size is counted in OUTPUT channels (read from the
+        // stream): frames_per_buffer frames of the delivered count, not the
+        // device channels the capture was opened at.
         let output_channels = stream.channels();
         let target_samples = self.frames_per_buffer as usize * output_channels as usize;
         let vad_probability = self.vad_probability.clone();
@@ -844,6 +844,8 @@ fn to_napi_error(e: decibri::error::DecibriError) -> Error {
         | VadSampleRateUnsupported(_)
         | VadThresholdOutOfRange(_)
         | AecSampleRateUnsupported(_)
+        | AecMultichannelUnsupported { .. }
+        | BlockSizeNotFrameAligned { .. }
         | AudioFormatUnsupported { .. }
         | AudioFileMalformed { .. }
         | AudioFileTruncated { .. }
@@ -867,6 +869,8 @@ fn to_napi_error(e: decibri::error::DecibriError) -> Error {
         | StreamOpenFailed(_)
         | StreamStartFailed(_)
         | SpeakerChannelsUnsupported { .. }
+        | MicrophoneChannelsUnsupported { .. }
+        | ChannelSelectionAmbiguous { .. }
         | PermissionDenied
         | MicrophoneStreamClosed
         | SpeakerStreamClosed

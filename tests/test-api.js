@@ -68,11 +68,19 @@ async function testErrors() {
   assertThrows(() => new Microphone({ sampleRate: 999 }), RangeError, 'sample rate must be between 1000 and 384000');
   assertThrows(() => new Microphone({ sampleRate: 384001 }), RangeError, 'sample rate must be between 1000 and 384000');
 
-  // channels: mono only. A value below 1 is a plain range error; a value above
-  // 1 is rejected as multichannel (not silently downmixed to mono).
+  // channels: bounded below only. A value below 1 is a plain range error; the
+  // count is otherwise bounded by the resolved device alone, which answers at
+  // start(), so the wrapper refuses no value above 1.
   assertThrows(() => new Microphone({ channels: 0 }), RangeError, 'channels must be at least 1');
-  assertThrows(() => new Microphone({ channels: 2 }), RangeError, 'multichannel capture is not supported; channels must be 1 (mono)');
-  assertThrows(() => new Microphone({ channels: 33 }), RangeError, 'multichannel capture is not supported; channels must be 1 (mono)');
+  for (const channels of [2, 33]) {
+    try {
+      new Microphone({ channels }).stop();
+      passed++;
+    } catch (e) {
+      console.log(`  FAIL: channels ${channels} refused at construction: ${e.message}`);
+      failed++;
+    }
+  }
 
   // framesPerBuffer
   assertThrows(() => new Microphone({ framesPerBuffer: 63 }), RangeError, 'frames per buffer must be between 64 and 65536');

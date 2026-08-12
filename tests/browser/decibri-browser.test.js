@@ -1,5 +1,4 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { readFileSync } from 'node:fs';
 import pkg from '../../npm/decibri/package.json';
 
 // ── Browser API mocks ────────────────────────────────────────────────────────
@@ -161,24 +160,17 @@ describe('Microphone constructor validation', () => {
     const below = thrownBy(() => new Microphone({ channels: 0 }));
     expect(below).toBeInstanceOf(RangeError);
     expect(below.message).toBe('channels must be at least 1');
-
-    for (const channels of [2, 33]) {
-      const err = thrownBy(() => new Microphone({ channels }));
-      expect(err).toBeInstanceOf(RangeError);
-      expect(err.message).toBe('multichannel capture is not supported; channels must be 1 (mono)');
-    }
   });
 
-  it('accepts channels 1 and keeps the Web Audio ceiling on record', () => {
+  it('bounds channels below only at construction', () => {
+    // The count is bounded by the granted track alone, which answers at
+    // start(), so no count above 1 is refused here. The 1024 row is the
+    // negative control: a fixed maximum reintroduced at construction fails
+    // it loudly.
     expect(new Microphone({ channels: 1 })).toBeInstanceOf(Microphone);
-    // The 32-channel bound is unreachable while only 1 is accepted, so pin it
-    // in the source text: the recorded Web Audio floor must stay in place.
-    const source = readFileSync(
-      new URL('../../npm/decibri/src/browser/decibri-browser.js', import.meta.url),
-      'utf8'
-    );
-    expect(source).toContain('this._channels > 32');
-    expect(source).toContain("The Web Audio specification's floor");
+    for (const channels of [2, 33, 1024]) {
+      expect(new Microphone({ channels })).toBeInstanceOf(Microphone);
+    }
   });
 
   it('throws on invalid vad threshold', () => {
@@ -350,6 +342,97 @@ describe('Microphone channelMap at start', () => {
   });
 });
 
+describe('Microphone unmapped channels at start', () => {
+  beforeEach(resetMocks);
+
+  // The unmapped derivation has exactly two meanings, checked against the
+  // granted track's report with the engine's messages: 1 delivers the
+  // average, the granted count delivers the identity, and everything else is
+  // refused rather than decibri choosing channels the caller did not name.
+
+  it('rejects an unmapped strict subset with the engine message', async () => {
+    mockGetSettings.mockReturnValue({ channelCount: 6 });
+    const mic = new Microphone({ channels: 2 });
+    const errorFn = vi.fn();
+    mic.on('error', errorFn);
+
+    await expect(mic.start()).rejects.toThrow(
+      "a channel map is required to deliver 2 of the device's 6 input channels"
+    );
+    expect(errorFn).toHaveBeenCalledTimes(1);
+    expect(mockTrackStop).toHaveBeenCalled();
+    expect(mockContextClose).toHaveBeenCalled();
+    expect(mockAddModule).not.toHaveBeenCalled();
+    expect(mic.isOpen).toBe(false);
+  });
+
+  it('rejects a count above the grant with the engine message', async () => {
+    mockGetSettings.mockReturnValue({ channelCount: 2 });
+    const mic = new Microphone({ channels: 4 });
+    const errorFn = vi.fn();
+    mic.on('error', errorFn);
+
+    await expect(mic.start()).rejects.toThrow(
+      'the input device does not support 4 delivered channels; it reports 2'
+    );
+    expect(errorFn).toHaveBeenCalledTimes(1);
+    expect(mockTrackStop).toHaveBeenCalled();
+    expect(mic.isOpen).toBe(false);
+  });
+
+  it('accepts the identity and hands the count to the worklet', async () => {
+    mockGetSettings.mockReturnValue({ channelCount: 2 });
+    const mic = new Microphone({ channels: 2 });
+    await mic.start();
+    expect(mic.isOpen).toBe(true);
+    expect(capturedWorkletOptions.processorOptions.channels).toBe(2);
+    expect(capturedWorkletOptions.processorOptions.channelMap).toBe(null);
+    mic.stop();
+  });
+
+  it('a map lifts both rules: more delivered channels than the grant carries', async () => {
+    // The browser half of the deliberate asymmetry: [0, 0, 0, 0] on a mono
+    // grant is legitimate through the map and refused without one, because a
+    // map's entries are checked one at a time and may repeat.
+    mockGetSettings.mockReturnValue({ channelCount: 1 });
+    const mic = new Microphone({ channels: 4, channelMap: [0, 0, 0, 0] });
+    await mic.start();
+    expect(mic.isOpen).toBe(true);
+    expect(capturedWorkletOptions.processorOptions.channelMap).toEqual([0, 0, 0, 0]);
+    mic.stop();
+
+    resetMocks();
+    mockGetSettings.mockReturnValue({ channelCount: 1 });
+    const bare = new Microphone({ channels: 4 });
+    bare.on('error', () => {});
+    await expect(bare.start()).rejects.toThrow(
+      'the input device does not support 4 delivered channels; it reports 1'
+    );
+  });
+
+  it('defers the unmapped check to the worklet when the browser reports no channel count', async () => {
+    mockGetSettings.mockReturnValue({});
+    const mic = new Microphone({ channels: 2 });
+    const errorFn = vi.fn();
+    mic.on('error', errorFn);
+
+    await mic.start();
+    expect(mic.isOpen).toBe(true);
+
+    // The worklet reports the failure as a tagged control object on the same
+    // port the chunks ride; the wrapper surfaces it and stops.
+    mockPort.onmessage({
+      data: { type: 'error', message: "a channel map is required to deliver 2 of the device's 6 input channels" },
+    });
+    expect(errorFn).toHaveBeenCalledTimes(1);
+    expect(errorFn.mock.calls[0][0].message).toBe(
+      "a channel map is required to deliver 2 of the device's 6 input channels"
+    );
+    expect(mic.isOpen).toBe(false);
+    expect(mockTrackStop).toHaveBeenCalled();
+  });
+});
+
 describe('Microphone.start()', () => {
   beforeEach(resetMocks);
 
@@ -392,6 +475,7 @@ describe('Microphone.start()', () => {
       format: 'int16',
       nativeSampleRate: 48000,
       targetSampleRate: 16000,
+      channels: 1,
       channelMap: null,
     });
 
@@ -648,6 +732,30 @@ describe('Microphone VAD', () => {
     mockPort.onmessage({ data: loud.buffer });
 
     expect(mic.vadScore).toBe(0);
+    mic.stop();
+  });
+
+  it('scores a multichannel chunk on the average of its channels', async () => {
+    // The node path's detector feed collapses a multichannel signal to the
+    // engine average before scoring; the browser score does the same, so
+    // opposite-phase channels score as the silence their average is rather
+    // than as full-scale energy.
+    mockGetSettings.mockReturnValue({ channelCount: 2 });
+    const mic = new Microphone({ dtype: 'float32', channels: 2, vad: { model: 'energy', threshold: 0.01 } });
+    await mic.start();
+
+    const opposite = new Float32Array(100);
+    for (let i = 0; i < 100; i += 2) {
+      opposite[i] = 1.0;
+      opposite[i + 1] = -1.0;
+    }
+    mockPort.onmessage({ data: opposite.buffer });
+    expect(mic.vadScore).toBe(0);
+
+    const inPhase = new Float32Array(100).fill(0.5);
+    mockPort.onmessage({ data: inPhase.buffer });
+    expect(mic.vadScore).toBeCloseTo(0.5);
+
     mic.stop();
   });
 

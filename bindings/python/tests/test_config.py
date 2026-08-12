@@ -31,12 +31,12 @@ and live in test_vad.py Section A alongside the rest of the VAD surface.
 import pytest
 
 from decibri import (
+    AecMultichannelUnsupported,
     ChannelMapLengthMismatch,
     ChannelsOutOfRange,
     Microphone,
     FramesPerBufferOutOfRange,
     InvalidFormat,
-    MultichannelNotSupported,
     SampleRateOutOfRange,
     Speaker,
 )
@@ -121,19 +121,30 @@ def test_zero_channels_is_out_of_range() -> None:
     [
         pytest.param(2, id="channels_stereo"),
         pytest.param(33, id="channels_above_former_maximum"),
-        pytest.param(100, id="channels_far_above"),
+        pytest.param(1024, id="channels_beyond_any_device"),
     ],
 )
-def test_multichannel_request_is_rejected(channels: int) -> None:
-    """Capture is mono only: more than one channel raises MultichannelNotSupported
-    at construction (rejected, not silently downmixed) with the canonical Rust message.
+def test_channel_counts_above_one_construct(channels: int) -> None:
+    """Construction bounds channels below only; the count is otherwise bounded
+    by the resolved device alone, which answers at start(). A fixed maximum
+    reintroduced at construction fails against the counts here.
     """
-    with pytest.raises(MultichannelNotSupported) as exc_info:
-        Microphone(channels=channels)
+    Microphone(channels=channels)
+
+
+def test_aec_with_multichannel_is_rejected() -> None:
+    """Echo cancellation reads one near-end channel, so it is refused together
+    with a delivered count above 1 at construction, naming the count. One
+    channel selected from an array is the accepted pairing: the refusal is the
+    cross-field pair, not a ceiling on channels.
+    """
+    with pytest.raises(AecMultichannelUnsupported) as exc_info:
+        Microphone(channels=2, aec="tau")
     assert (
         str(exc_info.value)
-        == "multichannel capture is not supported; channels must be 1 (mono)"
+        == "echo cancellation requires a single delivered channel; channels is 2"
     )
+    Microphone(channels=1, channel_map=[3], aec="tau")
 
 
 @pytest.mark.parametrize(
@@ -177,6 +188,22 @@ def test_channel_map_of_one_entry_constructs() -> None:
     """
     mic = Microphone(channel_map=[0])
     assert mic is not None
+
+
+def test_channel_map_length_follows_the_delivered_count() -> None:
+    """The map's length must equal channels at any count, and the mismatch
+    message names both figures. One entry per delivered channel, in delivery
+    order: entries may repeat and may appear in any order, so a map both
+    selects and permutes.
+    """
+    with pytest.raises(ChannelMapLengthMismatch) as exc_info:
+        Microphone(channels=3, channel_map=[0, 1])
+    assert str(exc_info.value) == (
+        "the channel map has 2 entries; it must have "
+        "exactly one entry per delivered channel (3)"
+    )
+    Microphone(channels=2, channel_map=[1, 0])
+    Microphone(channels=4, channel_map=[0, 0, 0, 0])
 
 
 @pytest.mark.parametrize(

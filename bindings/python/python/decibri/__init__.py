@@ -29,8 +29,10 @@ from decibri._decibri import (
 from decibri.exceptions import (
     AgcTargetOutOfRange,
     AlreadyRunning,
+    BlockSizeNotFrameAligned,
     ChannelMapLengthMismatch,
     ChannelMapOutOfRange,
+    ChannelSelectionAmbiguous,
     ChannelsOutOfRange,
     DecibriError,
     DeviceEnumerationFailed,
@@ -81,6 +83,8 @@ from decibri.exceptions import (
     VadThresholdOutOfRange,
     AecSampleRateUnsupported,
     AecConfigInvalid,
+    AecMultichannelUnsupported,
+    MicrophoneChannelsUnsupported,
     AudioFormatUnsupported,
     AudioFileMalformed,
     AudioFileTruncated,
@@ -140,9 +144,10 @@ def record_to_file(
     sample_rate : int, optional
         Capture sample rate in Hz. Default 16000.
     channels : int, optional
-        Number of input channels. Capture is mono, so 1 (the default) is
-        the only accepted value; a higher value raises
-        ``MultichannelNotSupported``.
+        Number of channels to deliver and write. Default 1 (mono), which
+        averages every device channel. A count equal to the device's own
+        writes every device channel interleaved; a strict subset needs
+        ``Microphone`` directly, so it can carry a ``channel_map``.
     device : int | str | None, optional
         Input device selector. ``None`` (default) uses the system
         default input. Pass an integer index from ``input_devices()``
@@ -266,7 +271,7 @@ __all__ = [
     # Exception hierarchy entry points:
     # only the catch-target roots plus ForkAfterOrtInit are surfaced in
     # __all__ to keep `from decibri import *` legible. The full
-    # 32+-class hierarchy remains importable via top-level attribute
+    # 60-class hierarchy remains importable via top-level attribute
     # lookup (``decibri.<Class>``) AND via the explicit submodule
     # (``decibri.exceptions.<Class>``); see decibri.exceptions for the
     # complete list. The four catch-target names cover catch-anything,

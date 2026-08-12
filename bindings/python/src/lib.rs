@@ -27,7 +27,7 @@
 //! modes.
 
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU16, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex as StdMutex};
 use std::time::Duration;
 
@@ -150,10 +150,14 @@ const EXCEPTION_NAMES: &[&str] = &[
     "SpeakerChannelsUnsupported",
     "ChannelMapOutOfRange",
     "ChannelMapLengthMismatch",
+    "MicrophoneChannelsUnsupported",
+    "ChannelSelectionAmbiguous",
+    "BlockSizeNotFrameAligned",
     "VadSampleRateUnsupported",
     "VadThresholdOutOfRange",
     "AecSampleRateUnsupported",
     "AecConfigInvalid",
+    "AecMultichannelUnsupported",
     "ResampleConfigInvalid",
     "ResampleAfterFlush",
     "ResampleFailed",
@@ -723,10 +727,10 @@ impl MicrophoneBridge {
         };
 
         // Requested block size in interleaved OUTPUT samples: frames_per_buffer
-        // times the stream's output channel count. The engine's normalize chain
-        // makes a multichannel device mono, so this is counted in output (not
-        // device) channels; the core re-blocks to exactly this size on every
-        // platform.
+        // frames of the delivered count, read from the stream, not the device
+        // channels the capture was opened at. Counting it this way keeps the
+        // request a whole number of frames at any delivered count; the core
+        // re-blocks to exactly this size on every platform.
         let output_channels = stream.channels();
         let samples = self.capture_config.frames_per_buffer as usize * output_channels as usize;
 
@@ -2143,6 +2147,11 @@ struct FileBridge {
     /// The source's native rate, copied at construction so the getter stays
     /// readable after the source is consumed.
     input_rate: u32,
+    /// The channel count the most recent chunk was interleaved at, read off
+    /// that chunk rather than derived from the configuration, so a consumer
+    /// counting frames cannot disagree with the data it was handed. 1 before
+    /// the first chunk.
+    delivered_channels: AtomicU16,
 }
 
 /// Build the core [`FileConfig`] from the bridge keyword arguments, mapping
@@ -2458,6 +2467,11 @@ impl FileBridge {
             (chunk.data, chunk.channels)
         };
 
+        // Publish the count this chunk is interleaved at before handing the
+        // data over, so a consumer that reads the getter after a read sees the
+        // count belonging to the chunk it just received.
+        self.delivered_channels.store(channels, Ordering::Relaxed);
+
         let obj = if self.numpy {
             encode_chunk_numpy(py, data, self.format, channels)?
         } else {
@@ -2598,6 +2612,14 @@ impl FileBridge {
     fn input_rate(&self) -> u32 {
         self.input_rate
     }
+
+    /// The channel count the most recent chunk was interleaved at. 1 before
+    /// the first chunk. Lets the wrapper turn a chunk's length into a frame
+    /// count without assuming what the delivered count is.
+    #[getter]
+    fn channels(&self) -> u16 {
+        self.delivered_channels.load(Ordering::Relaxed)
+    }
 }
 
 impl FileBridge {
@@ -2630,6 +2652,7 @@ impl FileBridge {
             last_vad_probability: AtomicU32::new(0),
             sample_rate,
             input_rate,
+            delivered_channels: AtomicU16::new(1),
         }
     }
 

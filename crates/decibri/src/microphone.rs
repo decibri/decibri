@@ -101,30 +101,57 @@ impl HighpassFilter {
 pub struct MicrophoneConfig {
     /// Sample rate in Hz. Range: 1000–384000. Default: 16000.
     pub sample_rate: u32,
-    /// Number of channels the stream DELIVERS. Mono only: the only accepted
-    /// value is 1 (the default), and a value greater than 1 is rejected by
-    /// [`validate`](Self::validate) with
-    /// [`DecibriError::MultichannelNotSupported`]. The field is kept (rather
-    /// than removed) for forward compatibility: a future release may honour a
-    /// value greater than 1 by delivering true interleaved multichannel, which
-    /// widens the accepted set without breaking callers. Default: 1.
+    /// Number of channels the stream DELIVERS, interleaved frame by frame in
+    /// [`AudioChunk::data`]. Bounded below at 1 (the default) by
+    /// [`validate`](Self::validate); bounded above by the resolved device
+    /// alone, which reports its own count when the stream starts. No fixed
+    /// maximum exists.
     ///
     /// The device itself is opened at its own native channel count, exactly as
-    /// it is opened at its native rate: decibri collapses the captured audio
-    /// to this delivered count with the documented average of every opened
-    /// channel, or with the channels [`channel_map`](Self::channel_map)
-    /// selects. This mirrors [`sample_rate`](Self::sample_rate), which is also
-    /// the delivered figure rather than the device-open one. The playback
-    /// counterpart, [`crate::speaker::SpeakerConfig::channels`], is the count
-    /// offered to the device, because playback has no delivered side; on both
-    /// surfaces the field is the shape of the audio you exchange with decibri.
+    /// it is opened at its native rate, and decibri derives the delivered
+    /// channels from it. This mirrors [`sample_rate`](Self::sample_rate),
+    /// which is also the delivered figure rather than the device-open one. The
+    /// playback counterpart, [`crate::speaker::SpeakerConfig::channels`], is
+    /// the count offered to the device, because playback has no delivered
+    /// side; on both surfaces the field is the shape of the audio you exchange
+    /// with decibri.
+    ///
+    /// How the delivered channels are derived from the device's, when
+    /// [`channel_map`](Self::channel_map) is `None`:
+    ///
+    /// - `1`: the documented average of every opened channel.
+    /// - equal to the device's own count: every device channel, in device
+    ///   order.
+    /// - above the device's own count:
+    ///   [`DecibriError::MicrophoneChannelsUnsupported`] when the stream
+    ///   starts.
+    /// - above 1 and below the device's own count:
+    ///   [`DecibriError::ChannelSelectionAmbiguous`] when the stream starts.
+    ///   Which of the device's channels those should be has no single answer,
+    ///   so [`channel_map`](Self::channel_map) names them rather than decibri
+    ///   choosing.
+    ///
+    /// A [`channel_map`](Self::channel_map) names the device channels
+    /// directly, so it answers every case above except a count the device does
+    /// not have.
+    ///
+    /// A count above 1 is rejected with
+    /// [`DecibriError::AecMultichannelUnsupported`] when [`aec`](Self::aec)
+    /// names a model.
+    ///
+    /// The block size passed to
+    /// [`MicrophoneStream::try_next_chunk`](MicrophoneStream::try_next_chunk)
+    /// and [`MicrophoneStream::next_chunk`](MicrophoneStream::next_chunk) is a
+    /// count of interleaved samples, so above 1 channel it must be a multiple
+    /// of this count.
     pub channels: u16,
     /// Optional list of 0-based DEVICE channel indices selecting which device
     /// channels feed the delivered channels: delivered channel `j` carries
     /// device channel `channel_map[j]`. The length must equal
-    /// [`channels`](Self::channels), so the accepted length is 1 (the map
-    /// selects the one delivered channel). `None` (the default) delivers the
-    /// documented average of every opened channel.
+    /// [`channels`](Self::channels). Entries may repeat and may appear in any
+    /// order, so a map both selects and permutes. `None` (the default)
+    /// derives the delivered channels as [`channels`](Self::channels)
+    /// documents.
     ///
     /// The same shape as CoreAudio AUHAL's channel map
     /// (`kAudioOutputUnitProperty_ChannelMap`: an array of device channel
@@ -300,16 +327,10 @@ impl MicrophoneConfig {
         if self.channels == 0 {
             return Err(DecibriError::ChannelsOutOfRange);
         }
-        // Mono only: a request for more than one channel is rejected rather
-        // than silently downmixed to mono. Retaining the `channels` field at
-        // `1` keeps a later move to true interleaved multichannel an additive
-        // change (a widening of the accepted set, not a breaking
-        // redefinition). The device-side downmix that averages a multichannel
-        // capture to the mono target is unchanged; only the user-facing
-        // request for `channels > 1` is rejected here.
-        if self.channels > 1 {
-            return Err(DecibriError::MultichannelNotSupported);
-        }
+        // No upper bound here. The delivered count is bounded by the resolved
+        // device alone, which is not in scope in this pure function, so the
+        // ceiling is applied at open time as
+        // `DecibriError::MicrophoneChannelsUnsupported`.
         if !(64..=65536).contains(&self.frames_per_buffer) {
             return Err(DecibriError::FramesPerBufferOutOfRange);
         }
@@ -341,6 +362,20 @@ impl MicrophoneConfig {
         if self.aec.is_some() {
             if !(8000..=48000).contains(&self.sample_rate) {
                 return Err(DecibriError::AecSampleRateUnsupported(self.sample_rate));
+            }
+            // The canceller reads one near-end channel. Fed an interleaved
+            // multichannel block it counts samples as time, never acquires
+            // its delay, and hands the capture back untouched with no fault
+            // reported; at a count that does not divide its internal framing
+            // it also cuts frames at the chunk boundaries. Neither is visible
+            // in the delivered audio, so the pair is refused here rather than
+            // accepted. A cross-field rejection, not a ceiling on `channels`:
+            // `channels: 1` with a `channel_map` naming one channel of an
+            // array is accepted and cancels normally.
+            if self.channels > 1 {
+                return Err(DecibriError::AecMultichannelUnsupported {
+                    channels: self.channels,
+                });
             }
             // The declared reference rate is converted to the target rate, so it
             // has to be a rate decibri resamples from at all. Guarded here rather
@@ -580,8 +615,11 @@ impl MicrophoneStream {
     /// `samples` is the requested block size in interleaved `f32` samples
     /// (frames times channels). The device's native capture buffers are
     /// re-blocked on the consumer side, so every returned chunk holds exactly
-    /// `samples` samples. `samples` should be non-zero and, for frame
-    /// alignment, a multiple of the channel count.
+    /// `samples` samples. `samples` must be a whole number of frames, meaning
+    /// a multiple of [`channels`](Self::channels); a size that is not is
+    /// refused with [`DecibriError::BlockSizeNotFrameAligned`] rather than
+    /// splitting a frame across the chunk boundary. Every size is a whole
+    /// number of frames on a mono stream.
     ///
     /// # Returns
     /// - `Ok(Some(chunk))`: a full block of exactly `samples` samples was
@@ -611,6 +649,7 @@ impl MicrophoneStream {
     /// Part of decibri's stable FFI-consumer API surface, alongside
     /// [`next_chunk`](Self::next_chunk).
     pub fn try_next_chunk(&self, samples: usize) -> Result<Option<AudioChunk>, DecibriError> {
+        self.check_frame_alignment(samples)?;
         let mut buf = self
             .reblock_buffer
             .lock()
@@ -660,8 +699,11 @@ impl MicrophoneStream {
     /// `samples` is the requested block size in interleaved `f32` samples
     /// (frames times channels). The device's native capture buffers are
     /// re-blocked on the consumer side, so a returned chunk holds exactly
-    /// `samples` samples. `samples` should be non-zero and, for frame
-    /// alignment, a multiple of the channel count.
+    /// `samples` samples. `samples` must be a whole number of frames, meaning
+    /// a multiple of [`channels`](Self::channels); a size that is not is
+    /// refused with [`DecibriError::BlockSizeNotFrameAligned`] rather than
+    /// splitting a frame across the chunk boundary. Every size is a whole
+    /// number of frames on a mono stream.
     ///
     /// # Arguments
     /// - `timeout = None`: block indefinitely until a full block arrives or the
@@ -707,6 +749,7 @@ impl MicrophoneStream {
         // frames) so the extra wakeups cost negligible CPU.
         const POLL_INTERVAL: Duration = Duration::from_millis(20);
 
+        self.check_frame_alignment(samples)?;
         let deadline = timeout.map(|t| Instant::now() + t);
         let mut buf = self
             .reblock_buffer
@@ -770,6 +813,28 @@ impl MicrophoneStream {
                 }
             }
         }
+    }
+
+    /// Refuse a block size that is not a whole number of frames.
+    ///
+    /// The re-block buffer holds interleaved samples, so a size that is not a
+    /// multiple of the delivered channel count would cut a frame at the chunk
+    /// boundary and leave every following chunk's channels rotated by the
+    /// remainder. The chunk still reports the right count and the right
+    /// length, so the rotation is invisible to a consumer; it is refused here
+    /// rather than delivered. Checked before anything is dequeued, so a
+    /// refused call consumes nothing and leaves the stream readable at a
+    /// correct size.
+    ///
+    /// Cannot fire on a mono stream: every size is a multiple of 1.
+    fn check_frame_alignment(&self, samples: usize) -> Result<(), DecibriError> {
+        if self.channels > 1 && !samples.is_multiple_of(self.channels as usize) {
+            return Err(DecibriError::BlockSizeNotFrameAligned {
+                samples,
+                channels: self.channels,
+            });
+        }
+        Ok(())
     }
 
     /// Drain exactly `samples` interleaved samples off the front of the re-block
@@ -1275,6 +1340,48 @@ fn validate_channel_map(
     Ok(())
 }
 
+/// Validate a delivered channel count carrying no channel map against the
+/// channel count the resolved device reports.
+///
+/// Without a map, decibri derives the delivered channels itself, and only two
+/// derivations have a single meaning: collapsing every device channel to one
+/// (the documented average) and carrying every device channel through in
+/// device order. A count above the device's own is not derivable at all, since
+/// decibri delivers device channels and cannot manufacture one that does not
+/// exist. A count above one and below the device's own is derivable several
+/// ways that no reading of the request chooses between, and every one of them
+/// would deliver plausible audio from channels the caller did not name, which
+/// nothing in the delivered chunk would reveal; `channel_map` names them
+/// instead.
+///
+/// A map lifts both rules, and deliberately: its entries are checked against
+/// the device individually by [`validate_channel_map`], so a map may repeat a
+/// channel and may therefore be longer than the device's own count.
+///
+/// A pure function so the rules are assertable without a device to resolve;
+/// [`Microphone::start`] is its one production caller, passing the same device
+/// report that sets the capture open count. It does not belong in
+/// [`MicrophoneConfig::validate`], which has no device in scope.
+#[cfg(feature = "capture")]
+fn validate_unmapped_channels(
+    target_channels: u16,
+    device_channels: u16,
+) -> Result<(), DecibriError> {
+    if target_channels > device_channels {
+        return Err(DecibriError::MicrophoneChannelsUnsupported {
+            requested: target_channels,
+            available: device_channels,
+        });
+    }
+    if target_channels > 1 && target_channels < device_channels {
+        return Err(DecibriError::ChannelSelectionAmbiguous {
+            requested: target_channels,
+            available: device_channels,
+        });
+    }
+    Ok(())
+}
+
 #[cfg(feature = "capture")]
 impl Microphone {
     /// Create a microphone: validates the [`MicrophoneConfig`] and resolves the
@@ -1317,8 +1424,9 @@ impl Microphone {
         // and returns `None` only for a mono device already at the target rate
         // with no map. The stream reports the OUTPUT channel count (the count
         // the exact-size `samples` math is counted in) and the target rate.
-        // `validate()` bounds the accepted set of `channels`, so the value
-        // reaching the chain here is a validated one.
+        // `validate()` bounds the accepted set of `channels` below, so the
+        // value reaching the chain here is non-zero; its upper bound is the
+        // device's, applied just below.
         let target_channels: u16 = self.config.channels;
 
         // The channel map names device channels, so it is checked here, after
@@ -1326,6 +1434,8 @@ impl Microphone {
         // Never checked in `validate()`, which has no device in scope.
         if let Some(map) = &self.config.channel_map {
             validate_channel_map(map, self.config.channels, native_channels)?;
+        } else {
+            validate_unmapped_channels(target_channels, native_channels)?;
         }
         // Denoise is enabled only when a model AND its path are both set; with a
         // model but no path (or vice versa) the chain leaves denoise off. The
@@ -2788,43 +2898,100 @@ mod tests {
         );
     }
 
-    /// Microphone capture is mono only. `MicrophoneConfig::validate` accepts a
-    /// channel count of exactly 1 (the default) and rejects any value greater
-    /// than 1 with `MultichannelNotSupported` rather than silently downmixing
-    /// it, so a later move to true interleaved multichannel is a clean additive
-    /// widening. A zero channel count keeps the plain `ChannelsOutOfRange`. The
-    /// device-side downmix that averages a multichannel capture to the mono
-    /// target is a separate concern, exercised by
-    /// `test_downmix_chain_yields_correct_mono`, and is unaffected.
+    /// `MicrophoneConfig::validate` bounds `channels` below and not above. A
+    /// zero channel count is `ChannelsOutOfRange`; every count above it
+    /// validates, whatever its size, because the only ceiling is the resolved
+    /// device's and this function has no device in scope. A fixed maximum
+    /// added here later fails against the large counts below.
     #[test]
-    fn multichannel_request_is_rejected_mono_only() {
+    fn validate_bounds_channels_below_and_not_above() {
         let mut cfg = MicrophoneConfig::default();
         assert_eq!(cfg.channels, 1, "the default channel count is mono");
         assert!(cfg.validate().is_ok(), "the default (channels 1) validates");
 
-        cfg.channels = 1;
-        assert!(cfg.validate().is_ok(), "an explicit channels 1 validates");
-
-        cfg.channels = 2;
-        assert!(
-            matches!(cfg.validate(), Err(DecibriError::MultichannelNotSupported)),
-            "stereo is rejected as multichannel, not downmixed"
-        );
-        cfg.channels = 32;
-        assert!(
-            matches!(cfg.validate(), Err(DecibriError::MultichannelNotSupported)),
-            "the formerly-accepted upper edge is now rejected"
-        );
-        cfg.channels = 100;
-        assert!(
-            matches!(cfg.validate(), Err(DecibriError::MultichannelNotSupported)),
-            "a large channel count is rejected as multichannel"
-        );
+        for channels in [1u16, 2, 6, 32, 100, 1024, u16::MAX] {
+            cfg.channels = channels;
+            assert!(
+                cfg.validate().is_ok(),
+                "channels {channels} validates: no upper bound lives here"
+            );
+        }
 
         cfg.channels = 0;
         assert!(
             matches!(cfg.validate(), Err(DecibriError::ChannelsOutOfRange)),
-            "zero channels stays a plain range error, not a multichannel one"
+            "zero channels is the one channel-count rejection validate makes"
+        );
+    }
+
+    /// The unmapped derivation has exactly two meanings, and refuses the rest
+    /// against the device's own report rather than choosing.
+    ///
+    /// Negative control: the two accepted rows below are the reason a blanket
+    /// refusal cannot pass this test.
+    #[test]
+    fn unmapped_channels_accept_only_the_average_and_the_identity() {
+        for (requested, device) in [(1u16, 1u16), (1, 2), (1, 6), (2, 2), (6, 6), (123, 123)] {
+            assert!(
+                validate_unmapped_channels(requested, device).is_ok(),
+                "{requested} of {device} is the average or the identity"
+            );
+        }
+
+        for (requested, device) in [(2u16, 1u16), (7, 6), (1024, 2)] {
+            assert!(
+                matches!(
+                    validate_unmapped_channels(requested, device),
+                    Err(DecibriError::MicrophoneChannelsUnsupported {
+                        requested: r,
+                        available: a,
+                    }) if r == requested && a == device
+                ),
+                "{requested} of {device} exceeds the device and names both figures"
+            );
+        }
+
+        for (requested, device) in [(2u16, 6u16), (2, 3), (5, 6), (63, 64)] {
+            assert!(
+                matches!(
+                    validate_unmapped_channels(requested, device),
+                    Err(DecibriError::ChannelSelectionAmbiguous {
+                        requested: r,
+                        available: a,
+                    }) if r == requested && a == device
+                ),
+                "{requested} of {device} is a strict subset and needs a map"
+            );
+        }
+    }
+
+    /// A map lifts both unmapped rules, because its entries are checked
+    /// against the device one at a time. A map may repeat a channel, so it may
+    /// be longer than the device's own count: `channels: 4` on a mono device
+    /// is legitimate through `[0, 0, 0, 0]` and refused without a map.
+    #[test]
+    fn a_map_may_deliver_more_channels_than_the_device_has() {
+        assert!(
+            validate_channel_map(&[0, 0, 0, 0], 4, 1).is_ok(),
+            "four copies of a mono device's one channel is a valid map"
+        );
+        assert!(
+            matches!(
+                validate_unmapped_channels(4, 1),
+                Err(DecibriError::MicrophoneChannelsUnsupported { .. })
+            ),
+            "the same count without a map is refused"
+        );
+        assert!(
+            validate_channel_map(&[3, 1], 2, 6).is_ok(),
+            "a strict subset in an arbitrary order is a valid map"
+        );
+        assert!(
+            matches!(
+                validate_unmapped_channels(2, 6),
+                Err(DecibriError::ChannelSelectionAmbiguous { .. })
+            ),
+            "the same count without a map is refused"
         );
     }
 
@@ -3302,6 +3469,74 @@ mod tests {
         ));
     }
 
+    /// A block size that is not a whole number of frames is refused, and
+    /// refused before anything is dequeued, so the stream stays readable at a
+    /// correct size afterwards.
+    ///
+    /// Regression: draining an arbitrary sample count off an interleaved
+    /// buffer. A chunk cut mid-frame reports the right channel count and the
+    /// right length, and every chunk after it carries the channels rotated by
+    /// the remainder, so nothing in the delivered audio reveals it.
+    #[test]
+    fn a_block_size_that_splits_a_frame_is_refused_and_consumes_nothing() {
+        let (stream, sender, _running) = test_stream_with(None, 2);
+        sender
+            .send(AudioChunk {
+                data: (0..12).map(|value| value as f32).collect(),
+                sample_rate: 16000,
+                channels: 2,
+            })
+            .unwrap();
+
+        for samples in [1usize, 3, 5, 1601] {
+            assert!(
+                matches!(
+                    stream.try_next_chunk(samples),
+                    Err(DecibriError::BlockSizeNotFrameAligned {
+                        samples: s,
+                        channels: 2,
+                    }) if s == samples
+                ),
+                "a {samples}-sample block splits a stereo frame"
+            );
+            assert!(
+                matches!(
+                    stream.next_chunk(samples, Some(Duration::from_millis(1))),
+                    Err(DecibriError::BlockSizeNotFrameAligned { .. })
+                ),
+                "the blocking read refuses the same {samples}-sample block"
+            );
+        }
+
+        // Nothing above consumed a sample: the first frame is still frame 0.
+        let chunk = stream
+            .try_next_chunk(4)
+            .expect("an aligned read succeeds")
+            .expect("a full block is buffered");
+        assert_eq!(
+            chunk.data,
+            vec![0.0, 1.0, 2.0, 3.0],
+            "the refused reads dequeued nothing and left the frames aligned"
+        );
+
+        // Negative control: on a mono stream no size can split a frame, so the
+        // guard is unreachable and the odd sizes above all read normally.
+        let (mono, mono_sender, _mono_running) = test_stream_with(None, 1);
+        mono_sender
+            .send(AudioChunk {
+                data: (0..12).map(|value| value as f32).collect(),
+                sample_rate: 16000,
+                channels: 1,
+            })
+            .unwrap();
+        for samples in [1usize, 3, 5] {
+            assert!(
+                mono.try_next_chunk(samples).is_ok(),
+                "a mono stream accepts a {samples}-sample block"
+            );
+        }
+    }
+
     // ── Echo cancellation ──────────────────────────────────────────────
 
     /// The rate window `validate` enforces is exactly the one the canceller
@@ -3328,6 +3563,75 @@ mod tests {
                 config.validate().is_ok(),
                 engine_accepts,
                 "validate must accept exactly the rates the canceller accepts (rate {rate})"
+            );
+        }
+    }
+
+    /// Echo cancellation and a delivered count above one are refused together.
+    ///
+    /// The canceller reads one near-end channel, so an interleaved
+    /// multichannel block leaves it unable to acquire its delay: it returns
+    /// the capture unchanged and reports no fault, and at a count that does
+    /// not divide its framing it also cuts frames at the chunk boundaries.
+    /// Nothing in the delivered audio distinguishes either from working
+    /// cancellation, so the pair is refused at configuration time.
+    ///
+    /// The second half is what makes this a fence rather than a ban: a single
+    /// delivered channel selected from a multichannel device by `channel_map`
+    /// still cancels. A test asserting only the rejection would pass equally
+    /// against an implementation that had simply disabled cancellation.
+    #[cfg(feature = "aec")]
+    #[test]
+    fn aec_refuses_multichannel_and_still_accepts_a_selected_channel() {
+        let mut config = MicrophoneConfig {
+            aec: Some(decibri_aec::AecModel::default()),
+            ..Default::default()
+        };
+
+        for channels in [2u16, 3, 8, 64] {
+            config.channels = channels;
+            config.channel_map = None;
+            assert!(
+                matches!(
+                    config.validate(),
+                    Err(DecibriError::AecMultichannelUnsupported { channels: c }) if c == channels
+                ),
+                "channels {channels} with the canceller is refused, naming the count"
+            );
+
+            // A map does not buy a way around the fence: the rejection is on
+            // the delivered count, whatever produced it.
+            config.channel_map = Some((0..channels).collect());
+            assert!(
+                matches!(
+                    config.validate(),
+                    Err(DecibriError::AecMultichannelUnsupported { .. })
+                ),
+                "channels {channels} with the canceller is refused with a map too"
+            );
+        }
+
+        config.channels = 1;
+        config.channel_map = None;
+        assert!(
+            config.validate().is_ok(),
+            "one delivered channel with the canceller still validates"
+        );
+        config.channel_map = Some(vec![3]);
+        assert!(
+            config.validate().is_ok(),
+            "one channel selected from an array with the canceller still validates"
+        );
+
+        // Negative control: the same counts without the canceller validate, so
+        // the rejection is the cross-field pair and not a ceiling on channels.
+        config.aec = None;
+        for channels in [2u16, 3, 8, 64] {
+            config.channels = channels;
+            config.channel_map = None;
+            assert!(
+                config.validate().is_ok(),
+                "channels {channels} validates once the canceller is off"
             );
         }
     }
