@@ -310,14 +310,15 @@ class AecSampleRateUnsupported(DecibriError):
 class AecMultichannelUnsupported(DecibriError):
     """Raised when echo cancellation is combined with more than one channel.
 
-    The canceller reads one near-end channel. Fed an interleaved
+    decibri runs the canceller on one near-end channel. Fed an interleaved
     multichannel capture it never acquires its delay, returns the audio
-    unchanged and reports no fault, and at a channel count that does not
-    divide its framing it also cuts frames at the chunk boundaries.
-    Neither is visible in the delivered audio, so the combination is
-    refused at construction. Cancellation on one channel of an array is
-    unaffected: ``channels=1`` with a ``channel_map`` naming that channel
-    is accepted. The message names the offending count.
+    unchanged and reports no fault, and a discarded internal carry that is
+    not a whole number of frames rotates the channel identities of
+    everything after it, at any count above one. Neither is visible in the
+    delivered audio, so the combination is refused at construction.
+    Cancellation on one channel of an array is unaffected: ``channels=1``
+    with a ``channel_map`` naming that channel is accepted. The message
+    names the offending count and both accepted ways forward.
     """
 
 

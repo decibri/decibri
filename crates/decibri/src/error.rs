@@ -427,14 +427,15 @@ pub enum DecibriError {
     /// channel.
     ///
     /// `channels` is the offending count
-    /// [`crate::microphone::MicrophoneConfig::channels`] carried. The
-    /// canceller reads one near-end channel and one mono reference, so it
-    /// cannot process an interleaved multichannel capture: fed one it reads
-    /// interleaved samples as time, never acquires its delay, and returns the
-    /// capture unchanged while reporting no fault, and at a channel count that
-    /// does not divide its internal framing it also cuts frames at chunk
-    /// boundaries. Neither outcome is detectable from the delivered audio, so
-    /// the combination is refused at
+    /// [`crate::microphone::MicrophoneConfig::channels`] carried. decibri runs
+    /// the canceller on one near-end channel against one mono reference, so an
+    /// interleaved multichannel capture is not a signal it can be handed in one
+    /// call: fed one it reads interleaved samples as time, never acquires its
+    /// delay, and returns the capture unchanged while reporting no fault, and a
+    /// discarded internal carry that is not a whole number of frames rotates the
+    /// channel identities of everything after it, at any count above one.
+    /// Neither outcome is detectable from the delivered audio, so the
+    /// combination is refused at
     /// [`crate::microphone::MicrophoneConfig::validate`], which has both
     /// fields in scope, rather than accepted and left to corrupt.
     ///
@@ -446,10 +447,16 @@ pub enum DecibriError {
     /// Cancellation on one channel of a multichannel device is unaffected:
     /// `channels: 1` with a
     /// [`crate::microphone::MicrophoneConfig::channel_map`] naming that
-    /// channel is accepted. Deliberately not feature-gated, so the identity
-    /// table's coverage stays unconditional. Additive variant permitted by
-    /// `#[non_exhaustive]`.
-    #[error("echo cancellation requires a single delivered channel; channels is {channels}")]
+    /// channel is accepted, and the message names both that pairing and the
+    /// option of leaving the canceller off. The leading `echo cancellation runs
+    /// on one delivered channel` clause is the stable part. Deliberately not
+    /// feature-gated, so the identity table's coverage stays unconditional.
+    /// Additive variant permitted by `#[non_exhaustive]`.
+    #[error(
+        "echo cancellation runs on one delivered channel; channels is {channels}. \
+         Set channels to 1 with a channel map to choose the device channel it \
+         cancels, or leave aec unset to capture more than one channel"
+    )]
     AecMultichannelUnsupported { channels: u16 },
 
     // ── Offline file source errors ─────────────────────────────────────
