@@ -50,19 +50,6 @@ pub enum DecibriError {
     #[error("channels must be at least 1")]
     ChannelsOutOfRange,
 
-    /// Retained for compatibility; no decibri operation returns it.
-    ///
-    /// It reported a capture configuration requesting more than one channel,
-    /// while capture was mono only. Capture now delivers the requested channel
-    /// count, bounded only by the resolved device, so the condition this named
-    /// no longer exists. A count of 0 remains [`Self::ChannelsOutOfRange`]; a
-    /// count above the device's own report is
-    /// [`Self::MicrophoneChannelsUnsupported`]. The variant, its identity and
-    /// its message text are unchanged, so code matching either still compiles
-    /// and still matches. Static message to keep the text stable.
-    #[error("multichannel capture is not supported; channels must be 1 (mono)")]
-    MultichannelNotSupported,
-
     #[error("frames per buffer must be between 64 and 65536")]
     FramesPerBufferOutOfRange,
 
@@ -440,8 +427,7 @@ pub enum DecibriError {
     /// fields in scope, rather than accepted and left to corrupt.
     ///
     /// A dedicated variant rather than a reason string on
-    /// [`Self::AecConfigInvalid`] reads more intentionally, matching the
-    /// reasoning recorded on [`Self::MultichannelNotSupported`]. This is a
+    /// [`Self::AecConfigInvalid`] reads more intentionally. This is a
     /// cross-field rejection between two configuration fields and not a
     /// ceiling on `channels`, which is bounded only by the device.
     /// Cancellation on one channel of a multichannel device is unaffected:
@@ -784,8 +770,6 @@ error_identity! {
         DecibriError::SampleRateOutOfRange;
     DecibriError::ChannelsOutOfRange => "ChannelsOutOfRange", "CHANNELS_OUT_OF_RANGE",
         DecibriError::ChannelsOutOfRange;
-    DecibriError::MultichannelNotSupported => "MultichannelNotSupported", "MULTICHANNEL_NOT_SUPPORTED",
-        DecibriError::MultichannelNotSupported;
     DecibriError::FramesPerBufferOutOfRange => "FramesPerBufferOutOfRange", "FRAMES_PER_BUFFER_OUT_OF_RANGE",
         DecibriError::FramesPerBufferOutOfRange;
     DecibriError::AgcTargetOutOfRange => "AgcTargetOutOfRange", "AGC_TARGET_OUT_OF_RANGE",

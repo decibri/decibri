@@ -44,4 +44,4 @@ All commits, tags, and registry publishes are performed manually. If a task appe
 
 - Update `CHANGELOG.md` when adding features, fixing bugs, or making breaking changes.
 - Add entries under the `## [<next-version>] - Unreleased` section in the appropriate subsection (Added, Changed, Fixed, Removed).
-- Use [Keep a Changelog](https://keepachangelog.com) format. One bullet per change, concise.
+- Use [Keep a Changelog](https://keepachangelog.com) format. One bullet per change, concise. A version section that contains breaking changes opens with a `### Breaking changes` heading above those subsections; the heading groups the breaking entries and replaces none of the named types.

@@ -8,10 +8,12 @@ export interface MicrophoneInfo {
   name: string;
   /**
    * Stable per-host device ID. Pass via `device: { id: ... }` for selection
-   * that survives across enumerations.
-   * - Windows (WASAPI): endpoint ID
-   * - macOS (CoreAudio): device UID
-   * - Linux (ALSA): PCM identifier
+   * that survives across enumerations. The lowercase host name, a colon, then
+   * the platform device identifier:
+   * - Windows (WASAPI): `wasapi:` then the endpoint ID (e.g.
+   *   `wasapi:{0.0.1.00000000}.{...}`)
+   * - macOS (CoreAudio): `coreaudio:` then the device UID
+   * - Linux (ALSA): `alsa:` then the PCM identifier
    * Empty string if cpal cannot produce a stable ID for this device.
    */
   id: string;

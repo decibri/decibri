@@ -28,7 +28,6 @@ from decibri.exceptions import (
     MicrophoneChannelsUnsupported as MicrophoneChannelsUnsupported,
 )
 from decibri.exceptions import ChannelsOutOfRange as ChannelsOutOfRange
-from decibri.exceptions import MultichannelNotSupported as MultichannelNotSupported
 from decibri.exceptions import DecibriError as DecibriError
 from decibri.exceptions import DeviceEnumerationFailed as DeviceEnumerationFailed
 from decibri.exceptions import DeviceError as DeviceError

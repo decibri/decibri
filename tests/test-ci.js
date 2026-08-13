@@ -521,7 +521,6 @@ console.log('--- Group 7b: core error catalog coverage ---');
 const BUILTIN_VARIANTS = [
   'SampleRateOutOfRange',
   'ChannelsOutOfRange',
-  'MultichannelNotSupported',
   'FramesPerBufferOutOfRange',
   'AgcTargetOutOfRange',
   'LimiterCeilingOutOfRange',

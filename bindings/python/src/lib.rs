@@ -127,7 +127,6 @@ const EXCEPTION_NAMES: &[&str] = &[
     "DeviceFailed",
     "OnnxBackendFailed",
     "ChannelsOutOfRange",
-    "MultichannelNotSupported",
     "DeviceEnumerationFailed",
     "DeviceIndexOutOfRange",
     "MicrophoneNotFound",

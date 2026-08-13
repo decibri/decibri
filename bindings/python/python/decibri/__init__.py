@@ -51,7 +51,6 @@ from decibri.exceptions import (
     MicrophoneNotFound,
     MicrophoneStreamClosed,
     ModelLoadFailed,
-    MultichannelNotSupported,
     MultipleDevicesMatch,
     NoMicrophoneFound,
     NoSpeakerFound,

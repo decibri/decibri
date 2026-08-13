@@ -734,8 +734,10 @@ pub struct DeviceInfoJs {
     pub index: u32,
     pub name: String,
     /// Stable per-host device ID suitable for `device: { id: ... }` selection.
-    /// WASAPI endpoint ID on Windows, CoreAudio UID on macOS, ALSA pcm_id on
-    /// Linux. Empty string if cpal cannot produce a stable ID for this device.
+    /// The lowercase host name, a colon, then the platform device identifier:
+    /// `wasapi:` then the endpoint ID on Windows, `coreaudio:` then the device
+    /// UID on macOS, `alsa:` then the PCM identifier on Linux. Empty string if
+    /// cpal cannot produce a stable ID for this device.
     pub id: String,
     pub max_input_channels: u32,
     pub default_sample_rate: u32,
@@ -835,7 +837,6 @@ fn to_napi_error(e: decibri::error::DecibriError) -> Error {
         // Config validation (bad caller input)
         SampleRateOutOfRange
         | ChannelsOutOfRange
-        | MultichannelNotSupported
         | FramesPerBufferOutOfRange
         | AgcTargetOutOfRange
         | LimiterCeilingOutOfRange
