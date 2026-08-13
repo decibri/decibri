@@ -140,9 +140,10 @@ def test_aec_with_multichannel_is_rejected() -> None:
     """
     with pytest.raises(AecMultichannelUnsupported) as exc_info:
         Microphone(channels=2, aec="tau")
-    assert (
-        str(exc_info.value)
-        == "echo cancellation requires a single delivered channel; channels is 2"
+    assert str(exc_info.value) == (
+        "echo cancellation runs on one delivered channel; channels is 2. "
+        "Set channels to 1 with a channel map to choose the device channel it "
+        "cancels, or leave aec unset to capture more than one channel"
     )
     Microphone(channels=1, channel_map=[3], aec="tau")
 

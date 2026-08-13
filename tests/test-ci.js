@@ -1183,12 +1183,16 @@ try {
 assertThrows(
   () => new Microphone({ channels: 2, aec: 'tau' }),
   RangeError,
-  'echo cancellation requires a single delivered channel; channels is 2'
+  'echo cancellation runs on one delivered channel; channels is 2. Set channels to 1 ' +
+    'with a channel map to choose the device channel it cancels, or leave aec unset to ' +
+    'capture more than one channel'
 );
 assertThrows(
   () => new Microphone({ channels: 8, aec: { model: 'tau' } }),
   RangeError,
-  'echo cancellation requires a single delivered channel; channels is 8'
+  'echo cancellation runs on one delivered channel; channels is 8. Set channels to 1 ' +
+    'with a channel map to choose the device channel it cancels, or leave aec unset to ' +
+    'capture more than one channel'
 );
 try {
   const m = new Microphone({ channels: 1, channelMap: [3], aec: 'tau' });

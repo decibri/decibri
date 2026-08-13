@@ -89,7 +89,7 @@ const RANGE_PREFIXES = [
   'Silero VAD only supports',
   'VAD threshold must be between',
   'echo cancellation only supports',
-  'echo cancellation requires a single delivered channel',
+  'echo cancellation runs on one delivered channel',
   'device index out of range',
   'analysis requires VAD',
 ];

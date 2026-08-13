@@ -363,12 +363,13 @@ impl MicrophoneConfig {
             if !(8000..=48000).contains(&self.sample_rate) {
                 return Err(DecibriError::AecSampleRateUnsupported(self.sample_rate));
             }
-            // The canceller reads one near-end channel. Fed an interleaved
-            // multichannel block it counts samples as time, never acquires
-            // its delay, and hands the capture back untouched with no fault
-            // reported; at a count that does not divide its internal framing
-            // it also cuts frames at the chunk boundaries. Neither is visible
-            // in the delivered audio, so the pair is refused here rather than
+            // decibri runs the canceller on one near-end channel. Fed an
+            // interleaved multichannel block it counts samples as time, never
+            // acquires its delay, and hands the capture back untouched with no
+            // fault reported; a discarded internal carry that is not a whole
+            // number of frames also rotates the channel identities of everything
+            // after it, at any count above one. Neither is visible in the
+            // delivered audio, so the pair is refused here rather than
             // accepted. A cross-field rejection, not a ceiling on `channels`:
             // `channels: 1` with a `channel_map` naming one channel of an
             // array is accepted and cancels normally.
@@ -3569,12 +3570,13 @@ mod tests {
 
     /// Echo cancellation and a delivered count above one are refused together.
     ///
-    /// The canceller reads one near-end channel, so an interleaved
+    /// decibri runs the canceller on one near-end channel, so an interleaved
     /// multichannel block leaves it unable to acquire its delay: it returns
-    /// the capture unchanged and reports no fault, and at a count that does
-    /// not divide its framing it also cuts frames at the chunk boundaries.
-    /// Nothing in the delivered audio distinguishes either from working
-    /// cancellation, so the pair is refused at configuration time.
+    /// the capture unchanged and reports no fault, and a discarded internal
+    /// carry that is not a whole number of frames rotates the channel
+    /// identities of everything after it, at any count above one. Nothing in
+    /// the delivered audio distinguishes either from working cancellation, so
+    /// the pair is refused at configuration time.
     ///
     /// The second half is what makes this a fence rather than a ban: a single
     /// delivered channel selected from a multichannel device by `channel_map`
