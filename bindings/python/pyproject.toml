@@ -105,6 +105,11 @@ include = [
     # hash-suffix renaming applied at wheel-repair time.
     { path = "python/decibri/_ort/*", format = ["wheel"] },
 ]
+# The local interpreter's bytecode caches are not part of the package: the
+# wheel ships source and the installing interpreter writes its own caches.
+exclude = [
+    { path = "python/**/__pycache__/**", format = ["sdist", "wheel"] },
+]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

@@ -76,7 +76,6 @@ class OrtPathError extends OrtError {
 const RANGE_PREFIXES = [
   'sample rate must be between',
   'channels must be at least',
-  'multichannel capture is not supported',
   'frames per buffer must be between',
   'agc target level must be between',
   'limiter ceiling must be between',

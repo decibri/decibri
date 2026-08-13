@@ -26,10 +26,12 @@ pub struct MicrophoneInfo {
     /// [`DeviceSelector::Id`] for selection that survives across
     /// enumerations.
     ///
-    /// The string is the platform device identifier:
-    /// - Windows (WASAPI): endpoint ID (e.g. `{0.0.1.00000000}.{...}`)
-    /// - macOS (CoreAudio): device UID
-    /// - Linux (ALSA): PCM identifier
+    /// The string is `cpal::DeviceId`'s `Display` form: the lowercase host
+    /// name, a colon, then the platform device identifier:
+    /// - Windows (WASAPI): `wasapi:` then the endpoint ID (e.g.
+    ///   `wasapi:{0.0.1.00000000}.{...}`)
+    /// - macOS (CoreAudio): `coreaudio:` then the device UID
+    /// - Linux (ALSA): `alsa:` then the PCM identifier
     ///
     /// Empty string if the platform could not produce a stable ID for this
     /// device (rare; some host backends cannot assign IDs to every
@@ -74,9 +76,11 @@ pub enum DeviceSelector {
     Name(String),
     /// Select by stable per-host device ID.
     ///
-    /// The ID is the string produced by `cpal::DeviceId`'s [`Display`] impl
-    /// (WASAPI endpoint ID on Windows, CoreAudio UID on macOS, ALSA pcm_id
-    /// on Linux). Matching is exact string equality, not substring.
+    /// The ID is the string produced by `cpal::DeviceId`'s [`Display`] impl:
+    /// the lowercase host name, a colon, then the platform device identifier
+    /// (`wasapi:` then the endpoint ID on Windows, `coreaudio:` then the
+    /// device UID on macOS, `alsa:` then the PCM identifier on Linux).
+    /// Matching is exact string equality, not substring.
     ///
     /// Obtain an ID from [`MicrophoneInfo::id`] / [`SpeakerInfo::id`]
     /// returned by [`input_devices`] / [`output_devices`].

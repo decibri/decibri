@@ -10,14 +10,14 @@ shape the core never sees. An out-of-range agc target raises
 AgcTargetOutOfRange; a malformed vad, denoise or highpass value raises
 ValueError.
 
-57 instance classes plus 3 intermediate parent classes (DeviceError,
-OrtError, OrtPathError) for catch ergonomics, totaling 60 class
+59 instance classes plus 3 intermediate parent classes (DeviceError,
+OrtError, OrtPathError) for catch ergonomics, totaling 62 class
 definitions beneath DecibriError. Single-inheritance hierarchy per
 CPython convention.
 
 Hierarchy:
     DecibriError
-    + 39 direct subclasses (config + runtime errors that don't involve
+    + 41 direct subclasses (config + runtime errors that don't involve
       device enumeration or ORT, including DeviceFailed and OnnxBackendFailed)
     + DeviceError (intermediate; no instances; catches device-related)
         + 8 direct device subclasses (MicrophoneNotFound, SpeakerNotFound,
@@ -56,20 +56,6 @@ class SampleRateOutOfRange(DecibriError):
 
 class ChannelsOutOfRange(DecibriError):
     """Raised when channels is outside the supported range."""
-
-
-class MultichannelNotSupported(DecibriError):
-    """Retained for compatibility; nothing raises it.
-
-    It was raised when a microphone was asked to capture more than one
-    channel, while capture was mono only. Capture now delivers the
-    requested channel count, bounded only by the resolved device, so the
-    condition this named no longer exists. ``channels=0`` still raises
-    ``ChannelsOutOfRange``, and a count above the device's own report
-    raises ``MicrophoneChannelsUnsupported``. The class and its position
-    in the hierarchy are unchanged, so code that catches it still
-    imports and still runs.
-    """
 
 
 class FramesPerBufferOutOfRange(DecibriError):
