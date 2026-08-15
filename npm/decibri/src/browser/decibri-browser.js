@@ -108,7 +108,7 @@ class Microphone extends Emitter {
         vadSource = source;
       }
     } else {
-      throw new TypeError(`Invalid vad value: ${JSON.stringify(vad)}. Expected false, 'energy', or a config object { model, threshold, holdoffMs }.`);
+      throw new TypeError(`Invalid vad value: ${JSON.stringify(vad)}. Expected false, 'energy', or a config object { model, threshold, holdoffMs, source }.`);
     }
     this._vadThreshold = vadThreshold;
     this._vadHoldoff = vadHoldoff;

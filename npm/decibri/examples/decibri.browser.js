@@ -128,7 +128,7 @@ var decibri = (function() {
 						if (deliveredChannels >= 1 && source >= deliveredChannels) throw new RangeError(`the detector source names delivered channel ${source}; the delivered channel count is ${deliveredChannels}`);
 						vadSource = source;
 					}
-				} else throw new TypeError(`Invalid vad value: ${JSON.stringify(vad)}. Expected false, 'energy', or a config object { model, threshold, holdoffMs }.`);
+				} else throw new TypeError(`Invalid vad value: ${JSON.stringify(vad)}. Expected false, 'energy', or a config object { model, threshold, holdoffMs, source }.`);
 				this._vadThreshold = vadThreshold;
 				this._vadHoldoff = vadHoldoff;
 				this._vadSource = vadSource;

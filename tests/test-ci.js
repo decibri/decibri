@@ -1388,10 +1388,11 @@ try {
   failed++;
 }
 
-// The reference push accepts every input shape Speaker.write accepts (Buffer,
-// any TypedArray, DataView) and never throws while capture is not running:
-// before start() and after stop() a valid push is a no-op, not an error.
-// Catches the push becoming stateful and the input normalization narrowing.
+// The reference push accepts Speaker.write's input shapes dtype-matched to
+// the microphone's own (Buffer, Uint8Array, and DataView as raw bytes; the
+// configured dtype's typed array) and never throws while capture is not
+// running: before start() and after stop() a valid push returns silently.
+// Catches the push raising on state and the input normalization narrowing.
 try {
   const m = new Microphone({ sampleRate: 16000, channels: 1, aec: 'tau' });
   assert(
@@ -1435,6 +1436,43 @@ try {
 } catch (e) {
   console.log(`  FAIL: float32 pushAecReference rejected: ${e.message}`);
   failed++;
+}
+
+// A typed array carrying a sample dtype other than the configured one is
+// refused rather than read as raw bytes, whatever the capture state, with
+// the class the Python surface raises for the same condition. The known
+// pair names both dtypes and both remedies; any other sample-dtype view
+// keeps the generic message. Buffer, Uint8Array, and DataView stay
+// format-agnostic byte carriers.
+{
+  const m = new Microphone({ sampleRate: 16000, channels: 1, aec: 'tau' });
+  assertThrows(
+    () => m.pushAecReference(new Float32Array(320)),
+    TypeError,
+    "dtype 'int16' configured but Float32Array samples were pushed; convert to Int16Array or construct Microphone with dtype: 'float32'"
+  );
+  assertThrows(
+    () => m.pushAecReference(new Float64Array(320)),
+    TypeError,
+    'pushAecReference requires a Buffer, TypedArray, or DataView of PCM samples in the configured dtype'
+  );
+  m.stop();
+  assertThrows(
+    () => m.pushAecReference(new Float32Array(320)),
+    TypeError,
+    "dtype 'int16' configured but Float32Array samples were pushed"
+  );
+  const f = new Microphone({ sampleRate: 16000, channels: 1, dtype: 'float32', aec: 'tau' });
+  assertThrows(
+    () => f.pushAecReference(new Int16Array(320)),
+    TypeError,
+    "dtype 'float32' configured but Int16Array samples were pushed; convert to Float32Array or construct Microphone with dtype: 'int16'"
+  );
+  assert(
+    f.pushAecReference(new Uint8Array(64)) === undefined,
+    'a Uint8Array stays a byte carrier on a float32 microphone'
+  );
+  f.stop();
 }
 
 // A non-buffer input is a TypeError whatever the capture state, so a wrong
