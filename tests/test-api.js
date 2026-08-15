@@ -398,6 +398,15 @@ async function testAec() {
     block.writeInt16LE(Math.round(Math.sin((2 * Math.PI * 440 * i) / 16000) * 8000), i * 2);
   }
 
+  // Pushed before any consumer engages the stream, while capture is not
+  // running: discarded and counted, so the metrics read below must carry
+  // exactly these samples in referenceDropped.
+  const preStartPushes = 3;
+  for (let i = 0; i < preStartPushes; i++) {
+    mic.pushAecReference(block);
+  }
+  const preStartSamples = (block.length / 2) * preStartPushes;
+
   let pushError = null;
   const pusher = setInterval(() => {
     try {
@@ -433,7 +442,12 @@ async function testAec() {
     // keeps searching for the whole stream.
     assert(m.delaySamples === null, 'delaySamples stays null with no acoustic echo to lock on');
     assert(m.acquisitionParked > 0, 'acquisitionParked climbs while the estimator searches');
-    assert(m.referenceDropped === 0, 'in-cadence 20 ms pushes drop nothing');
+    // Exactly the pre-start samples: the not-running pushes are counted, and
+    // the in-cadence 20 ms pushes made while capturing still drop nothing.
+    assert(
+      m.referenceDropped === preStartSamples,
+      `referenceDropped carries the ${preStartSamples} pre-start samples alone (got ${m.referenceDropped})`
+    );
   }
 
   mic.stop();

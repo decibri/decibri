@@ -293,6 +293,49 @@ async def test_missing_numpy_async_file_surfaces_raise_importerror(
     assert str(excinfo.value) == _MISSING_NUMPY_MESSAGE
 
 
+def test_missing_numpy_bridge_construction_raises_importerror(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Constructing a bridge directly with ``numpy=True`` raises the guard.
+
+    The guard lives in the extension's own constructors, so bypassing the
+    wrapper classes cannot reach the read path's extension-internal failure;
+    the message is the wrapper guard's, byte for byte, raised before any
+    device or source work touches the arguments.
+    """
+    from decibri import _decibri
+
+    _block_numpy(monkeypatch)
+    with pytest.raises(ImportError) as excinfo:
+        _decibri.MicrophoneBridge(16000, 1, 1600, "int16", numpy=True)
+    assert str(excinfo.value) == _MISSING_NUMPY_MESSAGE
+    with pytest.raises(ImportError) as excinfo:
+        _decibri.AsyncMicrophoneBridge(16000, 1, 1600, "int16", numpy=True)
+    assert str(excinfo.value) == _MISSING_NUMPY_MESSAGE
+    with pytest.raises(ImportError) as excinfo:
+        _decibri.FileBridge.open(str(tmp_path / "absent.wav"), numpy=True)
+    assert str(excinfo.value) == _MISSING_NUMPY_MESSAGE
+    with pytest.raises(ImportError) as excinfo:
+        _decibri.FileBridge.buffer([0.0] * 1600, 16000, numpy=True)
+    assert str(excinfo.value) == _MISSING_NUMPY_MESSAGE
+
+
+def test_missing_numpy_bridge_construction_caught_by_except_exception(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The bridge guard is caught by a plain ``except Exception``."""
+    from decibri import _decibri
+
+    _block_numpy(monkeypatch)
+    try:
+        _decibri.MicrophoneBridge(16000, 1, 1600, "int16", numpy=True)
+    except Exception as exc:
+        assert isinstance(exc, ImportError)
+        assert str(exc) == _MISSING_NUMPY_MESSAGE
+    else:
+        pytest.fail("MicrophoneBridge(numpy=True) did not raise without numpy")
+
+
 def test_missing_numpy_default_bytes_mode_unaffected(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:

@@ -40,6 +40,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 ### Fixed
 
 - The wheel no longer includes the build machine's `__pycache__` directory beside the package source. The installing interpreter writes its own caches; every shipped source file is unchanged.
+- Constructing a `_decibri` bridge class directly with `numpy=True` and no numpy installed raises the same catchable `ImportError` the public constructors raise (`numpy is not installed. Install with: pip install decibri[numpy]`), from the bridge constructor itself, where the first `read()` raised an uncatchable `pyo3_runtime.PanicException`. Every public class already raised the `ImportError` at construction; their behaviour is unchanged.
 
 ## [0.10.0] - 2026-08-10
 

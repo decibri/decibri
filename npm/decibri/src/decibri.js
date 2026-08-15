@@ -102,6 +102,7 @@ class Microphone extends Readable {
     this._vad = prepared.vadEnabled;
     this._vadThreshold = prepared.vadThreshold;
     this._vadHoldoff = prepared.vadHoldoff;
+    this._dtype = prepared.dtype;
     this._vadScore = 0;
     this._isSpeaking = false;
     this._silenceTimer = null;
@@ -228,7 +229,7 @@ class Microphone extends Readable {
     // vad selects the detector and (optionally) its threshold/holdoff policy.
     // It accepts false (disabled, default), the 'silero'/'energy' shorthand
     // (which uses the mode's default threshold and holdoff), or a config object
-    // { model, threshold, holdoffMs } to tune the policy. The legacy two-flag
+    // { model, threshold, holdoffMs, source } to tune the policy. The legacy two-flag
     // form (vad: true plus vadMode) and the flat vadThreshold/vadHoldoff
     // options are rejected with a migration error. The threshold and holdoff
     // live JS-side (the state machine runs in this wrapper); only the mode is
@@ -307,7 +308,7 @@ class Microphone extends Readable {
       }
     } else {
       throw new TypeError(
-        `Invalid vad value: ${JSON.stringify(vad)}. Expected false, 'silero', 'energy', or a config object { model, threshold, holdoffMs }.`
+        `Invalid vad value: ${JSON.stringify(vad)}. Expected false, 'silero', 'energy', or a config object { model, threshold, holdoffMs, source }.`
       );
     }
 
@@ -665,24 +666,27 @@ class Microphone extends Readable {
 
   /**
    * Queue far-end reference audio for the echo canceller: the audio being
-   * played out, pushed as it is played, in played order. Accepts the same
-   * input shapes `Speaker.write` accepts (a `Buffer`, any TypedArray, or a
-   * `DataView` of PCM bytes in this microphone's `dtype`), at the declared
-   * `referenceSampleRate` (the capture rate when unset), interleaved at the
-   * declared `referenceChannels` (mono when unset). With `referenceChannels`
-   * above 1, each frame is averaged to one mono sample before the canceller
-   * sees it; a multichannel reference pushed without declaring the count
-   * cancels nothing and reports no error. The declared count must match this
-   * buffer's actual interleaving: a mismatch is not detected and raises no
-   * error, and shows up only as `aecMetrics().delaySamples` staying `null`
-   * with no fault reported.
+   * played out, pushed as it is played, in played order. Accepts a `Buffer`,
+   * `Uint8Array`, or `DataView` of PCM bytes in this microphone's `dtype`,
+   * or the typed array carrying that dtype (`Int16Array` for `'int16'`,
+   * `Float32Array` for `'float32'`), at the declared `referenceSampleRate`
+   * (the capture rate when unset), interleaved at the declared
+   * `referenceChannels` (mono when unset). A typed array carrying any other
+   * sample dtype throws a `TypeError`, whatever the capture state. With
+   * `referenceChannels` above 1, each frame is averaged to one mono sample
+   * before the canceller sees it; a multichannel reference pushed without
+   * declaring the count cancels nothing and reports no error. The declared
+   * count must match this buffer's actual interleaving: a mismatch is not
+   * detected and raises no error, and shows up only as
+   * `aecMetrics().delaySamples` staying `null` with no fault reported.
    *
    * Never blocks and never throws on a full queue: samples that do not fit
    * are discarded and counted by `aecMetrics().referenceDropped`, and the
    * span they occupied is represented as silence. Silence between played
    * audio need not be pushed; a caller that stops pushing has said nothing is
-   * playing. A push while capture is not running, or with the `aec` option
-   * unset, is a no-op.
+   * playing. A push while capture is not running is discarded and counted by
+   * `referenceDropped`, read once capture runs; a push with the `aec` option
+   * unset is a no-op.
    *
    * @param {Buffer | NodeJS.ArrayBufferView} data PCM samples in the
    *   configured `dtype`.
@@ -692,8 +696,28 @@ class Microphone extends Readable {
     if (Buffer.isBuffer(data)) {
       buf = data;
     } else if (ArrayBuffer.isView(data)) {
-      // Any TypedArray or DataView: view the same bytes, no copy, exactly as
-      // the stream machinery normalizes a typed-array write to a Speaker.
+      // A typed array names its own sample dtype, so one carrying a dtype
+      // other than the configured one is refused rather than read as raw
+      // bytes. Buffer, Uint8Array, and DataView are format-agnostic byte
+      // carriers, exactly as bytes are on the Python surface; the accepted
+      // view is normalized to the same bytes, no copy, exactly as the stream
+      // machinery normalizes a typed-array write to a Speaker.
+      if (!(data instanceof Uint8Array) && !(data instanceof DataView)) {
+        const expected = this._dtype === 'int16' ? Int16Array : Float32Array;
+        if (!(data instanceof expected)) {
+          const mismatched = this._dtype === 'int16' ? Float32Array : Int16Array;
+          if (data instanceof mismatched) {
+            const other = this._dtype === 'int16' ? 'float32' : 'int16';
+            throw new TypeError(
+              `dtype '${this._dtype}' configured but ${mismatched.name} samples were pushed; ` +
+                `convert to ${expected.name} or construct Microphone with dtype: '${other}'`
+            );
+          }
+          throw new TypeError(
+            'pushAecReference requires a Buffer, TypedArray, or DataView of PCM samples in the configured dtype'
+          );
+        }
+      }
       buf = Buffer.from(data.buffer, data.byteOffset, data.byteLength);
     } else {
       throw new TypeError(
@@ -985,7 +1009,7 @@ class File extends Readable {
       }
     } else {
       throw new TypeError(
-        `Invalid vad value: ${JSON.stringify(vad)}. Expected false, 'silero', 'energy', or a config object { model, threshold, holdoffMs }.`
+        `Invalid vad value: ${JSON.stringify(vad)}. Expected false, 'silero', 'energy', or a config object { model, threshold, holdoffMs, source }.`
       );
     }
 

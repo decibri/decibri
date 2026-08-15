@@ -1,4 +1,4 @@
-use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
@@ -156,6 +156,13 @@ pub struct DecibriBridge {
     // flag, so the pump captures it by value (no hand-back like `vad`).
     energy_vad: bool,
     vad_probability: Arc<AtomicU32>,
+    // Whether the `aec` option named a model. A push with no live stream is
+    // counted below only when a canceller exists to be starved by the loss.
+    aec_enabled: bool,
+    // Far-end samples pushed while no stream was live, discarded because the
+    // reference queue exists only on a live stream. Merged into the
+    // `referenceDropped` metric, which is readable once capture runs.
+    no_stream_reference_dropped: AtomicU64,
 }
 
 /// The `Send` pieces of a microphone bridge produced by the open work: the
@@ -172,6 +179,7 @@ pub struct MicrophoneParts {
     frames_per_buffer: u32,
     vad: Option<SileroVad>,
     energy_vad: bool,
+    aec_enabled: bool,
 }
 
 /// Resolve the device and load the Silero model. This is the blocking open work
@@ -398,6 +406,7 @@ fn build_microphone_parts(options: Option<DecibriOptions>) -> Result<MicrophoneP
         }
     }
 
+    let aec_enabled = config.aec.is_some();
     let capture = Microphone::new(config).map_err(to_napi_error)?;
 
     // VAD mode selector. The JS wrapper passes 'silero' or 'energy' only when VAD
@@ -437,6 +446,7 @@ fn build_microphone_parts(options: Option<DecibriOptions>) -> Result<MicrophoneP
         frames_per_buffer,
         vad,
         energy_vad,
+        aec_enabled,
     })
 }
 
@@ -455,6 +465,8 @@ impl MicrophoneParts {
             vad: self.vad,
             energy_vad: self.energy_vad,
             vad_probability: Arc::new(AtomicU32::new(0)),
+            aec_enabled: self.aec_enabled,
+            no_stream_reference_dropped: AtomicU64::new(0),
         }
     }
 }
@@ -688,11 +700,24 @@ impl DecibriBridge {
     /// Queue far-end reference audio for the echo canceller. `buffer` is mono
     /// PCM bytes in the bridge's configured format, at the declared reference
     /// rate, in played order. Never blocks and never fails: a full queue
-    /// discards and counts rather than erroring, and a push with no active
-    /// stream (not started, stopped, or echo cancellation off) is a no-op.
+    /// discards and counts rather than erroring. A push with no active stream
+    /// (not started, or stopped) is discarded and counted into the
+    /// `referenceDropped` metric when a canceller is configured; with echo
+    /// cancellation off it is a no-op.
     #[napi]
     pub fn push_aec_reference(&self, buffer: Buffer) {
         let Some(stream) = self.stream.as_ref() else {
+            // The reference queue exists only on a live stream, so the samples
+            // are counted as dropped here; the count reaches the metric once
+            // capture runs.
+            if self.aec_enabled {
+                let dropped = match self.format {
+                    SampleFormat::Int16 => buffer.len() / 2,
+                    SampleFormat::Float32 => buffer.len() / 4,
+                };
+                self.no_stream_reference_dropped
+                    .fetch_add(dropped as u64, Ordering::Relaxed);
+            }
             return;
         };
         if buffer.is_empty() {
@@ -720,7 +745,9 @@ impl DecibriBridge {
             reference_starved: metrics.reference_starved as f64,
             acquisition_parked: metrics.acquisition_parked as f64,
             reference_reanchors: metrics.reference_reanchors as f64,
-            reference_dropped: stream.aec_reference_dropped() as f64,
+            reference_dropped: (stream.aec_reference_dropped()
+                + self.no_stream_reference_dropped.load(Ordering::Relaxed))
+                as f64,
             reference_silence: stream.aec_reference_silence() as f64,
         })
     }
@@ -803,10 +830,11 @@ pub struct AecMetricsJs {
     /// Times the canceller inferred a capture discontinuity and rebuilt its
     /// alignment from the reference frontier.
     pub reference_reanchors: f64,
-    /// Far-end samples discarded because a single push exceeded the reference
-    /// queue's bound, at the declared reference rate. The span they occupied is
-    /// still represented as silence, so a discard costs the cancellation of
-    /// that span alone.
+    /// Far-end samples discarded, at the declared reference rate: a single
+    /// push exceeded the reference queue's bound, or the push arrived while
+    /// capture was not running. The span an oversized push occupied is still
+    /// represented as silence, so that discard costs the cancellation of the
+    /// span alone.
     pub reference_dropped: f64,
     /// Far-end samples the core supplied as silence because the caller had
     /// pushed none for them, at the capture rate. An accounting figure, not a

@@ -35,7 +35,7 @@ use std::collections::HashMap;
 
 use tokio::sync::Mutex;
 
-use pyo3::exceptions::{PyRuntimeError, PyTypeError, PyValueError};
+use pyo3::exceptions::{PyImportError, PyRuntimeError, PyTypeError, PyValueError};
 use pyo3::prelude::*;
 use pyo3::sync::PyOnceLock;
 use pyo3::types::{PyBytes, PyModule, PyType};
@@ -552,6 +552,21 @@ fn encode_chunk_numpy<'py>(
     }
 }
 
+/// Refuse a `numpy=true` construction when numpy is not importable, with the
+/// catchable `ImportError` the Python-side constructors raise for the same
+/// condition, so a bridge constructed directly cannot reach the read path's
+/// extension-internal failure. Runs before any device or source work.
+fn require_numpy_importable(py: Python<'_>) -> PyResult<()> {
+    if let Err(cause) = py.import("numpy") {
+        let err = PyImportError::new_err(
+            "numpy is not installed. Install with: pip install decibri[numpy]",
+        );
+        err.set_cause(py, Some(cause));
+        return Err(err);
+    }
+    Ok(())
+}
+
 // ---------------------------------------------------------------------------
 // Empirical smoke: pyo3-async-runtimes integration probe.
 //
@@ -984,6 +999,9 @@ impl MicrophoneBridge {
         detector_source: Option<u16>,
     ) -> PyResult<Self> {
         let parsed_format = parse_sample_format(&format).map_err(|e| to_py_err(py, e))?;
+        if numpy {
+            require_numpy_importable(py)?;
+        }
         let device_selector = build_device_selector(device.as_ref())?;
 
         // `MicrophoneConfig` is `#[non_exhaustive]`: default-construct then
@@ -2326,6 +2344,9 @@ impl FileBridge {
         detector_source: Option<u16>,
     ) -> PyResult<Self> {
         let parsed_format = parse_sample_format(&format).map_err(|e| to_py_err(py, e))?;
+        if numpy {
+            require_numpy_importable(py)?;
+        }
         let config = build_file_config(
             sample_rate,
             channels,
@@ -2412,6 +2433,9 @@ impl FileBridge {
         detector_source: Option<u16>,
     ) -> PyResult<Self> {
         let parsed_format = parse_sample_format(&format).map_err(|e| to_py_err(py, e))?;
+        if numpy {
+            require_numpy_importable(py)?;
+        }
         let data = extract_buffer_samples(&samples)?;
         let config = build_file_config(
             sample_rate,

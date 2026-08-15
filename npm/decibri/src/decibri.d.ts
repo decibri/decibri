@@ -188,10 +188,10 @@ export interface AecMetrics {
    */
   referenceReanchors: number;
   /**
-   * Far-end samples discarded because a single push exceeded the reference
-   * queue's bound, at the declared reference rate. The span they occupied is
-   * still represented as silence, so a discard costs the cancellation of that
-   * span alone.
+   * Far-end samples discarded, at the declared reference rate: a single push
+   * exceeded the reference queue's bound, or the push arrived while capture
+   * was not running. The span an oversized push occupied is still represented
+   * as silence, so that discard costs the cancellation of the span alone.
    */
   referenceDropped: number;
   /**
@@ -457,7 +457,11 @@ export declare class Microphone extends Readable {
    * Never blocks and never throws on a full queue: samples that do not fit
    * are discarded and counted by `aecMetrics().referenceDropped`. Silence
    * between played audio need not be pushed. A push while capture is not
-   * running, or with the `aec` option unset, is a no-op.
+   * running is discarded and counted by `referenceDropped`, read once
+   * capture runs; a push with the `aec` option unset is a no-op. A typed
+   * array carrying a sample dtype other than the configured `dtype` throws
+   * a `TypeError`, whatever the capture state; `Buffer`, `Uint8Array`, and
+   * `DataView` are format-agnostic byte carriers.
    */
   pushAecReference(data: Buffer | NodeJS.ArrayBufferView): void;
 
