@@ -216,11 +216,13 @@ class AsyncMicrophone:
         vad_mode: str
         vad_threshold: float | None
         vad_holdoff_ms: int
+        vad_source: int | None
         if vad is False:
             vad_enabled = False
             vad_mode = "energy"  # inert placeholder; bridge ignores when disabled
             vad_threshold = None
             vad_holdoff_ms = _DEFAULT_VAD_HOLDOFF_MS
+            vad_source = None
         elif vad is True:
             raise ValueError(
                 "vad=True is no longer supported. "
@@ -231,11 +233,13 @@ class AsyncMicrophone:
             vad_mode = vad.model
             vad_threshold = vad.threshold
             vad_holdoff_ms = vad.holdoff_ms
+            vad_source = vad.source
         elif isinstance(vad, str) and vad in _VALID_MODES:
             vad_enabled = True
             vad_mode = vad
             vad_threshold = None
             vad_holdoff_ms = _DEFAULT_VAD_HOLDOFF_MS
+            vad_source = None
         else:
             raise ValueError(
                 f"Invalid vad value: {vad!r}. "
@@ -435,6 +439,7 @@ class AsyncMicrophone:
             aec_reference_sample_rate=aec_reference_sample_rate,
             aec_reference_channels=aec_reference_channels,
             channel_map=channel_map,
+            detector_source=vad_source,
         )
 
         self._vad_enabled = vad_enabled

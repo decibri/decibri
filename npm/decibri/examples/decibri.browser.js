@@ -103,6 +103,7 @@ var decibri = (function() {
 				const vad = options.vad ?? false;
 				let vadThreshold = .01;
 				let vadHoldoff = 300;
+				let vadSource;
 				if (vad === false) this._vad = false;
 				else if (vad === true) throw new TypeError("vad: true is no longer supported. Specify the mode explicitly: vad: 'energy'.");
 				else if (vad === "energy") this._vad = true;
@@ -119,9 +120,18 @@ var decibri = (function() {
 						if (vad.holdoffMs < 0) throw new RangeError("vad holdoffMs must be non-negative");
 						vadHoldoff = vad.holdoffMs;
 					}
+					if (vad.source !== void 0) {
+						const source = vad.source;
+						if (typeof source !== "number" || !Number.isInteger(source)) throw new TypeError("vad source must be an integer");
+						if (source < 0 || source > 65535) throw new RangeError("vad source must be between 0 and 65535");
+						const deliveredChannels = options.channels ?? 1;
+						if (deliveredChannels >= 1 && source >= deliveredChannels) throw new RangeError(`the detector source names delivered channel ${source}; the delivered channel count is ${deliveredChannels}`);
+						vadSource = source;
+					}
 				} else throw new TypeError(`Invalid vad value: ${JSON.stringify(vad)}. Expected false, 'energy', or a config object { model, threshold, holdoffMs }.`);
 				this._vadThreshold = vadThreshold;
 				this._vadHoldoff = vadHoldoff;
+				this._vadSource = vadSource;
 				this._vadScore = 0;
 				this._isSpeaking = false;
 				this._silenceTimer = null;
@@ -200,8 +210,9 @@ var decibri = (function() {
 			/**
 			* Most recent VAD score: the normalized RMS of the last chunk in `'energy'`
 			* mode, or 0 when VAD is disabled or before the first chunk is processed.
-			* A chunk carrying more than one channel is collapsed to the average of its
-			* channels before the RMS, so the score reflects one channel's level.
+			* A chunk carrying more than one channel is collapsed to the average of
+			* its channels, or to the one delivered channel a `vad: { source }` names,
+			* before the RMS, so the score reflects one channel's level.
 			* @returns {number}
 			*/
 			get vadScore() {
@@ -347,7 +358,15 @@ var decibri = (function() {
 				if (channels > 1) {
 					const frames = Math.floor(n / channels);
 					if (frames === 0) return 0;
+					const source = this._vadSource;
 					let sum = 0;
+					if (source !== void 0) {
+						for (let f = 0; f < frames; f++) {
+							const s = isFloat ? chunk[f * channels + source] : chunk[f * channels + source] / 32768;
+							sum += s * s;
+						}
+						return Math.sqrt(sum / frames);
+					}
 					for (let f = 0; f < frames; f++) {
 						let acc = 0;
 						for (let c = 0; c < channels; c++) {

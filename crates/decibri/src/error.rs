@@ -76,6 +76,25 @@ pub enum DecibriError {
     #[error("limiter ceiling must be between -3.0 and 0.0")]
     LimiterCeilingOutOfRange,
 
+    /// A detector source named a delivered channel at or above the configured
+    /// delivered channel count.
+    ///
+    /// `index` is the 0-based delivered channel the source named
+    /// ([`crate::microphone::DetectorSource::Channel`]); `channels` is the
+    /// configured delivered count
+    /// ([`crate::microphone::MicrophoneConfig::channels`] on capture,
+    /// [`crate::file::FileConfig::channels`] on the file surface). The source
+    /// names DELIVERED channels, the positions of the interleaved frames a
+    /// consumer receives, so the configured count is in scope without a
+    /// device or a source file and the check runs in each surface's
+    /// `validate()`. The delivered count is the only ceiling; no fixed
+    /// maximum is enforced anywhere. Deliberately not feature-gated, so the
+    /// identity table's coverage stays unconditional. The leading `the
+    /// detector source names` clause is the stable part. Additive variant
+    /// permitted by `#[non_exhaustive]`.
+    #[error("the detector source names delivered channel {index}; the delivered channel count is {channels}")]
+    DetectorSourceOutOfRange { index: u16, channels: u16 },
+
     /// The `compression` level for a FLAC save fell outside the encoder's
     /// 0 to 8 range.
     ///
@@ -776,6 +795,11 @@ error_identity! {
         DecibriError::AgcTargetOutOfRange;
     DecibriError::LimiterCeilingOutOfRange => "LimiterCeilingOutOfRange", "LIMITER_CEILING_OUT_OF_RANGE",
         DecibriError::LimiterCeilingOutOfRange;
+    DecibriError::DetectorSourceOutOfRange { .. } => "DetectorSourceOutOfRange", "DETECTOR_SOURCE_OUT_OF_RANGE",
+        DecibriError::DetectorSourceOutOfRange {
+            index: 2,
+            channels: 2,
+        };
     DecibriError::FlacCompressionOutOfRange => "FlacCompressionOutOfRange", "FLAC_COMPRESSION_OUT_OF_RANGE",
         DecibriError::FlacCompressionOutOfRange;
     DecibriError::InvalidFormat => "InvalidFormat", "INVALID_FORMAT",
@@ -1373,6 +1397,23 @@ mod tests {
         assert_eq!(
             err.to_string(),
             "the file channel map names channel 5; the file has 2 channels"
+        );
+    }
+
+    /// The `DetectorSourceOutOfRange` Display message keeps its frozen
+    /// leading clause, which the Node binding matches to classify the error
+    /// as a RangeError, and names the offending index plus the delivered
+    /// count. The text names the DELIVERED channel space, the index space the
+    /// detector source is defined in.
+    #[test]
+    fn detector_source_out_of_range_message_names_index_and_count() {
+        let err = DecibriError::DetectorSourceOutOfRange {
+            index: 3,
+            channels: 2,
+        };
+        assert_eq!(
+            err.to_string(),
+            "the detector source names delivered channel 3; the delivered channel count is 2"
         );
     }
 

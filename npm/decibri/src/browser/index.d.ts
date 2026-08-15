@@ -35,6 +35,16 @@ export interface VadOptions {
    * @default 300
    */
   holdoffMs?: number;
+  /**
+   * The 0-based DELIVERED channel the detector reads: the position within
+   * the delivered interleaved frames, after any `channelMap` is applied (a
+   * `channelMap` names device channels; `source` names the delivered
+   * position). Must be below the delivered channel count, which is its only
+   * ceiling; no fixed maximum exists. Affects only the detector score; the
+   * delivered audio is untouched.
+   * @default the frame average of every delivered channel
+   */
+  source?: number;
 }
 
 /** Constructor options for the browser `Microphone` class. */
@@ -118,8 +128,9 @@ export interface MicrophoneOptions {
    * Voice activity detection. One of:
    * - `false`: disabled (default)
    * - `'energy'`: RMS energy threshold
-   * - a `VadOptions` config object `{ model: 'energy', threshold?, holdoffMs? }`
-   *   to tune the threshold and holdoff
+   * - a `VadOptions` config object
+   *   `{ model: 'energy', threshold?, holdoffMs?, source? }` to tune the
+   *   threshold, holdoff, and detector source
    *
    * The browser runs energy VAD only; Silero is Node-only. The string shorthand
    * uses a 0.01 threshold and a 300 ms holdoff; pass a `VadOptions` object to

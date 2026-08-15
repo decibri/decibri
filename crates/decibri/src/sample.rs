@@ -102,6 +102,37 @@ pub fn downmix_to_mono(samples: &[f32], channels: u16) -> Vec<f32> {
         .collect()
 }
 
+/// Select one channel of interleaved multichannel audio.
+///
+/// `samples` holds interleaved f32 frames of `channels` samples each
+/// (`[c0, c1, .., c0, c1, ..]`). Each frame contributes its sample at the
+/// 0-based `index`, so `N` interleaved channels produce
+/// `samples.len() / channels` mono samples. The counterpart of
+/// [`downmix_to_mono`] for a detector source that names one delivered channel
+/// rather than the frame average
+/// ([`crate::microphone::DetectorSource::Channel`]).
+///
+/// `channels <= 1` returns the input unchanged (already mono), exactly as
+/// [`downmix_to_mono`] does. Any trailing partial frame (when `samples.len()`
+/// is not a multiple of `channels`) is dropped, matching the frame-exact
+/// buffering the capture path guarantees. `index` must be below `channels`:
+/// the configuration validation enforces that before any caller reaches here,
+/// and a debug build asserts it.
+pub fn select_channel(samples: &[f32], channels: u16, index: u16) -> Vec<f32> {
+    if channels <= 1 {
+        return samples.to_vec();
+    }
+    debug_assert!(
+        index < channels,
+        "the selected channel index must be below the interleave stride"
+    );
+    let channels = channels as usize;
+    samples
+        .chunks_exact(channels)
+        .map(|frame| frame[index as usize])
+        .collect()
+}
+
 /// Root-mean-square level of f32 samples, returned in `[0.0, 1.0]`.
 ///
 /// Computes `sqrt(mean(x^2))` over `samples`, the energy-VAD score. Returns
@@ -359,6 +390,41 @@ mod tests {
     fn test_downmix_empty() {
         let empty: Vec<f32> = vec![];
         assert!(downmix_to_mono(&empty, 2).is_empty());
+    }
+
+    // ── select_channel (one delivered channel for the VAD feed) ───────────
+
+    /// Each interleaved frame contributes exactly the sample at the selected
+    /// index: channel 0 and channel 1 of a stereo signal come out as their
+    /// own sequences, untouched.
+    #[test]
+    fn test_select_channel_picks_one_channel_exactly() {
+        let stereo = vec![0.1, -0.4, 0.2, -0.3, 0.3, -0.2, 0.4, -0.1];
+        assert_eq!(select_channel(&stereo, 2, 0), vec![0.1, 0.2, 0.3, 0.4]);
+        assert_eq!(select_channel(&stereo, 2, 1), vec![-0.4, -0.3, -0.2, -0.1]);
+    }
+
+    /// `channels <= 1` is the identity, exactly as `downmix_to_mono`.
+    #[test]
+    fn test_select_channel_mono_passthrough() {
+        let samples = vec![0.1, 0.2, 0.3];
+        assert_eq!(select_channel(&samples, 1, 0), samples);
+        assert_eq!(select_channel(&samples, 0, 0), samples);
+    }
+
+    /// A trailing partial frame is dropped, matching `downmix_to_mono` and
+    /// the frame-exact buffering the capture path guarantees.
+    #[test]
+    fn test_select_channel_drops_trailing_partial_frame() {
+        let stereo = vec![0.2, 0.4, 0.6, 0.8, 0.9];
+        assert_eq!(select_channel(&stereo, 2, 0), vec![0.2, 0.6]);
+        assert_eq!(select_channel(&stereo, 2, 1), vec![0.4, 0.8]);
+    }
+
+    #[test]
+    fn test_select_channel_empty() {
+        let empty: Vec<f32> = vec![];
+        assert!(select_channel(&empty, 2, 1).is_empty());
     }
 
     // ── rms (energy-VAD score) ────────────────────────────────────────────

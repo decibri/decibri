@@ -244,6 +244,7 @@ class Microphone extends Readable {
     let vadMode;
     let vadThreshold;
     let vadHoldoff;
+    let vadSource;
     if (vad === false) {
       vadEnabled = false;
       vadMode = 'energy'; // inert placeholder; ignored while disabled
@@ -255,10 +256,13 @@ class Microphone extends Readable {
       vadEnabled = true;
       vadMode = vad;
     } else if (vad !== null && typeof vad === 'object' && !Array.isArray(vad)) {
-      // Config object form: { model, threshold?, holdoffMs? }. model is required
-      // and selects the detector; threshold and holdoffMs override the mode
-      // defaults when supplied.
-      const { model, threshold, holdoffMs } = vad;
+      // Config object form: { model, threshold?, holdoffMs?, source? }. model
+      // is required and selects the detector; threshold and holdoffMs override
+      // the mode defaults when supplied; source names the 0-based DELIVERED
+      // channel the detector reads (the position within the delivered
+      // interleaved frames, after any channelMap), absent feeding the frame
+      // average of every delivered channel.
+      const { model, threshold, holdoffMs, source } = vad;
       if (model !== 'silero' && model !== 'energy') {
         throw new TypeError(
           `Invalid vad model: ${JSON.stringify(model)}. Expected 'silero' or 'energy'.`
@@ -283,6 +287,23 @@ class Microphone extends Readable {
           throw new RangeError('vad holdoffMs must be non-negative');
         }
         vadHoldoff = holdoffMs;
+      }
+      if (source !== undefined) {
+        if (typeof source !== 'number' || !Number.isInteger(source)) {
+          throw new TypeError('vad source must be an integer');
+        }
+        if (source < 0 || source > 65535) {
+          throw new RangeError('vad source must be between 0 and 65535');
+        }
+        // The delivered count is the only ceiling, checked here where both
+        // sides are in scope; the message is the core's own for the same
+        // condition. No fixed maximum exists.
+        if (source >= channels) {
+          throw new RangeError(
+            `the detector source names delivered channel ${source}; the delivered channel count is ${channels}`
+          );
+        }
+        vadSource = source;
       }
     } else {
       throw new TypeError(
@@ -468,6 +489,9 @@ class Microphone extends Readable {
         // native compute the energy score for a microphone that did not ask for
         // VAD. Absent means VAD off in native.
         vadMode: vadEnabled ? vadMode : undefined,
+        // The delivered channel the detector reads, from the vad config
+        // object's source key. Absent feeds the frame average.
+        detectorSource: vadSource,
         modelPath,
         dcRemoval,
         denoise,
@@ -905,6 +929,7 @@ class File extends Readable {
     let vadMode;
     let vadThreshold;
     let vadHoldoff;
+    let vadSource;
     if (vad === false) {
       vadEnabled = false;
       vadMode = 'energy'; // inert placeholder; ignored while disabled
@@ -916,7 +941,7 @@ class File extends Readable {
       vadEnabled = true;
       vadMode = vad;
     } else if (vad !== null && typeof vad === 'object' && !Array.isArray(vad)) {
-      const { model, threshold, holdoffMs } = vad;
+      const { model, threshold, holdoffMs, source } = vad;
       if (model !== 'silero' && model !== 'energy') {
         throw new TypeError(
           `Invalid vad model: ${JSON.stringify(model)}. Expected 'silero' or 'energy'.`
@@ -941,6 +966,22 @@ class File extends Readable {
           throw new RangeError('vad holdoffMs must be non-negative');
         }
         vadHoldoff = holdoffMs;
+      }
+      // source names the 0-based DELIVERED channel the detector reads,
+      // exactly as on Microphone; the checks and messages are the same.
+      if (source !== undefined) {
+        if (typeof source !== 'number' || !Number.isInteger(source)) {
+          throw new TypeError('vad source must be an integer');
+        }
+        if (source < 0 || source > 65535) {
+          throw new RangeError('vad source must be between 0 and 65535');
+        }
+        if (source >= channels) {
+          throw new RangeError(
+            `the detector source names delivered channel ${source}; the delivered channel count is ${channels}`
+          );
+        }
+        vadSource = source;
       }
     } else {
       throw new TypeError(
@@ -1011,6 +1052,9 @@ class File extends Readable {
         // Pass the mode to native only when VAD is enabled, exactly as the
         // Microphone options do; absent means VAD off in native.
         vadMode: vadEnabled ? vadMode : undefined,
+        // The delivered channel the detector reads, from the vad config
+        // object's source key. Absent feeds the frame average.
+        detectorSource: vadSource,
         // The whole-file analysis applies threshold and holdoff in the core
         // (segment merging in file time), so both cross the boundary here,
         // unlike the live path where the policy is wrapper-only.

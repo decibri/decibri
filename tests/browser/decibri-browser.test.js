@@ -759,6 +759,40 @@ describe('Microphone VAD', () => {
     mic.stop();
   });
 
+  it('scores the one delivered channel a vad source names', async () => {
+    // vad: { source } reads one delivered channel's samples alone: naming
+    // the silent channel scores the silence it carries, and naming the loud
+    // one scores its level, where the frame average would have blended the
+    // two. A silent channel against a loud one makes a wrong selection
+    // visible rather than plausible.
+    mockGetSettings.mockReturnValue({ channelCount: 2 });
+    const frames = new Float32Array(100);
+    for (let i = 0; i < 100; i += 2) {
+      frames[i] = 0.0; // delivered channel 0: silence
+      frames[i + 1] = 0.5; // delivered channel 1: loud
+    }
+
+    const silentSide = new Microphone({
+      dtype: 'float32',
+      channels: 2,
+      vad: { model: 'energy', threshold: 0.01, source: 0 },
+    });
+    await silentSide.start();
+    mockPort.onmessage({ data: frames.buffer });
+    expect(silentSide.vadScore).toBe(0);
+    silentSide.stop();
+
+    const loudSide = new Microphone({
+      dtype: 'float32',
+      channels: 2,
+      vad: { model: 'energy', threshold: 0.01, source: 1 },
+    });
+    await loudSide.start();
+    mockPort.onmessage({ data: frames.buffer });
+    expect(loudSide.vadScore).toBeCloseTo(0.5);
+    loudSide.stop();
+  });
+
   it('does not emit speech when below threshold', async () => {
     const mic = new Microphone({ dtype: 'float32', vad: { model: 'energy', threshold: 0.5 } });
     await mic.start();

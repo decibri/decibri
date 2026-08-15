@@ -26,7 +26,7 @@ use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
 
 use crate::error::DecibriError;
-use crate::microphone::{AudioChunk, DenoiseModel, HighpassFilter};
+use crate::microphone::{AudioChunk, DenoiseModel, DetectorSource, HighpassFilter};
 use crate::stage::{build_capture_stage, CaptureStage, Transforms};
 
 #[cfg(feature = "vad")]
@@ -118,6 +118,30 @@ pub struct FileConfig {
     /// [`validate`](Self::validate), which has no source in scope. Default:
     /// `None`.
     pub channel_map: Option<Vec<u16>>,
+    /// The source of the detector feed: which of the delivered channels a
+    /// voice-activity detector reads, for the per-chunk feed
+    /// ([`File::vad_input`]) and the whole-recording analysis
+    /// ([`File::analyze`]) alike.
+    /// [`DetectorSource::Average`](crate::microphone::DetectorSource::Average)
+    /// (the default) feeds the frame average of every delivered channel;
+    /// [`DetectorSource::Channel`](crate::microphone::DetectorSource::Channel)
+    /// feeds one delivered channel alone. Names a DELIVERED channel index,
+    /// never a source index: with a [`channel_map`](Self::channel_map)
+    /// present, delivered channel `j` carries source channel
+    /// `channel_map[j]` and the source names `j`. Affects only the detector
+    /// feed; the delivered audio is untouched.
+    ///
+    /// The same meaning as
+    /// [`crate::MicrophoneConfig::detector_source`], with the source's
+    /// channels standing where the device's stand on the live path. A
+    /// [`DetectorSource::Channel`](crate::microphone::DetectorSource::Channel)
+    /// index is validated by [`validate`](Self::validate) against
+    /// [`channels`](Self::channels), the delivered count
+    /// ([`DecibriError::DetectorSourceOutOfRange`] when it is not below that
+    /// count). The delivered count is the only ceiling; no fixed maximum
+    /// exists. Honoured only when the `vad` feature is compiled in. Default:
+    /// [`DetectorSource::Average`](crate::microphone::DetectorSource::Average).
+    pub detector_source: DetectorSource,
     /// Remove a constant (DC) offset with a one-pole DC-blocking high-pass,
     /// applied after the channel and rate normalization. Default: false (off).
     pub dc_removal: bool,
@@ -172,6 +196,7 @@ impl Default for FileConfig {
             sample_rate: 16000,
             channels: 1,
             channel_map: None,
+            detector_source: DetectorSource::Average,
             dc_removal: false,
             denoise: None,
             denoise_model_path: None,
@@ -189,15 +214,17 @@ impl Default for FileConfig {
 
 impl FileConfig {
     /// Validate the configuration: the target sample rate, the channel floor,
-    /// the AGC target, and the limiter ceiling (each when set) must fall
-    /// within the supported ranges, matching the live capture path's
-    /// validation exactly. With VAD configured, the detector threshold is
-    /// validated fail-fast as well.
+    /// the detector source, the AGC target, and the limiter ceiling (each
+    /// when set) must fall within the supported ranges, matching the live
+    /// capture path's validation exactly. With VAD configured, the detector
+    /// threshold is validated fail-fast as well.
     ///
     /// # Errors
     /// - [`DecibriError::SampleRateOutOfRange`] when `sample_rate` is outside
     ///   1000-384000.
     /// - [`DecibriError::ChannelsOutOfRange`] when `channels` is 0.
+    /// - [`DecibriError::DetectorSourceOutOfRange`] when the detector source
+    ///   names a delivered channel at or above `channels`.
     /// - [`DecibriError::AgcTargetOutOfRange`] when `agc` is outside -40..=-3.
     /// - [`DecibriError::LimiterCeilingOutOfRange`] when `limiter` is outside
     ///   -3.0..=0.0.
@@ -214,6 +241,19 @@ impl FileConfig {
         // own channel count alone, which is not in scope in this pure
         // function, so the ceiling is applied at construction as
         // `DecibriError::FileChannelsUnsupported`.
+        // The detector source names a delivered channel, and the delivered
+        // count is `channels`, which IS in scope here unlike the source's own
+        // count: an index at or above it can never resolve whatever the
+        // source turns out to carry. The delivered count is the only ceiling;
+        // no fixed maximum exists.
+        if let DetectorSource::Channel(index) = self.detector_source {
+            if index >= self.channels {
+                return Err(DecibriError::DetectorSourceOutOfRange {
+                    index,
+                    channels: self.channels,
+                });
+            }
+        }
         if let Some(target) = self.agc {
             if !(-40..=-3).contains(&target) {
                 return Err(DecibriError::AgcTargetOutOfRange);
@@ -459,6 +499,12 @@ pub struct File {
     /// Memory bound for `vad_queue`, in samples.
     #[cfg(feature = "vad")]
     vad_queue_cap: usize,
+    /// The source of the detector feed
+    /// ([`FileConfig::detector_source`]): the collapse
+    /// [`File::push_vad_feed`] applies before samples enter the feed. Copied
+    /// from the configuration at construction.
+    #[cfg(feature = "vad")]
+    detector_source: DetectorSource,
     /// Segment-merge holdoff in milliseconds of file time.
     #[cfg(feature = "vad")]
     vad_holdoff_ms: u32,
@@ -666,6 +712,8 @@ impl File {
             #[cfg(feature = "vad")]
             vad_queue_cap: vad_rate.max(target_rate) as usize * VAD_QUEUE_BOUND_SECS,
             #[cfg(feature = "vad")]
+            detector_source: config.detector_source,
+            #[cfg(feature = "vad")]
             vad_holdoff_ms: config.vad_holdoff_ms,
         })
     }
@@ -681,14 +729,20 @@ impl File {
         self.input_rate
     }
 
-    /// Whether the detector feed is maintained: when VAD is configured, or
-    /// when the chain has a conditioning transform (the delivered output then
-    /// differs from the pre-conditioning signal a detector should read),
-    /// exactly as the live capture path keeps its tap.
+    /// Whether the detector feed is maintained: when VAD is configured, when
+    /// the chain has a conditioning transform (the delivered output then
+    /// differs from the pre-conditioning signal a detector should read), or
+    /// when the delivery carries more than one channel (the feed is that
+    /// signal's mono collapse, which the delivered chunk is not). The same
+    /// three conditions under which the live capture path's
+    /// [`crate::microphone::MicrophoneStream::detector_feed`] returns a feed
+    /// distinct from the delivered chunk.
     fn feed_active(&self) -> bool {
         #[cfg(feature = "vad")]
         {
-            self.vad.is_some() || self.stage.as_ref().is_some_and(CaptureStage::has_transform)
+            self.vad.is_some()
+                || self.stage.as_ref().is_some_and(CaptureStage::has_transform)
+                || self.delivered_channels() > 1
         }
         #[cfg(not(feature = "vad"))]
         {
@@ -710,14 +764,15 @@ impl File {
 
     /// Drain the detector feed accumulated since the previous drain: the
     /// pre-conditioning signal, in file order, always mono (a signal carrying
-    /// more than one channel is collapsed to the frame average before it
-    /// enters the feed, the live path's own collapse). With VAD configured
-    /// the feed is at [`vad_rate`](Self::vad_rate); with only a conditioning
-    /// transform it stays at the target rate. Returns `None` when the feed is
-    /// inactive
-    /// (no VAD and no transform), in which case the delivered chunk already
-    /// is the pre-conditioning signal, exactly as
-    /// [`crate::microphone::MicrophoneStream::vad_input`] contracts.
+    /// more than one channel is collapsed before it enters the feed, as the
+    /// configured [`FileConfig::detector_source`] directs: the frame average
+    /// by default, or one named delivered channel, the live path's own
+    /// collapse). With VAD configured the feed is at
+    /// [`vad_rate`](Self::vad_rate); without VAD it stays at the target
+    /// rate. Returns `None` when the feed is inactive (no VAD, no transform,
+    /// and a mono delivery), in which case the delivered chunk already is
+    /// the mono pre-conditioning signal, exactly as
+    /// [`crate::microphone::MicrophoneStream::detector_feed`] contracts.
     ///
     /// Binding-internal plumbing: a binding calls this after each delivered
     /// chunk and feeds the samples (or, on `None`, the delivered chunk) to
@@ -1085,14 +1140,17 @@ impl File {
     /// than one channel, resampling to the detector rate when the two
     /// differ, and enforce the feed's memory bound.
     ///
-    /// The collapse is the live path's own: each interleaved frame becomes
-    /// one sample, the average of its channels
-    /// ([`crate::sample::downmix_to_mono`], the engine
-    /// [`crate::microphone::MicrophoneStream::detector_feed`] collapses
-    /// with), at the chain's own post-normalize channel count, the count the
-    /// scratch signal is interleaved at. The detector and the feed's
-    /// resampler both read mono, so the collapse precedes both. At one
-    /// channel the samples take the untouched path below, byte for byte.
+    /// The collapse is the live path's own, directed by the configured
+    /// [`FileConfig::detector_source`] exactly as
+    /// [`crate::microphone::MicrophoneStream::detector_feed`] is directed by
+    /// its own: each interleaved frame becomes one sample, the average of its
+    /// channels ([`crate::sample::downmix_to_mono`], the default) or the
+    /// sample of one named delivered channel
+    /// ([`crate::sample::select_channel`]), at the chain's own post-normalize
+    /// channel count, the count the scratch signal is interleaved at. The
+    /// detector and the feed's resampler both read mono, so the collapse
+    /// precedes both. At one channel the samples take the untouched path
+    /// below, byte for byte.
     ///
     /// The detector-feed resampler rejects a block that arrives after its own
     /// flush. Every caller runs before that flush, so the rejection is
@@ -1108,7 +1166,14 @@ impl File {
             .map_or(self.input_channels, CaptureStage::tap_channels);
         let collapsed;
         let feed: &[f32] = if feed_channels > 1 {
-            collapsed = crate::sample::downmix_to_mono(&self.scratch, feed_channels);
+            collapsed = match self.detector_source {
+                DetectorSource::Average => {
+                    crate::sample::downmix_to_mono(&self.scratch, feed_channels)
+                }
+                DetectorSource::Channel(index) => {
+                    crate::sample::select_channel(&self.scratch, feed_channels, index)
+                }
+            };
             &collapsed
         } else {
             &self.scratch
@@ -3570,6 +3635,168 @@ mod tests {
             .unwrap();
         assert_eq!(stereo_report.scores, mono_report.scores);
         assert_eq!(stereo_report.segments, mono_report.segments);
+    }
+
+    /// Collect the detector feed a `File` iteration drains, chunk by chunk.
+    #[cfg(feature = "vad")]
+    fn collect_feed(mut file: File) -> Vec<f32> {
+        let mut fed = Vec::new();
+        loop {
+            let Some(chunk) = file.next() else { break };
+            chunk.expect("iteration should not error");
+            fed.extend(file.vad_input().expect("the feed is active"));
+        }
+        fed
+    }
+
+    /// A `DetectorSource::Channel` feeds the named delivered channel alone on
+    /// the file surface: a silent channel against a ramp, so a wrong
+    /// selection is visible rather than plausible. Naming the silent channel
+    /// feeds silence; naming the loud one feeds the ramp, byte for byte. The
+    /// same feed `analyze` consumes, so the whole-recording analysis reads
+    /// the named channel too.
+    #[cfg(feature = "vad")]
+    #[test]
+    fn a_channel_source_feeds_the_named_channel_on_the_file_surface() {
+        let frames = 3200;
+        let loud: Vec<f32> = (0..frames).map(|i| (i % 16) as f32 * 0.05 + 0.1).collect();
+        // Delivered channel 0 silent, delivered channel 1 loud.
+        let stereo: Vec<f32> = loud.iter().flat_map(|&s| [0.0, s]).collect();
+
+        for (source, expected) in [
+            (DetectorSource::Channel(0), vec![0.0_f32; frames]),
+            (DetectorSource::Channel(1), loud.clone()),
+        ] {
+            let config = FileConfig {
+                channels: 2,
+                detector_source: source,
+                ..vad_file_config()
+            };
+            let fed = collect_feed(File::buffer(stereo.clone(), 16000, 2, config).unwrap());
+            assert_eq!(fed, expected, "the feed carries {source:?} alone");
+        }
+
+        // The default remains the frame average, byte for byte, beside the
+        // selecting configurations above.
+        let config = FileConfig {
+            channels: 2,
+            ..vad_file_config()
+        };
+        let fed = collect_feed(File::buffer(stereo.clone(), 16000, 2, config).unwrap());
+        assert_eq!(
+            fed,
+            crate::sample::downmix_to_mono(&stereo, 2),
+            "no source set: the feed is the frame average"
+        );
+    }
+
+    /// A multichannel delivery keeps the feed active even with no detector
+    /// configured and no transform: `vad_input` hands out the mono collapse
+    /// of the pre-conditioning signal, so a binding never falls back to the
+    /// interleaved delivered chunk. The same three-condition contract as the
+    /// live path's `detector_feed`. Regression: an interleaved multichannel
+    /// signal reaching a detector as consecutive mono samples.
+    #[cfg(feature = "vad")]
+    #[test]
+    fn a_multichannel_delivery_keeps_the_feed_active_without_vad() {
+        let frames = 3200;
+        let loud: Vec<f32> = (0..frames).map(|i| (i % 16) as f32 * 0.05 + 0.1).collect();
+        let stereo: Vec<f32> = loud.iter().flat_map(|&s| [0.0, s]).collect();
+
+        let config = FileConfig {
+            channels: 2,
+            ..FileConfig::default()
+        };
+        let fed = collect_feed(File::buffer(stereo.clone(), 16000, 2, config).unwrap());
+        assert_eq!(
+            fed,
+            crate::sample::downmix_to_mono(&stereo, 2),
+            "no VAD, no transform: the feed is the delivery's mono collapse"
+        );
+    }
+
+    /// The detector source names DELIVERED channels, the position within the
+    /// frames a consumer receives, not source channels: under a permuting map
+    /// `[1, 0]`, `Channel(0)` feeds source channel 1, the one the map placed
+    /// at delivered position 0. Regression: a source index resolved in the
+    /// source's own channel space, which reads the other channel here while
+    /// every length still agrees.
+    #[cfg(feature = "vad")]
+    #[test]
+    fn a_channel_source_resolves_in_delivered_space_under_a_permuting_map() {
+        let frames = 3200;
+        let a: Vec<f32> = (0..frames).map(|i| (i % 8) as f32 * 0.1 - 0.35).collect();
+        let b: Vec<f32> = a.iter().map(|&s| s + 0.25).collect();
+        let stereo: Vec<f32> = a.iter().zip(&b).flat_map(|(&x, &y)| [x, y]).collect();
+
+        let config = FileConfig {
+            channels: 2,
+            channel_map: Some(vec![1, 0]),
+            detector_source: DetectorSource::Channel(0),
+            ..vad_file_config()
+        };
+        let fed = collect_feed(File::buffer(stereo, 16000, 2, config).unwrap());
+        assert_eq!(
+            fed, b,
+            "delivered channel 0 carries source channel 1 under the map, and the feed reads it"
+        );
+    }
+
+    /// Under a duplicating map `[0, 0]` every delivered position carries
+    /// source channel 0, and the detector source names a position: naming
+    /// delivered channel 1 feeds source channel 0's samples, never source
+    /// channel 1's. The delivered space makes a duplicated channel
+    /// unambiguous by position, which is what the index space is for.
+    #[cfg(feature = "vad")]
+    #[test]
+    fn a_channel_source_under_a_duplicating_map_reads_the_delivered_position() {
+        let frames = 3200;
+        let a: Vec<f32> = (0..frames).map(|i| (i % 8) as f32 * 0.1 - 0.35).collect();
+        let b: Vec<f32> = a.iter().map(|&s| s + 0.25).collect();
+        let stereo: Vec<f32> = a.iter().zip(&b).flat_map(|(&x, &y)| [x, y]).collect();
+
+        let config = FileConfig {
+            channels: 2,
+            channel_map: Some(vec![0, 0]),
+            detector_source: DetectorSource::Channel(1),
+            ..vad_file_config()
+        };
+        let fed = collect_feed(File::buffer(stereo, 16000, 2, config).unwrap());
+        assert_eq!(
+            fed, a,
+            "delivered channel 1 carries source channel 0 under the duplicating map"
+        );
+    }
+
+    /// A detector source at or above the configured delivered count is
+    /// refused at construction, against that count alone: a large delivered
+    /// count admits a correspondingly large index. The negative control
+    /// against a fixed maximum reintroduced on the index.
+    #[test]
+    fn a_detector_source_out_of_range_is_refused_at_construction() {
+        let config = FileConfig {
+            channels: 2,
+            detector_source: DetectorSource::Channel(2),
+            ..FileConfig::default()
+        };
+        assert!(matches!(
+            File::buffer(vec![0.0; 64], 16000, 2, config),
+            Err(DecibriError::DetectorSourceOutOfRange {
+                index: 2,
+                channels: 2
+            })
+        ));
+
+        // No fixed maximum: 1024 delivered channels admit index 1023.
+        let config = FileConfig {
+            channels: 1024,
+            detector_source: DetectorSource::Channel(1023),
+            ..FileConfig::default()
+        };
+        assert!(
+            File::buffer(vec![0.0; 1024], 16000, 1024, config).is_ok(),
+            "the delivered count is the only ceiling"
+        );
     }
 
     /// THE round trip: a three-channel source saved and re-read reproduces
