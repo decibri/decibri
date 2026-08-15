@@ -24,7 +24,7 @@ from pathlib import Path
 
 import pytest
 
-from decibri import AsyncMicrophone, Microphone, Vad
+from decibri import AsyncMicrophone, DetectorSourceOutOfRange, Microphone, Vad
 from decibri._classes import _VadStateMachine
 
 
@@ -202,6 +202,51 @@ def test_vad_object_holdoff_negative_raises() -> None:
     """A negative holdoff_ms in a Vad object raises a clear ValueError."""
     with pytest.raises(ValueError, match="holdoff_ms must be non-negative"):
         Vad(model="energy", holdoff_ms=-1)
+
+
+# --- Vad detector source ----------------------------------------------------
+
+
+def test_vad_object_source_default_is_none() -> None:
+    """source left unset feeds the detector the frame average, the default."""
+    assert Vad(model="energy").source is None
+    assert Vad(model="silero").source is None
+
+
+def test_vad_object_source_shape_validation() -> None:
+    """source must be an integer in [0, 65535]; bool is not an integer here."""
+    with pytest.raises(TypeError, match="source must be an integer"):
+        Vad(model="energy", source="left")  # type: ignore[arg-type]
+    with pytest.raises(TypeError, match="source must be an integer"):
+        Vad(model="energy", source=True)
+    with pytest.raises(ValueError, match=r"source must be in \[0, 65535\]"):
+        Vad(model="energy", source=-1)
+    with pytest.raises(ValueError, match=r"source must be in \[0, 65535\]"):
+        Vad(model="energy", source=65536)
+
+
+def test_vad_source_out_of_range_raises_at_construction() -> None:
+    """A source at or above the delivered count raises the typed core error
+    at construction, checked against the configured count alone, with the
+    core's own message naming the delivered index space."""
+    with pytest.raises(
+        DetectorSourceOutOfRange,
+        match="the detector source names delivered channel 2; "
+        "the delivered channel count is 2",
+    ):
+        Microphone(channels=2, vad=Vad(model="energy", source=2))
+    with pytest.raises(DetectorSourceOutOfRange):
+        Microphone(vad=Vad(model="energy", source=1))
+
+
+def test_vad_source_below_count_constructs() -> None:
+    """A source below the delivered count constructs, at any count: the
+    delivered count is the only ceiling, so a large count admits a
+    correspondingly large index."""
+    assert Microphone(channels=2, vad=Vad(model="energy", source=1)) is not None
+    assert (
+        Microphone(channels=1024, vad=Vad(model="energy", source=1023)) is not None
+    )
 
 
 def test_vad_threshold_kwarg_removed() -> None:

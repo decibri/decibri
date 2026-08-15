@@ -30,6 +30,7 @@ from decibri.exceptions import (
     BlockSizeNotFrameAligned,
     ChannelMapLengthMismatch,
     DecibriError,
+    DetectorSourceOutOfRange,
     FileChannelMapOutOfRange,
     FileChannelSelectionAmbiguous,
     FileChannelsUnsupported,
@@ -972,6 +973,45 @@ def test_channel_map_selects_and_permutes() -> None:
     assert list(right_values) == pytest.approx(
         [stereo[f * 2 + 1] for f in range(1000)], abs=0.0
     )
+
+
+def test_detector_source_feeds_the_named_channel() -> None:
+    """Vad(source=...) reads one delivered channel alone: a silent channel
+    against a loud one makes a wrong selection visible rather than
+    plausible. The energy score is the RMS of exactly the samples the
+    detector was fed, and with source unset it stays the frame average's."""
+    frames = 4000
+    silent_loud: list[float] = []
+    for _ in range(frames):
+        silent_loud.extend((0.0, 0.5))
+
+    def top_score(vad: Vad | str) -> float:
+        scored = File.buffer(
+            silent_loud, input_rate=16000, input_channels=2, channels=2, vad=vad
+        )
+        return max(chunk.vad_score for chunk in scored.iter_with_metadata())
+
+    assert top_score(Vad(model="energy", source=0)) < 0.001
+    assert top_score(Vad(model="energy", source=1)) == pytest.approx(0.5, abs=0.01)
+    assert top_score(Vad(model="energy")) == pytest.approx(0.25, abs=0.01)
+
+
+def test_detector_source_out_of_range_raises() -> None:
+    """A source at or above the delivered count raises the typed core error
+    at construction, checked against the configured delivered count alone,
+    with the core's message naming the delivered index space."""
+    with pytest.raises(
+        DetectorSourceOutOfRange,
+        match="the detector source names delivered channel 2; "
+        "the delivered channel count is 2",
+    ):
+        File.buffer(
+            stereo_interleaved(8),
+            input_rate=16000,
+            input_channels=2,
+            channels=2,
+            vad=Vad(model="energy", source=2),
+        )
 
 
 def test_unmapped_over_ask_raises() -> None:

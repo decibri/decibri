@@ -41,10 +41,10 @@ class Microphone extends Emitter {
 
     // ── VAD state ─────────────────────────────────────────────────────────
     // vad accepts false (disabled, default), the 'energy' shorthand, or a config
-    // object { model: 'energy', threshold?, holdoffMs? } to tune the policy. The
-    // browser runs energy VAD only; Silero needs ONNX Runtime, which is
-    // Node-only. The legacy vad: true form and the flat vadThreshold/vadHoldoff
-    // options are rejected with a migration error.
+    // object { model: 'energy', threshold?, holdoffMs?, source? } to tune the
+    // policy. The browser runs energy VAD only; Silero needs ONNX Runtime,
+    // which is Node-only. The legacy vad: true form and the flat
+    // vadThreshold/vadHoldoff options are rejected with a migration error.
     if (options.vadThreshold !== undefined || options.vadHoldoff !== undefined) {
       throw new TypeError(
         "vadThreshold and vadHoldoff are no longer supported. Pass them on the vad config object: vad: { model: 'energy', threshold: 0.01, holdoffMs: 300 }."
@@ -53,6 +53,7 @@ class Microphone extends Emitter {
     const vad = options.vad ?? false;
     let vadThreshold = 0.01;
     let vadHoldoff = 300;
+    let vadSource;
     if (vad === false) {
       this._vad = false;
     } else if (vad === true) {
@@ -84,11 +85,34 @@ class Microphone extends Emitter {
         }
         vadHoldoff = vad.holdoffMs;
       }
+      // source names the 0-based DELIVERED channel the detector reads, the
+      // position within the delivered interleaved frames after any
+      // channelMap; absent scores the frame average of every delivered
+      // channel. The checks and the messages are the node entry's. The
+      // delivered-count check runs only against a valid count; a count below
+      // one is reported as its own error below, exactly as on the node entry.
+      if (vad.source !== undefined) {
+        const source = vad.source;
+        if (typeof source !== 'number' || !Number.isInteger(source)) {
+          throw new TypeError('vad source must be an integer');
+        }
+        if (source < 0 || source > 65535) {
+          throw new RangeError('vad source must be between 0 and 65535');
+        }
+        const deliveredChannels = options.channels ?? 1;
+        if (deliveredChannels >= 1 && source >= deliveredChannels) {
+          throw new RangeError(
+            `the detector source names delivered channel ${source}; the delivered channel count is ${deliveredChannels}`
+          );
+        }
+        vadSource = source;
+      }
     } else {
       throw new TypeError(`Invalid vad value: ${JSON.stringify(vad)}. Expected false, 'energy', or a config object { model, threshold, holdoffMs }.`);
     }
     this._vadThreshold = vadThreshold;
     this._vadHoldoff = vadHoldoff;
+    this._vadSource = vadSource;
     this._vadScore = 0;
     this._isSpeaking = false;
     this._silenceTimer = null;
@@ -229,8 +253,9 @@ class Microphone extends Emitter {
   /**
    * Most recent VAD score: the normalized RMS of the last chunk in `'energy'`
    * mode, or 0 when VAD is disabled or before the first chunk is processed.
-   * A chunk carrying more than one channel is collapsed to the average of its
-   * channels before the RMS, so the score reflects one channel's level.
+   * A chunk carrying more than one channel is collapsed to the average of
+   * its channels, or to the one delivered channel a `vad: { source }` names,
+   * before the RMS, so the score reflects one channel's level.
    * @returns {number}
    */
   get vadScore() {
@@ -459,12 +484,21 @@ class Microphone extends Emitter {
 
     if (channels > 1) {
       // Score one channel's level, as the node path's detector feed does:
-      // collapse each interleaved frame to the engine's average
-      // (single-precision accumulation, f32 quotient), then take the RMS of
-      // the collapsed signal.
+      // collapse each interleaved frame as the configured source directs,
+      // the engine's average (single-precision accumulation, f32 quotient)
+      // by default or one named delivered channel's sample alone, then take
+      // the RMS of the collapsed signal.
       const frames = Math.floor(n / channels);
       if (frames === 0) return 0;
+      const source = this._vadSource;
       let sum = 0;
+      if (source !== undefined) {
+        for (let f = 0; f < frames; f++) {
+          const s = isFloat ? chunk[f * channels + source] : chunk[f * channels + source] / 32768;
+          sum += s * s;
+        }
+        return Math.sqrt(sum / frames);
+      }
       for (let f = 0; f < frames; f++) {
         let acc = 0;
         for (let c = 0; c < channels; c++) {

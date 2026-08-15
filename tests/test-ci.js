@@ -524,6 +524,7 @@ const BUILTIN_VARIANTS = [
   'FramesPerBufferOutOfRange',
   'AgcTargetOutOfRange',
   'LimiterCeilingOutOfRange',
+  'DetectorSourceOutOfRange',
   'ChannelMapLengthMismatch',
   'FlacCompressionOutOfRange',
   'InvalidFormat',
@@ -766,6 +767,42 @@ const parityCases = [
     message: 'vad holdoffMs must be non-negative',
   },
   {
+    label: "vad source 'left'",
+    options: { vad: { model: 'energy', source: 'left' } },
+    type: TypeError,
+    message: 'vad source must be an integer',
+  },
+  {
+    label: 'vad source 0.5',
+    options: { vad: { model: 'energy', source: 0.5 } },
+    type: TypeError,
+    message: 'vad source must be an integer',
+  },
+  {
+    label: 'vad source -1',
+    options: { vad: { model: 'energy', source: -1 } },
+    type: RangeError,
+    message: 'vad source must be between 0 and 65535',
+  },
+  {
+    label: 'vad source 65536',
+    options: { vad: { model: 'energy', source: 65536 } },
+    type: RangeError,
+    message: 'vad source must be between 0 and 65535',
+  },
+  {
+    label: 'vad source 1 on the default mono delivery',
+    options: { vad: { model: 'energy', source: 1 } },
+    type: RangeError,
+    message: 'the detector source names delivered channel 1; the delivered channel count is 1',
+  },
+  {
+    label: 'vad source 2 with channels 2',
+    options: { channels: 2, vad: { model: 'energy', source: 2 } },
+    type: RangeError,
+    message: 'the detector source names delivered channel 2; the delivered channel count is 2',
+  },
+  {
     label: 'sampleRate 0',
     options: { sampleRate: 0 },
     type: RangeError,
@@ -857,6 +894,10 @@ for (const options of [
   { channels: 33 },
   { channels: 1024 },
   { channels: 2, channelMap: [1, 0] },
+  { channels: 2, vad: { model: 'energy', source: 1 } },
+  // The regression control against a fixed maximum reintroduced on the
+  // detector source: the delivered count is its only ceiling.
+  { channels: 1024, vad: { model: 'energy', source: 1023 } },
 ]) {
   const label = JSON.stringify(options);
   for (const [entry, Ctor] of [['node', Microphone], ['browser', BrowserMicrophone]]) {

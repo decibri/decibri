@@ -35,6 +35,7 @@ from decibri.exceptions import (
     ChannelSelectionAmbiguous,
     ChannelsOutOfRange,
     DecibriError,
+    DetectorSourceOutOfRange,
     DeviceEnumerationFailed,
     DeviceError,
     DeviceFailed,
@@ -273,7 +274,7 @@ __all__ = [
     # Exception hierarchy entry points:
     # only the catch-target roots plus ForkAfterOrtInit are surfaced in
     # __all__ to keep `from decibri import *` legible. The full
-    # 63-class hierarchy remains importable via top-level attribute
+    # 64-class hierarchy remains importable via top-level attribute
     # lookup (``decibri.<Class>``) AND via the explicit submodule
     # (``decibri.exceptions.<Class>``); see decibri.exceptions for the
     # complete list. The four catch-target names cover catch-anything,

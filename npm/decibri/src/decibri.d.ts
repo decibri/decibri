@@ -61,6 +61,17 @@ export interface VadOptions {
    * @default 300
    */
   holdoffMs?: number;
+
+  /**
+   * The 0-based DELIVERED channel the detector reads: the position within
+   * the delivered interleaved frames, after any `channelMap` is applied (a
+   * `channelMap` names device channels; `source` names the delivered
+   * position). Must be below the delivered channel count, which is its only
+   * ceiling; no fixed maximum exists. Affects only the detector feed; the
+   * delivered audio is untouched.
+   * @default the frame average of every delivered channel
+   */
+  source?: number;
 }
 
 /**
@@ -274,8 +285,8 @@ export interface MicrophoneOptions extends ReadableOptions {
    * - `false`: disabled (default)
    * - `'silero'`: Silero VAD v6.2 ML model (more accurate, ~1ms inference)
    * - `'energy'`: RMS energy threshold (lightweight)
-   * - a `VadOptions` config object `{ model, threshold?, holdoffMs? }` to tune
-   *   the threshold and holdoff for the chosen model
+   * - a `VadOptions` config object `{ model, threshold?, holdoffMs?, source? }`
+   *   to tune the threshold, holdoff, and detector source for the chosen model
    *
    * The string shorthand uses the mode's default threshold (0.5 for `'silero'`,
    * 0.01 for `'energy'`) and a 300 ms holdoff; pass a `VadOptions` object to

@@ -939,6 +939,61 @@ async function fileTests(h) {
     `a map entry the source lacks carries FILE_CHANNEL_MAP_OUT_OF_RANGE (got ${outOfRange && outOfRange.code}: ${outOfRange && outOfRange.message})`
   );
 
+  console.log('File: the detector source names one delivered channel');
+
+  // A stereo source whose channels are distinguishable by level alone,
+  // delivered channel 0 silent and delivered channel 1 loud, so a wrong
+  // selection is visible rather than plausible: the energy score is the RMS
+  // of exactly the samples the detector was fed.
+  const srcFrames = 4000;
+  const silentLoud = new Float32Array(srcFrames * 2);
+  for (let f = 0; f < srcFrames; f++) {
+    silentLoud[f * 2] = 0;
+    silentLoud[f * 2 + 1] = 0.5;
+  }
+  const scoreOf = async (vad) => {
+    const scored = File.buffer(silentLoud, {
+      inputRate: 16000,
+      inputChannels: 2,
+      channels: 2,
+      vad,
+    });
+    let top = 0;
+    for await (const chunk of scored) {
+      top = Math.max(top, scored.vadScore);
+    }
+    return top;
+  };
+  const silentScore = await scoreOf({ model: 'energy', source: 0 });
+  assert(silentScore < 0.001, `naming the silent channel scores its silence (got ${silentScore})`);
+  const loudScore = await scoreOf({ model: 'energy', source: 1 });
+  assert(
+    Math.abs(loudScore - 0.5) < 0.01,
+    `naming the loud channel scores its own level (got ${loudScore})`
+  );
+  // No source set: the score is the frame average's, half the loud level
+  // here, so the default is the established collapse beside the selections.
+  const averagedScore = await scoreOf({ model: 'energy' });
+  assert(
+    Math.abs(averagedScore - 0.25) < 0.01,
+    `no source: the score is the frame average's (got ${averagedScore})`
+  );
+
+  // The refusal is the wrapper's own RangeError, the same class and message
+  // the Microphone raises for the same input, checked against the delivered
+  // count alone.
+  assertThrows(
+    () =>
+      File.buffer(silentLoud, {
+        inputRate: 16000,
+        inputChannels: 2,
+        channels: 2,
+        vad: { model: 'energy', source: 2 },
+      }),
+    RangeError,
+    'the detector source names delivered channel 2; the delivered channel count is 2'
+  );
+
   // The round trip: a stereo save re-read delivers the identical stream,
   // and the written header carries the channel count.
   const stereoDest = path.join(tmp, 'stereo.wav');

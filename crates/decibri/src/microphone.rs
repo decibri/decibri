@@ -90,6 +90,35 @@ impl HighpassFilter {
     }
 }
 
+/// The source of the detector feed: which of the delivered channels the
+/// voice-activity detector reads.
+///
+/// A closed, `#[non_exhaustive]` set, designed to grow the way
+/// [`DenoiseModel`] grows. The variants name DELIVERED channels, the 0-based
+/// positions of the interleaved frames a consumer receives, after any
+/// [`MicrophoneConfig::channel_map`] is applied: with a map present,
+/// delivered channel `j` carries device channel `channel_map[j]`, and the
+/// source names `j`, never the device index. A device channel the map
+/// delivers at two positions is therefore named by position, without
+/// ambiguity. Selecting a source changes which samples reach the detector
+/// and nothing else: the delivered audio is untouched.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum DetectorSource {
+    /// The frame average of every delivered channel, the default: each
+    /// interleaved frame collapses to the arithmetic mean of its channels
+    /// before the detector reads it. At one delivered channel this is the
+    /// identity.
+    #[default]
+    Average,
+    /// One delivered channel, by 0-based index: the detector reads that
+    /// channel's samples alone. The index must be below the configured
+    /// delivered channel count
+    /// ([`DecibriError::DetectorSourceOutOfRange`] otherwise); the count is
+    /// the only ceiling, so no fixed maximum exists.
+    Channel(u16),
+}
+
 /// Configuration for a microphone capture session.
 ///
 /// `#[non_exhaustive]`: construct it with [`MicrophoneConfig::default`] and then
@@ -169,6 +198,23 @@ pub struct MicrophoneConfig {
     /// [`validate`](Self::validate), which has no device in scope. Default:
     /// `None`.
     pub channel_map: Option<Vec<u16>>,
+    /// The source of the detector feed
+    /// ([`MicrophoneStream::detector_feed`]): which of the delivered channels
+    /// a voice-activity detector reads. [`DetectorSource::Average`] (the
+    /// default) feeds the frame average of every delivered channel;
+    /// [`DetectorSource::Channel`] feeds one delivered channel alone. Names a
+    /// DELIVERED channel index, the position within the interleaved frames a
+    /// consumer receives, never a device index: with a
+    /// [`channel_map`](Self::channel_map) present, delivered channel `j`
+    /// carries device channel `channel_map[j]` and the source names `j`.
+    /// Affects only the detector feed; the delivered audio is untouched.
+    ///
+    /// A [`DetectorSource::Channel`] index is validated by
+    /// [`validate`](Self::validate) against [`channels`](Self::channels), the
+    /// delivered count ([`DecibriError::DetectorSourceOutOfRange`] when it is
+    /// not below that count). The delivered count is the only ceiling; no
+    /// fixed maximum exists. Default: [`DetectorSource::Average`].
+    pub detector_source: DetectorSource,
     /// Frames per audio callback buffer. Range: 64–65536. Default: 1600.
     pub frames_per_buffer: u32,
     /// Device selection. Default: system default input.
@@ -292,6 +338,7 @@ impl Default for MicrophoneConfig {
             sample_rate: 16000,
             channels: 1,
             channel_map: None,
+            detector_source: DetectorSource::Average,
             frames_per_buffer: 1600,
             device: DeviceSelector::Default,
             dc_removal: false,
@@ -316,10 +363,10 @@ impl Default for MicrophoneConfig {
 }
 
 impl MicrophoneConfig {
-    /// Validate the configuration: sample rate, channel count, buffer size, the
-    /// AGC target, the limiter ceiling, and the echo-cancellation rates and
-    /// reference channel count (each when set) must fall within the supported
-    /// ranges.
+    /// Validate the configuration: sample rate, channel count, detector
+    /// source, buffer size, the AGC target, the limiter ceiling, and the
+    /// echo-cancellation rates and reference channel count (each when set)
+    /// must fall within the supported ranges.
     pub fn validate(&self) -> Result<(), DecibriError> {
         if !(1000..=384000).contains(&self.sample_rate) {
             return Err(DecibriError::SampleRateOutOfRange);
@@ -331,6 +378,19 @@ impl MicrophoneConfig {
         // device alone, which is not in scope in this pure function, so the
         // ceiling is applied at open time as
         // `DecibriError::MicrophoneChannelsUnsupported`.
+        // The detector source names a delivered channel, and the delivered
+        // count is `channels`, which IS in scope here unlike the device: an
+        // index at or above it can never resolve whatever device answers at
+        // start(). The delivered count is the only ceiling; no fixed maximum
+        // exists.
+        if let DetectorSource::Channel(index) = self.detector_source {
+            if index >= self.channels {
+                return Err(DecibriError::DetectorSourceOutOfRange {
+                    index,
+                    channels: self.channels,
+                });
+            }
+        }
         if !(64..=65536).contains(&self.frames_per_buffer) {
             return Err(DecibriError::FramesPerBufferOutOfRange);
         }
@@ -571,6 +631,13 @@ pub struct MicrophoneStream {
     // which is fixed for the stream's lifetime, so no lock is needed to read
     // it.
     tap_channels: u16,
+    // The source of the detector feed
+    // ([`MicrophoneConfig::detector_source`]): the collapse
+    // [`detector_feed`](Self::detector_feed) applies, to the tap at
+    // `tap_channels` and to a multichannel delivered chunk at `channels`.
+    // Copied from the configuration at start and fixed for the stream's
+    // lifetime.
+    detector_source: DetectorSource,
     // Memory bound (in samples) for `vad_tap`, computed from the target rate at
     // construction (see `VAD_TAP_BOUND_SECS`). Oldest tapped samples are dropped
     // beyond this so a consumer that enables an enhancement step but never drains
@@ -1053,11 +1120,14 @@ impl MicrophoneStream {
     /// The feed is the pre-transform signal from
     /// [`vad_input`](Self::vad_input) when the tap is active, and the
     /// delivered chunk otherwise. Either signal is collapsed to mono when it
-    /// carries more than one channel: each interleaved frame becomes one
-    /// sample, the average of its channels. The tap is collapsed at the
-    /// chain's own post-normalize channel count, the count the tapped samples
-    /// are interleaved at; the delivered chunk is collapsed at the stream's
-    /// delivered count.
+    /// carries more than one channel, as the configured
+    /// [`MicrophoneConfig::detector_source`] directs: each interleaved frame
+    /// becomes one sample, the average of its channels
+    /// ([`DetectorSource::Average`], the default) or the sample of one named
+    /// delivered channel ([`DetectorSource::Channel`]). The tap is collapsed
+    /// at the chain's own post-normalize channel count, the count the tapped
+    /// samples are interleaved at; the delivered chunk is collapsed at the
+    /// stream's delivered count.
     ///
     /// # Returns
     /// - `Some(v)`: `v` is the mono detector feed for this delivery.
@@ -1070,15 +1140,33 @@ impl MicrophoneStream {
     pub fn detector_feed(&self, delivered: &[f32]) -> Option<Vec<f32>> {
         if let Some(tap) = self.vad_input(delivered.len()) {
             return Some(if self.tap_channels > 1 {
-                crate::sample::downmix_to_mono(&tap, self.tap_channels)
+                Self::collapse(&tap, self.tap_channels, self.detector_source)
             } else {
                 tap
             });
         }
         if self.channels > 1 {
-            return Some(crate::sample::downmix_to_mono(delivered, self.channels));
+            return Some(Self::collapse(
+                delivered,
+                self.channels,
+                self.detector_source,
+            ));
         }
         None
+    }
+
+    /// Collapse one interleaved signal to the mono detector feed, as the
+    /// configured source directs: the frame average, or one delivered
+    /// channel's samples. The single collapse site both
+    /// [`detector_feed`](Self::detector_feed) paths run through, so the two
+    /// cannot apply different sources.
+    fn collapse(samples: &[f32], channels: u16, source: DetectorSource) -> Vec<f32> {
+        match source {
+            DetectorSource::Average => crate::sample::downmix_to_mono(samples, channels),
+            DetectorSource::Channel(index) => {
+                crate::sample::select_channel(samples, channels, index)
+            }
+        }
     }
 
     /// Take the last device/driver error reported while streaming, if any.
@@ -1584,6 +1672,7 @@ impl Microphone {
             chain_flushed: AtomicBool::new(false),
             vad_tap,
             tap_channels,
+            detector_source: self.config.detector_source,
             vad_tap_cap,
             #[cfg(feature = "aec")]
             aec_reference,
@@ -1646,12 +1735,28 @@ mod tests {
             capture_stage: capture_stage.map(Mutex::new),
             vad_tap,
             tap_channels,
+            detector_source: DetectorSource::Average,
             vad_tap_cap: 16000 * VAD_TAP_BOUND_SECS,
             chain_flushed: AtomicBool::new(false),
             #[cfg(feature = "aec")]
             aec_reference: None,
             #[cfg(feature = "aec")]
             aec_reference_channels: 1,
+        };
+        (stream, sender, running)
+    }
+
+    /// As [`test_stream_with`], with the detector source set apart from the
+    /// default average.
+    fn test_stream_with_source(
+        capture_stage: Option<CaptureStage>,
+        channels: u16,
+        source: DetectorSource,
+    ) -> (MicrophoneStream, Sender<AudioChunk>, Arc<AtomicBool>) {
+        let (stream, sender, running) = test_stream_with(capture_stage, channels);
+        let stream = MicrophoneStream {
+            detector_source: source,
+            ..stream
         };
         (stream, sender, running)
     }
@@ -2568,6 +2673,127 @@ mod tests {
                 "feed sample {i} is the frame's channel average (got {got}, want {want})"
             );
         }
+    }
+
+    /// With no detector source set, the feed is byte-identical to the frame
+    /// average on both `detector_feed` paths: the tap collapse and the
+    /// delivered-chunk collapse each equal `downmix_to_mono` of their input
+    /// exactly. The default-path safety pin: a configuration that sets
+    /// nothing reads the same feed as before the option existed. Regression:
+    /// the source plumbing disturbing the default collapse.
+    #[test]
+    fn the_default_detector_source_is_the_frame_average() {
+        // Tap path: a 2-channel tap on a default-source stream.
+        let (stream, _sender, _running) = test_stream_with(Some(two_channel_tap_chain()), 2);
+        let frames = 160;
+        let interleaved: Vec<f32> = (0..frames)
+            .flat_map(|i| [(i % 8) as f32 * 0.125 - 0.5, (i % 5) as f32 * 0.2 - 0.4])
+            .collect();
+        stream.push_vad_tap(interleaved.clone());
+        let feed = stream
+            .detector_feed(&interleaved)
+            .expect("a transform keeps the tap active");
+        assert_eq!(
+            feed,
+            crate::sample::downmix_to_mono(&interleaved, 2),
+            "the tap-path default is the frame average, byte for byte"
+        );
+
+        // Delivered path: no chain, 2 delivered channels, default source.
+        let (stream, _sender, _running) = test_stream_with(None, 2);
+        let feed = stream
+            .detector_feed(&interleaved)
+            .expect("a multichannel delivered chunk is collapsed");
+        assert_eq!(
+            feed,
+            crate::sample::downmix_to_mono(&interleaved, 2),
+            "the delivered-path default is the frame average, byte for byte"
+        );
+    }
+
+    /// A `DetectorSource::Channel` feeds the named delivered channel alone,
+    /// on both `detector_feed` paths. The channels carry distinguishable
+    /// content, silence against a ramp, so a wrong selection is visible: the
+    /// silent channel's feed is all zeros and the loud channel's is the ramp.
+    /// Regression: a selection that reads the wrong channel while every
+    /// length still agrees.
+    #[test]
+    fn a_channel_source_feeds_the_named_delivered_channel() {
+        let frames = 160;
+        let loud: Vec<f32> = (0..frames).map(|i| (i % 16) as f32 * 0.05 + 0.1).collect();
+        // Delivered channel 0 is silent; delivered channel 1 carries the ramp.
+        let interleaved: Vec<f32> = loud.iter().flat_map(|&s| [0.0, s]).collect();
+
+        // Tap path.
+        for (source, expected) in [
+            (DetectorSource::Channel(0), vec![0.0_f32; frames]),
+            (DetectorSource::Channel(1), loud.clone()),
+        ] {
+            let (stream, _sender, _running) =
+                test_stream_with_source(Some(two_channel_tap_chain()), 2, source);
+            stream.push_vad_tap(interleaved.clone());
+            let feed = stream
+                .detector_feed(&interleaved)
+                .expect("a transform keeps the tap active");
+            assert_eq!(feed, expected, "the tap path feeds {source:?} alone");
+        }
+
+        // Delivered path (no chain).
+        for (source, expected) in [
+            (DetectorSource::Channel(0), vec![0.0_f32; frames]),
+            (DetectorSource::Channel(1), loud.clone()),
+        ] {
+            let (stream, _sender, _running) = test_stream_with_source(None, 2, source);
+            let feed = stream
+                .detector_feed(&interleaved)
+                .expect("a multichannel delivered chunk is collapsed");
+            assert_eq!(feed, expected, "the delivered path feeds {source:?} alone");
+        }
+    }
+
+    /// `validate` refuses a detector source at or above the configured
+    /// delivered count and accepts one below it, at any count: the check is
+    /// against the configuration's own `channels`, and a large count admits a
+    /// correspondingly large index. The negative control against a fixed
+    /// maximum reintroduced on the index.
+    #[test]
+    fn detector_source_is_validated_against_the_delivered_count() {
+        let mut config = MicrophoneConfig {
+            channels: 2,
+            detector_source: DetectorSource::Channel(2),
+            ..Default::default()
+        };
+        assert!(matches!(
+            config.validate(),
+            Err(DecibriError::DetectorSourceOutOfRange {
+                index: 2,
+                channels: 2
+            })
+        ));
+
+        config.detector_source = DetectorSource::Channel(1);
+        assert!(config.validate().is_ok(), "an index below the count passes");
+
+        // Mono: only channel 0 exists.
+        config.channels = 1;
+        config.detector_source = DetectorSource::Channel(1);
+        assert!(matches!(
+            config.validate(),
+            Err(DecibriError::DetectorSourceOutOfRange {
+                index: 1,
+                channels: 1
+            })
+        ));
+        config.detector_source = DetectorSource::Channel(0);
+        assert!(config.validate().is_ok(), "channel 0 is valid on mono");
+
+        // No fixed maximum: a large delivered count admits a large index.
+        config.channels = 1024;
+        config.detector_source = DetectorSource::Channel(1023);
+        assert!(
+            config.validate().is_ok(),
+            "the delivered count is the only ceiling"
+        );
     }
 
     /// The tap stays aligned with the delivered output through the resampler's

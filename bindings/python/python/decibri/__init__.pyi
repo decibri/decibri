@@ -29,6 +29,7 @@ from decibri.exceptions import (
 )
 from decibri.exceptions import ChannelsOutOfRange as ChannelsOutOfRange
 from decibri.exceptions import DecibriError as DecibriError
+from decibri.exceptions import DetectorSourceOutOfRange as DetectorSourceOutOfRange
 from decibri.exceptions import DeviceEnumerationFailed as DeviceEnumerationFailed
 from decibri.exceptions import DeviceError as DeviceError
 from decibri.exceptions import DeviceFailed as DeviceFailed

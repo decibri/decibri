@@ -79,6 +79,7 @@ const RANGE_PREFIXES = [
   'frames per buffer must be between',
   'agc target level must be between',
   'limiter ceiling must be between',
+  'the detector source names',
   'the channel map has',
   'the requested block size',
   'flac compression level must be between',

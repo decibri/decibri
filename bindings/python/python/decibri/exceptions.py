@@ -10,14 +10,14 @@ shape the core never sees. An out-of-range agc target raises
 AgcTargetOutOfRange; a malformed vad, denoise or highpass value raises
 ValueError.
 
-59 instance classes plus 3 intermediate parent classes (DeviceError,
-OrtError, OrtPathError) for catch ergonomics, totaling 62 class
+60 instance classes plus 3 intermediate parent classes (DeviceError,
+OrtError, OrtPathError) for catch ergonomics, totaling 63 class
 definitions beneath DecibriError. Single-inheritance hierarchy per
 CPython convention.
 
 Hierarchy:
     DecibriError
-    + 41 direct subclasses (config + runtime errors that don't involve
+    + 42 direct subclasses (config + runtime errors that don't involve
       device enumeration or ORT, including DeviceFailed and OnnxBackendFailed)
     + DeviceError (intermediate; no instances; catches device-related)
         + 8 direct device subclasses (MicrophoneNotFound, SpeakerNotFound,
@@ -68,6 +68,11 @@ class AgcTargetOutOfRange(DecibriError):
 
 class LimiterCeilingOutOfRange(DecibriError):
     """Raised when the limiter ceiling is outside the supported dBFS range."""
+
+
+class DetectorSourceOutOfRange(DecibriError):
+    """Raised when the detector source names a delivered channel at or above
+    the configured delivered channel count."""
 
 
 class FlacCompressionOutOfRange(DecibriError):

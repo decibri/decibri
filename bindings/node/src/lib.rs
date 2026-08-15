@@ -14,7 +14,7 @@ use decibri::file::{
     SaveReport as CoreSaveReport, VadReport as CoreVadReport,
 };
 use decibri::microphone::{
-    DenoiseModel, HighpassFilter, Microphone, MicrophoneConfig, MicrophoneStream,
+    DenoiseModel, DetectorSource, HighpassFilter, Microphone, MicrophoneConfig, MicrophoneStream,
 };
 use decibri::sample;
 use decibri::speaker::{Speaker, SpeakerConfig, SpeakerSink, SpeakerStream};
@@ -63,6 +63,15 @@ pub struct DecibriOptions {
     /// resolved device's own report when the stream starts; no fixed maximum
     /// exists.
     pub channel_map: Option<Vec<u32>>,
+    /// The source of the detector feed: the 0-based DELIVERED channel the
+    /// voice-activity detector reads, resolved by the JS wrapper from the
+    /// `vad` config object's `source` key. Absent feeds the frame average of
+    /// every delivered channel, the default. Validated against the delivered
+    /// channel count by the core's own configuration check; no fixed maximum
+    /// exists. Internal plumbing (the user passes `vad: { source }`), so it
+    /// is hidden from the generated TypeScript like `ortLibraryPath`.
+    #[napi(skip_typescript)]
+    pub detector_source: Option<u32>,
     pub frames_per_buffer: Option<u32>,
     pub format: Option<String>,
     pub device: Option<serde_json::Value>,
@@ -219,6 +228,21 @@ fn build_microphone_parts(options: Option<DecibriOptions>) -> Result<MicrophoneP
             })?);
         }
         config.channel_map = Some(entries);
+    }
+
+    // Detector source: narrow the JS number to the core's u16 (the JS wrapper
+    // performs the user-facing integer and range checks; this is the native
+    // backstop) and select the named delivered channel. Absent keeps the
+    // default, the frame average. The range check against the delivered
+    // count is the core's own, in the configuration validation.
+    if let Some(source) = opts.detector_source {
+        let index: u16 = source.try_into().map_err(|_| {
+            Error::new(
+                Status::InvalidArg,
+                "vad source must be between 0 and 65535".to_string(),
+            )
+        })?;
+        config.detector_source = DetectorSource::Channel(index);
     }
 
     // DC removal: a same-length one-pole DC-blocking high-pass, the first
@@ -1349,6 +1373,14 @@ pub struct FileOptions {
     pub sample_rate: Option<u32>,
     pub channels: Option<u16>,
     pub channel_map: Option<Vec<u16>>,
+    /// The source of the detector feed: the 0-based DELIVERED channel the
+    /// detector reads, resolved by the JS wrapper from the `vad` config
+    /// object's `source` key exactly as on the live path. Absent feeds the
+    /// frame average. Validated against the delivered channel count by the
+    /// core's own configuration check. Internal plumbing, hidden from the
+    /// generated TypeScript like `vadThreshold`.
+    #[napi(skip_typescript)]
+    pub detector_source: Option<u16>,
     pub input_channels: Option<u16>,
     pub format: Option<String>,
     pub vad_mode: Option<String>,
@@ -1516,6 +1548,12 @@ fn build_file_config(opts: &FileOptions) -> Result<FileConfig> {
     // only the core knows it once the source is opened.
     config.channels = opts.channels.unwrap_or(1);
     config.channel_map = opts.channel_map.clone();
+    // Detector source: absent keeps the default, the frame average. The
+    // range check against the delivered count is the core's own, in the
+    // configuration validation.
+    if let Some(index) = opts.detector_source {
+        config.detector_source = DetectorSource::Channel(index);
+    }
     config.dc_removal = opts.dc_removal.unwrap_or(false);
 
     if let Some(name) = opts.denoise.as_deref() {

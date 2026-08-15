@@ -151,6 +151,14 @@ class Vad:
             default: 0.5 for ``"silero"``, 0.01 for ``"energy"``.
         holdoff_ms: Milliseconds of sub-threshold audio tolerated before the
             speaking state clears (the silence holdoff). Default 300.
+        source: The 0-based DELIVERED channel the detector reads, the
+            position within the delivered interleaved frames after any
+            ``channel_map``. ``None`` (the default) feeds the detector the
+            frame average of every delivered channel. Must be below the
+            configured channel count (``DetectorSourceOutOfRange`` at
+            construction otherwise); the count is the only ceiling, so no
+            fixed maximum exists. Affects only the detector feed; the
+            delivered audio is untouched.
 
     Example:
         Microphone(vad=Vad(model="silero", threshold=0.6, holdoff_ms=200))
@@ -159,6 +167,7 @@ class Vad:
     model: str = "silero"
     threshold: float | None = None
     holdoff_ms: int = _DEFAULT_VAD_HOLDOFF_MS
+    source: int | None = None
 
     def __post_init__(self) -> None:
         if self.model not in _VALID_MODES:
@@ -171,6 +180,17 @@ class Vad:
             raise ValueError(
                 f"holdoff_ms must be non-negative milliseconds; got {self.holdoff_ms}"
             )
+        # Shape checks only: bool is excluded because it passes an int check
+        # while meaning a toggle, and the u16 crossing bound is the same one
+        # channel_map entries observe. The check against the configured
+        # channel count is the core's own, made where both are in scope.
+        if self.source is not None:
+            if isinstance(self.source, bool) or not isinstance(self.source, int):
+                raise TypeError(f"source must be an integer; got {self.source!r}")
+            if not 0 <= self.source <= 65535:
+                raise ValueError(
+                    f"source must be in [0, 65535]; got {self.source}"
+                )
 
 
 # ---------------------------------------------------------------------------
@@ -682,11 +702,13 @@ class Microphone:
         vad_mode: str
         vad_threshold: float | None
         vad_holdoff_ms: int
+        vad_source: int | None
         if vad is False:
             vad_enabled = False
             vad_mode = "energy"  # inert placeholder; bridge ignores when disabled
             vad_threshold = None
             vad_holdoff_ms = _DEFAULT_VAD_HOLDOFF_MS
+            vad_source = None
         elif vad is True:
             raise ValueError(
                 "vad=True is no longer supported. "
@@ -697,11 +719,13 @@ class Microphone:
             vad_mode = vad.model
             vad_threshold = vad.threshold
             vad_holdoff_ms = vad.holdoff_ms
+            vad_source = vad.source
         elif isinstance(vad, str) and vad in _VALID_MODES:
             vad_enabled = True
             vad_mode = vad
             vad_threshold = None
             vad_holdoff_ms = _DEFAULT_VAD_HOLDOFF_MS
+            vad_source = None
         else:
             raise ValueError(
                 f"Invalid vad value: {vad!r}. "
@@ -920,6 +944,7 @@ class Microphone:
             aec_reference_sample_rate=aec_reference_sample_rate,
             aec_reference_channels=aec_reference_channels,
             channel_map=channel_map,
+            detector_source=vad_source,
         )
 
         self._vad_enabled = vad_enabled
@@ -1796,11 +1821,13 @@ class File:
         vad_mode: str
         vad_threshold: float | None
         vad_holdoff_ms: int
+        vad_source: int | None
         if vad is False:
             vad_enabled = False
             vad_mode = "energy"  # inert placeholder; bridge ignores when disabled
             vad_threshold = None
             vad_holdoff_ms = _DEFAULT_VAD_HOLDOFF_MS
+            vad_source = None
         elif vad is True:
             raise ValueError(
                 "vad=True is no longer supported. "
@@ -1811,11 +1838,13 @@ class File:
             vad_mode = vad.model
             vad_threshold = vad.threshold
             vad_holdoff_ms = vad.holdoff_ms
+            vad_source = vad.source
         elif isinstance(vad, str) and vad in _VALID_MODES:
             vad_enabled = True
             vad_mode = vad
             vad_threshold = None
             vad_holdoff_ms = _DEFAULT_VAD_HOLDOFF_MS
+            vad_source = None
         else:
             raise ValueError(
                 f"Invalid vad value: {vad!r}. "
@@ -1948,6 +1977,7 @@ class File:
             "agc": agc,
             "limiter": limiter,
             "dc_removal": dc_removal,
+            "detector_source": vad_source,
         }
 
         if source[0] == "path":

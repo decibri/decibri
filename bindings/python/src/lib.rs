@@ -54,7 +54,8 @@ use decibri::file::{
     File as CoreFile, FileConfig, SaveFormat as CoreSaveFormat, SaveOptions as CoreSaveOptions,
 };
 use decibri::microphone::{
-    AudioChunk, DenoiseModel, HighpassFilter, Microphone, MicrophoneConfig, MicrophoneStream,
+    AudioChunk, DenoiseModel, DetectorSource, HighpassFilter, Microphone, MicrophoneConfig,
+    MicrophoneStream,
 };
 use decibri::sample::{
     f32_le_bytes_to_f32, f32_to_f32_le_bytes, f32_to_i16_le_bytes, i16_le_bytes_to_f32, rms,
@@ -143,6 +144,7 @@ const EXCEPTION_NAMES: &[&str] = &[
     "SampleRateOutOfRange",
     "AgcTargetOutOfRange",
     "LimiterCeilingOutOfRange",
+    "DetectorSourceOutOfRange",
     "FlacCompressionOutOfRange",
     "StreamOpenFailed",
     "StreamStartFailed",
@@ -950,6 +952,7 @@ impl MicrophoneBridge {
         aec_reference_sample_rate = None,
         aec_reference_channels = None,
         channel_map = None,
+        detector_source = None,
     ))]
     #[allow(clippy::too_many_arguments)]
     fn new(
@@ -978,6 +981,7 @@ impl MicrophoneBridge {
         aec_reference_sample_rate: Option<u32>,
         aec_reference_channels: Option<u16>,
         channel_map: Option<Vec<u16>>,
+        detector_source: Option<u16>,
     ) -> PyResult<Self> {
         let parsed_format = parse_sample_format(&format).map_err(|e| to_py_err(py, e))?;
         let device_selector = build_device_selector(device.as_ref())?;
@@ -995,6 +999,14 @@ impl MicrophoneBridge {
         // exists on the device is the core's own check, made against the
         // resolved device's report at start().
         capture_config.channel_map = channel_map;
+
+        // Detector source: the 0-based DELIVERED channel the detector reads,
+        // from the Vad config object's source field. Absent keeps the
+        // default, the frame average. The range check against the delivered
+        // count is the core's own, in the configuration validation below.
+        if let Some(index) = detector_source {
+            capture_config.detector_source = DetectorSource::Channel(index);
+        }
 
         // DC removal: a same-length one-pole DC-blocking high-pass, the first
         // transform stage (before denoise). `false` (the default) leaves it off,
@@ -1661,6 +1673,7 @@ impl AsyncMicrophoneBridge {
         aec_reference_sample_rate = None,
         aec_reference_channels = None,
         channel_map = None,
+        detector_source = None,
     ))]
     #[allow(clippy::too_many_arguments)]
     fn new(
@@ -1689,6 +1702,7 @@ impl AsyncMicrophoneBridge {
         aec_reference_sample_rate: Option<u32>,
         aec_reference_channels: Option<u16>,
         channel_map: Option<Vec<u16>>,
+        detector_source: Option<u16>,
     ) -> PyResult<Self> {
         let inner = MicrophoneBridge::new(
             py,
@@ -1716,6 +1730,7 @@ impl AsyncMicrophoneBridge {
             aec_reference_sample_rate,
             aec_reference_channels,
             channel_map,
+            detector_source,
         )?;
         Ok(AsyncMicrophoneBridge {
             inner: Arc::new(inner),
@@ -2175,6 +2190,7 @@ fn build_file_config(
     agc: Option<i8>,
     limiter: Option<f32>,
     dc_removal: bool,
+    detector_source: Option<u16>,
 ) -> PyResult<FileConfig> {
     // `FileConfig` is `#[non_exhaustive]`: default-construct then assign the
     // public fields rather than using a struct literal.
@@ -2185,6 +2201,13 @@ fn build_file_config(
     // only the core knows it once the source is opened.
     config.channels = channels;
     config.channel_map = channel_map;
+    // Detector source: the 0-based DELIVERED channel the detector reads,
+    // from the Vad config object's source field, exactly as on the live
+    // path. Absent keeps the default, the frame average. The range check
+    // against the delivered count is the core's own, at construction.
+    if let Some(index) = detector_source {
+        config.detector_source = DetectorSource::Channel(index);
+    }
     config.dc_removal = dc_removal;
 
     if let Some(name) = denoise {
@@ -2277,6 +2300,7 @@ impl FileBridge {
         agc = None,
         limiter = None,
         dc_removal = false,
+        detector_source = None,
     ))]
     #[allow(clippy::too_many_arguments)]
     fn open(
@@ -2299,6 +2323,7 @@ impl FileBridge {
         agc: Option<i8>,
         limiter: Option<f32>,
         dc_removal: bool,
+        detector_source: Option<u16>,
     ) -> PyResult<Self> {
         let parsed_format = parse_sample_format(&format).map_err(|e| to_py_err(py, e))?;
         let config = build_file_config(
@@ -2317,6 +2342,7 @@ impl FileBridge {
             agc,
             limiter,
             dc_removal,
+            detector_source,
         )?;
         let file = CoreFile::open(&path, config).map_err(|e| to_py_err(py, e))?;
         Ok(Self::from_core(
@@ -2358,6 +2384,7 @@ impl FileBridge {
         agc = None,
         limiter = None,
         dc_removal = false,
+        detector_source = None,
     ))]
     #[allow(clippy::too_many_arguments)]
     fn buffer(
@@ -2382,6 +2409,7 @@ impl FileBridge {
         agc: Option<i8>,
         limiter: Option<f32>,
         dc_removal: bool,
+        detector_source: Option<u16>,
     ) -> PyResult<Self> {
         let parsed_format = parse_sample_format(&format).map_err(|e| to_py_err(py, e))?;
         let data = extract_buffer_samples(&samples)?;
@@ -2401,6 +2429,7 @@ impl FileBridge {
             agc,
             limiter,
             dc_removal,
+            detector_source,
         )?;
         let file = CoreFile::buffer(data, input_rate, input_channels, config)
             .map_err(|e| to_py_err(py, e))?;
