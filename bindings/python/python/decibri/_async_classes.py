@@ -64,6 +64,7 @@ from decibri._classes import (
     SaveReport,
     Vad,
     VadReport,
+    _aec_metrics_from_raw,
     _BUNDLED_DENOISE_MODEL,
     _BUNDLED_VAD_MODEL,
     _DEFAULT_VAD_HOLDOFF_MS,
@@ -693,16 +694,7 @@ class AsyncMicrophone:
         raw = await self._bridge.aec_metrics()
         if raw is None:
             return None
-        return AecMetrics(
-            delay_samples=raw[0],
-            erle_db=raw[1],
-            double_talk=raw[2],
-            reference_starved=raw[3],
-            acquisition_parked=raw[4],
-            reference_reanchors=raw[5],
-            reference_dropped=raw[6],
-            reference_silence=raw[7],
-        )
+        return _aec_metrics_from_raw(raw)
 
     # -----------------------------------------------------------------------
     # Static methods

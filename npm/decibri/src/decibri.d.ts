@@ -147,9 +147,55 @@ export interface AecOptions {
 }
 
 /**
+ * One delivered channel's canceller report, one entry of
+ * `AecMetrics.channels`. Engine-level fields only: the reference queue's
+ * counters (`referenceDropped`, `referenceSilence`) describe the shared queue
+ * and stay on `AecMetrics` itself.
+ */
+export interface AecChannelMetrics {
+  /**
+   * This channel's active delay alignment in samples, or `null` while its
+   * estimator is still searching. The offset from the reference frontier as
+   * the feeding established it, not a measurement of the room's echo path.
+   */
+  delaySamples: number | null;
+  /**
+   * This channel's smoothed echo-return-loss-enhancement estimate in dB. Not
+   * a quality ranking across channels: ERLE rises with echo distance, because
+   * a weaker echo is easier to reduce in ratio terms, so a far microphone
+   * routinely reports a higher figure than a near one while removing less
+   * echo in absolute terms. Compare a channel against its own history, not
+   * against its neighbours.
+   */
+  erleDb: number;
+  /**
+   * Whether this channel's double-talk detector currently believes the
+   * near-end talker is active; its adaptation is held while true.
+   */
+  doubleTalk: boolean;
+  /**
+   * Near-end samples this channel's canceller could find no far-end sample
+   * for while an alignment was active.
+   */
+  referenceStarved: number;
+  /**
+   * Near-end samples this channel processed while no delay alignment was
+   * active: the searching span, not a transport failure.
+   */
+  acquisitionParked: number;
+  /**
+   * Times this channel's canceller inferred a capture discontinuity and
+   * rebuilt its alignment from the reference frontier.
+   */
+  referenceReanchors: number;
+}
+
+/**
  * The echo canceller's transport and cancellation metrics, returned by
  * `Microphone.aecMetrics()`. One object carries the canceller's own report and
- * the reference queue's counters.
+ * the reference queue's counters. The top-level engine fields report the first
+ * delivered channel's canceller; `channels` carries every delivered channel's
+ * report, so the two agree on a single-channel stream.
  */
 export interface AecMetrics {
   /**
@@ -200,6 +246,15 @@ export interface AecMetrics {
    * while nothing is playing, the far end is silence.
    */
   referenceSilence: number;
+  /**
+   * Every delivered channel's canceller report, in delivered order, one entry
+   * per channel. One canceller engine runs per delivered channel, each fed
+   * the same pushed reference and each finding its own channel's echo delay,
+   * so the entries differ where the channels' acoustic paths differ. On a
+   * single-channel stream this holds one entry agreeing with the top-level
+   * fields.
+   */
+  channels: AecChannelMetrics[];
 }
 
 /** Constructor options for `Microphone`. */

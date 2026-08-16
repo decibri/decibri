@@ -161,7 +161,6 @@ const EXCEPTION_NAMES: &[&str] = &[
     "VadThresholdOutOfRange",
     "AecSampleRateUnsupported",
     "AecConfigInvalid",
-    "AecMultichannelUnsupported",
     "ResampleConfigInvalid",
     "ResampleAfterFlush",
     "ResampleFailed",
@@ -855,7 +854,8 @@ impl MicrophoneBridge {
             let guard = lock_recover(&self.active);
             guard.as_ref().map(|active| Arc::clone(&active.stream))
         }?;
-        let metrics = stream.aec_metrics()?;
+        let per_channel = stream.aec_metrics_per_channel()?;
+        let metrics = per_channel.first()?;
         Some((
             metrics.delay_samples.map(|s| s as u64),
             metrics.canceller.erle_db,
@@ -865,6 +865,19 @@ impl MicrophoneBridge {
             metrics.reference_reanchors,
             stream.aec_reference_dropped(),
             stream.aec_reference_silence(),
+            per_channel
+                .iter()
+                .map(|m| {
+                    (
+                        m.delay_samples.map(|s| s as u64),
+                        m.canceller.erle_db,
+                        m.canceller.double_talk,
+                        m.reference_starved,
+                        m.acquisition_parked,
+                        m.reference_reanchors,
+                    )
+                })
+                .collect(),
         ))
     }
 
@@ -931,13 +944,31 @@ impl MicrophoneBridge {
     }
 }
 
+/// One delivered channel's engine-level report inside `AecMetricsTuple`, in
+/// the field order the Python wrapper's `AecChannelMetrics` dataclass takes
+/// them: (delay_samples, erle_db, double_talk, reference_starved,
+/// acquisition_parked, reference_reanchors).
+type AecChannelMetricsTuple = (Option<u64>, f32, bool, u64, u64, u64);
+
 /// Owned bundle of the echo canceller's metrics plus the reference queue's
 /// counters, in the field order the Python wrapper's `AecMetrics` dataclass
 /// takes them: (delay_samples, erle_db, double_talk, reference_starved,
 /// acquisition_parked, reference_reanchors, reference_dropped,
-/// reference_silence). Every field is `Send + 'static`, so it crosses the
-/// `spawn_blocking` boundary.
-type AecMetricsTuple = (Option<u64>, f32, bool, u64, u64, u64, u64, u64);
+/// reference_silence, channels). The leading engine fields report the first
+/// delivered channel's canceller; `channels` carries every delivered
+/// channel's engine report in delivered order. Every field is
+/// `Send + 'static`, so it crosses the `spawn_blocking` boundary.
+type AecMetricsTuple = (
+    Option<u64>,
+    f32,
+    bool,
+    u64,
+    u64,
+    u64,
+    u64,
+    u64,
+    Vec<AecChannelMetricsTuple>,
+);
 
 #[pymethods]
 impl MicrophoneBridge {

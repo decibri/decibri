@@ -239,7 +239,20 @@ class MicrophoneBridge:
     def push_aec_reference(self, samples: SampleData) -> None: ...
     def aec_metrics(
         self,
-    ) -> tuple[int | None, float, bool, int, int, int, int, int] | None: ...
+    ) -> (
+        tuple[
+            int | None,
+            float,
+            bool,
+            int,
+            int,
+            int,
+            int,
+            int,
+            list[tuple[int | None, float, bool, int, int, int]],
+        ]
+        | None
+    ): ...
     def __iter__(self) -> MicrophoneBridge: ...
     def __next__(self) -> bytes: ...
     def __enter__(self) -> MicrophoneBridge: ...
@@ -355,7 +368,20 @@ class AsyncMicrophoneBridge:
     def aec_metrics(
         self,
     ) -> Coroutine[
-        Any, Any, tuple[int | None, float, bool, int, int, int, int, int] | None
+        Any,
+        Any,
+        tuple[
+            int | None,
+            float,
+            bool,
+            int,
+            int,
+            int,
+            int,
+            int,
+            list[tuple[int | None, float, bool, int, int, int]],
+        ]
+        | None,
     ]: ...
     @property
     def is_open(self) -> Awaitable[bool]: ...

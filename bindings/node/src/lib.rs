@@ -734,10 +734,16 @@ impl DecibriBridge {
     /// reference queue's own counters, or `null` when no stream is active or
     /// echo cancellation is off. Counters are returned as f64 (exact JS numbers
     /// for any realistic count), matching the `overrunCount` getter.
+    ///
+    /// The top-level engine fields report the first delivered channel's
+    /// canceller; `channels` carries every delivered channel's engine report in
+    /// delivered order, one entry per channel, so the two agree on a
+    /// single-channel stream.
     #[napi]
     pub fn aec_metrics(&self) -> Option<AecMetricsJs> {
         let stream = self.stream.as_ref()?;
-        let metrics = stream.aec_metrics()?;
+        let per_channel = stream.aec_metrics_per_channel()?;
+        let metrics = per_channel.first()?;
         Some(AecMetricsJs {
             delay_samples: metrics.delay_samples.map(|s| s as f64),
             erle_db: f64::from(metrics.canceller.erle_db),
@@ -749,6 +755,17 @@ impl DecibriBridge {
                 + self.no_stream_reference_dropped.load(Ordering::Relaxed))
                 as f64,
             reference_silence: stream.aec_reference_silence() as f64,
+            channels: per_channel
+                .iter()
+                .map(|m| AecChannelMetricsJs {
+                    delay_samples: m.delay_samples.map(|s| s as f64),
+                    erle_db: f64::from(m.canceller.erle_db),
+                    double_talk: m.canceller.double_talk,
+                    reference_starved: m.reference_starved as f64,
+                    acquisition_parked: m.acquisition_parked as f64,
+                    reference_reanchors: m.reference_reanchors as f64,
+                })
+                .collect(),
         })
     }
 
@@ -840,6 +857,43 @@ pub struct AecMetricsJs {
     /// pushed none for them, at the capture rate. An accounting figure, not a
     /// fault: while nothing is playing, the far end is silence.
     pub reference_silence: f64,
+    /// Every delivered channel's canceller report, in delivered order, one
+    /// entry per channel. One canceller engine runs per delivered channel,
+    /// each fed the same pushed reference and each finding its own channel's
+    /// echo delay, so the entries differ where the channels' acoustic paths
+    /// differ. On a single-channel stream this holds one entry agreeing with
+    /// the top-level fields.
+    pub channels: Vec<AecChannelMetricsJs>,
+}
+
+/// One delivered channel's canceller report inside `AecMetricsJs.channels`.
+/// Engine-level fields only: the reference queue's counters (`referenceDropped`,
+/// `referenceSilence`) describe the shared queue and stay on the top level.
+#[napi(object)]
+pub struct AecChannelMetricsJs {
+    /// This channel's active delay alignment in samples, or `null` while its
+    /// estimator is still searching. The offset from the reference frontier as
+    /// the feeding established it, not a measurement of the room's echo path.
+    pub delay_samples: Option<f64>,
+    /// This channel's smoothed echo-return-loss-enhancement estimate in dB.
+    /// Not a quality ranking across channels: ERLE rises with echo distance,
+    /// because a weaker echo is easier to reduce in ratio terms, so a far
+    /// microphone routinely reports a higher figure than a near one while
+    /// removing less echo in absolute terms. Compare a channel against its own
+    /// history, not against its neighbours.
+    pub erle_db: f64,
+    /// Whether this channel's double-talk detector currently believes the
+    /// near-end talker is active; its adaptation is held while true.
+    pub double_talk: bool,
+    /// Near-end samples this channel's canceller could find no far-end sample
+    /// for while an alignment was active.
+    pub reference_starved: f64,
+    /// Near-end samples this channel processed while no delay alignment was
+    /// active: the searching span, not a transport failure.
+    pub acquisition_parked: f64,
+    /// Times this channel's canceller inferred a capture discontinuity and
+    /// rebuilt its alignment from the reference frontier.
+    pub reference_reanchors: f64,
 }
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
@@ -897,7 +951,6 @@ fn to_napi_error(e: decibri::error::DecibriError) -> Error {
         | VadSampleRateUnsupported(_)
         | VadThresholdOutOfRange(_)
         | AecSampleRateUnsupported(_)
-        | AecMultichannelUnsupported { .. }
         | BlockSizeNotFrameAligned { .. }
         | FileChannelsUnsupported { .. }
         | FileChannelSelectionAmbiguous { .. }

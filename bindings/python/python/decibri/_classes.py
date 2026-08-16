@@ -64,6 +64,7 @@ __all__ = [
     "Vad",
     "Aec",
     "AecMetrics",
+    "AecChannelMetrics",
     "Microphone",
     "Speaker",
     "File",
@@ -311,6 +312,48 @@ class Aec:
 
 
 @dataclass(frozen=True, slots=True)
+class AecChannelMetrics:
+    """One delivered channel's canceller report, one entry of
+    ``AecMetrics.channels``.
+
+    Engine-level fields only: the reference queue's counters
+    (``reference_dropped``, ``reference_silence``) describe the shared queue
+    and stay on ``AecMetrics`` itself.
+
+    Attributes:
+        delay_samples: This channel's active delay alignment in samples, or
+            ``None`` while its estimator is still searching. The offset from
+            the reference frontier as the feeding established it, not a
+            measurement of the room's echo path.
+        erle_db: This channel's smoothed echo-return-loss-enhancement
+            estimate in dB. Not a quality ranking across channels: ERLE
+            rises with echo distance, because a weaker echo is easier to
+            reduce in ratio terms, so a far microphone routinely reports a
+            higher figure than a near one while removing less echo in
+            absolute terms. Compare a channel against its own history, not
+            against its neighbours.
+        double_talk: Whether this channel's double-talk detector currently
+            believes the near-end talker is active; its adaptation is held
+            while ``True``.
+        reference_starved: Near-end samples this channel's canceller could
+            find no far-end sample for while an alignment was active.
+        acquisition_parked: Near-end samples this channel processed while no
+            delay alignment was active: the searching span, not a transport
+            failure.
+        reference_reanchors: Times this channel's canceller inferred a
+            capture discontinuity and rebuilt its alignment from the
+            reference frontier.
+    """
+
+    delay_samples: int | None
+    erle_db: float
+    double_talk: bool
+    reference_starved: int
+    acquisition_parked: int
+    reference_reanchors: int
+
+
+@dataclass(frozen=True, slots=True)
 class AecMetrics:
     """The echo canceller's transport and cancellation metrics.
 
@@ -353,6 +396,13 @@ class AecMetrics:
             because the caller had pushed none for them, at the capture
             rate. An accounting figure, not a fault: while nothing is
             playing, the far end is silence.
+        channels: Every delivered channel's canceller report, in delivered
+            order, one entry per channel. One canceller engine runs per
+            delivered channel, each fed the same pushed reference and each
+            finding its own channel's echo delay, so the entries differ
+            where the channels' acoustic paths differ. The top-level engine
+            fields report the first delivered channel's canceller, so on a
+            single-channel stream this holds one entry agreeing with them.
     """
 
     delay_samples: int | None
@@ -363,6 +413,45 @@ class AecMetrics:
     reference_reanchors: int
     reference_dropped: int
     reference_silence: int
+    channels: tuple[AecChannelMetrics, ...]
+
+
+def _aec_metrics_from_raw(
+    raw: tuple[
+        int | None,
+        float,
+        bool,
+        int,
+        int,
+        int,
+        int,
+        int,
+        list[tuple[int | None, float, bool, int, int, int]],
+    ],
+) -> AecMetrics:
+    """Build the public ``AecMetrics`` from the bridge's flat tuple, shared
+    by the sync and async surfaces so the two field orders cannot drift."""
+    return AecMetrics(
+        delay_samples=raw[0],
+        erle_db=raw[1],
+        double_talk=raw[2],
+        reference_starved=raw[3],
+        acquisition_parked=raw[4],
+        reference_reanchors=raw[5],
+        reference_dropped=raw[6],
+        reference_silence=raw[7],
+        channels=tuple(
+            AecChannelMetrics(
+                delay_samples=entry[0],
+                erle_db=entry[1],
+                double_talk=entry[2],
+                reference_starved=entry[3],
+                acquisition_parked=entry[4],
+                reference_reanchors=entry[5],
+            )
+            for entry in raw[8]
+        ),
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -558,8 +647,9 @@ class Microphone:
     ``MicrophoneChannelsUnsupported`` at ``start()`` and a strict subset above
     one raises ``ChannelSelectionAmbiguous``, because which channels it means
     has no single answer. Above one channel, ``read()`` block sizes count
-    interleaved samples and must be a whole number of frames, and echo
-    cancellation is refused with ``AecMultichannelUnsupported``.
+    interleaved samples and must be a whole number of frames. Echo
+    cancellation runs one canceller engine per delivered channel, so its
+    processing and memory cost scale with the count.
 
     The ``channel_map`` parameter selects which device channels feed the
     delivered channels: a list of 0-based device channel indices, one entry per
@@ -1225,16 +1315,7 @@ class Microphone:
         raw = self._bridge.aec_metrics()
         if raw is None:
             return None
-        return AecMetrics(
-            delay_samples=raw[0],
-            erle_db=raw[1],
-            double_talk=raw[2],
-            reference_starved=raw[3],
-            acquisition_parked=raw[4],
-            reference_reanchors=raw[5],
-            reference_dropped=raw[6],
-            reference_silence=raw[7],
-        )
+        return _aec_metrics_from_raw(raw)
 
     # -----------------------------------------------------------------------
     # Static methods

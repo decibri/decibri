@@ -25,7 +25,6 @@ from pathlib import Path
 import decibri
 from decibri import (
     AecConfigInvalid,
-    AecMultichannelUnsupported,
     AecSampleRateUnsupported,
     AgcTargetOutOfRange,
     AlreadyRunning,
@@ -99,7 +98,7 @@ import pytest
 
 ALL_DECIBRI_ERROR_CLASSES = (
     DecibriError,
-    # 42 direct DecibriError subclasses (non-device, non-ORT). DeviceFailed
+    # 41 direct DecibriError subclasses (non-device, non-ORT). DeviceFailed
     # is a runtime device/driver failure (distinct from the DeviceError
     # enumeration/selection family); OnnxBackendFailed is the non-ORT ONNX
     # backend catch-all (distinct from the OrtError family); FileConsumed and
@@ -115,7 +114,6 @@ ALL_DECIBRI_ERROR_CLASSES = (
     FileChannelsUnsupported,
     FileChannelSelectionAmbiguous,
     FileChannelMapOutOfRange,
-    AecMultichannelUnsupported,
     FramesPerBufferOutOfRange,
     AgcTargetOutOfRange,
     LimiterCeilingOutOfRange,
@@ -173,9 +171,9 @@ ALL_DECIBRI_ERROR_CLASSES = (
 
 
 def test_class_count() -> None:
-    # 64 total: 1 base + 42 direct + DeviceError + 8 device + OrtError
+    # 63 total: 1 base + 41 direct + DeviceError + 8 device + OrtError
     # + 8 ORT direct + OrtPathError + 2 path.
-    assert len(ALL_DECIBRI_ERROR_CLASSES) == 64
+    assert len(ALL_DECIBRI_ERROR_CLASSES) == 63
 
 
 def test_all_inherit_from_decibri_error() -> None:
@@ -501,8 +499,8 @@ def _core_variant_names() -> list[str]:
     assert "PermissionDenied" in names, "known variant missing from the parsed table"
     # The count is pinned deliberately and must be updated when a core variant
     # is added or removed.
-    assert len(names) == 59, (
-        f"parsed {len(names)} variants from the core identity table, expected 59;"
+    assert len(names) == 58, (
+        f"parsed {len(names)} variants from the core identity table, expected 58;"
         " the count is pinned deliberately and must be updated when a core"
         " variant is added or removed"
     )

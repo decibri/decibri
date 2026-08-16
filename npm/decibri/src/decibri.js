@@ -738,6 +738,11 @@ class Microphone extends Readable {
    * `referenceDropped` means single pushes are exceeding the reference
    * queue's bound.
    *
+   * The top-level engine fields report the first delivered channel's
+   * canceller; `channels` carries every delivered channel's report in
+   * delivered order, one entry per channel, so the two agree on a
+   * single-channel stream.
+   *
    * @returns {import('./decibri').AecMetrics | null}
    */
   aecMetrics() {
@@ -752,6 +757,14 @@ class Microphone extends Readable {
       referenceReanchors: m.referenceReanchors,
       referenceDropped: m.referenceDropped,
       referenceSilence: m.referenceSilence,
+      channels: m.channels.map((c) => ({
+        delaySamples: c.delaySamples ?? null,
+        erleDb: c.erleDb,
+        doubleTalk: c.doubleTalk,
+        referenceStarved: c.referenceStarved,
+        acquisitionParked: c.acquisitionParked,
+        referenceReanchors: c.referenceReanchors,
+      })),
     };
   }
 
