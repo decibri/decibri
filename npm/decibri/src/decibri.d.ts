@@ -281,9 +281,9 @@ export interface MicrophoneOptions extends ReadableOptions {
    * `'MICROPHONE_CHANNELS_UNSUPPORTED'`; and a count above `1` and below the
    * device's own fails it with `'CHANNEL_SELECTION_AMBIGUOUS'`, because
    * which channels it means has no single answer, so `channelMap` names
-   * them. A count above `1` combined with `aec` throws a `RangeError`: echo
-   * cancellation reads a single delivered channel, and one channel selected
-   * from an array by `channelMap` still cancels.
+   * them. With `aec` set, one canceller runs per delivered channel, and
+   * `aecMetrics().channels` reports each delivered channel's canceller in
+   * delivered order.
    * @default 1
    */
   channels?: number;

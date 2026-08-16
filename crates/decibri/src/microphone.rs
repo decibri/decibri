@@ -2140,11 +2140,11 @@ mod tests {
     /// The channel count a stream reports is DERIVED from its chain, not named
     /// beside it.
     ///
-    /// Regression: `delivered_channels` answering with a constant. Capture is
-    /// mono in and mono out for every configuration it accepts today, so a
-    /// hardcoded `1` matches the derived value at every point the rest of the
-    /// suite observes it. Planting one against the code before this test existed
-    /// left all 277 tests green, which is the whole reason the test is here.
+    /// Regression: `delivered_channels` answering with a constant. On the
+    /// mono-only capture surface this test was written against, a hardcoded
+    /// `1` matched the derived value at every point the rest of the suite
+    /// observed it: planting one before this test existed left all 277 tests
+    /// green, which is the whole reason the test is here.
     ///
     /// Each arm below fails a constant a different way round: a chain that
     /// collapses must report the collapse, a chain that collapses nothing must
@@ -2556,8 +2556,7 @@ mod tests {
     /// transform, so the tap is active and its resolved count is 2. Built
     /// through `build_capture_stage` exactly as `Microphone::start` builds it.
     /// The tests that use it fill the tap directly and never run a block
-    /// through the chain: the in-place transform wrappers assert mono, so no
-    /// multichannel signal can cross the transform segment.
+    /// through the chain, so the feed derivation is exercised on its own.
     fn two_channel_tap_chain() -> CaptureStage {
         build_capture_stage(
             2,

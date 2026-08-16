@@ -10,9 +10,10 @@
 //! device's native sample rate to the requested target rate with one engine
 //! per carried channel, then the echo canceller, which removes the echo of
 //! caller-supplied far-end audio. The channel stage runs first so every later
-//! stage sees the delivered channel count; the echo
-//! canceller runs last so it receives mono at the target rate, the only format
-//! it accepts. The optional `transform` segment runs after `normalize`, holding
+//! stage sees the delivered channel count; the echo canceller runs last so it
+//! receives the delivered planar runs at the target rate, holding one engine
+//! per delivered channel, each engine reading its own channel's mono run.
+//! The optional `transform` segment runs after `normalize`, holding
 //! the conditioning a consumer opts into: the same-length [`DcBlocker`]
 //! DC-removal step, then the framed, length-changing denoise stage. A
 //! `transform` stage need not preserve length (denoise re-blocks and introduces

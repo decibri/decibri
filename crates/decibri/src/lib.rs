@@ -1,4 +1,5 @@
-//! Cross-platform audio capture, playback, and voice-activity detection.
+//! Cross-platform audio capture, conditioning, and playback, with
+//! voice-activity detection on live and recorded audio.
 //!
 //! decibri records from a microphone, plays audio to a speaker, and runs Silero
 //! voice-activity detection through one API on Windows, macOS, and Linux. It is

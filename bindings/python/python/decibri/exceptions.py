@@ -10,21 +10,22 @@ shape the core never sees. An out-of-range agc target raises
 AgcTargetOutOfRange; a malformed vad, denoise or highpass value raises
 ValueError.
 
-60 instance classes plus 3 intermediate parent classes (DeviceError,
-OrtError, OrtPathError) for catch ergonomics, totaling 63 class
-definitions beneath DecibriError. Single-inheritance hierarchy per
-CPython convention.
+Instance classes sit beneath DecibriError, either directly or under one
+of three intermediate parent classes (DeviceError, OrtError, OrtPathError)
+provided for catch ergonomics. Single-inheritance hierarchy per CPython
+convention. The enforced class counts live in
+``tests/test_exceptions.py``, not here.
 
 Hierarchy:
     DecibriError
-    + 42 direct subclasses (config + runtime errors that don't involve
+    + direct subclasses (config + runtime errors that don't involve
       device enumeration or ORT, including DeviceFailed and OnnxBackendFailed)
     + DeviceError (intermediate; no instances; catches device-related)
-        + 8 direct device subclasses (MicrophoneNotFound, SpeakerNotFound,
+        + the device subclasses (MicrophoneNotFound, SpeakerNotFound,
           MultipleDevicesMatch, DeviceIndexOutOfRange, NoMicrophoneFound,
           NoSpeakerFound, NotAnInputDevice, DeviceEnumerationFailed)
     + OrtError (intermediate; no instances; catches all ORT-related)
-        + 8 direct ORT subclasses (init, session, threads, models,
+        + the ORT subclasses (init, session, threads, models,
           inference, tensors)
         + OrtPathError (intermediate; no instances; catches path-specific)
             + OrtLoadFailed (has path field; ORT failed to load)

@@ -14,7 +14,7 @@
 
 # Decibri
 
-Cross-platform audio capture, playback, and voice activity detection for Python, Rust, and Node.js.
+Cross-platform audio capture, conditioning, and playback for Python, Rust, and Node.js, with voice activity detection on live and recorded audio.
 
 <a href="https://pypi.org/project/decibri/"><img src="https://img.shields.io/pypi/v/decibri" alt="PyPI version"></a>&nbsp;
 <a href="https://www.npmjs.com/package/decibri"><img src="https://img.shields.io/npm/v/decibri" alt="npm version"></a>&nbsp;
@@ -33,12 +33,13 @@ Decibri is a cross-platform audio engine for real-time speech and voice applicat
 
 Key features:
 
-- Microphone capture and speaker playback
+- Microphone capture and speaker playback, mono or multichannel
 - Voice activity detection (Silero or energy modes)
+- Opt-in audio conditioning: noise suppression, echo cancellation, gain control, and filtering
+- Audio file reading, writing, conditioning, and speech analysis (WAV, AIFF, FLAC)
 - Async and streaming APIs
 - Cross-platform: Windows, macOS, Linux, browsers
 - Available in Python, Node.js, and Rust
-- Cloud and local speech-to-text integrations
 
 To learn more, visit [decibri.com/docs/](https://decibri.com/docs/).
 
@@ -234,7 +235,7 @@ The same VAD API is available in Node.js and Rust. Language-specific examples an
 
 ## Integrations
 
-Decibri pipes microphone audio directly into cloud and local speech services. Full guides at [decibri.com/docs/integrations](https://decibri.com/docs/integrations).
+Decibri delivers and accepts PCM in the shapes cloud and local speech services exchange: captured microphone audio ready for a recognizer, and speaker playback for synthesized audio. The guides at [decibri.com/docs/integrations](https://decibri.com/docs/integrations) show how to connect decibri to each service below.
 
 | Provider | Environment | STT | TTS | VAD | KWS |
 | :--- | :---: | :---: | :---: | :---: | :---: |
