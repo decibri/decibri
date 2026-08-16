@@ -1,16 +1,17 @@
 """Exception hierarchy tests.
 
-Covers all 64 exception classes shipped in the public ``decibri`` namespace:
-1 base (DecibriError) + 42 direct subclasses + DeviceError intermediate
-+ 8 direct DeviceError subclasses + OrtError intermediate + 8 direct
-OrtError subclasses + OrtPathError intermediate + 2 direct OrtPathError
-subclasses.
+Covers every exception class shipped in the public ``decibri`` namespace:
+the DecibriError base, its direct subclasses, and the DeviceError, OrtError
+and OrtPathError intermediates with their subclasses. The class counts are
+enforced by the assertions below (``test_class_count`` and the catch-target
+tests), so this docstring states the hierarchy's shape and leaves the sizes
+to them.
 
 Verifies:
 - Each class is reachable, raisable, and catchable by its own type.
-- The catch-target hierarchy: ``except DeviceError`` catches all 8
-  device-related instance variants; ``except OrtError`` catches all 10
-  ORT-family instance variants; ``except OrtPathError`` catches the 2
+- The catch-target hierarchy: ``except DeviceError`` catches every
+  device-related instance variant; ``except OrtError`` catches every
+  ORT-family instance variant; ``except OrtPathError`` catches the
   path-specific variants; ``except DecibriError`` catches everything.
 - Path-bearing exceptions (OrtLoadFailed, OrtPathInvalid, VadModelLoadFailed,
   ModelLoadFailed) expose .path (and .reason for OrtPathInvalid) as named

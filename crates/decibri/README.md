@@ -1,6 +1,6 @@
 # Decibri (Rust)
 
-Cross-platform audio capture, playback, and voice activity detection for Rust applications.
+Cross-platform audio capture, conditioning, and playback for Rust applications, with voice activity detection on live and recorded audio.
 
 [![crates.io](https://img.shields.io/crates/v/decibri)](https://crates.io/crates/decibri)
 [![docs.rs](https://img.shields.io/docsrs/decibri)](https://docs.rs/decibri/)
@@ -18,10 +18,10 @@ Or directly:
 
 ```toml
 [dependencies]
-decibri = "4"
+decibri = "6"
 ```
 
-The default feature set (`capture`, `playback`, `vad`, `denoise`, `gain`, `ort-load-dynamic`) covers most use cases. See [Feature flags](#feature-flags) below for opt-in or trimmed configurations.
+The default feature set (`capture`, `playback`, `vad`, `denoise`, `gain`, `aec`, `ort-load-dynamic`) covers most use cases. See [Feature flags](#feature-flags) below for opt-in or trimmed configurations.
 
 ## Quick start
 
@@ -90,7 +90,7 @@ for device in Microphone::devices()? {
 
 ### decibri ACE: capture conditioning
 
-decibri ACE (Audio Capture Engine) is the opt-in conditioning chain on the capture path. `MicrophoneConfig` carries one field per stage; each defaults to off, so `MicrophoneConfig::default()` captures with no conditioning. The stages run in a fixed order after the device is normalized to the target mono rate: DC removal, denoise, high-pass, AGC, then limiter.
+decibri ACE (Audio Capture Engine) is the opt-in conditioning chain on the capture path. `MicrophoneConfig` carries one field per stage; each defaults to off, so `MicrophoneConfig::default()` captures with no conditioning. The stages run in a fixed order after the device is normalized to the delivered channel count at the target rate: DC removal, denoise, high-pass, AGC, then limiter.
 
 ```rust
 use decibri::{Microphone, MicrophoneConfig, DenoiseModel, HighpassFilter};
@@ -157,6 +157,7 @@ If you do not need Silero VAD, disable the `vad` feature to drop the ONNX Runtim
 | `vad` | on | Silero voice-activity detection (pulls in ONNX Runtime) |
 | `denoise` | on | Capture-path single-channel speech enhancement (pulls in ONNX Runtime; runs only alongside `capture`) |
 | `gain` | on | Capture-path AGC and peak limiter (pure DSP, no extra dependency) |
+| `aec` | on | Capture-path acoustic echo cancellation of caller-supplied far-end audio (pure DSP, no model; runs only alongside `capture`) |
 | `ort-load-dynamic` | on | ONNX Runtime loaded at runtime from a path you control |
 | `ort-download-binaries` | off | ONNX Runtime downloaded at build time and embedded |
 
@@ -169,7 +170,7 @@ Execution-provider passthrough features (off by default; opt in for GPU accelera
 **Zero-config builds** (ONNX Runtime downloaded at `cargo build`, embedded):
 
 ```toml
-decibri = { version = "4", features = ["ort-download-binaries"], default-features = false }
+decibri = { version = "6", features = ["ort-download-binaries"], default-features = false }
 ```
 
 Add back the other features you want (`capture`, `playback`, `vad`).
@@ -177,7 +178,7 @@ Add back the other features you want (`capture`, `playback`, `vad`).
 **Production deployments with a bundled runtime** (default; ONNX Runtime loaded at runtime from a path you control):
 
 ```toml
-decibri = "4"
+decibri = "6"
 ```
 
 Then either set `ORT_DYLIB_PATH=/path/to/libonnxruntime.{so,dylib,dll}` before first use, or call `ort::init_from(path).commit()` at startup. ONNX Runtime initializes exactly once per process; the first successful path wins and later constructions silently reuse it.
@@ -185,7 +186,7 @@ Then either set `ORT_DYLIB_PATH=/path/to/libonnxruntime.{so,dylib,dll}` before f
 **Capture and playback without VAD** (no ONNX Runtime dependency at all):
 
 ```toml
-decibri = { version = "4", features = ["capture", "playback"], default-features = false }
+decibri = { version = "6", features = ["capture", "playback"], default-features = false }
 ```
 
 ## ONNX Runtime configuration
@@ -206,7 +207,7 @@ ONNX Runtime initialized in a parent process does not survive `fork()` cleanly: 
 
 ## Public API surface
 
-The stable 4.x surface includes:
+The public API surface includes:
 
 - [`microphone::Microphone`](https://docs.rs/decibri/latest/decibri/microphone/struct.Microphone.html), [`microphone::MicrophoneConfig`](https://docs.rs/decibri/latest/decibri/microphone/struct.MicrophoneConfig.html), [`microphone::MicrophoneStream`](https://docs.rs/decibri/latest/decibri/microphone/struct.MicrophoneStream.html) (`try_next_chunk`, `next_chunk`, `is_open`, `stop`)
 - [`speaker::Speaker`](https://docs.rs/decibri/latest/decibri/speaker/struct.Speaker.html), [`speaker::SpeakerConfig`](https://docs.rs/decibri/latest/decibri/speaker/struct.SpeakerConfig.html), [`speaker::SpeakerStream`](https://docs.rs/decibri/latest/decibri/speaker/struct.SpeakerStream.html) (`send`, `drain`, `is_playing`, `stop`)

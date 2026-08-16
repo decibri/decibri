@@ -196,7 +196,8 @@ export declare class Microphone {
    * Most recent VAD score: the normalized RMS of the last chunk in `'energy'`
    * mode, or 0 when VAD is disabled or before the first chunk is processed.
    * A chunk carrying more than one channel is collapsed to the average of its
-   * channels before the RMS, so the score reflects one channel's level.
+   * channels before the RMS, or read at the one delivered channel the vad
+   * `source` names when it is set, so the score reflects one channel's level.
    */
   readonly vadScore: number;
 

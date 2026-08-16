@@ -40,11 +40,11 @@ Microphone(vad=False)     # unchanged; the default
 ## Breaking in 0.5.0: mono-only capture
 
 decibri 4.x delivered interleaved multichannel audio when a microphone was
-opened with `channels` greater than `1`. decibri 0.5.0 narrows capture to mono:
-the `channels` constructor parameter on `Microphone` / `AsyncMicrophone`
-accepts only `1` (the default), and a value greater than `1` raises the new
-`MultichannelNotSupported` exception at `start()` instead of being captured. If
-your code opened a microphone with more than one channel, pass `channels=1` (or
+opened with `channels` greater than `1`. decibri 0.5.0 narrowed capture to
+mono: the `channels` constructor parameter on `Microphone` / `AsyncMicrophone`
+accepted only `1` (the default), and a value greater than `1` raised the
+`MultichannelNotSupported` exception at `start()` instead of being captured.
+To run 4.x code on the 0.5.0 through 0.10.0 releases, pass `channels=1` (or
 omit it).
 
 Before:
@@ -60,23 +60,19 @@ decibri.Microphone(channels=1)  # 0.5.0: mono (or omit channels entirely)
 decibri.Microphone()            # unchanged; mono is the default
 ```
 
-A value greater than `1` now raises:
+On those releases a value greater than `1` raised:
 
 ```python
-from decibri import MultichannelNotSupported
-
 decibri.Microphone(channels=2).start()
 # raises MultichannelNotSupported:
 # multichannel capture is not supported; channels must be 1 (mono)
 ```
 
-The `channels` parameter is kept, so multichannel may return later as an
-additive change (a future release accepting a value greater than `1` by
-delivering true interleaved multichannel, where `read()` would then return a
-2-D array) rather than a further break. The intended longer-term multichannel
-direction is array ingest (consuming several channels internally for processing
-such as beamforming or array noise reduction while still delivering one
-conditioned stream), which is distinct from raw multichannel delivery.
+That restriction has since been removed: `channels` above `1` is accepted again
+and delivers interleaved multichannel audio, and the
+`MultichannelNotSupported` exception class is removed with it, so
+`from decibri import MultichannelNotSupported` raises `ImportError`. See
+[CHANGELOG.md](./CHANGELOG.md) for the current `channels` semantics.
 
 ## Device-enumeration methods (the main change)
 

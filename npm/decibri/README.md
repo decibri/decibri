@@ -1,6 +1,6 @@
 # decibri
 
-Cross-platform audio capture, playback, and voice activity detection for Node.js and browsers.
+Cross-platform audio capture, conditioning, and playback for Node.js and browsers, with voice activity detection on live and recorded audio.
 
 ## Installation
 
@@ -98,11 +98,12 @@ Creates a Readable stream that captures from the microphone.
 | Option | Type | Default | Description |
 | --- | --- | --- | --- |
 | `sampleRate` | number | 16000 | Samples per second (1000 to 384000) |
-| `channels` | number | 1 | Mono only: the only accepted value is `1`; a value greater than `1` throws a `RangeError` |
+| `channels` | number | 1 | Delivered channels per frame, interleaved. `1` (the default) delivers the average of every device channel; the device's own count delivers every device channel in device order; a `channelMap` names any other selection. The device's own report is the only ceiling; no fixed maximum exists |
+| `channelMap` | number[] | none | 0-based device channel indices choosing which device channels feed the delivered channels: delivered channel `j` carries device channel `channelMap[j]`. The length must equal `channels`; entries may repeat and may appear in any order, so a map selects, permutes, and duplicates |
 | `framesPerBuffer` | number | 1600 | Frames per chunk (64 to 65536). At 16kHz mono, 1600 = 100ms = 3200 bytes |
 | `device` | number, string, or `{ id: string }` | system default | Device index, case-insensitive name substring, or stable per-host ID |
 | `dtype` | `'int16'` \| `'float32'` | `'int16'` | Sample encoding |
-| `vad` | `false` \| `'silero'` \| `'energy'` \| `VadOptions` | `false` | Voice activity detection: disabled, the Silero ML model, an RMS energy threshold, or a config object `{ model, threshold, holdoffMs }` to tune the policy |
+| `vad` | `false` \| `'silero'` \| `'energy'` \| `VadOptions` | `false` | Voice activity detection: disabled, the Silero ML model, an RMS energy threshold, or a config object `{ model, threshold, holdoffMs, source }` to tune the policy and the detector source |
 | `modelPath` | string | bundled model | Path to the Silero model. Only used when `vad` is `'silero'` |
 | `dcRemoval` | boolean | off | Remove a constant (DC) offset with a one-pole DC-blocking high-pass. Runs first in the chain; same-length, no added latency |
 | `denoise` | `'fastenhancer-t'` | off | Single-channel speech-enhancement (denoise) model. The model ships in the package; no path or download needed |
@@ -112,7 +113,9 @@ Creates a Readable stream that captures from the microphone.
 
 Standard `ReadableOptions` (e.g. `highWaterMark`) are also accepted.
 
-`vad: true` is not accepted; pass the mode explicitly as `vad: 'silero'` or `vad: 'energy'`. The string shorthand uses the default threshold (0.5 for `'silero'`, 0.01 for `'energy'`) and a 300 ms holdoff; to tune them pass a config object: `vad: { model: 'silero', threshold: 0.6, holdoffMs: 200 }`. The `threshold` (`0`–`1`) and `holdoffMs` fields are optional and fall back to those defaults.
+`vad: true` is not accepted; pass the mode explicitly as `vad: 'silero'` or `vad: 'energy'`. The string shorthand uses the default threshold (0.5 for `'silero'`, 0.01 for `'energy'`) and a 300 ms holdoff; to tune them pass a config object: `vad: { model: 'silero', threshold: 0.6, holdoffMs: 200 }`. The `threshold` (`0`–`1`) and `holdoffMs` fields are optional and fall back to those defaults. The optional `source` field names the 0-based DELIVERED channel the detector reads: the position within the delivered interleaved frames after any `channelMap` is applied (a `channelMap` names device channels; `source` names a delivered position). Absent, the detector reads the frame average of every delivered channel. Selecting a source changes which samples the detector reads and nothing else; the delivered audio is untouched.
+
+Multichannel capture delivers interleaved frames: each chunk holds `framesPerBuffer * channels` samples, and each frame carries the delivered channels in order. Without a `channelMap`, a `channels` count above `1` must equal the device's own: a count above the device's report fails with a `DecibriError` carrying the code `'MICROPHONE_CHANNELS_UNSUPPORTED'`, and a count above `1` and below the device's report fails with `'CHANNEL_SELECTION_AMBIGUOUS'`, because which channels it means has no single answer; a `channelMap` names them. A map entry the device does not have fails with `'CHANNEL_MAP_OUT_OF_RANGE'`, naming the entry and the count the device reports.
 
 ### Methods
 
@@ -235,7 +238,7 @@ Same options as Node.js, plus:
 | `noiseSuppression` | boolean | true | Browser noise suppression |
 | `workletUrl` | string | inline blob | Custom worklet URL for strict CSP |
 
-The browser runs energy-mode VAD only, so its `vad` option accepts `false` or `'energy'`. The browser `version()` returns `{ decibri }` only: the browser build has no native core, so `decibri` reports the installed package version. In Node, `version().decibri` reports the native core version.
+The browser runs energy-mode VAD only, so its `vad` option accepts `false`, `'energy'`, or a config object `{ model: 'energy', threshold, holdoffMs, source }`. The browser `version()` returns `{ decibri }` only: the browser build has no native core, so `decibri` reports the installed package version. In Node, `version().decibri` reports the native core version.
 
 ### Key differences from Node.js
 
@@ -351,11 +354,11 @@ Everything a `Microphone` does to live audio, `File` does to audio you already h
 
 - `await File.open(path, options?)`: read a file off the event loop (recommended, like `Microphone.open`). Reads WAV, AIFF, AIFF-C and FLAC, identified from the file's own bytes rather than its extension.
 - `new File(path, options?)`: the same result, synchronous (blocks on disk I/O; fine for scripts).
-- `File.buffer(samples, options)`: wrap a `Float32Array` of samples you already hold. `options.inputRate` is required (raw samples carry no header); a raw `Buffer` of bytes is rejected as ambiguous.
+- `File.buffer(samples, options)`: wrap a `Float32Array` of samples you already hold. `options.inputRate` is required (raw samples carry no header); a raw `Buffer` of bytes is rejected as ambiguous. `options.inputChannels` states the interleave of the samples, `1` by default, the channel counterpart of `inputRate`.
 - `await file.analyze()` (also spelled `analyse()`): consume the source and resolve to a `VadReport` of per-window `scores` (`{ start, end, vadScore, isSpeech }`) and merged speech `segments` (`{ start, end }`), in seconds of file time. Requires `vad: 'silero'`; a `File` opened without `vad` rejects with `analysis requires VAD`.
 - `file.vadScore`, `'speech'` / `'silence'` events: per-chunk VAD alongside the stream, with the holdoff measured in FILE time (sample positions), never wall-clock time, so processing speed does not change the reported events.
 
-Options mirror `Microphone` (`sampleRate`, `dtype`, `vad`, `dcRemoval`, `denoise`, `highpass`, `agc`, `limiter`); the live-capture options (`device`, `channels`, `framesPerBuffer`) do not apply. Iteration and analysis are separate single passes: construct one `File` per operation. Note: Node also has a global `File` (the web File API); import decibri's explicitly to avoid shadowing surprises.
+Options mirror `Microphone` (`sampleRate`, `channels`, `channelMap`, `dtype`, `vad`, `dcRemoval`, `denoise`, `highpass`, `agc`, `limiter`), with `channels` and `channelMap` read against the source's own channel count (the file's header, or `inputChannels` for `File.buffer`) where the live path reads the device's report, and the vad `source` naming a delivered channel exactly as on `Microphone`; the live-capture options (`device`, `framesPerBuffer`) do not apply. Iteration and analysis are separate single passes: construct one `File` per operation. Note: Node also has a global `File` (the web File API); import decibri's explicitly to avoid shadowing surprises.
 
 ## Device Selection
 
