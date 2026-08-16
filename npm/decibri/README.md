@@ -306,9 +306,9 @@ mic.on('silence', () => console.log('silent'));
 
 The Silero model (~2MB) ships inside the npm package. No downloads or API keys required. Silero mode is Node.js only.
 
-## decibri ACE (audio conditioning)
+## Decibri ACE (audio conditioning)
 
-decibri ACE (Audio Capture Engine) is decibri's opt-in audio front-end for speech. It is a conditioning chain that runs on the captured audio before it reaches your `'data'` handler. Every stage is off by default, runs on-device, and needs no API key. With nothing enabled the capture path is byte-identical to plain capture.
+Decibri ACE (Audio Conditioning Engine) is decibri's opt-in audio front-end for speech. It is a conditioning chain that runs on the captured audio before it reaches your `'data'` handler. Every stage is off by default, runs on-device, and needs no API key. With nothing enabled the capture path is byte-identical to plain capture.
 
 The stages run in a fixed order. Enable any subset:
 

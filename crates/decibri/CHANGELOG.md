@@ -9,7 +9,7 @@ For other decibri packages, see:
 - npm package: [npm/decibri/CHANGELOG.md](../../npm/decibri/CHANGELOG.md)
 - Python package: [bindings/python/CHANGELOG.md](../../bindings/python/CHANGELOG.md)
 
-## [Unreleased]
+## [6.2.0] - 2026-08-16
 
 ### Breaking changes
 

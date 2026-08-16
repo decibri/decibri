@@ -143,9 +143,9 @@ mic = decibri.Microphone(vad=decibri.Vad(model="silero", threshold=0.5))
 
 Use `mic.vad_score` (a value in `[0, 1]`) to gate downstream processing. `mic.is_speaking` returns the boolean above-threshold view.
 
-## decibri ACE (audio conditioning)
+## Decibri ACE (audio conditioning)
 
-decibri ACE (Audio Capture Engine) is decibri's opt-in audio front-end for speech: a conditioning chain applied to the captured audio before it is delivered. Every stage is off by default, runs on-device, and needs no API key. Leave the options unset and the capture path is unchanged.
+Decibri ACE (Audio Conditioning Engine) is decibri's opt-in audio front-end for speech: a conditioning chain applied to the captured audio before it is delivered. Every stage is off by default, runs on-device, and needs no API key. Leave the options unset and the capture path is unchanged.
 
 The stages run in this order. Pass any subset on the `Microphone` constructor:
 
