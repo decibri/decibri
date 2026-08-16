@@ -88,9 +88,9 @@ for device in Microphone::devices()? {
 
 `Speaker::devices()` is the playback equivalent. The free functions `decibri::input_devices()` and `decibri::output_devices()` return the same lists.
 
-### decibri ACE: capture conditioning
+### Decibri ACE: capture conditioning
 
-decibri ACE (Audio Capture Engine) is the opt-in conditioning chain on the capture path. `MicrophoneConfig` carries one field per stage; each defaults to off, so `MicrophoneConfig::default()` captures with no conditioning. The stages run in a fixed order after the device is normalized to the delivered channel count at the target rate: DC removal, denoise, high-pass, AGC, then limiter.
+Decibri ACE (Audio Conditioning Engine) is the opt-in conditioning chain on the capture path. `MicrophoneConfig` carries one field per stage; each defaults to off, so `MicrophoneConfig::default()` captures with no conditioning. The stages run in a fixed order after the device is normalized to the delivered channel count at the target rate: DC removal, denoise, high-pass, AGC, then limiter.
 
 ```rust
 use decibri::{Microphone, MicrophoneConfig, DenoiseModel, HighpassFilter};

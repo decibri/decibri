@@ -27,7 +27,7 @@ Cross-platform audio capture, conditioning, and playback for Python, Rust, and N
 
 ---
 
-## What is decibri?
+## What is Decibri?
 
 Decibri is a cross-platform audio engine for real-time speech and voice applications. One unified API across Python, Rust, Node.js, and browsers.
 
@@ -35,7 +35,8 @@ Key features:
 
 - Microphone capture and speaker playback, mono or multichannel
 - Voice activity detection (Silero or energy modes)
-- Opt-in audio conditioning: noise suppression, echo cancellation, gain control, and filtering
+- Acoustic echo cancellation (AEC), one canceller per delivered channel
+- Opt-in conditioning: noise suppression, gain control, and filtering
 - Audio file reading, writing, conditioning, and speech analysis (WAV, AIFF, FLAC)
 - Async and streaming APIs
 - Cross-platform: Windows, macOS, Linux, browsers
@@ -43,11 +44,11 @@ Key features:
 
 To learn more, visit [decibri.com/docs/](https://decibri.com/docs/).
 
-## decibri ACE
+## Decibri ACE
 
-Audio Capture Engine for Speech.
+Audio Conditioning Engine for Speech.
 
-decibri ACE (Audio Capture Engine) is decibri's opt-in audio front-end for speech: it conditions microphone audio before it reaches your recognizer. Every stage is off by default, so a plain `Microphone(...)` is byte-identical to capture without ACE, and you turn on only the stages you want.
+Decibri ACE (Audio Conditioning Engine) is decibri's opt-in audio front-end for speech: it conditions microphone audio before it reaches your recognizer. Every stage is off by default, so a plain `Microphone(...)` is byte-identical to capture without ACE, and you turn on only the stages you want.
 
 What makes it useful is not the individual filters, it is the package they come in:
 
@@ -55,7 +56,7 @@ What makes it useful is not the individual filters, it is the package they come 
 - **Opt-in and zero-cost when off.** Nothing in the chain runs until you ask for it. With every stage left at its default, the capture path is unchanged.
 - **One surface across the bindings.** The same conditioning options, with the same names and ranges, are available from Python, Node.js, and Rust.
 
-ACE is a practical capture pipeline, not a claim to state-of-the-art signal processing. The stages are conventional and described plainly:
+ACE is a practical conditioning pipeline, not a claim to state-of-the-art signal processing. The stages are conventional and described plainly:
 
 | Stage | Option | What it does |
 | :--- | :--- | :--- |
