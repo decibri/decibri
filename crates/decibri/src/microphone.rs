@@ -164,10 +164,6 @@ pub struct MicrophoneConfig {
     /// directly, so it answers every case above except a count the device does
     /// not have.
     ///
-    /// A count above 1 is rejected with
-    /// [`DecibriError::AecMultichannelUnsupported`] when [`aec`](Self::aec)
-    /// names a model.
-    ///
     /// The block size passed to
     /// [`MicrophoneStream::try_next_chunk`](MicrophoneStream::try_next_chunk)
     /// and [`MicrophoneStream::next_chunk`](MicrophoneStream::next_chunk) is a
@@ -271,9 +267,15 @@ pub struct MicrophoneConfig {
     /// [`MicrophoneStream::push_aec_reference`]. `None` (the default) leaves echo
     /// cancellation off.
     ///
-    /// Runs last in the normalize segment, on the mono signal at the target
-    /// rate, before the pre-transform detector tap: with it on, the detector
-    /// reads the echo-removed signal. Requires
+    /// Runs last in the normalize segment, on the delivered channels at the
+    /// target rate, before the pre-transform detector tap: with it on, the
+    /// detector reads the echo-removed signal. One canceller engine runs per
+    /// delivered channel, each fed the same pushed reference and each finding
+    /// its own channel's echo delay, so the processing and memory cost scale
+    /// with [`channels`](Self::channels); a capture that overruns the
+    /// machine's budget shows up as
+    /// [`overrun_count`](MicrophoneStream::overrun_count) climbing, exactly as
+    /// any other stage that outruns the consumer does. Requires
     /// [`sample_rate`](Self::sample_rate) in `8000..=48000`, narrower than the
     /// range that field otherwise accepts; a rate outside it is rejected by
     /// [`validate`](Self::validate). Honoured only when the `aec` feature is
@@ -422,21 +424,6 @@ impl MicrophoneConfig {
         if self.aec.is_some() {
             if !(8000..=48000).contains(&self.sample_rate) {
                 return Err(DecibriError::AecSampleRateUnsupported(self.sample_rate));
-            }
-            // decibri runs the canceller on one near-end channel. Fed an
-            // interleaved multichannel block it counts samples as time, never
-            // acquires its delay, and hands the capture back untouched with no
-            // fault reported; a discarded internal carry that is not a whole
-            // number of frames also rotates the channel identities of everything
-            // after it, at any count above one. Neither is visible in the
-            // delivered audio, so the pair is refused here rather than
-            // accepted. A cross-field rejection, not a ceiling on `channels`:
-            // `channels: 1` with a `channel_map` naming one channel of an
-            // array is accepted and cancels normally.
-            if self.channels > 1 {
-                return Err(DecibriError::AecMultichannelUnsupported {
-                    channels: self.channels,
-                });
             }
             // The declared reference rate is converted to the target rate, so it
             // has to be a rate decibri resamples from at all. Guarded here rather
@@ -1303,6 +1290,12 @@ impl MicrophoneStream {
     /// The echo canceller's transport and cancellation metrics, or `None` on a
     /// stream with echo cancellation off.
     ///
+    /// On a stream delivering more than one channel this reports the FIRST
+    /// delivered channel's canceller; read
+    /// [`aec_metrics_per_channel`](Self::aec_metrics_per_channel) for every
+    /// channel's report. On a single-channel stream the two agree, this one
+    /// holding the single entry.
+    ///
     /// `acquisition_parked` climbing while `delay_samples` stays `None` and
     /// `erle_db` stays at zero is the signature of a canceller with no usable
     /// reference: none was pushed, it is not at the declared rate, or it is not
@@ -1322,6 +1315,30 @@ impl MicrophoneStream {
     /// each block, so a read serializes against block processing.
     #[cfg(feature = "aec")]
     pub fn aec_metrics(&self) -> Option<decibri_aec::AecMetrics> {
+        self.aec_metrics_per_channel()?.into_iter().next()
+    }
+
+    /// Every delivered channel's canceller metrics, in delivered order, or
+    /// `None` on a stream with echo cancellation off. One canceller engine
+    /// runs per delivered channel, each fed the same pushed reference and each
+    /// finding its own channel's echo delay, so the entries differ where the
+    /// channels' acoustic paths differ. The vector is never empty.
+    ///
+    /// `delay_samples` is each engine's alignment offset from the reference
+    /// frontier as the feeding established it, not a measurement of the room's
+    /// echo path length.
+    ///
+    /// `erle_db` is not a quality ranking across channels: it rises with echo
+    /// distance, because a weaker echo is easier to reduce in ratio terms, so
+    /// a far microphone routinely reports a higher figure than a near one
+    /// while removing less echo in absolute terms. Compare a channel against
+    /// its own history, not against its neighbours.
+    ///
+    /// # Thread safety
+    /// Takes the capture chain's lock, which the chain holds for the duration of
+    /// each block, so a read serializes against block processing.
+    #[cfg(feature = "aec")]
+    pub fn aec_metrics_per_channel(&self) -> Option<Vec<decibri_aec::AecMetrics>> {
         self.capture_stage
             .as_ref()?
             .lock()
@@ -3794,72 +3811,56 @@ mod tests {
         }
     }
 
-    /// Echo cancellation and a delivered count above one are refused together.
+    /// Echo cancellation validates at every delivered channel count, with and
+    /// without a channel map: no capacity ceiling exists on the pair.
     ///
-    /// decibri runs the canceller on one near-end channel, so an interleaved
-    /// multichannel block leaves it unable to acquire its delay: it returns
-    /// the capture unchanged and reports no fault, and a discarded internal
-    /// carry that is not a whole number of frames rotates the channel
-    /// identities of everything after it, at any count above one. Nothing in
-    /// the delivered audio distinguishes either from working cancellation, so
-    /// the pair is refused at configuration time.
-    ///
-    /// The second half is what makes this a fence rather than a ban: a single
-    /// delivered channel selected from a multichannel device by `channel_map`
-    /// still cancels. A test asserting only the rejection would pass equally
-    /// against an implementation that had simply disabled cancellation.
+    /// The counts run well past any plausible machine budget on purpose. The
+    /// cost of cancellation scales per delivered channel and the overload
+    /// signal is `overrun_count` at runtime, so a capacity rejection at
+    /// configuration time would be a number decibri cannot derive; this pins
+    /// that no such number exists. A maximum added later fails here loudly.
     #[cfg(feature = "aec")]
     #[test]
-    fn aec_refuses_multichannel_and_still_accepts_a_selected_channel() {
+    fn aec_validates_at_every_delivered_channel_count() {
         let mut config = MicrophoneConfig {
             aec: Some(decibri_aec::AecModel::default()),
             ..Default::default()
         };
 
-        for channels in [2u16, 3, 8, 64] {
+        for channels in [1u16, 2, 3, 8, 64] {
             config.channels = channels;
             config.channel_map = None;
             assert!(
-                matches!(
-                    config.validate(),
-                    Err(DecibriError::AecMultichannelUnsupported { channels: c }) if c == channels
-                ),
-                "channels {channels} with the canceller is refused, naming the count"
+                config.validate().is_ok(),
+                "channels {channels} with the canceller validates"
             );
 
-            // A map does not buy a way around the fence: the rejection is on
-            // the delivered count, whatever produced it.
             config.channel_map = Some((0..channels).collect());
             assert!(
-                matches!(
-                    config.validate(),
-                    Err(DecibriError::AecMultichannelUnsupported { .. })
-                ),
-                "channels {channels} with the canceller is refused with a map too"
+                config.validate().is_ok(),
+                "channels {channels} with the canceller and a map validates"
             );
         }
 
+        // One channel selected from an array cancels as before.
         config.channels = 1;
-        config.channel_map = None;
-        assert!(
-            config.validate().is_ok(),
-            "one delivered channel with the canceller still validates"
-        );
         config.channel_map = Some(vec![3]);
         assert!(
             config.validate().is_ok(),
-            "one channel selected from an array with the canceller still validates"
+            "one channel selected from an array with the canceller validates"
         );
 
-        // Negative control: the same counts without the canceller validate, so
-        // the rejection is the cross-field pair and not a ceiling on channels.
+        // Negative control: the same counts without the canceller also
+        // validate, so the acceptance above is not an artifact of a validator
+        // that stopped checking channels at all; both sides sit on the same
+        // device-bounded rule.
         config.aec = None;
         for channels in [2u16, 3, 8, 64] {
             config.channels = channels;
             config.channel_map = None;
             assert!(
                 config.validate().is_ok(),
-                "channels {channels} validates once the canceller is off"
+                "channels {channels} validates with the canceller off"
             );
         }
     }
@@ -4002,6 +4003,58 @@ mod tests {
         assert_eq!(plain.aec_reference_dropped(), 0);
         assert_eq!(plain.aec_reference_silence(), 0);
         assert!(plain.aec_metrics().is_none());
+    }
+
+    /// On a stream delivering more than one channel, the per-channel accessor
+    /// carries one entry per delivered channel and the single-report accessor
+    /// is its first entry. Regression: the two accessors answering from
+    /// different engines, or the per-channel report collapsing to one entry.
+    #[cfg(feature = "aec")]
+    #[test]
+    fn aec_metrics_per_channel_carries_every_delivered_channel() {
+        let queue = Arc::new(crate::stage::AecReferenceRing::new(16_000));
+        let chain = build_capture_stage(
+            2,
+            2,
+            16_000,
+            16_000,
+            Transforms {
+                aec: Some(AecSettings {
+                    model: decibri_aec::AecModel::default(),
+                    tail_ms: None,
+                    suppression: None,
+                    reference_rate: 16_000,
+                    reference: Arc::clone(&queue),
+                }),
+                ..Default::default()
+            },
+        )
+        .expect("the chain builds")
+        .expect("echo cancellation builds a chain");
+        let (stream, _sender, _running) =
+            test_stream_with_reference(Some(chain), 2, Arc::clone(&queue));
+
+        let mut buf = VecDeque::new();
+        stream
+            .ingest(
+                &mut buf,
+                AudioChunk {
+                    data: vec![0.1; 2 * 512],
+                    sample_rate: 16_000,
+                    channels: 2,
+                },
+            )
+            .expect("the chain conditions one block");
+
+        let per_channel = stream
+            .aec_metrics_per_channel()
+            .expect("the stream reports per-channel metrics");
+        assert_eq!(per_channel.len(), 2, "one entry per delivered channel");
+        let single = stream.aec_metrics().expect("the stream reports metrics");
+        assert_eq!(
+            single, per_channel[0],
+            "the single report is the first delivered channel's entry"
+        );
     }
 
     /// A stereo push whose two channels are identical leaves the queue exactly

@@ -4,6 +4,7 @@ from decibri._async_classes import AsyncFile as AsyncFile
 from decibri._async_classes import AsyncMicrophone as AsyncMicrophone
 from decibri._async_classes import AsyncSpeaker as AsyncSpeaker
 from decibri._classes import Aec as Aec
+from decibri._classes import AecChannelMetrics as AecChannelMetrics
 from decibri._classes import AecMetrics as AecMetrics
 from decibri._classes import Chunk as Chunk
 from decibri._classes import File as File
@@ -76,9 +77,6 @@ from decibri.exceptions import VadSampleRateUnsupported as VadSampleRateUnsuppor
 from decibri.exceptions import VadThresholdOutOfRange as VadThresholdOutOfRange
 from decibri.exceptions import AecSampleRateUnsupported as AecSampleRateUnsupported
 from decibri.exceptions import AecConfigInvalid as AecConfigInvalid
-from decibri.exceptions import (
-    AecMultichannelUnsupported as AecMultichannelUnsupported,
-)
 from decibri.exceptions import AudioFormatUnsupported as AudioFormatUnsupported
 from decibri.exceptions import AudioFileMalformed as AudioFileMalformed
 from decibri.exceptions import AudioFileTruncated as AudioFileTruncated

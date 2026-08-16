@@ -181,13 +181,15 @@ pub(crate) trait Stage: Send {
         0
     }
 
-    /// The echo canceller's transport and cancellation metrics, when this stage
-    /// holds a canceller.
+    /// The echo cancellers' transport and cancellation metrics, one entry per
+    /// delivered channel in delivered order, when this stage holds cancellers.
     ///
     /// `None` for every other stage, so [`CaptureStage::aec_metrics`] finds the
-    /// one stage that answers without downcasting a boxed trait object.
+    /// one stage that answers without downcasting a boxed trait object. The
+    /// returned vector is never empty: a stage that holds cancellers holds at
+    /// least one.
     #[cfg(feature = "aec")]
-    fn aec_metrics(&self) -> Option<AecMetrics> {
+    fn aec_metrics(&self) -> Option<Vec<AecMetrics>> {
         None
     }
 }
@@ -649,26 +651,29 @@ pub(crate) struct AecSettings {
 /// Cancel the echo of caller-supplied far-end audio out of the captured signal.
 ///
 /// [`build_capture_stage`] pushes this last in the `normalize` segment, after
-/// [`Downmix`] and [`ResampleStage`], so the canceller receives mono at the
-/// target rate: the only format it accepts, and the rate its engine is
-/// constructed at. Running before the VAD tap is taken means the detector reads
-/// the echo-removed signal rather than the raw capture.
+/// the channel stage (and [`Deinterleave`]) and [`ResampleStage`], so the
+/// stage receives the delivered channels at the target rate, planar above one
+/// channel. It holds one engine per delivered channel, index i cancelling
+/// planar run i, exactly as [`ResampleStage`] holds one resampler per carried
+/// channel: each engine receives one channel's run, the mono stream its
+/// documented contract requires. Running before the VAD tap is taken means the
+/// detector reads the echo-removed signal rather than the raw capture.
 ///
-/// Each [`process`](Stage::process) feeds the reference into the engine before
-/// cancelling the near-end block, and feeds it at the rate the capture consumes
-/// it: enough to reach the near-end frontier this block ends at, and no further.
-/// Whatever the caller pushed beyond that stays queued and is read on later
-/// blocks, so nothing is discarded and the far-end frontier never runs ahead of
-/// the capture. The engine re-blocks internally, so a call may append fewer or
-/// more samples than it consumed and the totals balance after
+/// Each [`process`](Stage::process) feeds the reference into every engine
+/// before cancelling the near-end block, and feeds it at the rate the capture
+/// consumes it: enough to reach the near-end frontier this block ends at, and
+/// no further. Whatever the caller pushed beyond that stays queued and is read
+/// on later blocks, so nothing is discarded and the far-end frontier never
+/// runs ahead of the capture. The engine re-blocks internally, so a call may
+/// append fewer or more samples than it consumed and the totals balance after
 /// [`flush`](Stage::flush).
 ///
-/// The far-end frontier is what the canceller measures its alignment from, and
-/// it measures it once, on the first block it sees. A frontier that has run
-/// ahead of the capture puts every later near-end sample past the reference the
-/// canceller holds, which its delay search reads as a window it cannot score, so
-/// it never locks and never recovers. Feeding at the capture's own rate is what
-/// holds the two together: see
+/// The far-end frontier is what each canceller measures its alignment from,
+/// and it measures it once, on the first block it sees. A frontier that has
+/// run ahead of the capture puts every later near-end sample past the
+/// reference the canceller holds, which its delay search reads as a window it
+/// cannot score, so it never locks and never recovers. Feeding at the
+/// capture's own rate is what holds the two together: see
 /// [`feed_reference`](AecStage::feed_reference).
 ///
 /// The feed then tops the far-end stream up with silence to the near-end
@@ -677,10 +682,22 @@ pub(crate) struct AecSettings {
 /// far end IS silence, and a caller who pushes nothing is saying so. Without the
 /// top-up a caller who pauses leaves the far-end frontier permanently behind the
 /// capture, which the engine can only read as a reference that never arrives.
+///
+/// Above one channel the near-end feed is re-blocked (see the `pending`
+/// field): every engine receives whole multiples of its own
+/// `latency_samples()` per call, which holds the engines' emitted counts
+/// identical however their delay searches behave. At one channel the input is
+/// handed to the single engine directly, so the call cadence of a
+/// single-channel capture is untouched by the re-blocker's existence.
 #[cfg(feature = "aec")]
 struct AecStage {
-    /// The canceller, constructed at the capture target rate.
-    aec: Aec,
+    /// One engine per delivered channel, index i cancelling planar run i, each
+    /// constructed at the capture target rate from the same configuration. The
+    /// length is resolved at chain build time; no fixed maximum exists.
+    /// Nothing is shared between engines, including each engine's internal
+    /// far-end history: every engine is fed the same reference and the same
+    /// per-call near lengths, and each finds its own channel's echo delay.
+    engines: Vec<Aec>,
     /// The shared queue the caller pushes far-end audio into.
     reference: Arc<AecReferenceRing>,
     /// The rate the caller declares its pushed reference is at. Held so the
@@ -719,17 +736,44 @@ struct AecStage {
     /// While it does, the silence top-up is held back: silence laid down in
     /// front of queued reference is a gap rather than a top-up.
     reference_pending: bool,
+    /// The near-end re-blocker: one carry run per channel, holding the frames
+    /// received but not yet handed to the engines. Used only above one
+    /// channel; at one channel the input goes to the engine directly and
+    /// these stay empty.
+    ///
+    /// Each engine is fed whole multiples of [`Self::block`] per call, so its
+    /// internal partial-block carry is empty at every call boundary. That is
+    /// load-bearing: when an engine's delay acquisition promotes a lock it
+    /// resets its canceller, and the reset clears the canceller's internal
+    /// carry before the current call's samples are pushed, so what a
+    /// promotion can discard is `(samples fed) mod block`. Feeding in block
+    /// multiples pins that at zero for every engine, which is what keeps N
+    /// engines emitting identical counts however their promotions fall. The
+    /// reset-before-push ordering is behaviour the canceller crate exhibits,
+    /// not a contract it documents; a canceller change that reorders the two
+    /// breaks the equal-count property silently, with no error on either
+    /// side.
+    pending: Vec<Vec<f32>>,
+    /// The engines' shared framing granularity, read from
+    /// `latency_samples()` at construction: identical engines report an
+    /// identical figure. The re-blocker feeds in whole multiples of this.
+    block: usize,
 }
 
 #[cfg(feature = "aec")]
 impl AecStage {
-    /// Build the stage for a capture at `target_rate`.
+    /// Build the stage for a capture at `target_rate` carrying `channels`
+    /// delivered channels: one engine per channel, all from the same
+    /// configuration. A count of zero is floored to one, as [`Block::new`]
+    /// floors its channel count.
     ///
-    /// The engine is constructed at `target_rate`, which is the rate the signal
-    /// reaching this stage carries. Returns an error when the canceller rejects
-    /// the configuration (bridged by `From<AecError>`) or when the reference
-    /// rate pair is one the resampler cannot serve.
-    fn new(settings: AecSettings, target_rate: u32) -> Result<Self, DecibriError> {
+    /// Every engine is constructed at `target_rate`, which is the rate the
+    /// signal reaching this stage carries. Returns an error when the canceller
+    /// rejects the configuration (bridged by `From<AecError>`) or when the
+    /// reference rate pair is one the resampler cannot serve; construction
+    /// validates the configuration once per engine, identically, so a failure
+    /// strikes the first engine or none.
+    fn new(settings: AecSettings, target_rate: u32, channels: u16) -> Result<Self, DecibriError> {
         let AecSettings {
             model,
             tail_ms,
@@ -755,11 +799,17 @@ impl AecStage {
         if let Some(suppression) = suppression {
             config.suppression = suppression;
         }
-        let aec = Aec::new(config)?;
+        let channels = channels.max(1);
+        let engines = (0..channels)
+            .map(|_| Aec::new(config.clone()))
+            .collect::<Result<Vec<_>, _>>()?;
+        let block = engines[0].latency_samples();
 
         // Converting on the drain side keeps the caller's push to a copy into the
         // queue, so the thread that produced the audio pays nothing for the
-        // conversion.
+        // conversion. One resampler serves every engine: the reference is mono
+        // and is drained once, so the converted block is handed to each engine
+        // in turn.
         let reference_resampler = if reference_rate != target_rate {
             Some(PolyphaseResampler::new(reference_rate, target_rate)?)
         } else {
@@ -767,7 +817,7 @@ impl AecStage {
         };
 
         Ok(Self {
-            aec,
+            engines,
             reference,
             reference_rate,
             target_rate,
@@ -779,12 +829,17 @@ impl AecStage {
             near_seen: 0,
             received_near: false,
             reference_pending: false,
+            pending: (0..channels).map(|_| Vec::new()).collect(),
+            block,
         })
     }
 
-    /// Feed the queued reference into the engine, at most `budget` samples of it
-    /// measured at the capture target rate, converting from the declared rate
-    /// first when the two differ.
+    /// Feed the queued reference into every engine, at most `budget` samples of
+    /// it measured at the capture target rate, converting from the declared rate
+    /// first when the two differ. The queue is drained once and the drained
+    /// block handed to each engine in turn, so the caller's single push serves
+    /// every channel; `budget` and [`Self::far_fed`] are per-engine counts, the
+    /// same for all engines because all are fed identically.
     ///
     /// The budget is what makes the feed rate-matched. The canceller anchors its
     /// alignment on the far-end frontier as it stands at the first block it
@@ -831,11 +886,15 @@ impl AecStage {
             Some(resampler) => {
                 self.resampled.clear();
                 resampler.process(&self.drained, &mut self.resampled)?;
-                self.aec.feed_reference(&self.resampled);
+                for engine in self.engines.iter_mut() {
+                    engine.feed_reference(&self.resampled);
+                }
                 self.far_fed += self.resampled.len() as u64;
             }
             None => {
-                self.aec.feed_reference(&self.drained);
+                for engine in self.engines.iter_mut() {
+                    engine.feed_reference(&self.drained);
+                }
                 self.far_fed += self.drained.len() as u64;
             }
         }
@@ -869,7 +928,9 @@ impl AecStage {
         if self.silence.len() < fill {
             self.silence.resize(fill, 0.0);
         }
-        self.aec.feed_reference(&self.silence[..fill]);
+        for engine in self.engines.iter_mut() {
+            engine.feed_reference(&self.silence[..fill]);
+        }
         self.far_fed += fill as u64;
         self.reference.record_silence(fill as u64);
     }
@@ -878,34 +939,92 @@ impl AecStage {
 #[cfg(feature = "aec")]
 impl Stage for AecStage {
     fn process(&mut self, input: Block<'_>, out: &mut Vec<f32>) -> Result<(), DecibriError> {
-        // The canceller is mono on both its near and far ends, and its far-end
-        // accounting below counts near-end samples as if each were one frame.
-        // Stated here rather than assumed, so a chain that ever hands this stage
-        // more than one channel says so.
+        // The count the stage was built for and the count the block carries are
+        // the same number reaching it by two routes, exactly as for `Downmix`
+        // and `Select`. A block at another count would hand at least one engine
+        // a run that is not one channel's samples.
         debug_assert_eq!(
-            input.channels(),
-            1,
-            "the echo canceller requires mono, got {} channels",
+            input.channels() as usize,
+            self.engines.len(),
+            "the echo canceller was built for {} channels and handed {}",
+            self.engines.len(),
             input.channels()
         );
-        // The reference goes in first, up to the frontier this block ends at, and
-        // the top-up then covers whatever of the block the caller left uncovered.
-        // The budget is the distance the far end has left to travel to reach that
-        // frontier, so a caller feeding in step hands over its whole block and a
-        // caller running ahead hands over one block's worth of its backlog.
-        let near_frontier = self.near_seen + input.len() as u64;
+        if self.engines.len() == 1 {
+            // One channel: the input goes to the engine directly, with no
+            // re-blocking, so the engine sees exactly the call cadence the
+            // native buffers produce. The engine drives its reference feeding
+            // and re-anchor evaluation off the lengths of these calls, which
+            // is why the single-channel path bypasses the re-blocker rather
+            // than passing through it with a window of one.
+            //
+            // The reference goes in first, up to the frontier this block ends
+            // at, and the top-up then covers whatever of the block the caller
+            // left uncovered. The budget is the distance the far end has left
+            // to travel to reach that frontier, so a caller feeding in step
+            // hands over its whole block and a caller running ahead hands
+            // over one block's worth of its backlog.
+            let near_frontier = self.near_seen + input.len() as u64;
+            self.feed_reference(near_frontier.saturating_sub(self.far_fed))?;
+            if !self.reference_pending {
+                self.fill_reference_to(near_frontier);
+            }
+            self.near_seen = near_frontier;
+            if !input.is_empty() {
+                self.received_near = true;
+            }
+            // The engine appends its output in step with the near-end samples
+            // that produced it. Its `latency_samples` is a buffering budget,
+            // not an index offset, so nothing here shifts the output by it.
+            self.engines[0].process(input.samples(), out)?;
+            return Ok(());
+        }
+        // Above one channel the input is planar: one run per channel, appended
+        // to that channel's carry. The engines are then fed the largest whole
+        // multiple of `block` the carry holds, every channel the same count,
+        // and the remainder stays carried. See the `pending` field for why the
+        // block-multiple feed is load-bearing and not a convenience.
+        let frames = input.frames();
+        if frames > 0 {
+            self.received_near = true;
+        }
+        for (channel, pend) in self.pending.iter_mut().enumerate() {
+            pend.extend_from_slice(&input.samples()[channel * frames..(channel + 1) * frames]);
+        }
+        let held = self.pending[0].len();
+        let feed = held - (held % self.block);
+        if feed == 0 {
+            // No whole block yet: nothing reaches the engines, the near
+            // frontier does not advance, and no reference is drained for it.
+            return Ok(());
+        }
+        // The reference accounting is per engine and identical across engines:
+        // one drain covers all of them (see `feed_reference`), and the frames
+        // fed this call are what the frontier advances by.
+        let near_frontier = self.near_seen + feed as u64;
         self.feed_reference(near_frontier.saturating_sub(self.far_fed))?;
         if !self.reference_pending {
             self.fill_reference_to(near_frontier);
         }
         self.near_seen = near_frontier;
-        if !input.is_empty() {
-            self.received_near = true;
+        // Each engine consumes `feed` samples of its own channel and, having
+        // been fed a whole multiple of its block from an empty internal carry,
+        // appends exactly `feed` samples: equal-length runs in, equal-length
+        // runs out, which is what keeps the planar layout valid downstream.
+        let mut emitted = None;
+        for (channel, engine) in self.engines.iter_mut().enumerate() {
+            let before = out.len();
+            engine.process(&self.pending[channel][..feed], out)?;
+            let count = out.len() - before;
+            debug_assert!(
+                emitted.is_none_or(|e: usize| e == count),
+                "identical engines fed equal block-multiple runs emit equal-length runs"
+            );
+            emitted = Some(count);
         }
-        // The engine appends its output in step with the near-end samples that
-        // produced it. Its `latency_samples` is a buffering budget, not an index
-        // offset, so nothing here shifts the output by it.
-        self.aec.process(input.samples(), out)?;
+        for pend in self.pending.iter_mut() {
+            pend.drain(..feed);
+        }
         Ok(())
     }
 
@@ -915,8 +1034,28 @@ impl Stage for AecStage {
         if !self.received_near {
             return Ok(());
         }
+        // The re-blocker's held remainder goes into the engines first, exactly
+        // as a steady-state block would: rate-matched reference, then the near
+        // samples, so the engines' own frontier accounting sees an ordinary
+        // call. Shorter than one block, each engine banks its run as internal
+        // carry and appends nothing; the carry comes out in the drain below.
+        let remainder = self.pending.first().map_or(0, Vec::len);
+        if remainder > 0 {
+            let near_frontier = self.near_seen + remainder as u64;
+            self.feed_reference(near_frontier.saturating_sub(self.far_fed))?;
+            if !self.reference_pending {
+                self.fill_reference_to(near_frontier);
+            }
+            self.near_seen = near_frontier;
+            for (channel, engine) in self.engines.iter_mut().enumerate() {
+                engine.process(&self.pending[channel], out)?;
+            }
+            for pend in self.pending.iter_mut() {
+                pend.clear();
+            }
+        }
         // Everything still queued, then the reference resampler's own
-        // group-delay tail, both before the engine drains: the far end is
+        // group-delay tail, both before the engines drain: the far end is
         // complete when the near end's carry comes out, and a caller's push is
         // never left unread. The budget the per-block feed is rate-matched by
         // does not apply here, because there is no near-end audio left for the
@@ -926,23 +1065,43 @@ impl Stage for AecStage {
             self.resampled.clear();
             resampler.flush(&mut self.resampled);
             if !self.resampled.is_empty() {
-                self.aec.feed_reference(&self.resampled);
+                for engine in self.engines.iter_mut() {
+                    engine.feed_reference(&self.resampled);
+                }
             }
         }
-        self.aec.flush(out)?;
+        // Drain each engine's end-of-stream carry, in channel order, so the
+        // appended tail is planar like every processed block. Identical
+        // engines fed identically hold identical-length tails, which the
+        // assertion states.
+        let mut emitted = None;
+        for engine in self.engines.iter_mut() {
+            let before = out.len();
+            engine.flush(out)?;
+            let count = out.len() - before;
+            debug_assert!(
+                emitted.is_none_or(|e: usize| e == count),
+                "identical engines hold identical-length tails"
+            );
+            emitted = Some(count);
+        }
         Ok(())
     }
 
     fn latency_samples(&self) -> usize {
-        // Forward the engine's own constant framing figure. It is the amount by
-        // which the emitted count trails the consumed count, which is what this
-        // trait reports, and it is summed only across the `transform` segment
-        // that this stage is not part of.
-        self.aec.latency_samples()
+        // Forward one engine's constant framing figure: every engine is
+        // constructed from the same configuration, so the figure is identical
+        // across channels. It is the amount by which the emitted count trails
+        // the consumed count, which is what this trait reports, and it is
+        // summed only across the `transform` segment that this stage is not
+        // part of.
+        self.engines
+            .first()
+            .map_or(0, |engine| engine.latency_samples())
     }
 
-    fn aec_metrics(&self) -> Option<AecMetrics> {
-        Some(self.aec.metrics())
+    fn aec_metrics(&self) -> Option<Vec<AecMetrics>> {
+        Some(self.engines.iter().map(Aec::metrics).collect())
     }
 }
 
@@ -1462,11 +1621,13 @@ impl CaptureStage {
         self.transform.iter().map(|s| s.latency_samples()).sum()
     }
 
-    /// The echo canceller's metrics, or `None` when the chain has no canceller.
+    /// The echo cancellers' metrics, one entry per delivered channel in
+    /// delivered order, or `None` when the chain has no canceller. The vector
+    /// is never empty: a chain with cancellation holds at least one engine.
     ///
     /// The canceller is a `normalize` stage, so only that segment is walked.
     #[cfg(feature = "aec")]
-    pub(crate) fn aec_metrics(&self) -> Option<AecMetrics> {
+    pub(crate) fn aec_metrics(&self) -> Option<Vec<AecMetrics>> {
         self.normalize.iter().find_map(|stage| stage.aec_metrics())
     }
 
@@ -1573,8 +1734,10 @@ pub(crate) struct Transforms<'a> {
 /// (converting the captured audio to the requested rate, one engine per
 /// carried channel), then the
 /// [`AecStage`] when `aec` names settings (and the `aec` feature is compiled
-/// in), last in the `normalize` segment so the canceller receives mono at the
-/// target rate and the VAD tap carries the echo-removed signal. When `dc_removal` is
+/// in), last in the `normalize` segment so the cancellers receive the
+/// delivered channels at the target rate (one engine per channel, each
+/// reading its own planar run) and the VAD tap carries the echo-removed
+/// signal. When `dc_removal` is
 /// set, pushes the [`DcBlocker`] into the `transform` segment; when `denoise` is
 /// `Some((model, model_path, ort_library_path))` (and the `denoise` feature is
 /// compiled in), pushes the framed denoise stage immediately after it, loading
@@ -1666,15 +1829,20 @@ pub(crate) fn build_capture_stage(
         )?));
     }
 
-    // Echo cancellation runs LAST in the normalize segment, after the downmix
-    // and the resample, so the canceller receives mono at the target rate: the
-    // only channel count it accepts, and the rate its engine is constructed at.
+    // Echo cancellation runs LAST in the normalize segment, after the channel
+    // stage and the resample, so the stage receives the delivered channels at
+    // the target rate, planar above one channel: one engine per channel, each
+    // reading its own run, at the rate the engines are constructed at.
     // Nothing runs between it and the VAD tap, so the detector reads the
     // echo-removed signal. The order is pinned by this push position and
     // `build_ends_normalize_at_the_canceller`.
     #[cfg(feature = "aec")]
     if let Some(settings) = aec {
-        normalize.push(Box::new(AecStage::new(settings, target_rate)?));
+        normalize.push(Box::new(AecStage::new(
+            settings,
+            target_rate,
+            chain_channels,
+        )?));
     }
 
     // Resolve the channel count the `normalize` segment ends at by asking the
@@ -4654,7 +4822,7 @@ mod tests {
                 out.extend_from_slice(chain.run(piece).expect("run"));
             }
             chain.flush(&mut out).expect("flush");
-            (out, chain.aec_metrics().expect("metrics"), queue)
+            (out, chain.aec_metrics().expect("metrics").remove(0), queue)
         };
 
         let (_, in_step, _) = run(0);
@@ -4859,7 +5027,10 @@ mod tests {
 
         // The alignment it reached is reported, so a chain that cancels by some
         // other route than a locked delay does not pass silently.
-        let metrics = chain.aec_metrics().expect("a canceller reports metrics");
+        let metrics = chain
+            .aec_metrics()
+            .expect("a canceller reports metrics")
+            .remove(0);
         assert!(
             metrics.delay_samples.is_some(),
             "the canceller must report the alignment it locked onto"
@@ -5061,7 +5232,11 @@ mod tests {
                 out.extend_from_slice(chain.run(piece).expect("run"));
             }
             chain.flush(&mut out).expect("flush");
-            (out, chain.aec_metrics().expect("metrics"), queue.silence())
+            (
+                out,
+                chain.aec_metrics().expect("metrics").remove(0),
+                queue.silence(),
+            )
         };
 
         let (pushed, _, pushed_silence) = run(true);
@@ -5158,7 +5333,10 @@ mod tests {
             0,
             "an utterance-sized push must fit the queue whole"
         );
-        let metrics = chain.aec_metrics().expect("a canceller reports metrics");
+        let metrics = chain
+            .aec_metrics()
+            .expect("a canceller reports metrics")
+            .remove(0);
         assert!(
             metrics.delay_samples.is_some(),
             "a caller that pushes an utterance at a time must still lock"
@@ -5228,7 +5406,10 @@ mod tests {
             3 * (UTTERANCE - CAPACITY) as u64,
             "the samples past the bound are counted"
         );
-        let metrics = chain.aec_metrics().expect("a canceller reports metrics");
+        let metrics = chain
+            .aec_metrics()
+            .expect("a canceller reports metrics")
+            .remove(0);
         assert!(
             metrics.delay_samples.is_some(),
             "a discard must not cost the canceller its lock"
@@ -5432,7 +5613,10 @@ mod tests {
         let queue = Arc::new(AecReferenceRing::new(16_000));
         let mut chain = aec_chain(1, 16_000, 16_000, false, &queue, 16_000);
         chain.run(&mono_signal(1_600)).expect("run");
-        let metrics = chain.aec_metrics().expect("a canceller reports metrics");
+        let metrics = chain
+            .aec_metrics()
+            .expect("a canceller reports metrics")
+            .remove(0);
         assert_eq!(
             metrics.delay_samples, None,
             "no reference was pushed, so no alignment was found"
@@ -5470,6 +5654,315 @@ mod tests {
             assert!(
                 name.parse::<AecModel>().is_ok(),
                 "the published model name {name} must parse"
+            );
+        }
+    }
+
+    /// A chain delivering `channels` channels with echo cancellation on and no
+    /// other stage: the device count equals the delivered count at one rate,
+    /// so the normalize segment is the rearrangement and the cancellers alone.
+    #[cfg(feature = "aec")]
+    fn aec_multichannel_chain(
+        channels: u16,
+        rate: u32,
+        queue: &Arc<AecReferenceRing>,
+        reference_rate: u32,
+    ) -> CaptureStage {
+        build_capture_stage(
+            channels,
+            channels,
+            rate,
+            rate,
+            Transforms {
+                aec: Some(aec_settings(queue, reference_rate)),
+                ..Default::default()
+            },
+        )
+        .expect("the chain builds")
+        .expect("echo cancellation builds a chain")
+    }
+
+    /// Interleave equal-length per-channel signals into frames.
+    #[cfg(feature = "aec")]
+    fn interleave_frames(channels: &[Vec<f32>]) -> Vec<f32> {
+        let frames = channels[0].len();
+        let mut out = Vec::with_capacity(frames * channels.len());
+        for frame in 0..frames {
+            for channel in channels {
+                out.push(channel[frame]);
+            }
+        }
+        out
+    }
+
+    /// Split interleaved frames back into per-channel runs.
+    #[cfg(feature = "aec")]
+    fn split_frames(interleaved: &[f32], channels: usize) -> Vec<Vec<f32>> {
+        let mut out = vec![Vec::with_capacity(interleaved.len() / channels); channels];
+        for frame in interleaved.chunks_exact(channels) {
+            for (channel, &sample) in frame.iter().enumerate() {
+                out[channel].push(sample);
+            }
+        }
+        out
+    }
+
+    /// Above one channel the near-end feed is re-blocked to whole multiples of
+    /// the engines' 256-sample framing; at one channel it is not. Pinned on
+    /// the far-end frontier: the silence top-up covers exactly the frames
+    /// handed to the engines, so the counter reads back what each call fed.
+    ///
+    /// Regression, above one channel: a feed that hands the engines a partial
+    /// block, which a later delay promotion would truncate differently per
+    /// channel and shear the channels apart silently. Regression, at one
+    /// channel: the re-blocker engaging there, which would change the call
+    /// cadence the single-channel engine has always seen and move its
+    /// reference feeding and re-anchor evaluation without changing its
+    /// latency.
+    #[cfg(feature = "aec")]
+    #[test]
+    fn aec_re_blocks_above_one_channel_and_only_there() {
+        // Two channels, 320 frames per call: not a block multiple, so the
+        // re-blocker holds a growing remainder and feeds 256, 256, 256, 512.
+        let queue = Arc::new(AecReferenceRing::new(16_000));
+        let mut chain = aec_multichannel_chain(2, 16_000, &queue, 16_000);
+        let signal = mono_signal(4 * 320);
+        let stereo = interleave_frames(&[signal.clone(), signal.clone()]);
+        let mut delivered = Vec::new();
+        for (call, piece) in stereo.chunks(2 * 320).enumerate() {
+            let out_len = chain.run(piece).expect("run").len();
+            delivered.push(out_len);
+            let expected_fed: u64 = [256u64, 512, 768, 1280][call];
+            assert_eq!(
+                queue.silence(),
+                expected_fed,
+                "call {call} advances the far-end frontier by whole blocks"
+            );
+        }
+        assert_eq!(
+            delivered,
+            vec![2 * 256, 2 * 256, 2 * 256, 2 * 512],
+            "each call delivers both channels at the block-multiple count it fed"
+        );
+        let mut tail = Vec::new();
+        chain.flush(&mut tail).expect("flush");
+        assert_eq!(
+            delivered.iter().sum::<usize>() + tail.len(),
+            stereo.len(),
+            "the totals balance after the flush"
+        );
+
+        // The same signal at block-multiple calls passes straight through,
+        // nothing held: 512, 512 and the trailing 256 frames each deliver in
+        // full on the call that fed them.
+        let queue = Arc::new(AecReferenceRing::new(16_000));
+        let mut chain = aec_multichannel_chain(2, 16_000, &queue, 16_000);
+        for (call, piece) in stereo.chunks(2 * 512).enumerate() {
+            assert_eq!(
+                chain.run(piece).expect("run").len(),
+                piece.len(),
+                "a block-multiple call passes straight through (call {call})"
+            );
+        }
+        assert_eq!(queue.silence(), 1280, "nothing is held back at a multiple");
+
+        // One channel, the same 320-sample calls: the frontier advances by the
+        // full input length every call, not by a block multiple, because the
+        // input goes to the engine directly and the engine holds its own
+        // carry. The emitted counts still land on block boundaries, which is
+        // the engine's internal framing at work, not the re-blocker's.
+        let queue = Arc::new(AecReferenceRing::new(16_000));
+        let mut chain = aec_chain(1, 16_000, 16_000, false, &queue, 16_000);
+        let mut delivered = Vec::new();
+        for (call, piece) in signal.chunks(320).enumerate() {
+            delivered.push(chain.run(piece).expect("run").len());
+            let expected_fed = 320 * (call as u64 + 1);
+            assert_eq!(
+                queue.silence(),
+                expected_fed,
+                "call {call} advances the mono frontier by the input length"
+            );
+        }
+        assert_eq!(
+            delivered,
+            vec![256, 256, 256, 512],
+            "the mono emission cadence is the engine's own framing"
+        );
+    }
+
+    /// Two delivered channels carrying the same signal against the same
+    /// reference deliver the same samples, bit for bit, across lock and
+    /// promotion. The engines are identical, are fed identical runs in
+    /// identical calls, and share the drained reference, so the first
+    /// diverging sample would mark the exact call where the per-channel state
+    /// separated. This is the sharpest observable form of the lockstep
+    /// property: the per-call equal-count assertions run inside the stage in
+    /// debug builds, and this pins the delivered bytes on top of them.
+    #[cfg(feature = "aec")]
+    #[test]
+    fn aec_identical_channels_deliver_identical_samples() {
+        const RATE: usize = 16_000;
+        const SECONDS: usize = 8;
+        const DELAY: usize = 400;
+        const ECHO_GAIN: f32 = 0.25;
+
+        let mut far = far_noise(SECONDS * RATE);
+        for sample in far[..RATE / 2].iter_mut() {
+            *sample = 0.0;
+        }
+        let mut near = vec![0.0f32; far.len()];
+        for i in DELAY..near.len() {
+            near[i] = ECHO_GAIN * far[i - DELAY];
+        }
+
+        let queue = Arc::new(AecReferenceRing::new(2 * RATE));
+        let mut chain = aec_multichannel_chain(2, RATE as u32, &queue, RATE as u32);
+        let stereo = interleave_frames(&[near.clone(), near.clone()]);
+        let mut out = Vec::new();
+        for (call, piece) in stereo.chunks(2 * 320).enumerate() {
+            let start = call * 320;
+            queue.push(&far[start..(start + 320).min(far.len())]);
+            out.extend_from_slice(chain.run(piece).expect("run"));
+        }
+        chain.flush(&mut out).expect("flush");
+
+        let channels = split_frames(&out, 2);
+        assert_eq!(
+            channels[0], channels[1],
+            "identical inputs through identical engines deliver identical bytes"
+        );
+
+        // Guard against the pair passing because nothing was cancelled: the
+        // echo is removed from both channels, so the equality above compared
+        // working cancellers rather than two passthroughs.
+        let window = (SECONDS - 1) * RATE..(SECONDS - 1) * RATE + RATE / 2;
+        let removed = rms_db(&near[window.clone()]) - rms_db(&channels[0][window]);
+        assert!(
+            removed >= 30.0,
+            "both channels must cancel (removed {removed:.1} dB)"
+        );
+    }
+
+    /// Channels with different echo delays each lock their own alignment, stay
+    /// in lockstep through a mid-stream change of both echo paths, and are
+    /// both cancelled. The delivered counts are asserted per call (both
+    /// channels, whole blocks) and in total, and the per-channel metrics
+    /// report two distinct locked alignments about the geometry's own spacing
+    /// apart.
+    #[cfg(feature = "aec")]
+    #[test]
+    fn aec_channels_with_different_delays_lock_apart_and_stay_in_lockstep() {
+        const RATE: usize = 16_000;
+        const SECONDS: usize = 10;
+        const SWITCH: usize = 5 * RATE;
+        const DELAY_A: usize = 400;
+        const DELAY_B: usize = 900;
+        const SHIFT: usize = 800;
+        const ECHO_GAIN: f32 = 0.25;
+
+        let mut far = far_noise(SECONDS * RATE);
+        for sample in far[..RATE / 2].iter_mut() {
+            *sample = 0.0;
+        }
+        let echo = |delay_before: usize, delay_after: usize| -> Vec<f32> {
+            let mut near = vec![0.0f32; far.len()];
+            for i in 0..near.len() {
+                let delay = if i < SWITCH {
+                    delay_before
+                } else {
+                    delay_after
+                };
+                if i >= delay {
+                    near[i] = ECHO_GAIN * far[i - delay];
+                }
+            }
+            near
+        };
+        let near_a = echo(DELAY_A, DELAY_A + SHIFT);
+        let near_b = echo(DELAY_B, DELAY_B + SHIFT);
+
+        let queue = Arc::new(AecReferenceRing::new(2 * RATE));
+        let mut chain = aec_multichannel_chain(2, RATE as u32, &queue, RATE as u32);
+        let stereo = interleave_frames(&[near_a.clone(), near_b.clone()]);
+        let mut out = Vec::new();
+        for (call, piece) in stereo.chunks(2 * 320).enumerate() {
+            let start = call * 320;
+            queue.push(&far[start..(start + 320).min(far.len())]);
+            let before = out.len();
+            out.extend_from_slice(chain.run(piece).expect("run"));
+            let emitted = out.len() - before;
+            assert!(
+                emitted.is_multiple_of(2) && (emitted / 2).is_multiple_of(256),
+                "call {call} delivers both channels in whole blocks, got {emitted}"
+            );
+        }
+        chain.flush(&mut out).expect("flush");
+        assert_eq!(
+            out.len(),
+            stereo.len(),
+            "every input frame is delivered on both channels after the flush"
+        );
+
+        // Both channels are cancelled, before the echo paths move and after
+        // both cancellers have re-converged on the moved paths.
+        let channels = split_frames(&out, 2);
+        for window in [4 * RATE..4 * RATE + RATE / 2, 9 * RATE..9 * RATE + RATE / 2] {
+            for (index, (channel, near)) in channels.iter().zip([&near_a, &near_b]).enumerate() {
+                let removed = rms_db(&near[window.clone()]) - rms_db(&channel[window.clone()]);
+                assert!(
+                    removed >= 20.0,
+                    "channel {index} must cancel in {window:?} (removed {removed:.1} dB)"
+                );
+            }
+        }
+
+        // One report per delivered channel, each holding its own alignment:
+        // the two offsets sit about the delay spacing apart, so the engines
+        // demonstrably searched their own channels rather than sharing one
+        // decision.
+        let metrics = chain.aec_metrics().expect("a canceller reports metrics");
+        assert_eq!(metrics.len(), 2, "one report per delivered channel");
+        let offset_a = metrics[0].delay_samples.expect("channel 0 locks");
+        let offset_b = metrics[1].delay_samples.expect("channel 1 locks");
+        let spacing = offset_b as i64 - offset_a as i64;
+        assert!(
+            (400..=600).contains(&spacing),
+            "the alignments sit the echo spacing apart, got {offset_a} and {offset_b}"
+        );
+    }
+
+    /// The metrics vector carries exactly one entry per delivered channel, at
+    /// one channel and well past any plausible machine budget: the count is a
+    /// property of the chain that was built, and no capacity ceiling exists
+    /// anywhere between the configuration and the engines. A maximum added
+    /// later fails here loudly.
+    #[cfg(feature = "aec")]
+    #[test]
+    fn aec_builds_and_reports_one_engine_per_delivered_channel() {
+        let queue = Arc::new(AecReferenceRing::new(16_000));
+        let chain = aec_chain(1, 16_000, 16_000, false, &queue, 16_000);
+        assert_eq!(
+            chain.aec_metrics().expect("metrics").len(),
+            1,
+            "one channel, one engine"
+        );
+
+        for channels in [2u16, 8] {
+            let queue = Arc::new(AecReferenceRing::new(16_000));
+            let mut chain = aec_multichannel_chain(channels, 16_000, &queue, 16_000);
+            assert_eq!(
+                chain.aec_metrics().expect("metrics").len(),
+                channels as usize,
+                "{channels} channels, {channels} engines"
+            );
+            // One re-blocked call runs every engine, so the count above is
+            // backed by engines that process, not placeholders.
+            let frames = 320usize;
+            let block: Vec<f32> = mono_signal(frames * channels as usize);
+            assert_eq!(
+                chain.run(&block).expect("run").len(),
+                256 * channels as usize,
+                "every engine emits its channel's whole blocks"
             );
         }
     }

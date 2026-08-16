@@ -31,7 +31,6 @@ and live in test_vad.py Section A alongside the rest of the VAD surface.
 import pytest
 
 from decibri import (
-    AecMultichannelUnsupported,
     ChannelMapLengthMismatch,
     ChannelsOutOfRange,
     Microphone,
@@ -132,19 +131,22 @@ def test_channel_counts_above_one_construct(channels: int) -> None:
     Microphone(channels=channels)
 
 
-def test_aec_with_multichannel_is_rejected() -> None:
-    """Echo cancellation reads one near-end channel, so it is refused together
-    with a delivered count above 1 at construction, naming the count. One
-    channel selected from an array is the accepted pairing: the refusal is the
-    cross-field pair, not a ceiling on channels.
+@pytest.mark.parametrize(
+    "channels",
+    [
+        pytest.param(2, id="aec_channels_stereo"),
+        pytest.param(8, id="aec_channels_array"),
+        pytest.param(64, id="aec_channels_beyond_any_budget"),
+    ],
+)
+def test_aec_constructs_at_every_channel_count(channels: int) -> None:
+    """Echo cancellation runs one canceller engine per delivered channel, so
+    the pair constructs at any count: the count is bounded by the resolved
+    device alone, which answers at start(), and no capacity ceiling exists.
+    A maximum reintroduced at construction fails against the counts here.
     """
-    with pytest.raises(AecMultichannelUnsupported) as exc_info:
-        Microphone(channels=2, aec="tau")
-    assert str(exc_info.value) == (
-        "echo cancellation runs on one delivered channel; channels is 2. "
-        "Set channels to 1 with a channel map to choose the device channel it "
-        "cancels, or leave aec unset to capture more than one channel"
-    )
+    Microphone(channels=channels, aec="tau")
+    Microphone(channels=channels, channel_map=list(range(channels)), aec="tau")
     Microphone(channels=1, channel_map=[3], aec="tau")
 
 

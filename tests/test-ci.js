@@ -532,7 +532,6 @@ const BUILTIN_VARIANTS = [
   'VadSampleRateUnsupported',
   'VadThresholdOutOfRange',
   'AecSampleRateUnsupported',
-  'AecMultichannelUnsupported',
   'BlockSizeNotFrameAligned',
   'VadNotConfigured',
 ];
@@ -1215,25 +1214,28 @@ try {
   failed++;
 }
 
-// The canceller reads one near-end channel, so it is refused together with a
-// delivered count above 1, naming the count. The refusal is the cross-field
-// pair and not a ceiling on channels: the same counts without the canceller
-// are accepted (Group 1), and one channel selected from an array still
-// cancels. Catches the fence dropping out of the core's validate.
-assertThrows(
-  () => new Microphone({ channels: 2, aec: 'tau' }),
-  RangeError,
-  'echo cancellation runs on one delivered channel; channels is 2. Set channels to 1 ' +
-    'with a channel map to choose the device channel it cancels, or leave aec unset to ' +
-    'capture more than one channel'
-);
-assertThrows(
-  () => new Microphone({ channels: 8, aec: { model: 'tau' } }),
-  RangeError,
-  'echo cancellation runs on one delivered channel; channels is 8. Set channels to 1 ' +
-    'with a channel map to choose the device channel it cancels, or leave aec unset to ' +
-    'capture more than one channel'
-);
+// The canceller runs one engine per delivered channel, so the pair constructs
+// at any count: the count is bounded by the resolved device alone, which
+// answers at start(), and no capacity ceiling exists. The counts run well past
+// any plausible machine budget on purpose; a maximum reintroduced at
+// construction fails here loudly.
+try {
+  for (const channels of [2, 8, 64]) {
+    const m = new Microphone({ channels, aec: 'tau' });
+    assert(m instanceof Microphone, `channels ${channels} constructs with the canceller`);
+    m.stop();
+    const mapped = new Microphone({
+      channels,
+      channelMap: Array.from({ length: channels }, (_, i) => i),
+      aec: { model: 'tau' },
+    });
+    assert(mapped instanceof Microphone, `channels ${channels} with a map constructs with the canceller`);
+    mapped.stop();
+  }
+} catch (e) {
+  console.log(`  FAIL: aec multichannel construction rejected: ${e.message}`);
+  failed++;
+}
 try {
   const m = new Microphone({ channels: 1, channelMap: [3], aec: 'tau' });
   assert(m instanceof Microphone, 'one channel selected from an array constructs with the canceller');

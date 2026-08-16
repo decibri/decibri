@@ -429,41 +429,6 @@ pub enum DecibriError {
     #[error("echo canceller configuration error: {reason}")]
     AecConfigInvalid { reason: String },
 
-    /// Echo cancellation was requested together with more than one delivered
-    /// channel.
-    ///
-    /// `channels` is the offending count
-    /// [`crate::microphone::MicrophoneConfig::channels`] carried. decibri runs
-    /// the canceller on one near-end channel against one mono reference, so an
-    /// interleaved multichannel capture is not a signal it can be handed in one
-    /// call: fed one it reads interleaved samples as time, never acquires its
-    /// delay, and returns the capture unchanged while reporting no fault, and a
-    /// discarded internal carry that is not a whole number of frames rotates the
-    /// channel identities of everything after it, at any count above one.
-    /// Neither outcome is detectable from the delivered audio, so the
-    /// combination is refused at
-    /// [`crate::microphone::MicrophoneConfig::validate`], which has both
-    /// fields in scope, rather than accepted and left to corrupt.
-    ///
-    /// A dedicated variant rather than a reason string on
-    /// [`Self::AecConfigInvalid`] reads more intentionally. This is a
-    /// cross-field rejection between two configuration fields and not a
-    /// ceiling on `channels`, which is bounded only by the device.
-    /// Cancellation on one channel of a multichannel device is unaffected:
-    /// `channels: 1` with a
-    /// [`crate::microphone::MicrophoneConfig::channel_map`] naming that
-    /// channel is accepted, and the message names both that pairing and the
-    /// option of leaving the canceller off. The leading `echo cancellation runs
-    /// on one delivered channel` clause is the stable part. Deliberately not
-    /// feature-gated, so the identity table's coverage stays unconditional.
-    /// Additive variant permitted by `#[non_exhaustive]`.
-    #[error(
-        "echo cancellation runs on one delivered channel; channels is {channels}. \
-         Set channels to 1 with a channel map to choose the device channel it \
-         cancels, or leave aec unset to capture more than one channel"
-    )]
-    AecMultichannelUnsupported { channels: u16 },
-
     // ── Offline file source errors ─────────────────────────────────────
     /// An offline audio file could not be read from disk.
     ///
@@ -906,8 +871,6 @@ error_identity! {
         DecibriError::AecSampleRateUnsupported(96000);
     DecibriError::AecConfigInvalid { .. } => "AecConfigInvalid", "AEC_CONFIG_INVALID",
         DecibriError::AecConfigInvalid { reason: "sample".to_string() };
-    DecibriError::AecMultichannelUnsupported { .. } => "AecMultichannelUnsupported", "AEC_MULTICHANNEL_UNSUPPORTED",
-        DecibriError::AecMultichannelUnsupported { channels: 2 };
 
     #[cfg(feature = "capture")]
     DecibriError::FileReadFailed { .. } => "FileReadFailed", "FILE_READ_FAILED",

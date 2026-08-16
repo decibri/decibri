@@ -10,6 +10,7 @@ constructors (``decibri.Microphone(...)`` / ``decibri.Speaker(...)``).
 from decibri._async_classes import AsyncFile, AsyncMicrophone, AsyncSpeaker
 from decibri._classes import (
     Aec,
+    AecChannelMetrics,
     AecMetrics,
     Chunk,
     File,
@@ -83,7 +84,6 @@ from decibri.exceptions import (
     VadThresholdOutOfRange,
     AecSampleRateUnsupported,
     AecConfigInvalid,
-    AecMultichannelUnsupported,
     MicrophoneChannelsUnsupported,
     AudioFormatUnsupported,
     AudioFileMalformed,
@@ -265,6 +265,7 @@ __all__ = [
     # Echo-cancellation config object and metrics report
     "Aec",
     "AecMetrics",
+    "AecChannelMetrics",
     # Whole-recording analysis report types
     "VadReport",
     "VadWindow",
