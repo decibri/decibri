@@ -227,11 +227,12 @@ All public types are `Send` and suitable for cross-thread handoff. `MicrophoneSt
 | Platform | Architecture | Audio Backend |
 | --- | --- | --- |
 | Windows | x64 | WASAPI |
+| Windows | arm64 | WASAPI |
 | macOS | arm64 (Apple Silicon) | CoreAudio |
 | Linux | x64 (gnu) | ALSA |
 | Linux | arm64 (gnu) | ALSA |
 
-Source builds work on additional targets (Intel macOS, Windows arm64, musl Linux) but are not part of the npm and PyPI binary release matrix. The crate itself has no per-target restriction beyond what the platform audio host supports.
+Source builds work on additional targets (Intel macOS, musl Linux) but are not part of the npm and PyPI binary release matrix. The crate itself has no per-target restriction beyond what the platform audio host supports.
 
 ## Cross-references
 

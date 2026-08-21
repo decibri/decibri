@@ -14,14 +14,14 @@
 # between minor versions.
 
 [graph]
-# The four targets decibri publishes for. They are the build matrices of
+# The five targets decibri publishes for. They are the build matrices of
 # .github/workflows/publish-npm.yml and .github/workflows/publish-pypi.yml,
 # and they must stay in step with both.
 #
 # Restricting the graph is what lets `multiple-versions = "deny"` below hold
 # with no skip entries. The duplicate versions in the lockfile (thiserror 1.x,
 # windows-sys 0.45) enter through cpal's Android branch, which none of these
-# four targets compiles, so they are absent from everything decibri ships.
+# five targets compiles, so they are absent from everything decibri ships.
 #
 # The restriction narrows `advisories` too, which is less obvious than its
 # effect on `bans`. A crate that reaches Cargo.lock but no shipped target sits
@@ -34,6 +34,7 @@
 # that scan in place would drop advisory coverage silently.
 targets = [
     "x86_64-pc-windows-msvc",
+    "aarch64-pc-windows-msvc",
     "aarch64-apple-darwin",
     "x86_64-unknown-linux-gnu",
     "aarch64-unknown-linux-gnu",
@@ -58,10 +59,10 @@ unmaintained = "all"
 # satisfied by an entry in this list fails the check.
 #
 # LGPL is deliberately absent, and its absence is the copyleft gate. Nothing
-# the four targets above resolve carries a copyleft arm today, so the gate is
+# the five targets above resolve carries a copyleft arm today, so the gate is
 # forward-looking: a dependency that can only be satisfied under LGPL, GPL,
 # AGPL or MPL fails this check and reaches a person, rather than arriving with
-# a routine version bump. Widening `targets` reaches code these four do not, so
+# a routine version bump. Widening `targets` reaches code these five do not, so
 # a change there is also a change to what this list has to cover.
 #
 # Nothing is added to this list to make a build pass. Each entry is a licence
@@ -82,13 +83,13 @@ allow = [
 
 # The list above is what decibri accepts, not an inventory of what the graph
 # currently contains, so an entry matching nothing is not a defect. Under the
-# four shipped targets BSD-3-Clause matches nothing today: it reaches the
+# five shipped targets BSD-3-Clause matches nothing today: it reaches the
 # lockfile only through num_enum under cpal's Android backend. Left at the
 # default this reports a warning on every green run.
 unused-allowed-license = "allow"
 
 [bans]
-# Exactly one version of each crate across the four shipped targets. A second
+# Exactly one version of each crate across the five shipped targets. A second
 # version entering the graph changes what ships, so it fails rather than warns.
 multiple-versions = "deny"
 

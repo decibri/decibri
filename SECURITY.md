@@ -14,7 +14,7 @@ When reporting, please include the following details where applicable:
 
 - A description of the vulnerability and how it can be exploited
 - The affected version of the package or crate
-- The platform and architecture (e.g., Windows x64, macOS arm64, Linux x64, Linux arm64)
+- The platform and architecture (e.g., Windows x64, Windows arm64, macOS arm64, Linux x64, Linux arm64)
 - Steps to reproduce the issue
 - The runtime where the issue occurs (Node.js, browser, Rust)
 - Any other relevant information that could help us fix the vulnerability
@@ -23,19 +23,19 @@ We review reports as quickly as possible and work with reporters to coordinate r
 
 ## Supply Chain and Binary Integrity
 
-Decibri ships prebuilt native binaries for four platforms (Windows x64, macOS ARM64, Linux x64, Linux ARM64) across multiple package registries. We take a defense-in-depth approach to supply chain integrity.
+Decibri ships prebuilt native binaries for five platforms (Windows x64, Windows ARM64, macOS ARM64, Linux x64, Linux ARM64) across multiple package registries. We take a defense-in-depth approach to supply chain integrity.
 
 ### Build integrity
 
 - All binaries are compiled exclusively in GitHub Actions CI on GitHub-hosted runners. No binaries are built or uploaded manually.
 - Builds are triggered only by tagged releases from the `main` branch of the `decibri/decibri` repository.
-- The release workflow verifies all four platform binaries are present and pass smoke tests before publishing to npm or crates.io.
+- The release workflow verifies all five platform binaries are present and pass smoke tests before publishing to npm or crates.io.
 - The full build configuration is open source and auditable in `.github/workflows/publish-crates.yml`, `.github/workflows/publish-npm.yml`, and `.github/workflows/publish-pypi.yml`.
 
 ### Publishing and authentication
 
 - npm publishing uses [Trusted Publishing via OIDC](https://docs.npmjs.com/trusted-publishers/). No long-lived npm tokens are stored in the repository or CI system. Each publish uses a short-lived, workflow-specific credential issued by npm.
-- All npm packages (`decibri`, `@decibri/decibri-win32-x64-msvc`, `@decibri/decibri-darwin-arm64`, `@decibri/decibri-linux-x64-gnu`, `@decibri/decibri-linux-arm64-gnu`) are configured to require 2FA and disallow legacy token publishing.
+- All npm packages (`decibri`, `@decibri/decibri-win32-x64-msvc`, `@decibri/decibri-win32-arm64-msvc`, `@decibri/decibri-darwin-arm64`, `@decibri/decibri-linux-x64-gnu`, `@decibri/decibri-linux-arm64-gnu`) are configured to require 2FA and disallow legacy token publishing.
 - The Rust crate on crates.io is published from the same CI pipeline using keyless [Trusted Publishing via OIDC](https://crates.io/docs/trusted-publishing): a short-lived, crate-specific publish token is issued per run by exchanging a GitHub OIDC token (via `rust-lang/crates-io-auth-action`). No long-lived crates.io token is stored in the repository or CI system.
 
 ### Provenance and attestation

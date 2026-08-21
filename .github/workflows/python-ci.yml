@@ -21,7 +21,7 @@ on:
       - '.github/workflows/python-ci.yml'
   workflow_dispatch:
   schedule:
-    # Nightly full 4 OS x 5 Python regression run at 04:00 UTC
+    # Nightly full 5 OS x 5 Python regression run at 04:00 UTC
     # (14:00 AEST / 13:00 AEDT). Catches forward-compatibility issues
     # that the reduced push matrix (3.10 floor + 3.14 ceiling only)
     # does not exercise on every commit. Distinct from any other cron
@@ -60,13 +60,14 @@ env:
   # SHA-256 of each ONNX Runtime release archive downloaded below, as
   # published beside the asset on its GitHub release page. Every download
   # step checks its archive against the matching digest before extracting
-  # it and fails on a mismatch. tests/test-ci.js (Group 8g) holds the four
+  # it and fails on a mismatch. tests/test-ci.js (Group 8g) holds the five
   # digests in lockstep across publish-npm.yml, publish-pypi.yml and
   # python-ci.yml.
   ORT_SHA256_LINUX_X64: 2529aef968d0ad0603365054bc46ebefa7f0fe3bc12f28c5f729c99ddffe2a81
   ORT_SHA256_LINUX_AARCH64: 53bab9a5c6ae198b7be75663b780c64caa388d30257fac458c71fbff0a82e98e
   ORT_SHA256_OSX_ARM64: 18c853e5c5deba90e244e1b953a65121f23747ba2c04e6743885caa6ce1ea12f
   ORT_SHA256_WIN_X64: e46ac7652def5da0e5223372be21185ffff553e0419459f66e0114d460c38162
+  ORT_SHA256_WIN_ARM64: 953f1187e262e60820cdafdc5cbe63930f24fe4d961182b739bf3effdf3f608f
   # Phase 7 wheel size thresholds. Soft warning continues the Phase 3
   # alarm (150 MB; today's bundled wheel is ~30 to 50 MB). Hard fail at
   # 200 MB catches pathological regressions (e.g., accidentally bundling
@@ -91,9 +92,9 @@ jobs:
       matrix:
         # Matrix sizing by trigger:
         #   pull_request:      3 jobs  (ubuntu-latest x 3 Python: floor, middle, ceiling)
-        #   push:              8 jobs  (4 OS x 2 Python: 3.10 floor + 3.14 ceiling)
-        #   workflow_dispatch: 20 jobs (full 4 OS x 5 Python)
-        #   schedule (nightly): 20 jobs (full 4 OS x 5 Python)
+        #   push:              9 jobs  (5 OS x 2 Python: 3.10 floor + 3.14 ceiling, less the excluded cell)
+        #   workflow_dispatch: 24 jobs (full 5 OS x 5 Python, less the excluded cell)
+        #   schedule (nightly): 24 jobs (full 5 OS x 5 Python, less the excluded cell)
         #
         # abi3-py310 wheels are forward-compatible by construction across
         # Python 3.10-3.14 per CPython's stable ABI guarantee. Running 5
@@ -108,6 +109,8 @@ jobs:
         # - ubuntu-latest         (x86_64-unknown-linux-gnu)
         # - ubuntu-24.04-arm      (aarch64-unknown-linux-gnu)
         # - windows-latest        (x86_64-pc-windows-msvc)
+        # - windows-11-arm        (aarch64-pc-windows-msvc; Python 3.11 and
+        #                          newer, see the exclude below)
         # - macos-14              (aarch64-apple-darwin; Apple Silicon only,
         #                          no Intel coverage matching release.yml)
         # macos-14 is pinned (not macos-latest) for consistency with
@@ -124,8 +127,16 @@ jobs:
         #
         # fromJSON(...) wrappers are required: GitHub Actions expression
         # results are strings, but matrix axes must be arrays.
-        os: ${{ fromJSON(github.event_name == 'pull_request' && '["ubuntu-latest"]' || '["ubuntu-latest", "ubuntu-24.04-arm", "windows-latest", "macos-14"]') }}
+        os: ${{ fromJSON(github.event_name == 'pull_request' && '["ubuntu-latest"]' || '["ubuntu-latest", "ubuntu-24.04-arm", "windows-latest", "windows-11-arm", "macos-14"]') }}
         python-version: ${{ fromJSON((github.event_name == 'workflow_dispatch' || github.event_name == 'schedule') && '["3.10", "3.11", "3.12", "3.13", "3.14"]' || github.event_name == 'pull_request' && '["3.10", "3.12", "3.14"]' || '["3.10", "3.14"]') }}
+        # No CPython 3.10 exists for Windows ARM64 (the platform's first
+        # release is 3.11), so the 3.10 cell on windows-11-arm cannot install
+        # its interpreter. An exclude is a partial match against the generated
+        # combinations; when none matches (the pull_request matrix has no
+        # windows-11-arm) it removes nothing.
+        exclude:
+          - os: windows-11-arm
+            python-version: "3.10"
     env:
       # Drives uv's interpreter selection per matrix entry. Replaces the
       # previous workflow-wide UV_PYTHON: "3.10" pin (single-version CI was
@@ -169,9 +180,11 @@ jobs:
 
       - name: Install Python ${{ matrix.python-version }}
         # uv ships pre-built Python interpreters for every supported
-        # platform (linux-x64, linux-aarch64, darwin-aarch64, win-x64),
-        # so this single command works across all four matrix OSes
-        # without per-OS conditionals.
+        # platform (linux-x64, linux-aarch64, darwin-aarch64, win-x64,
+        # win-arm64), so this single command works across all five matrix
+        # OSes without per-OS conditionals. On win-arm64 the oldest
+        # interpreter it can install is 3.11, which is why the 3.10 cell is
+        # excluded above.
         #
         # `shell: bash` is required, not cosmetic: the matrix includes
         # windows-latest, whose default shell is pwsh, and `$PYTHON_VERSION`
@@ -193,9 +206,10 @@ jobs:
       - name: Compute ORT platform metadata
         shell: bash
         # Maps RUNNER_OS + RUNNER_ARCH to the upstream ONNX Runtime
-        # tarball naming convention. The four expected combinations
-        # mirror release.yml's per-job matrix.ort_platform_slug values:
-        # win-x64, osx-arm64, linux-x64, linux-aarch64. python-ci.yml's
+        # tarball naming convention. The five expected combinations
+        # mirror publish-npm.yml's per-job matrix.ort_platform_slug
+        # values: win-x64, win-arm64, osx-arm64, linux-x64 and
+        # linux-aarch64. python-ci.yml's
         # matrix is conditional (sized by trigger) so the slug cannot be
         # carried as a matrix dimension; computing it here keeps a single
         # source of truth and lets the preflight + download steps below
@@ -208,6 +222,7 @@ jobs:
             Linux-ARM64)  SLUG="linux-aarch64"; EXT="tgz"; SHA256="$ORT_SHA256_LINUX_AARCH64" ;;
             macOS-ARM64)  SLUG="osx-arm64";     EXT="tgz"; SHA256="$ORT_SHA256_OSX_ARM64" ;;
             Windows-X64)  SLUG="win-x64";       EXT="zip"; SHA256="$ORT_SHA256_WIN_X64" ;;
+            Windows-ARM64) SLUG="win-arm64";    EXT="zip"; SHA256="$ORT_SHA256_WIN_ARM64" ;;
             *)
               echo "ERROR: unsupported runner OS+arch combination: ${RUNNER_OS}-${RUNNER_ARCH}"
               exit 1
@@ -326,14 +341,16 @@ jobs:
         if: runner.os == 'Windows'
         continue-on-error: true
         shell: pwsh
-        # Non-gating mirror of release.yml lines 197-217. dumpbin ships
-        # under VS install path and is not on default PATH on
-        # windows-latest runners. Output (the DLL's import table) goes to
+        # Non-gating mirror of publish-npm.yml's diagnostic. dumpbin ships
+        # under the VS install path and is not on the default PATH on the
+        # Windows runners; the host-native tools directory is chosen by the
+        # runner's architecture. Output (the DLL's import table) goes to
         # the log so unexpected dependencies (odd MSVC runtime, Windows
         # SDK DLLs, etc.) surface before users hit "cannot find library
         # X" at runtime.
         run: |
-          $dumpbin = Get-ChildItem "C:\Program Files*\Microsoft Visual Studio\*\*\VC\Tools\MSVC\*\bin\Hostx64\x64\dumpbin.exe" -ErrorAction SilentlyContinue | Select-Object -First 1
+          $hostDir = if ($env:RUNNER_ARCH -eq 'ARM64') { 'Hostarm64\arm64' } else { 'Hostx64\x64' }
+          $dumpbin = Get-ChildItem "C:\Program Files*\Microsoft Visual Studio\*\*\VC\Tools\MSVC\*\bin\$hostDir\dumpbin.exe" -ErrorAction SilentlyContinue | Select-Object -First 1
           if (-not $dumpbin) {
             Write-Host "dumpbin.exe not found under the Visual Studio install path"
             exit 1
@@ -361,7 +378,7 @@ jobs:
 
       - name: Run mypy --strict (Linux only)
         # mypy strict is identical regardless of OS; running it on every
-        # matrix entry would surface the same errors four times for no
+        # matrix entry would surface the same errors five times for no
         # additional signal. Pinned to Linux (both x64 and ARM64) because
         # both share the canonical type-check environment; macOS / Windows
         # entries skip this step.

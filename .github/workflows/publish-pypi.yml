@@ -57,13 +57,14 @@ env:
   # SHA-256 of each ONNX Runtime release archive downloaded below, as
   # published beside the asset on its GitHub release page. Every download
   # step checks its archive against the matching digest before extracting
-  # it and fails on a mismatch. tests/test-ci.js (Group 8g) holds the four
+  # it and fails on a mismatch. tests/test-ci.js (Group 8g) holds the five
   # digests in lockstep across publish-npm.yml, publish-pypi.yml and
   # python-ci.yml.
   ORT_SHA256_LINUX_X64: 2529aef968d0ad0603365054bc46ebefa7f0fe3bc12f28c5f729c99ddffe2a81
   ORT_SHA256_LINUX_AARCH64: 53bab9a5c6ae198b7be75663b780c64caa388d30257fac458c71fbff0a82e98e
   ORT_SHA256_OSX_ARM64: 18c853e5c5deba90e244e1b953a65121f23747ba2c04e6743885caa6ce1ea12f
   ORT_SHA256_WIN_X64: e46ac7652def5da0e5223372be21185ffff553e0419459f66e0114d460c38162
+  ORT_SHA256_WIN_ARM64: 953f1187e262e60820cdafdc5cbe63930f24fe4d961182b739bf3effdf3f608f
   # Required for maturin abi3 builds on Python 3.14 hosts targeting py310
   # abi3. See PyO3 issue #5505. Workflow-level setting applies to every
   # matrix entry; no-op on Python 3.10-3.13 hosts.
@@ -84,14 +85,17 @@ jobs:
             target: x86_64-unknown-linux-gnu
             ort_platform_slug: linux-x64
             ort_ext: tgz
+            python: '3.10'
           - os: ubuntu-24.04-arm
             target: aarch64-unknown-linux-gnu
             ort_platform_slug: linux-aarch64
             ort_ext: tgz
+            python: '3.10'
           - os: macos-14
             target: aarch64-apple-darwin
             ort_platform_slug: osx-arm64
             ort_ext: tgz
+            python: '3.10'
           # x86_64-apple-darwin (macos-13) dropped 2026-05-03. Apple shipped
           # the last Intel Macs between 2020-2022; macOS 26 (2025) dropped
           # support for many Intel models. Phase 10's first workflow_dispatch
@@ -103,6 +107,15 @@ jobs:
             target: x86_64-pc-windows-msvc
             ort_platform_slug: win-x64
             ort_ext: zip
+            python: '3.10'
+          - os: windows-11-arm
+            target: aarch64-pc-windows-msvc
+            ort_platform_slug: win-arm64
+            ort_ext: zip
+            # 3.11 is the oldest CPython published for Windows ARM64. The
+            # wheel's cp310-abi3 tag comes from the pyo3 feature, not from
+            # the interpreter that builds it.
+            python: '3.11'
     permissions:
       contents: read
     steps:
@@ -132,12 +145,19 @@ jobs:
           enable-cache: true
           cache-dependency-glob: "bindings/python/uv.lock"
 
-      - name: Install Python (3.10 floor)
+      - name: Install Python ${{ matrix.python }}
         # abi3 contract: a wheel built against Python 3.10 stable ABI loads
         # cleanly on every CPython 3.10+. Building once at the floor is
         # sufficient; python-ci.yml's nightly matrix verifies forward
-        # compatibility across 3.10-3.14.
-        run: uv python install 3.10
+        # compatibility across 3.10-3.14. Windows ARM64 installs 3.11, the
+        # oldest CPython published for that platform.
+        #
+        # `shell: bash` is required: the Windows runners default to pwsh,
+        # which does not expand `$PYTHON_VERSION`.
+        shell: bash
+        env:
+          PYTHON_VERSION: ${{ matrix.python }}
+        run: uv python install "$PYTHON_VERSION"
 
       - name: Sync dev environment (locked)
         working-directory: bindings/python
@@ -159,6 +179,7 @@ jobs:
           case "${{ matrix.ort_platform_slug }}" in
             osx-arm64) SHA256="$ORT_SHA256_OSX_ARM64" ;;
             win-x64)   SHA256="$ORT_SHA256_WIN_X64" ;;
+            win-arm64) SHA256="$ORT_SHA256_WIN_ARM64" ;;
             *)
               echo "ERROR: no ORT_SHA256_* digest is declared for ${{ matrix.ort_platform_slug }}"
               exit 1

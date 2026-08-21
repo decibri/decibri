@@ -10,6 +10,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+### Added
+
+- A Windows ARM64 wheel (`win_arm64`), bundling ONNX Runtime 1.28.1 like the other four. It carries the same `cp310-abi3` tag; on Windows ARM64 the oldest supported Python is 3.11, the first CPython release published for that platform.
+
 ### Changed
 
 - The wheel bundles ONNX Runtime 1.28.1 under `decibri/_ort/`, and the extension is built against `ort` 2.0.0-rc.13 (`api-28`). A `DECIBRI_ORT_DYLIB_PATH` or `ORT_DYLIB_PATH` override must point at ONNX Runtime 1.28 or newer.

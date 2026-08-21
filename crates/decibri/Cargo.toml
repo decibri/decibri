@@ -38,6 +38,7 @@ targets = [
     "aarch64-unknown-linux-gnu",
     "aarch64-apple-darwin",
     "x86_64-pc-windows-msvc",
+    "aarch64-pc-windows-msvc",
 ]
 # docs.rs uses ort-download-binaries since ort-load-dynamic requires a runtime
 # dylib that docs.rs builders don't have. Mutually exclusive with ort-load-dynamic

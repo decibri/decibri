@@ -208,6 +208,7 @@ for segment in report.segments:
 Supports:
 
 - Windows x64
+- Windows arm64
 - macOS arm64
 - Linux x64
 - Linux arm64

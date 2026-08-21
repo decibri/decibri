@@ -231,9 +231,9 @@ jobs:
 
           **Review upgrade path:**
           1. Check that the current \`ort\` crate version still supports \`api-${LATEST_MINOR}\` (compare against [ort.pyke.io/setup/multiversion](https://ort.pyke.io/setup/multiversion)).
-          2. Update \`ORT_VERSION\` and the four \`ORT_SHA256_*\` archive digests in \`.github/workflows/publish-npm.yml\`, \`publish-pypi.yml\` and \`python-ci.yml\`.
+          2. Update \`ORT_VERSION\` and the five \`ORT_SHA256_*\` archive digests in \`.github/workflows/publish-npm.yml\`, \`publish-pypi.yml\` and \`python-ci.yml\`.
           3. Update the \`api_n\` baseline in \`.github/workflows/check-upstream.yml\` if the ort crate was also upgraded.
-          4. Trigger \`publish-npm.yml\` manually via workflow_dispatch with \`publish\` left unticked to confirm the new tarball URLs resolve and the bundled dylib loads across all four platforms.${ABI_WARNING}"
+          4. Trigger \`publish-npm.yml\` manually via workflow_dispatch with \`publish\` left unticked to confirm the new tarball URLs resolve and the bundled dylib loads across all five platforms.${ABI_WARNING}"
 
           if [ "$COUNT" = "0" ]; then
             gh issue create \
