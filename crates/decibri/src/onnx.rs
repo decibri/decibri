@@ -180,9 +180,14 @@ static ORT_INIT_PID: OnceLock<u32> = OnceLock::new();
 ///
 /// Returns one of two typed variants depending on whether a path was provided:
 /// [`DecibriError::OrtLoadFailed`] when `path.is_some()`, or
-/// [`DecibriError::OrtInitFailed`] otherwise. The inner `ort::Error` is
-/// carried via `#[source]` so consumers can walk the error chain.
-fn wrap_init_error(path: Option<&Path>, err: ort::Error) -> DecibriError {
+/// [`DecibriError::OrtInitFailed`] otherwise. The inner error (the
+/// `ort::LoadDynamicError` a failed `ort::init_from` returns, or an
+/// `ort::Error`) is carried via `#[source]` so consumers can walk the error
+/// chain.
+fn wrap_init_error<E>(path: Option<&Path>, err: E) -> DecibriError
+where
+    E: std::error::Error + Send + Sync + 'static,
+{
     match path {
         Some(p) => DecibriError::OrtLoadFailed {
             path: p.to_path_buf(),
@@ -234,7 +239,11 @@ fn telemetry_enabled() -> bool {
 /// so `init_ort_once` stays single-path.
 ///
 /// Under `ort-load-dynamic`: `ort::init_from(path)` is available and is
-/// fallible (validates the dylib up-front).
+/// fallible (validates the dylib up-front). Its failure is
+/// `ort::LoadDynamicError`, a plain value that touches no ORT symbol. It is
+/// boxed into the decibri variant as is and never converted to an
+/// `ort::Error`, because constructing one calls into the C API of the
+/// runtime that has just failed to load.
 ///
 /// Under `ort-download-binaries`: `ort::init_from` does NOT exist. ORT is
 /// statically linked into the binary and any path argument is meaningless.
@@ -244,7 +253,7 @@ fn telemetry_enabled() -> bool {
 /// Every chain carries [`telemetry_enabled`]; see its documentation for the
 /// default and the limits on it.
 #[cfg(feature = "ort-load-dynamic")]
-fn do_ort_init(path: Option<&Path>) -> Result<bool, ort::Error> {
+fn do_ort_init(path: Option<&Path>) -> Result<bool, ort::LoadDynamicError> {
     let telemetry = telemetry_enabled();
     match path {
         Some(p) => {
@@ -273,9 +282,10 @@ fn do_ort_init(_path: Option<&Path>) -> Result<bool, ort::Error> {
 /// - Otherwise delegates to the feature-gated `do_ort_init` helper.
 /// - On failure, the `OnceLock` is NOT set, so a subsequent caller can retry.
 ///
-/// Note: `e` in the error-wrapping path below is always an `ort::Error` (ORT's
-/// own error type), never a `DecibriError`. This function is the single place
-/// where ORT errors enter decibri's error hierarchy. Do NOT apply the same
+/// Note: `e` in the error-wrapping path below is always one of `ort`'s own
+/// error types (`ort::LoadDynamicError` under `ort-load-dynamic`,
+/// `ort::Error` otherwise), never a `DecibriError`. This function is the
+/// single place where ORT errors enter decibri's error hierarchy. Do NOT apply the same
 /// wrapping pattern elsewhere or the `decibri:` prefix and guidance string
 /// will be duplicated in the message users see.
 pub(crate) fn init_ort_once(path: Option<&Path>) -> Result<(), DecibriError> {

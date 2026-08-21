@@ -192,14 +192,15 @@ jobs:
       - name: Get decibri's ort crate api-N baseline
         id: baseline
         run: |
-          # ort 2.0.0-rc.12 defaults to api-24. Hardcoded here to avoid
-          # a second Cargo.toml parse.
+          # ort 2.0.0-rc.13 is pinned with api-28 (the feature list in the
+          # workspace Cargo.toml). Hardcoded here to avoid a second
+          # Cargo.toml parse.
           #
           # IMPORTANT: when upgrading the ort crate, update this number to
           # match the new crate's target api-N. See the maintainer comment
           # in the workspace root Cargo.toml for the full upgrade procedure
           # (step 4 of that comment lists this file explicitly).
-          echo "api_n=24" >> "$GITHUB_OUTPUT"
+          echo "api_n=28" >> "$GITHUB_OUTPUT"
 
       - name: Create or update issue if upstream advanced
         if: steps.pinned.outputs.version != steps.latest.outputs.version
@@ -230,7 +231,7 @@ jobs:
 
           **Review upgrade path:**
           1. Check that the current \`ort\` crate version still supports \`api-${LATEST_MINOR}\` (compare against [ort.pyke.io/setup/multiversion](https://ort.pyke.io/setup/multiversion)).
-          2. Update \`ORT_VERSION\` in \`.github/workflows/publish-npm.yml\`.
+          2. Update \`ORT_VERSION\` and the four \`ORT_SHA256_*\` archive digests in \`.github/workflows/publish-npm.yml\`, \`publish-pypi.yml\` and \`python-ci.yml\`.
           3. Update the \`api_n\` baseline in \`.github/workflows/check-upstream.yml\` if the ort crate was also upgraded.
           4. Trigger \`publish-npm.yml\` manually via workflow_dispatch with \`publish\` left unticked to confirm the new tarball URLs resolve and the bundled dylib loads across all four platforms.${ABI_WARNING}"
 

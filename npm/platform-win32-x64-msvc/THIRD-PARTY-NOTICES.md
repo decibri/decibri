@@ -8,9 +8,9 @@ with the files.
 ## ONNX Runtime
 
 - **Name:** ONNX Runtime
-- **Version:** 1.24.4
+- **Version:** 1.28.1
 - **License:** MIT
-- **Source:** https://github.com/microsoft/onnxruntime (release `v1.24.4`)
+- **Source:** https://github.com/microsoft/onnxruntime (release `v1.28.1`)
 - **Files covered:** the ONNX Runtime dynamic libraries distributed in this
   package: `onnxruntime.dll` on Windows, `libonnxruntime.dylib` on macOS,
   `libonnxruntime.so` and `libonnxruntime_providers_shared.so` on Linux. Each
@@ -53,11 +53,11 @@ SOFTWARE.
 ## ONNX Runtime Third-Party Notices
 
 The following section reproduces, verbatim, the `ThirdPartyNotices.txt` file
-from the ONNX Runtime `v1.24.4` release archives. It covers third-party
+from the ONNX Runtime `v1.28.1` release archives. It covers third-party
 material incorporated into the ONNX Runtime libraries named above. The text
 between the markers is upstream's, unaltered.
 
-<!-- BEGIN VERBATIM ThirdPartyNotices.txt (ONNX Runtime v1.24.4) -->
+<!-- BEGIN VERBATIM ThirdPartyNotices.txt (ONNX Runtime v1.28.1) -->
 ```text
 THIRD PARTY SOFTWARE NOTICES AND INFORMATION
 
@@ -6181,7 +6181,7 @@ Redistribution and use in source and binary forms, with or without modification,
 
 THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 ```
-<!-- END VERBATIM ThirdPartyNotices.txt (ONNX Runtime v1.24.4) -->
+<!-- END VERBATIM ThirdPartyNotices.txt (ONNX Runtime v1.28.1) -->
 
 ## Source Availability: Eigen (MPL-2.0)
 
@@ -6191,6 +6191,6 @@ notices above. The Eigen source code for this ONNX Runtime version is
 available at:
 
 - https://github.com/eigen-mirror/eigen/archive/1d8b82b0740839c0de7f1242a3585e3390ff5f33/eigen-1d8b82b0740839c0de7f1242a3585e3390ff5f33.zip
-  (the archive ONNX Runtime `v1.24.4` builds against, per `cmake/deps.txt`
+  (the archive ONNX Runtime `v1.28.1` builds against, per `cmake/deps.txt`
   at that tag)
 - https://gitlab.com/libeigen/eigen (the Eigen project repository)

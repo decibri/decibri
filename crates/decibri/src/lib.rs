@@ -124,9 +124,9 @@
 //!
 //! This constraint is why [`DecibriError`] splits
 //! "ORT path failure" across two variants:
-//! [`OrtLoadFailed`](error::DecibriError::OrtLoadFailed) carries an
-//! `ort::Error` source (reached after `ort::init_from` genuinely failed,
-//! by which point ORT is loaded and constructing errors is safe), and
+//! [`OrtLoadFailed`](error::DecibriError::OrtLoadFailed) carries the
+//! `ort::LoadDynamicError` that `ort::init_from` returned as its source (a
+//! plain value `ort` builds without calling into the runtime), and
 //! [`OrtPathInvalid`](error::DecibriError::OrtPathInvalid) does not
 //! (reached before any ORT symbol is touched). The
 //! [`is_ort_path_error`](error::DecibriError::is_ort_path_error) helper

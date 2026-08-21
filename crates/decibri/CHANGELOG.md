@@ -9,6 +9,13 @@ For other decibri packages, see:
 - npm package: [npm/decibri/CHANGELOG.md](../../npm/decibri/CHANGELOG.md)
 - Python package: [bindings/python/CHANGELOG.md](../../bindings/python/CHANGELOG.md)
 
+## [Unreleased]
+
+### Changed
+
+- The `ort` dependency is `2.0.0-rc.13` with the `api-28` feature, pairing the crate with the ONNX Runtime 1.28 C API. `ort-download-binaries` builds fetch ONNX Runtime 1.28.0, and `ort-load-dynamic` builds require a runtime of 1.28 or newer. The `ndarray` integration is no longer compiled in.
+- `DecibriError::OrtLoadFailed` carries the `ort::LoadDynamicError` that `ort::init_from` returns as its `source()`. The variant, its `code()` and its message template are unchanged.
+
 ## [6.2.0] - 2026-08-16
 
 ### Breaking changes

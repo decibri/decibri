@@ -23,7 +23,17 @@ permissions:
 # Updating this value is step 3 of the ort-crate upgrade procedure
 # documented in the workspace Cargo.toml maintainer comment.
 env:
-  ORT_VERSION: 1.24.4
+  ORT_VERSION: 1.28.1
+  # SHA-256 of each ONNX Runtime release archive downloaded below, as
+  # published beside the asset on its GitHub release page. Every download
+  # step checks its archive against the matching digest before extracting
+  # it and fails on a mismatch. tests/test-ci.js (Group 8g) holds the four
+  # digests in lockstep across publish-npm.yml, publish-pypi.yml and
+  # python-ci.yml.
+  ORT_SHA256_LINUX_X64: 2529aef968d0ad0603365054bc46ebefa7f0fe3bc12f28c5f729c99ddffe2a81
+  ORT_SHA256_LINUX_AARCH64: 53bab9a5c6ae198b7be75663b780c64caa388d30257fac458c71fbff0a82e98e
+  ORT_SHA256_OSX_ARM64: 18c853e5c5deba90e244e1b953a65121f23747ba2c04e6743885caa6ce1ea12f
+  ORT_SHA256_WIN_X64: e46ac7652def5da0e5223372be21185ffff553e0419459f66e0114d460c38162
 
 jobs:
   preflight:
@@ -161,12 +171,43 @@ jobs:
           fi
           echo "OK: tarball is available"
 
+      - name: Resolve the ONNX Runtime archive digest
+        id: ort-digest
+        shell: bash
+        # Selects the workflow-level ORT_SHA256_* digest for this platform's
+        # archive. Each download step below compares the archive against it
+        # before extracting anything.
+        run: |
+          case "${{ matrix.ort_platform_slug }}" in
+            linux-x64)     SHA256="$ORT_SHA256_LINUX_X64" ;;
+            linux-aarch64) SHA256="$ORT_SHA256_LINUX_AARCH64" ;;
+            osx-arm64)     SHA256="$ORT_SHA256_OSX_ARM64" ;;
+            win-x64)       SHA256="$ORT_SHA256_WIN_X64" ;;
+            *)
+              echo "ERROR: no ORT_SHA256_* digest is declared for ${{ matrix.ort_platform_slug }}"
+              exit 1
+              ;;
+          esac
+          if [ -z "$SHA256" ]; then
+            echo "ERROR: the ORT_SHA256_* digest for ${{ matrix.ort_platform_slug }} is empty"
+            exit 1
+          fi
+          echo "sha256=${SHA256}" >> "$GITHUB_OUTPUT"
+          echo "Expected SHA-256: ${SHA256}"
+
       - name: Download and extract ONNX Runtime (macOS)
         if: runner.os == 'macOS'
         shell: bash
         run: |
           URL="https://github.com/microsoft/onnxruntime/releases/download/v${ORT_VERSION}/onnxruntime-${{ matrix.ort_platform_slug }}-${ORT_VERSION}.tgz"
           curl -sL --retry 3 --retry-delay 2 -o ort.tgz "$URL"
+          ACTUAL=$(shasum -a 256 ort.tgz | cut -d' ' -f1)
+          if [ "$ACTUAL" != "${{ steps.ort-digest.outputs.sha256 }}" ]; then
+            echo "ERROR: SHA-256 mismatch for $URL"
+            echo "  expected: ${{ steps.ort-digest.outputs.sha256 }}"
+            echo "  actual:   $ACTUAL"
+            exit 1
+          fi
           tar -xzf ort.tgz
           SRC="onnxruntime-${{ matrix.ort_platform_slug }}-${ORT_VERSION}"
           # Upstream ships libonnxruntime.<version>.dylib; rename to unversioned
@@ -189,10 +230,17 @@ jobs:
         run: |
           URL="https://github.com/microsoft/onnxruntime/releases/download/v${ORT_VERSION}/onnxruntime-${{ matrix.ort_platform_slug }}-${ORT_VERSION}.tgz"
           curl -sL --retry 3 --retry-delay 2 -o ort.tgz "$URL"
+          ACTUAL=$(sha256sum ort.tgz | cut -d' ' -f1)
+          if [ "$ACTUAL" != "${{ steps.ort-digest.outputs.sha256 }}" ]; then
+            echo "ERROR: SHA-256 mismatch for $URL"
+            echo "  expected: ${{ steps.ort-digest.outputs.sha256 }}"
+            echo "  actual:   $ACTUAL"
+            exit 1
+          fi
           tar -xzf ort.tgz
           SRC="onnxruntime-${{ matrix.ort_platform_slug }}-${ORT_VERSION}"
           # cp -L follows the symlink chain (libonnxruntime.so -> .so.1 ->
-          # .so.1.24.4) and copies the real file as libonnxruntime.so. This
+          # .so.1.28.1) and copies the real file as libonnxruntime.so. This
           # avoids repeating the version in the filename. libonnxruntime_
           # providers_shared.so keeps its exact upstream name. The main
           # dylib dlopens it by that basename via $ORIGIN RUNPATH.
@@ -206,6 +254,14 @@ jobs:
           $ProgressPreference = 'SilentlyContinue'  # speeds up Invoke-WebRequest
           $url = "https://github.com/microsoft/onnxruntime/releases/download/v$env:ORT_VERSION/onnxruntime-${{ matrix.ort_platform_slug }}-$env:ORT_VERSION.zip"
           Invoke-WebRequest -Uri $url -OutFile ort.zip -MaximumRetryCount 3 -RetryIntervalSec 2
+          $expected = "${{ steps.ort-digest.outputs.sha256 }}"
+          $actual = (Get-FileHash -Path ort.zip -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($actual -ne $expected) {
+            Write-Host "ERROR: SHA-256 mismatch for $url"
+            Write-Host "  expected: $expected"
+            Write-Host "  actual:   $actual"
+            exit 1
+          }
           Expand-Archive -Path ort.zip -DestinationPath .
           $src = "onnxruntime-${{ matrix.ort_platform_slug }}-$env:ORT_VERSION"
           # Upstream DLL is already named onnxruntime.dll. No rename.

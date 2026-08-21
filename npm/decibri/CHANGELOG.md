@@ -9,6 +9,12 @@ For other decibri packages, see:
 - Rust core: [crates/decibri/CHANGELOG.md](../../crates/decibri/CHANGELOG.md)
 - Python package: [bindings/python/CHANGELOG.md](../../bindings/python/CHANGELOG.md)
 
+## [Unreleased]
+
+### Changed
+
+- The bundled ONNX Runtime is 1.28.1 in every platform package, and the native addon is built against `ort` 2.0.0-rc.13 (`api-28`). An `ORT_DYLIB_PATH` override must point at ONNX Runtime 1.28 or newer.
+
 ## [5.6.0] - 2026-08-16
 
 ### Breaking changes

@@ -33,7 +33,7 @@
 # Build context: project root.
 #   docker build -t decibri:audio -f Dockerfile.audio .
 
-ARG ORT_VERSION=1.24.4
+ARG ORT_VERSION=1.28.1
 
 # ---------- Stage 1: build the wheel ----------
 FROM rust:1-bookworm AS builder

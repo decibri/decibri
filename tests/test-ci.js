@@ -1531,11 +1531,13 @@ console.log('  Group 8f done\n');
 // covers. Each notice also reproduces, between marker lines, the verbatim
 // ThirdPartyNotices.txt from the pinned ONNX Runtime release archives. These
 // assertions hold the pins and the notices in lockstep: the three workflow
-// pins agree, every version-shaped string in every notice equals that pin,
-// the five notice copies are byte-identical, each copy carries exactly one
-// marker-delimited verbatim section, and that section's text hashes to the
-// upstream file's SHA-256. The hash constant moves together with the
-// ORT_VERSION pins whenever the bundled ONNX Runtime version changes.
+// pins agree, the four ORT_SHA256_* archive digests declared beside each pin
+// are well-formed, agree across the three workflows and are distinct, every
+// version-shaped string in every notice equals that pin, the five notice
+// copies are byte-identical, each copy carries exactly one marker-delimited
+// verbatim section, and that section's text hashes to the upstream file's
+// SHA-256. The hash constant moves when the upstream file changes between
+// bundled versions.
 
 console.log('--- Group 8g: third-party notice version pins ---');
 
@@ -1548,15 +1550,46 @@ console.log('--- Group 8g: third-party notice version pins ---');
     path.join('.github', 'workflows', 'publish-pypi.yml'),
     path.join('.github', 'workflows', 'python-ci.yml'),
   ];
-  const pins = workflowFiles.map((rel) => {
-    const text = fs.readFileSync(path.join(repoRoot, rel), 'utf8');
+  const workflowTexts = workflowFiles.map((rel) => fs.readFileSync(path.join(repoRoot, rel), 'utf8'));
+  const pins = workflowTexts.map((text, i) => {
     const match = text.match(/^\s+ORT_VERSION:\s*([0-9]+\.[0-9]+\.[0-9]+)\s*$/m);
-    assert(match !== null, `${rel} declares an ORT_VERSION pin`);
+    assert(match !== null, `${workflowFiles[i]} declares an ORT_VERSION pin`);
     return match ? match[1] : null;
   });
   assert(
     pins.every((pin) => pin !== null && pin === pins[0]),
     `the three workflow ORT_VERSION pins agree (${pins.join(', ')})`
+  );
+
+  // One SHA-256 per ONNX Runtime release archive the workflows download,
+  // declared beside the pin in each workflow's env block and compared against
+  // the downloaded archive before it is extracted.
+  const digestNames = [
+    'ORT_SHA256_LINUX_X64',
+    'ORT_SHA256_LINUX_AARCH64',
+    'ORT_SHA256_OSX_ARM64',
+    'ORT_SHA256_WIN_X64',
+  ];
+  const digests = workflowTexts.map((text, i) =>
+    digestNames.map((name) => {
+      const line = text.split(/\r?\n/).find((candidate) => candidate.startsWith(`  ${name}: `));
+      const value = line === undefined ? null : line.slice(`  ${name}: `.length).trim();
+      assert(
+        value !== null && /^[0-9a-f]{64}$/.test(value),
+        `${workflowFiles[i]} declares ${name} as a 64-digit lowercase hex SHA-256`
+      );
+      return value;
+    })
+  );
+  digestNames.forEach((name, j) => {
+    assert(
+      digests.every((set) => set[j] !== null && set[j] === digests[0][j]),
+      `the three workflow ${name} digests agree`
+    );
+  });
+  assert(
+    new Set(digests[0]).size === digestNames.length,
+    'the four archive digests are distinct'
   );
 
   const noticeFiles = [
@@ -1757,6 +1790,50 @@ console.log('--- Group 8h: bundled model pins ---');
 }
 
 console.log('  Group 8h done\n');
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// Group 8i: ONNX Runtime telemetry propagation (deterministic, no hardware required)
+// ═══════════════════════════════════════════════════════════════════════════════
+//
+// decibri disables ONNX Runtime telemetry by default on the environment it
+// commits, by chaining `.with_telemetry(...)` with the DECIBRI_ORT_TELEMETRY
+// switch onto every environment builder in `do_ort_init`
+// (crates/decibri/src/onnx.rs). The runtime's telemetry state is not
+// observable from a test, but the source text is: these assertions require
+// the call on every committed builder chain and require its argument to be
+// the switch, so a chain that drops the call or hardwires the value fails
+// here. Line comments are stripped first so prose naming the calls does not
+// count.
+
+console.log('--- Group 8i: ONNX Runtime telemetry propagation ---');
+
+{
+  const fs = require('fs');
+  const source = fs.readFileSync(
+    path.join(__dirname, '..', 'crates', 'decibri', 'src', 'onnx.rs'),
+    'utf8'
+  );
+  const code = source
+    .split(/\r?\n/)
+    .filter((line) => !/^\s*\/\//.test(line))
+    .join('\n');
+  const variants = (code.match(/^fn do_ort_init\(/gm) || []).length;
+  assert(variants === 2, `onnx.rs defines both do_ort_init variants (found ${variants})`);
+  const commits = (code.match(/\.commit\(\)/g) || []).length;
+  assert(commits >= 2, `onnx.rs commits at least one environment builder per variant (found ${commits})`);
+  const telemetryCalls = (code.match(/\.with_telemetry\(/g) || []).length;
+  assert(
+    telemetryCalls === commits,
+    `every committed environment builder chain carries .with_telemetry( (${telemetryCalls} of ${commits})`
+  );
+  const fromSwitch = (code.match(/\.with_telemetry\((telemetry|telemetry_enabled\(\))\)/g) || []).length;
+  assert(
+    fromSwitch === telemetryCalls,
+    `every .with_telemetry( argument is the DECIBRI_ORT_TELEMETRY switch (${fromSwitch} of ${telemetryCalls})`
+  );
+}
+
+console.log('  Group 8i done\n');
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // Group 9: async open() factories (deterministic, no hardware required)

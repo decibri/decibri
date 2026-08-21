@@ -17,7 +17,7 @@ decibri 0.1.0+ is on PyPI, so the minimal Dockerfile is a single stage that runs
 [Dockerfile.base](docker/Dockerfile.base):
 
 ```dockerfile
-ARG ORT_VERSION=1.24.4
+ARG ORT_VERSION=1.28.1
 
 FROM rust:1-bookworm AS builder
 
