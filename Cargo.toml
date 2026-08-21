@@ -57,7 +57,7 @@ crossbeam-channel = "0.5"
 #      api-27 while providing api-28). Update the `api-28` in the
 #      `features = [...]` list below to match the new api-N.
 #   2. Update the bundled ORT version to match (api-N -> ORT 1.N.x).
-#   3. Update `env.ORT_VERSION` and the four `env.ORT_SHA256_*` archive digests in
+#   3. Update `env.ORT_VERSION` and the five `env.ORT_SHA256_*` archive digests in
 #      .github/workflows/publish-npm.yml, publish-pypi.yml and python-ci.yml
 #      (workflow-level env blocks; tests/test-ci.js Group 8g holds them in
 #      lockstep).

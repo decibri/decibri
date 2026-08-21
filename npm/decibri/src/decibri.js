@@ -25,18 +25,19 @@ const PACKAGE_VERSION = require('../package.json').version;
  *                                           file: bundled ORT dylib filename }
  *
  * Dylib filenames are unversioned across all platforms for consistency. The
- * release workflow (.github/workflows/release.yml) copies Microsoft's
+ * publish workflow (.github/workflows/publish-npm.yml) copies Microsoft's
  * versioned upstream tarball file (e.g. libonnxruntime.1.28.1.dylib) into the
  * platform package with the unversioned name listed here.
  *
  * If you add a new platform, update this table AND the matching platform job
- * in release.yml.
+ * in publish-npm.yml.
  */
 const PLATFORM_DYLIB = {
   'darwin-arm64': { pkg: '@decibri/decibri-darwin-arm64',    file: 'libonnxruntime.dylib' },
   'linux-x64':    { pkg: '@decibri/decibri-linux-x64-gnu',   file: 'libonnxruntime.so' },
   'linux-arm64':  { pkg: '@decibri/decibri-linux-arm64-gnu', file: 'libonnxruntime.so' },
   'win32-x64':    { pkg: '@decibri/decibri-win32-x64-msvc',  file: 'onnxruntime.dll' },
+  'win32-arm64':  { pkg: '@decibri/decibri-win32-arm64-msvc', file: 'onnxruntime.dll' },
 };
 
 /**

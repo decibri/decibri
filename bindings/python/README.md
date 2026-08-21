@@ -193,9 +193,11 @@ for segment in report.segments:
 
 ## Compatibility
 
-| Python                       | Platforms                                                |
-| ---------------------------- | -------------------------------------------------------- |
-| 3.10, 3.11, 3.12, 3.13, 3.14 | Linux x64, Linux ARM64, macOS Apple Silicon, Windows x64 |
+| Python                       | Platforms                                                               |
+| ---------------------------- | ----------------------------------------------------------------------- |
+| 3.10, 3.11, 3.12, 3.13, 3.14 | Linux x64, Linux ARM64, macOS Apple Silicon, Windows x64, Windows ARM64 |
+
+On Windows ARM64 the oldest supported Python is 3.11, the first CPython release published for that platform.
 
 ## Bundled assets
 

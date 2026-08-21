@@ -11,6 +11,10 @@ For other decibri packages, see:
 
 ## [Unreleased]
 
+### Added
+
+- Windows ARM64 (`aarch64-pc-windows-msvc`) is a supported platform: the test suite runs on it in CI, it is a dependency-policy target in `deny.toml`, and docs.rs builds the documentation for it alongside the four existing targets.
+
 ### Changed
 
 - The `ort` dependency is `2.0.0-rc.13` with the `api-28` feature, pairing the crate with the ONNX Runtime 1.28 C API. `ort-download-binaries` builds fetch ONNX Runtime 1.28.0, and `ort-load-dynamic` builds require a runtime of 1.28 or newer. The `ndarray` integration is no longer compiled in.

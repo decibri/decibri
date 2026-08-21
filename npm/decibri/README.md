@@ -409,6 +409,7 @@ decibri 4.0.0 renames the API to a microphone and speaker vocabulary and switche
 | Platform | Architecture | Audio Backend |
 | --- | --- | --- |
 | Windows | x64 | WASAPI |
+| Windows | arm64 | WASAPI |
 | macOS | arm64 | CoreAudio |
 | Linux | x64 | ALSA |
 | Linux | arm64 | ALSA |

@@ -1531,9 +1531,9 @@ console.log('  Group 8f done\n');
 // covers. Each notice also reproduces, between marker lines, the verbatim
 // ThirdPartyNotices.txt from the pinned ONNX Runtime release archives. These
 // assertions hold the pins and the notices in lockstep: the three workflow
-// pins agree, the four ORT_SHA256_* archive digests declared beside each pin
+// pins agree, the five ORT_SHA256_* archive digests declared beside each pin
 // are well-formed, agree across the three workflows and are distinct, every
-// version-shaped string in every notice equals that pin, the five notice
+// version-shaped string in every notice equals that pin, the six notice
 // copies are byte-identical, each copy carries exactly one marker-delimited
 // verbatim section, and that section's text hashes to the upstream file's
 // SHA-256. The hash constant moves when the upstream file changes between
@@ -1569,6 +1569,7 @@ console.log('--- Group 8g: third-party notice version pins ---');
     'ORT_SHA256_LINUX_AARCH64',
     'ORT_SHA256_OSX_ARM64',
     'ORT_SHA256_WIN_X64',
+    'ORT_SHA256_WIN_ARM64',
   ];
   const digests = workflowTexts.map((text, i) =>
     digestNames.map((name) => {
@@ -1589,11 +1590,12 @@ console.log('--- Group 8g: third-party notice version pins ---');
   });
   assert(
     new Set(digests[0]).size === digestNames.length,
-    'the four archive digests are distinct'
+    'the five archive digests are distinct'
   );
 
   const noticeFiles = [
     path.join('npm', 'platform-win32-x64-msvc', 'THIRD-PARTY-NOTICES.md'),
+    path.join('npm', 'platform-win32-arm64-msvc', 'THIRD-PARTY-NOTICES.md'),
     path.join('npm', 'platform-darwin-arm64', 'THIRD-PARTY-NOTICES.md'),
     path.join('npm', 'platform-linux-x64-gnu', 'THIRD-PARTY-NOTICES.md'),
     path.join('npm', 'platform-linux-arm64-gnu', 'THIRD-PARTY-NOTICES.md'),

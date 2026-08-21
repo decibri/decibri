@@ -11,6 +11,10 @@ For other decibri packages, see:
 
 ## [Unreleased]
 
+### Added
+
+- Prebuilt binaries for Windows ARM64, published as the fifth platform package `@decibri/decibri-win32-arm64-msvc` and selected automatically on `win32` / `arm64`. It bundles ONNX Runtime 1.28.1 and ships the same `THIRD-PARTY-NOTICES.md` as the other platform packages. Native ARM64 Node.js previously failed at load with the napi `Cannot find native binding` message; x64 Node.js under emulation is unchanged.
+
 ### Changed
 
 - The bundled ONNX Runtime is 1.28.1 in every platform package, and the native addon is built against `ort` 2.0.0-rc.13 (`api-28`). An `ORT_DYLIB_PATH` override must point at ONNX Runtime 1.28 or newer.

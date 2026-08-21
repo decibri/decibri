@@ -27,13 +27,14 @@ env:
   # SHA-256 of each ONNX Runtime release archive downloaded below, as
   # published beside the asset on its GitHub release page. Every download
   # step checks its archive against the matching digest before extracting
-  # it and fails on a mismatch. tests/test-ci.js (Group 8g) holds the four
+  # it and fails on a mismatch. tests/test-ci.js (Group 8g) holds the five
   # digests in lockstep across publish-npm.yml, publish-pypi.yml and
   # python-ci.yml.
   ORT_SHA256_LINUX_X64: 2529aef968d0ad0603365054bc46ebefa7f0fe3bc12f28c5f729c99ddffe2a81
   ORT_SHA256_LINUX_AARCH64: 53bab9a5c6ae198b7be75663b780c64caa388d30257fac458c71fbff0a82e98e
   ORT_SHA256_OSX_ARM64: 18c853e5c5deba90e244e1b953a65121f23747ba2c04e6743885caa6ce1ea12f
   ORT_SHA256_WIN_X64: e46ac7652def5da0e5223372be21185ffff553e0419459f66e0114d460c38162
+  ORT_SHA256_WIN_ARM64: 953f1187e262e60820cdafdc5cbe63930f24fe4d961182b739bf3effdf3f608f
 
 jobs:
   preflight:
@@ -80,6 +81,7 @@ jobs:
             npm/platform-darwin-arm64/package.json \
             npm/platform-linux-arm64-gnu/package.json \
             npm/platform-linux-x64-gnu/package.json \
+            npm/platform-win32-arm64-msvc/package.json \
             npm/platform-win32-x64-msvc/package.json
           do
             PKG_VERSION=$(jq -r .version "$pkg")
@@ -93,11 +95,11 @@ jobs:
           if [ "$MISMATCH" = "1" ]; then
             echo ""
             echo "Release aborted: version mismatch detected."
-            echo "Bump all 5 package.json files to ${TAG_VERSION}, then re-tag."
+            echo "Bump all 6 package.json files to ${TAG_VERSION}, then re-tag."
             exit 1
           fi
 
-          echo "OK: tag and all 5 package.json files agree on ${TAG_VERSION}"
+          echo "OK: tag and all 6 package.json files agree on ${TAG_VERSION}"
 
   build:
     name: Build ${{ matrix.target }}
@@ -111,6 +113,11 @@ jobs:
             target: x86_64-pc-windows-msvc
             artifact: win32-x64-msvc
             ort_platform_slug: win-x64
+            ort_ext: zip
+          - os: windows-11-arm
+            target: aarch64-pc-windows-msvc
+            artifact: win32-arm64-msvc
+            ort_platform_slug: win-arm64
             ort_ext: zip
           - os: macos-14
             target: aarch64-apple-darwin
@@ -184,6 +191,7 @@ jobs:
             linux-aarch64) SHA256="$ORT_SHA256_LINUX_AARCH64" ;;
             osx-arm64)     SHA256="$ORT_SHA256_OSX_ARM64" ;;
             win-x64)       SHA256="$ORT_SHA256_WIN_X64" ;;
+            win-arm64)     SHA256="$ORT_SHA256_WIN_ARM64" ;;
             *)
               echo "ERROR: no ORT_SHA256_* digest is declared for ${{ matrix.ort_platform_slug }}"
               exit 1
@@ -273,15 +281,18 @@ jobs:
         continue-on-error: true
         shell: pwsh
         # Non-gating: `dumpbin` ships with MSVC under the Visual Studio
-        # install path and is NOT on the default PATH on windows-latest
+        # install path and is NOT on the default PATH on the Windows
         # runners. Located via a glob over the VS install directory rather
-        # than a third-party dev-env action. Output (the DLL's import
+        # than a third-party dev-env action, under the host-native tools
+        # directory for the runner's architecture (Hostx64\x64 on x64,
+        # Hostarm64\arm64 on ARM64). Output (the DLL's import
         # table) goes to the log so unexpected DLL dependencies (odd MSVC
         # runtime, Windows SDK DLLs not on a user's box, etc.) are visible
         # before users hit "cannot find library X" at runtime. On failure
         # the step is marked red but the workflow proceeds.
         run: |
-          $dumpbin = Get-ChildItem "C:\Program Files*\Microsoft Visual Studio\*\*\VC\Tools\MSVC\*\bin\Hostx64\x64\dumpbin.exe" -ErrorAction SilentlyContinue | Select-Object -First 1
+          $hostDir = if ($env:RUNNER_ARCH -eq 'ARM64') { 'Hostarm64\arm64' } else { 'Hostx64\x64' }
+          $dumpbin = Get-ChildItem "C:\Program Files*\Microsoft Visual Studio\*\*\VC\Tools\MSVC\*\bin\$hostDir\dumpbin.exe" -ErrorAction SilentlyContinue | Select-Object -First 1
           if (-not $dumpbin) {
             Write-Host "dumpbin.exe not found under the Visual Studio install path"
             exit 1
@@ -384,13 +395,17 @@ jobs:
           find artifacts/decibri-linux-arm64-gnu -name "decibri.linux-arm64-gnu.node"         -exec cp {} npm/platform-linux-arm64-gnu/ \;
           find artifacts/decibri-linux-arm64-gnu -name "libonnxruntime.so"                    -exec cp {} npm/platform-linux-arm64-gnu/ \;
           find artifacts/decibri-linux-arm64-gnu -name "libonnxruntime_providers_shared.so"   -exec cp {} npm/platform-linux-arm64-gnu/ \;
-          # Windows
+          # Windows x64
           find artifacts/decibri-win32-x64-msvc -name "decibri.win32-x64-msvc.node" -exec cp {} npm/platform-win32-x64-msvc/ \;
           find artifacts/decibri-win32-x64-msvc -name "onnxruntime.dll"             -exec cp {} npm/platform-win32-x64-msvc/ \;
+          # Windows arm64
+          find artifacts/decibri-win32-arm64-msvc -name "decibri.win32-arm64-msvc.node" -exec cp {} npm/platform-win32-arm64-msvc/ \;
+          find artifacts/decibri-win32-arm64-msvc -name "onnxruntime.dll"               -exec cp {} npm/platform-win32-arm64-msvc/ \;
 
       - name: Verify staged binaries
         run: |
           ls -la npm/platform-win32-x64-msvc/decibri.*.node   npm/platform-win32-x64-msvc/onnxruntime.dll
+          ls -la npm/platform-win32-arm64-msvc/decibri.*.node npm/platform-win32-arm64-msvc/onnxruntime.dll
           ls -la npm/platform-darwin-arm64/decibri.*.node     npm/platform-darwin-arm64/libonnxruntime.dylib
           ls -la npm/platform-linux-x64-gnu/decibri.*.node    npm/platform-linux-x64-gnu/libonnxruntime.so    npm/platform-linux-x64-gnu/libonnxruntime_providers_shared.so
           ls -la npm/platform-linux-arm64-gnu/decibri.*.node  npm/platform-linux-arm64-gnu/libonnxruntime.so  npm/platform-linux-arm64-gnu/libonnxruntime_providers_shared.so
@@ -499,6 +514,11 @@ jobs:
             :onnxruntime.dll \
             :THIRD-PARTY-NOTICES.md
 
+          verify_pack npm/platform-win32-arm64-msvc "@decibri/decibri-win32-arm64-msvc" \
+            :decibri.win32-arm64-msvc.node \
+            :onnxruntime.dll \
+            :THIRD-PARTY-NOTICES.md
+
           echo ""
           if [ "$FAIL" -ne 0 ]; then
             echo "================================================"
@@ -506,7 +526,7 @@ jobs:
             echo "================================================"
             exit 1
           fi
-          echo "All 5 packages pass verification."
+          echo "All 6 packages pass verification."
 
       # Platform packages publish first because the main package's
       # optionalDependencies reference them. npm Trusted Publishing (OIDC)
@@ -518,6 +538,10 @@ jobs:
       - name: Publish @decibri/decibri-win32-x64-msvc
         if: github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.publish == true)
         run: cd npm/platform-win32-x64-msvc && npm publish --access public
+
+      - name: Publish @decibri/decibri-win32-arm64-msvc
+        if: github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.publish == true)
+        run: cd npm/platform-win32-arm64-msvc && npm publish --access public
 
       - name: Publish @decibri/decibri-darwin-arm64
         if: github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.publish == true)
