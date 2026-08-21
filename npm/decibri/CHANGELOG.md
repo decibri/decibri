@@ -15,6 +15,10 @@ For other decibri packages, see:
 
 - The bundled ONNX Runtime is 1.28.1 in every platform package, and the native addon is built against `ort` 2.0.0-rc.13 (`api-28`). An `ORT_DYLIB_PATH` override must point at ONNX Runtime 1.28 or newer.
 
+### Fixed
+
+- A bundled or `ORT_DYLIB_PATH` ONNX Runtime that cannot be used (not a loadable library, or older than 1.28) rejects with `ORT_LOAD_FAILED` on every silero or denoise attempt; a second attempt after such a failure no longer aborts the process.
+
 ## [5.6.0] - 2026-08-16
 
 ### Breaking changes

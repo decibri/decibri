@@ -491,6 +491,53 @@ async function fileTests(h) {
     `a consumed File carries the FILE_CONSUMED code (got ${consumedErr && consumedErr.code})`
   );
 
+  // The detector's runtime failing to load is a typed failure on every
+  // attempt in a process, never an abort: a second analysis after a failed
+  // load reports what the first did. Run it in a child so an abort is an
+  // exit status, not the end of this suite. With a loadable runtime both
+  // analyses succeed; without one both reject with ORT_LOAD_FAILED.
+  const retryPath = path.join(tmp, 'retry.js');
+  fs.writeFileSync(
+    retryPath,
+    [
+      "'use strict';",
+      `const { File, DecibriError } = require(${JSON.stringify(DECIBRI_ENTRY)});`,
+      'const outcomes = [];',
+      '(async () => {',
+      '  for (let i = 0; i < 2; i++) {',
+      '    try {',
+      "      await File.buffer(new Float32Array(3200), { inputRate: 16000, vad: 'silero' }).analyze();",
+      "      outcomes.push('ok');",
+      '    } catch (e) {',
+      "      outcomes.push(e instanceof DecibriError ? e.code : 'untyped');",
+      '    }',
+      '  }',
+      '  process.stdout.write(JSON.stringify(outcomes));',
+      '})();',
+      '',
+    ].join('\n')
+  );
+  const retry = spawnSync(process.execPath, [retryPath], { encoding: 'utf8' });
+  assert(
+    retry.status === 0,
+    `two silero analyses in one process leave the process alive ` +
+      `(exit ${retry.status}, signal ${retry.signal}, stderr: ${(retry.stderr || '').split('\n')[0]})`
+  );
+  let retryOutcomes = [];
+  try {
+    retryOutcomes = JSON.parse(retry.stdout);
+  } catch (_) {
+    retryOutcomes = [];
+  }
+  assert(
+    retryOutcomes.length === 2 && retryOutcomes.every((o) => o === 'ok' || o === 'ORT_LOAD_FAILED'),
+    `each silero analysis either succeeds or rejects with ORT_LOAD_FAILED (got ${retry.stdout})`
+  );
+  assert(
+    retryOutcomes.length === 2 && retryOutcomes[0] === retryOutcomes[1],
+    `a second silero analysis reports what the first did (got ${retry.stdout})`
+  );
+
   // An exhausted File yields nothing on a second pass, no error.
   const exhausted = File.buffer(sineSamples(16000, 0.2), { inputRate: 16000 });
   assert((await readAll(exhausted)).length > 0, 'first pass over a File delivers audio');

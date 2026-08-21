@@ -23,6 +23,7 @@ Three tiers:
 
 from __future__ import annotations
 
+import subprocess
 import sys
 from pathlib import Path
 from typing import Iterator
@@ -269,3 +270,47 @@ def test_decibri_silero_construction() -> None:
     instance = decibri.Microphone(vad="silero")
     assert instance is not None
     assert isinstance(instance, decibri.Microphone)
+
+
+# ---------------------------------------------------------------------------
+# A runtime that cannot be loaded is typed on every attempt
+# ---------------------------------------------------------------------------
+
+
+def test_unusable_runtime_is_typed_on_every_attempt(tmp_path: Path) -> None:
+    """An ``ort_library_path`` that is not a loadable library raises
+    ``OrtLoadFailed`` on the first attempt and again on the second.
+
+    Runs in a child interpreter so a process abort is an exit status rather
+    than the end of this session. The first failed load must not change what
+    a later attempt in the same process reports. Needs no bundled runtime:
+    the explicit path is the whole fixture.
+    """
+    not_a_library = tmp_path / _PLATFORM_FILENAME.get(sys.platform, "onnxruntime.bin")
+    not_a_library.write_bytes(b"this is not a shared library\n")
+    script = (
+        "import sys\n"
+        "import decibri\n"
+        "outcomes = []\n"
+        "for _ in range(2):\n"
+        "    try:\n"
+        "        decibri.File.buffer([0.0] * 3200, input_rate=16000, vad='silero',\n"
+        "                            ort_library_path=sys.argv[1]).analyze()\n"
+        "        outcomes.append('ok')\n"
+        "    except decibri.OrtLoadFailed:\n"
+        "        outcomes.append('OrtLoadFailed')\n"
+        "    except BaseException as exc:  # noqa: BLE001\n"
+        "        outcomes.append(type(exc).__name__)\n"
+        "print(' '.join(outcomes))\n"
+    )
+    result = subprocess.run(
+        [sys.executable, "-c", script, str(not_a_library)],
+        capture_output=True,
+        text=True,
+        timeout=120,
+        check=False,
+    )
+    assert result.returncode == 0, (
+        f"child exited {result.returncode}; stderr: {result.stderr.strip()[:400]}"
+    )
+    assert result.stdout.split() == ["OrtLoadFailed", "OrtLoadFailed"], result.stdout

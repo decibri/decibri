@@ -14,7 +14,11 @@ For other decibri packages, see:
 ### Changed
 
 - The `ort` dependency is `2.0.0-rc.13` with the `api-28` feature, pairing the crate with the ONNX Runtime 1.28 C API. `ort-download-binaries` builds fetch ONNX Runtime 1.28.0, and `ort-load-dynamic` builds require a runtime of 1.28 or newer. The `ndarray` integration is no longer compiled in.
-- `DecibriError::OrtLoadFailed` carries the `ort::LoadDynamicError` that `ort::init_from` returns as its `source()`. The variant, its `code()` and its message template are unchanged.
+- `DecibriError::OrtLoadFailed` carries an `ort::LoadDynamicError` as its `source()`. The variant, its `code()` and its message template are unchanged.
+
+### Fixed
+
+- `ort-load-dynamic`: a runtime library that exists but cannot be used (not a loadable library, no `OrtGetApiBase`, or older than ONNX Runtime 1.28) fails with `DecibriError::OrtLoadFailed` on every attempt, for an explicit `ort_library_path`, for `ORT_DYLIB_PATH`, and for the bare platform library name. The pre-check in `init_ort_once` loads and checks the library before `ort` does; a second attempt after such a failure no longer aborts the process.
 
 ## [6.2.0] - 2026-08-16
 
