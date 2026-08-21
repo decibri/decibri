@@ -8,6 +8,16 @@ For Rust core (`crates/decibri`) and npm package (`npm/decibri`) changes, see [t
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Changed
+
+- The wheel bundles ONNX Runtime 1.28.1 under `decibri/_ort/`, and the extension is built against `ort` 2.0.0-rc.13 (`api-28`). A `DECIBRI_ORT_DYLIB_PATH` or `ORT_DYLIB_PATH` override must point at ONNX Runtime 1.28 or newer.
+
+### Fixed
+
+- An `ort_library_path`, `DECIBRI_ORT_DYLIB_PATH`, `ORT_DYLIB_PATH` or bundled ONNX Runtime that cannot be used (not a loadable library, or older than 1.28) raises `OrtLoadFailed` on every attempt; a second attempt after such a failure no longer aborts the process.
+
 ## [0.11.0] - 2026-08-16
 
 ### Breaking changes

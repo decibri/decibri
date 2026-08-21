@@ -117,16 +117,20 @@
 //! [`DecibriError::OrtPathInvalid`]
 //! (carries `path: PathBuf` and `reason: &'static str`, never touches ORT
 //! symbols) rather than reconstructing an `ort::Error`. decibri's internal
-//! `init_ort_once` follows this pattern: it performs a filesystem-level
-//! `Path::is_file()` check first and returns
-//! [`OrtPathInvalid`](error::DecibriError::OrtPathInvalid) on rejection,
-//! only handing the path to `ort::init_from` once the check passes.
+//! `init_ort_once` follows this pattern: it checks the filesystem first and
+//! returns [`OrtPathInvalid`](error::DecibriError::OrtPathInvalid) on
+//! rejection, then loads the library itself and checks it the way `ort` does
+//! (it exports `OrtGetApiBase` and reports the ONNX Runtime version `ort`
+//! requires), returning [`OrtLoadFailed`](error::DecibriError::OrtLoadFailed)
+//! with the `ort::LoadDynamicError` value for that condition, and only hands
+//! the path to `ort` once both checks pass. A load that fails inside `ort`
+//! cannot be retried in the process, so no library reaches `ort` unchecked.
 //!
 //! This constraint is why [`DecibriError`] splits
 //! "ORT path failure" across two variants:
 //! [`OrtLoadFailed`](error::DecibriError::OrtLoadFailed) carries an
-//! `ort::Error` source (reached after `ort::init_from` genuinely failed,
-//! by which point ORT is loaded and constructing errors is safe), and
+//! `ort::LoadDynamicError` as its source (a plain value built without calling
+//! into the runtime, by decibri's pre-check or by `ort::init_from`), and
 //! [`OrtPathInvalid`](error::DecibriError::OrtPathInvalid) does not
 //! (reached before any ORT symbol is touched). The
 //! [`is_ort_path_error`](error::DecibriError::is_ort_path_error) helper

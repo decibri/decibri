@@ -557,9 +557,12 @@ pub enum DecibriError {
         source: Box<dyn std::error::Error + Send + Sync>,
     },
 
-    /// The `ort_library_path` in `VadConfig` failed a pre-check before it
-    /// could be handed to `ort::init_from`. Used only by the Windows
-    /// hang-prevention pre-check in `init_ort_once`.
+    /// The `ort_library_path` in `VadConfig`, `ORT_DYLIB_PATH`, or the bare
+    /// platform library name failed the filesystem half of the pre-check in
+    /// `init_ort_once` (not a regular file, not resolvable by the system
+    /// loader, or the Windows in-box copy) before any load was attempted. A
+    /// library that is found but cannot be loaded or used is
+    /// [`Self::OrtLoadFailed`] instead.
     ///
     /// Intentionally does *not* carry an `ort::Error` source, because
     /// constructing an `ort::Error` under `ort-load-dynamic` calls into the
@@ -1083,10 +1086,12 @@ impl DecibriError {
     /// match on this rather than enumerating [`Self::OrtLoadFailed`] and
     /// [`Self::OrtPathInvalid`] separately:
     ///
-    /// - [`Self::OrtLoadFailed`] fires when ORT tried to load the path and
-    ///   failed (e.g. wrong ORT version, corrupted dylib).
+    /// - [`Self::OrtLoadFailed`] fires when the library was found but could
+    ///   not be loaded or used (not a loadable library, no `OrtGetApiBase`,
+    ///   or an ONNX Runtime older than the version this build requires),
+    ///   whether decibri's pre-check or `ort` detected it.
     /// - [`Self::OrtPathInvalid`] fires when decibri's filesystem pre-check
-    ///   rejected the path before ORT saw it (nonexistent, directory, etc).
+    ///   rejected the path before any load (nonexistent, directory, etc).
     ///
     /// Both represent the same user-facing failure mode: "this path cannot
     /// be used to load ORT." The split is a mechanical necessity (see the

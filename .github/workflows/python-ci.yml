@@ -56,7 +56,17 @@ env:
   # publish-npm.yml for ORT_VERSION; the wheel pipeline pins to the same
   # value here). Update in lockstep with publish-npm.yml at every ort-crate
   # upgrade per the workspace Cargo.toml maintainer comment (steps 2 and 3).
-  ORT_VERSION: 1.24.4
+  ORT_VERSION: 1.28.1
+  # SHA-256 of each ONNX Runtime release archive downloaded below, as
+  # published beside the asset on its GitHub release page. Every download
+  # step checks its archive against the matching digest before extracting
+  # it and fails on a mismatch. tests/test-ci.js (Group 8g) holds the four
+  # digests in lockstep across publish-npm.yml, publish-pypi.yml and
+  # python-ci.yml.
+  ORT_SHA256_LINUX_X64: 2529aef968d0ad0603365054bc46ebefa7f0fe3bc12f28c5f729c99ddffe2a81
+  ORT_SHA256_LINUX_AARCH64: 53bab9a5c6ae198b7be75663b780c64caa388d30257fac458c71fbff0a82e98e
+  ORT_SHA256_OSX_ARM64: 18c853e5c5deba90e244e1b953a65121f23747ba2c04e6743885caa6ce1ea12f
+  ORT_SHA256_WIN_X64: e46ac7652def5da0e5223372be21185ffff553e0419459f66e0114d460c38162
   # Phase 7 wheel size thresholds. Soft warning continues the Phase 3
   # alarm (150 MB; today's bundled wheel is ~30 to 50 MB). Hard fail at
   # 200 MB catches pathological regressions (e.g., accidentally bundling
@@ -181,7 +191,6 @@ jobs:
         run: uv sync --dev --locked
 
       - name: Compute ORT platform metadata
-        id: ort-meta
         shell: bash
         # Maps RUNNER_OS + RUNNER_ARCH to the upstream ONNX Runtime
         # tarball naming convention. The four expected combinations
@@ -190,23 +199,31 @@ jobs:
         # matrix is conditional (sized by trigger) so the slug cannot be
         # carried as a matrix dimension; computing it here keeps a single
         # source of truth and lets the preflight + download steps below
-        # share one URL.
+        # share one URL and one archive digest. The values travel to those
+        # steps as plain environment variables via GITHUB_ENV, not as step
+        # outputs, so no run block expands them through the template layer.
         run: |
           case "${RUNNER_OS}-${RUNNER_ARCH}" in
-            Linux-X64)    SLUG="linux-x64";     EXT="tgz" ;;
-            Linux-ARM64)  SLUG="linux-aarch64"; EXT="tgz" ;;
-            macOS-ARM64)  SLUG="osx-arm64";     EXT="tgz" ;;
-            Windows-X64)  SLUG="win-x64";       EXT="zip" ;;
+            Linux-X64)    SLUG="linux-x64";     EXT="tgz"; SHA256="$ORT_SHA256_LINUX_X64" ;;
+            Linux-ARM64)  SLUG="linux-aarch64"; EXT="tgz"; SHA256="$ORT_SHA256_LINUX_AARCH64" ;;
+            macOS-ARM64)  SLUG="osx-arm64";     EXT="tgz"; SHA256="$ORT_SHA256_OSX_ARM64" ;;
+            Windows-X64)  SLUG="win-x64";       EXT="zip"; SHA256="$ORT_SHA256_WIN_X64" ;;
             *)
               echo "ERROR: unsupported runner OS+arch combination: ${RUNNER_OS}-${RUNNER_ARCH}"
               exit 1
               ;;
           esac
+          if [ -z "$SHA256" ]; then
+            echo "ERROR: the ORT_SHA256_* digest for ${SLUG} is empty"
+            exit 1
+          fi
           URL="https://github.com/microsoft/onnxruntime/releases/download/v${ORT_VERSION}/onnxruntime-${SLUG}-${ORT_VERSION}.${EXT}"
-          echo "slug=${SLUG}" >> "$GITHUB_OUTPUT"
-          echo "ext=${EXT}" >> "$GITHUB_OUTPUT"
-          echo "url=${URL}" >> "$GITHUB_OUTPUT"
+          echo "ORT_SLUG=${SLUG}" >> "$GITHUB_ENV"
+          echo "ORT_EXT=${EXT}" >> "$GITHUB_ENV"
+          echo "ORT_URL=${URL}" >> "$GITHUB_ENV"
+          echo "ORT_SHA256=${SHA256}" >> "$GITHUB_ENV"
           echo "Resolved: ${URL}"
+          echo "Expected SHA-256: ${SHA256}"
 
       - name: Verify ONNX Runtime tarball availability
         shell: bash
@@ -216,7 +233,7 @@ jobs:
         # an opaque mid-build failure. Same pattern in production for the
         # Node release pipeline since 3.0.
         run: |
-          URL="${{ steps.ort-meta.outputs.url }}"
+          URL="$ORT_URL"
           echo "Verifying: $URL"
           if ! curl -sIfL --retry 3 --retry-delay 2 -o /dev/null "$URL"; then
             echo "ERROR: expected ONNX Runtime tarball not available at $URL"
@@ -236,10 +253,17 @@ jobs:
         # post-pip-install. Renamed to unversioned to match what the Python
         # resolver looks for under python/decibri/_ort/.
         run: |
-          SLUG="${{ steps.ort-meta.outputs.slug }}"
-          URL="${{ steps.ort-meta.outputs.url }}"
+          SLUG="$ORT_SLUG"
+          URL="$ORT_URL"
           mkdir -p bindings/python/python/decibri/_ort
           curl -sL --retry 3 --retry-delay 2 -o ort.tgz "$URL"
+          ACTUAL=$(shasum -a 256 ort.tgz | cut -d' ' -f1)
+          if [ "$ACTUAL" != "$ORT_SHA256" ]; then
+            echo "ERROR: SHA-256 mismatch for $URL"
+            echo "  expected: $ORT_SHA256"
+            echo "  actual:   $ACTUAL"
+            exit 1
+          fi
           tar -xzf ort.tgz
           SRC="onnxruntime-${SLUG}-${ORT_VERSION}"
           cp -L "$SRC/lib/libonnxruntime.${ORT_VERSION}.dylib" bindings/python/python/decibri/_ort/libonnxruntime.dylib
@@ -283,11 +307,19 @@ jobs:
         # future GPU EP integration needs it, revisit.
         run: |
           $ProgressPreference = 'SilentlyContinue'
-          $url = "${{ steps.ort-meta.outputs.url }}"
+          $url = $env:ORT_URL
           New-Item -ItemType Directory -Force -Path bindings/python/python/decibri/_ort | Out-Null
           Invoke-WebRequest -Uri $url -OutFile ort.zip -MaximumRetryCount 3 -RetryIntervalSec 2
+          $expected = $env:ORT_SHA256
+          $actual = (Get-FileHash -Path ort.zip -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($actual -ne $expected) {
+            Write-Host "ERROR: SHA-256 mismatch for $url"
+            Write-Host "  expected: $expected"
+            Write-Host "  actual:   $actual"
+            exit 1
+          }
           Expand-Archive -Path ort.zip -DestinationPath .
-          $src = "onnxruntime-${{ steps.ort-meta.outputs.slug }}-$env:ORT_VERSION"
+          $src = "onnxruntime-$env:ORT_SLUG-$env:ORT_VERSION"
           Copy-Item "$src/lib/onnxruntime.dll" bindings/python/python/decibri/_ort/
 
       - name: Inspect onnxruntime.dll imports (Windows, diagnostic)
@@ -406,7 +438,7 @@ jobs:
         # wheels with too-recent symbols (libc/libstdc++/libgcc_s) that
         # auditwheel refuses to repair.
         #
-        # Manylinux profile choice: 2_28 (matches ONNX Runtime 1.24's
+        # Manylinux profile choice: 2_28 (matches ONNX Runtime 1.28's
         # documented glibc floor; targeting 2_17 would waste audit headroom).
         #
         # Target derivation: matrix.os carries the runner OS; for Linux
@@ -454,11 +486,12 @@ jobs:
             # before the script reaches the container, so the script that
             # actually runs inside the container sees a literal version
             # string and the downstream ORT_TARBALL / ORT_URL lines work.
+            # The two Linux archive digests reach the container the same way.
             ORT_VERSION="${{ env.ORT_VERSION }}"
             ARCH=$(uname -m)
             case "$ARCH" in
-              x86_64)  ORT_ARCH="linux-x64"     ;;
-              aarch64) ORT_ARCH="linux-aarch64" ;;
+              x86_64)  ORT_ARCH="linux-x64";     ORT_SHA256="${{ env.ORT_SHA256_LINUX_X64 }}" ;;
+              aarch64) ORT_ARCH="linux-aarch64"; ORT_SHA256="${{ env.ORT_SHA256_LINUX_AARCH64 }}" ;;
               *)
                 echo "ERROR: unsupported container architecture: $ARCH"
                 exit 1
@@ -470,6 +503,13 @@ jobs:
 
             mkdir -p bindings/python/python/decibri/_ort
             curl -sL --retry 3 --retry-delay 2 -o /tmp/ort.tgz "$ORT_URL"
+            ACTUAL=$(sha256sum /tmp/ort.tgz | cut -d' ' -f1)
+            if [ -z "$ORT_SHA256" ] || [ "$ACTUAL" != "$ORT_SHA256" ]; then
+              echo "ERROR: SHA-256 mismatch for $ORT_URL"
+              echo "  expected: $ORT_SHA256"
+              echo "  actual:   $ACTUAL"
+              exit 1
+            fi
             tar -xzf /tmp/ort.tgz -C /tmp
             SRC="/tmp/onnxruntime-${ORT_ARCH}-${ORT_VERSION}"
             cp -L "$SRC/lib/libonnxruntime.so" bindings/python/python/decibri/_ort/libonnxruntime.so

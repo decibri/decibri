@@ -9,8 +9,8 @@ members = [
 [workspace.package]
 version = "6.2.0"
 edition = "2021"
-# MSRV empirically verified 2026-04-22: rustc 1.88 is the minimum version
-# that compiles the workspace. Floors: ort 2.0.0-rc.12 declares
+# MSRV empirically verified 2026-08-21: rustc 1.88 is the minimum version
+# that compiles the workspace. Floors: ort 2.0.0-rc.13 declares
 # `rust-version = "1.88"` and `edition = "2024"`, which dominates our own
 # MSRV. Other direct deps (napi-rs v3 ~1.74, cpal 0.17 ~1.70,
 # crossbeam-channel 0.5 ~1.60) are below this floor. Bump when dependencies
@@ -23,49 +23,53 @@ repository = "https://github.com/decibri/decibri"
 cpal = "0.17"
 thiserror = "2"
 crossbeam-channel = "0.5"
-# ort 2.0.0-rc.12 targets ONNX Runtime C API version 24 (ORT_API_VERSION = 24).
-# We bundle ONNX Runtime 1.24.4 tarballs into each npm platform package.
+# ort 2.0.0-rc.13 targets ONNX Runtime C API version 28 (ORT_API_VERSION = 28).
+# We bundle ONNX Runtime 1.28.1 archives into each npm platform package and
+# into the wheel.
 # Verified via:
-#   - https://raw.githubusercontent.com/pykeio/ort/v2.0.0-rc.12/ort-sys/src/version.rs
+#   - https://raw.githubusercontent.com/pykeio/ort/v2.0.0-rc.13/ort-sys/src/version.rs
 #   - https://ort.pyke.io/setup/multiversion
-#   - https://github.com/microsoft/onnxruntime/releases/tag/v1.24.1 (ORT_API_VERSION bump)
+#   - https://github.com/microsoft/onnxruntime/releases/tag/v1.28.1
 #
 # Feature rationale:
 #   - `std`:     required for non-no_std targets (all of ours).
-#   - `api-24`:  matches the ORT 1.24.x ABI we bundle in npm platform packages.
-#                Must be kept in sync with the bundled ORT tarball version.
-#                If omitted, ort silently falls back to api-17 (the baseline) and its
-#                own EP modules fail to compile against the older OrtApi struct.
+#   - `api-28`:  matches the ORT 1.28.x ABI we bundle. Must be kept in sync with
+#                the bundled ORT archive version. If omitted, ort silently falls
+#                back to api-17 (the baseline) and its own EP modules fail to
+#                compile against the older OrtApi struct. ort's own `default`
+#                feature set selects api-27; the explicit `api-28` here is what
+#                pairs the crate with the 1.28 runtime.
 # We deliberately exclude ort's other defaults (`download-binaries`, `tls-native`,
-# `copy-dylibs`, `tracing`) because:
+# `copy-dylibs`, `tracing`, `ndarray`) because:
 #   - `download-binaries` / `tls-native` / `copy-dylibs` are the old embedding path
 #     we're migrating away from in 3.1.0 (available opt-in via
 #     `ort-download-binaries` feature on crates/decibri for pure-Rust consumers).
-#   - `tracing` is an optional integration decibri doesn't use; ort gates it as
-#     `tracing?/std`, so leaving it off the feature list keeps it off.
-# `ndarray` cannot be excluded: ort's `std` feature lists `ndarray/std` (not
-# `ndarray?/std`), which force-enables the optional `ndarray` dependency, and
-# ort's `load-dynamic` (pulled by our `ort-load-dynamic` mode) enables `std` in
-# turn. decibri does not use the ndarray integration; it compiles unused.
+#   - `tracing` and `ndarray` are optional integrations decibri doesn't use; ort
+#     gates them as `tracing?/std` and `ndarray?/std`, so leaving them off the
+#     feature list keeps them off.
 #
 # Distribution mode (load-dynamic vs download-binaries) is selected by crates/decibri
 # via the `ort-load-dynamic` / `ort-download-binaries` features.
 #
-# When upgrading the ort crate (e.g. 2.0.0-rc.12 -> 2.0.0 stable -> future versions):
-#   1. Inspect the new ort's Cargo.toml `description` and `default` features for the
-#      new api-N (pyke bumps the default with each minor ORT target). Update the
-#      `api-24` in the `features = [...]` list below to match the new api-N.
-#   2. Update the bundled ORT version to match (e.g. api-25 -> ORT 1.25.x).
-#   3. Update the single `env.ORT_VERSION` declaration in .github/workflows/publish-npm.yml
-#      (workflow-level env block, not a per-job bash assignment: one source of truth).
+# When upgrading the ort crate (e.g. 2.0.0-rc.13 -> 2.0.0 stable -> future versions):
+#   1. Inspect the new ort's `api-*` features (ort-sys/Cargo.toml) for the highest
+#      api-N it provides; its `default` set can trail that (rc.13 defaults to
+#      api-27 while providing api-28). Update the `api-28` in the
+#      `features = [...]` list below to match the new api-N.
+#   2. Update the bundled ORT version to match (api-N -> ORT 1.N.x).
+#   3. Update `env.ORT_VERSION` and the four `env.ORT_SHA256_*` archive digests in
+#      .github/workflows/publish-npm.yml, publish-pypi.yml and python-ci.yml
+#      (workflow-level env blocks; tests/test-ci.js Group 8g holds them in
+#      lockstep).
 #   4. Update the `api_n` baseline in .github/workflows/check-upstream.yml.
-#   5. Trigger publish-npm.yml manually via workflow_dispatch with `publish` unticked
-#      to confirm the tarball URL pattern still resolves.
+#   5. Trigger publish-npm.yml and publish-pypi.yml manually via workflow_dispatch
+#      with `publish` unticked to confirm the archive URLs resolve, the digests
+#      match and the packaged runtime loads.
 # Steps 1-4 MUST move together. Leaving any one out produces an ABI mismatch that
 # either fails to compile (step 1 skipped) or fails at runtime dylib-load time
 # (step 2 skipped, because pyke/ort performs a version-string check in load_dylib_from_path
 # and returns Err for too-old ORT minors).
-ort = { version = "=2.0.0-rc.12", default-features = false, features = ["std", "api-24"] }
+ort = { version = "=2.0.0-rc.13", default-features = false, features = ["std", "api-28"] }
 
 [profile.release]
 lto = true

@@ -102,6 +102,110 @@ fn exe_sibling(path: &Path) -> Option<PathBuf> {
     Some(std::env::current_exe().ok()?.parent()?.join(path))
 }
 
+/// The library `ort` loads for `path`: an absolute path as is, a relative
+/// path from the executable's directory when that placement exists, and
+/// otherwise the relative path handed to the system loader unchanged. The
+/// pre-check in [`init_ort_once`] probes exactly this candidate, so the
+/// library it validates is the one `ort` loads next.
+#[cfg(feature = "ort-load-dynamic")]
+fn ort_candidate(path: &Path) -> PathBuf {
+    if path.is_absolute() {
+        return path.to_path_buf();
+    }
+    match exe_sibling(path) {
+        Some(sibling) if sibling.exists() => sibling,
+        _ => path.to_path_buf(),
+    }
+}
+
+/// The minor component of an ONNX Runtime version string, parsed as `ort`
+/// parses it: the second dotted field as a `u32`, and 0 when that field is
+/// absent or not a number. `"1.28.1"` gives 28.
+#[cfg(feature = "ort-load-dynamic")]
+fn ort_runtime_minor(version: &str) -> u32 {
+    version
+        .split('.')
+        .nth(1)
+        .map_or(0, |field| field.parse::<u32>().unwrap_or(0))
+}
+
+/// The runtime's version string read through its `OrtGetApiBase` entry
+/// point, or `None` when the library does not export the entry point or it
+/// yields no API base or no version string.
+#[cfg(feature = "ort-load-dynamic")]
+fn ort_runtime_version(library: &libloading::Library) -> Option<String> {
+    type GetApiBase = unsafe extern "system" fn() -> *const ort::sys::OrtApiBase;
+    // SAFETY: `OrtGetApiBase` is ONNX Runtime's C entry point with exactly
+    // this signature; it returns a pointer to a static table whose
+    // `GetVersionString` returns a static NUL-terminated string. Both
+    // pointers are checked for null before use, and neither is retained or
+    // freed.
+    unsafe {
+        let base_getter: libloading::Symbol<GetApiBase> = library.get(b"OrtGetApiBase").ok()?;
+        let base = base_getter();
+        if base.is_null() {
+            return None;
+        }
+        let version = ((*base).GetVersionString)();
+        if version.is_null() {
+            return None;
+        }
+        Some(
+            std::ffi::CStr::from_ptr(version)
+                .to_string_lossy()
+                .into_owned(),
+        )
+    }
+}
+
+/// Loads `candidate` and checks it the way `ort`'s own load does: it loads
+/// through the system loader, it exports `OrtGetApiBase`, and its runtime
+/// minor version is at least [`ort::MINOR_VERSION`]. The failures are the
+/// `ort::LoadDynamicError` values `ort` reports for the same conditions. On
+/// failure the library is unloaded again; on success it is returned loaded.
+///
+/// Every check `ort` performs when it loads a library has to run here first:
+/// a load that fails inside `ort` cannot be retried in the process, because
+/// `ort` completes its library cell on failure, after which `ort::init_from`
+/// returns `Ok` without loading and the first C API call panics.
+#[cfg(feature = "ort-load-dynamic")]
+fn probe_ort_library(candidate: &Path) -> Result<libloading::Library, ort::LoadDynamicError> {
+    // SAFETY: loading a library runs its initialisers. This is the same load
+    // `ort` performs for the same candidate.
+    let library = unsafe { libloading::Library::new(candidate) }.map_err(|error| {
+        ort::LoadDynamicError::Dlopen {
+            error,
+            path: candidate.to_path_buf(),
+        }
+    })?;
+    check_ort_library(library, candidate)
+}
+
+/// The entry-point and version half of [`probe_ort_library`], split out so
+/// the bare platform name can be checked for the Windows in-box copy between
+/// the load and these checks. Unloads `library` on failure.
+#[cfg(feature = "ort-load-dynamic")]
+fn check_ort_library(
+    library: libloading::Library,
+    candidate: &Path,
+) -> Result<libloading::Library, ort::LoadDynamicError> {
+    let path = candidate.to_path_buf();
+    match ort_runtime_version(&library) {
+        Some(version) if ort_runtime_minor(&version) >= ort::MINOR_VERSION => Ok(library),
+        Some(version) => {
+            drop(library);
+            Err(ort::LoadDynamicError::BadVersion {
+                version_str: version,
+                path,
+            })
+        }
+        None => {
+            drop(library);
+            Err(ort::LoadDynamicError::MissingApi { path })
+        }
+    }
+}
+
 /// The on-disk location of an already-loaded module, by its load name.
 /// Queries the loader directly (`GetModuleHandleW` does not change the
 /// module's reference count), so the probe's `Library` handle stays intact.
@@ -180,9 +284,14 @@ static ORT_INIT_PID: OnceLock<u32> = OnceLock::new();
 ///
 /// Returns one of two typed variants depending on whether a path was provided:
 /// [`DecibriError::OrtLoadFailed`] when `path.is_some()`, or
-/// [`DecibriError::OrtInitFailed`] otherwise. The inner `ort::Error` is
-/// carried via `#[source]` so consumers can walk the error chain.
-fn wrap_init_error(path: Option<&Path>, err: ort::Error) -> DecibriError {
+/// [`DecibriError::OrtInitFailed`] otherwise. The inner error (the
+/// `ort::LoadDynamicError` the pre-check or a failed `ort::init_from`
+/// produces, or an `ort::Error`) is carried via `#[source]` so consumers can
+/// walk the error chain.
+fn wrap_init_error<E>(path: Option<&Path>, err: E) -> DecibriError
+where
+    E: std::error::Error + Send + Sync + 'static,
+{
     match path {
         Some(p) => DecibriError::OrtLoadFailed {
             path: p.to_path_buf(),
@@ -234,7 +343,11 @@ fn telemetry_enabled() -> bool {
 /// so `init_ort_once` stays single-path.
 ///
 /// Under `ort-load-dynamic`: `ort::init_from(path)` is available and is
-/// fallible (validates the dylib up-front).
+/// fallible (validates the dylib up-front). Its failure is
+/// `ort::LoadDynamicError`, a plain value that touches no ORT symbol. It is
+/// boxed into the decibri variant as is and never converted to an
+/// `ort::Error`, because constructing one calls into the C API of the
+/// runtime that has just failed to load.
 ///
 /// Under `ort-download-binaries`: `ort::init_from` does NOT exist. ORT is
 /// statically linked into the binary and any path argument is meaningless.
@@ -244,7 +357,7 @@ fn telemetry_enabled() -> bool {
 /// Every chain carries [`telemetry_enabled`]; see its documentation for the
 /// default and the limits on it.
 #[cfg(feature = "ort-load-dynamic")]
-fn do_ort_init(path: Option<&Path>) -> Result<bool, ort::Error> {
+fn do_ort_init(path: Option<&Path>) -> Result<bool, ort::LoadDynamicError> {
     let telemetry = telemetry_enabled();
     match path {
         Some(p) => {
@@ -273,9 +386,10 @@ fn do_ort_init(_path: Option<&Path>) -> Result<bool, ort::Error> {
 /// - Otherwise delegates to the feature-gated `do_ort_init` helper.
 /// - On failure, the `OnceLock` is NOT set, so a subsequent caller can retry.
 ///
-/// Note: `e` in the error-wrapping path below is always an `ort::Error` (ORT's
-/// own error type), never a `DecibriError`. This function is the single place
-/// where ORT errors enter decibri's error hierarchy. Do NOT apply the same
+/// Note: `e` in the error-wrapping path below is always one of `ort`'s own
+/// error types (`ort::LoadDynamicError` under `ort-load-dynamic`,
+/// `ort::Error` otherwise), never a `DecibriError`. This function is the
+/// single place where ORT errors enter decibri's error hierarchy. Do NOT apply the same
 /// wrapping pattern elsewhere or the `decibri:` prefix and guidance string
 /// will be duplicated in the message users see.
 pub(crate) fn init_ort_once(path: Option<&Path>) -> Result<(), DecibriError> {
@@ -291,45 +405,39 @@ pub(crate) fn init_ort_once(path: Option<&Path>) -> Result<(), DecibriError> {
         return Ok(());
     }
 
-    // Defensive pre-check (load-dynamic only): verify the runtime ORT would
-    // load is actually there before handing control to ORT. A failing ORT
-    // load hangs indefinitely on Windows instead of erroring (reproduced
-    // 2026-04-22 against pyke/ort 2.0.0-rc.12 + onnxruntime 1.24.4 for an
-    // invalid `ort::init_from` path, and 2026-07-17 for `ort::init()` with
-    // no resolvable runtime at all), because constructing the failure's
-    // `ort::Error` itself re-triggers the dylib load. Failing fast here
-    // turns that hang into a clean typed error that Node, Python, and
-    // mobile consumers can surface to users.
+    // Pre-check (load-dynamic only): resolve the library exactly as `ort`
+    // resolves it and validate it the way `ort`'s own load does (it loads, it
+    // exports `OrtGetApiBase`, and it reports a runtime minor version of at
+    // least `ort::MINOR_VERSION`) before any `ort` call runs. A load that
+    // fails inside `ort` cannot be retried in this process: `ort` completes
+    // its library cell on failure, so the next `ort::init_from` returns `Ok`
+    // without loading and the first C API call panics, which aborts across an
+    // FFI boundary; `ort::init()` loads lazily at that first C API call and
+    // panics there on failure. Every check therefore runs here, for an
+    // explicit path, for `ORT_DYLIB_PATH`, and for the bare platform name,
+    // and a failure is a typed error that never touches `ort`. A probe that
+    // passes keeps the library resident, the state a successful init
+    // produces, so `ort` loads the same module next.
     //
-    // Both branches are covered:
-    // - `Some(path)`: the path must be a regular file before it reaches
-    //   `ort::init_from`.
-    // - `None`: `ort::init()` resolves the runtime itself, from the
-    //   `ORT_DYLIB_PATH` environment variable when set, otherwise from the
-    //   platform library name through the system loader. Pre-validate the
-    //   same resolution: a set `ORT_DYLIB_PATH` must point at a regular
-    //   file, and with the variable unset the system loader must actually
-    //   resolve the platform library (probed through `libloading`, the same
-    //   loader `ort` itself uses, which returns an error rather than
-    //   hanging). A successful probe keeps the library resident, the state
-    //   `ort::init()` produces anyway.
-    //
-    // The check is intentionally scoped to `load-dynamic`: under
-    // `download-binaries`, ORT is statically linked and there is nothing to
-    // pre-validate.
+    // The check is scoped to `load-dynamic`: under `download-binaries`, ORT
+    // is statically linked and there is nothing to pre-validate.
     #[cfg(feature = "ort-load-dynamic")]
     match path {
         Some(p) => {
             if !p.is_file() {
-                // Use `OrtPathInvalid`, not `OrtLoadFailed`, precisely because
-                // constructing an `ort::Error` here would call `ortsys![
-                // CreateStatus]`, which triggers the ORT dylib load that this
-                // pre-check is designed to prevent. `OrtPathInvalid` is
-                // string-only and never touches ORT symbols.
+                // `OrtPathInvalid` is string-only and never touches ORT
+                // symbols; constructing an `ort::Error` here would call
+                // `ortsys![CreateStatus]`, which triggers the ORT dylib load.
                 return Err(DecibriError::OrtPathInvalid {
                     path: p.to_path_buf(),
                     reason: "path does not exist or is not a regular file",
                 });
+            }
+            match probe_ort_library(&ort_candidate(p)) {
+                Ok(library) => std::mem::forget(library),
+                // The variant and source a failed `ort::init_from` produces
+                // for the same library.
+                Err(e) => return Err(wrap_init_error(Some(p), e)),
             }
         }
         // Mirror ort's own resolution for the no-path case so this
@@ -351,46 +459,72 @@ pub(crate) fn init_ort_once(path: Option<&Path>) -> Result<(), DecibriError> {
                         reason: "ORT_DYLIB_PATH does not point to a regular file",
                     });
                 }
+                match probe_ort_library(&ort_candidate(&env_path)) {
+                    Ok(library) => std::mem::forget(library),
+                    Err(e) => {
+                        return Err(DecibriError::OrtLoadFailed {
+                            path: env_path,
+                            source: Box::new(e),
+                        });
+                    }
+                }
             }
-            None => match unsafe { libloading::Library::new(ORT_DEFAULT_LIBRARY) } {
-                Ok(library) => {
-                    // Windows ships an in-box `onnxruntime.dll` in System32
-                    // (the Windows ML copy). The loader searches System32
-                    // before PATH, so a bare-name load resolves that copy on
-                    // any host without a runtime earlier in the search order,
-                    // and its API version is not the one `ort` requires:
-                    // proceeding hangs exactly like a missing runtime does.
-                    // decibri's documented resolution (the bundled library or
-                    // ORT_DYLIB_PATH) never means the in-box copy, so reject
-                    // it as unusable rather than letting `ort::init()` hang
-                    // on it.
-                    #[cfg(target_os = "windows")]
-                    if let Some(resolved) = windows_module_path(ORT_DEFAULT_LIBRARY) {
-                        if windows_in_box_runtime(&resolved) {
-                            drop(library);
-                            return Err(DecibriError::OrtPathInvalid {
-                                path: resolved,
-                                reason: "no usable ONNX Runtime found: \
-                                         ORT_DYLIB_PATH is not set and the \
-                                         system loader resolves only the \
-                                         Windows in-box runtime, which is not \
-                                         compatible",
-                            });
+            None => {
+                let candidate = ort_candidate(Path::new(ORT_DEFAULT_LIBRARY));
+                let bare_name = candidate == Path::new(ORT_DEFAULT_LIBRARY);
+                // SAFETY: loading a library runs its initialisers. This is
+                // the same load `ort` performs for the same candidate.
+                match unsafe { libloading::Library::new(&candidate) } {
+                    Ok(library) => {
+                        // Windows ships an in-box `onnxruntime.dll` in
+                        // System32 (the Windows ML copy). The loader searches
+                        // System32 before PATH, so a bare-name load resolves
+                        // that copy on any host without a runtime earlier in
+                        // the search order, and its API version is not the
+                        // one `ort` requires. The documented resolution (the
+                        // bundled library or ORT_DYLIB_PATH) never means the
+                        // in-box copy, so reject it as unusable.
+                        #[cfg(target_os = "windows")]
+                        if let Some(resolved) = windows_module_path(ORT_DEFAULT_LIBRARY) {
+                            if windows_in_box_runtime(&resolved) {
+                                drop(library);
+                                return Err(DecibriError::OrtPathInvalid {
+                                    path: resolved,
+                                    reason: "no usable ONNX Runtime found: \
+                                             ORT_DYLIB_PATH is not set and the \
+                                             system loader resolves only the \
+                                             Windows in-box runtime, which is not \
+                                             compatible",
+                                });
+                            }
+                        }
+                        match check_ort_library(library, &candidate) {
+                            // Keep the runtime resident rather than unloading
+                            // it: `ort` loads the same library next, so this
+                            // avoids a pointless unload/reload cycle and
+                            // matches the process state a successful init
+                            // produces.
+                            Ok(library) => std::mem::forget(library),
+                            Err(e) => {
+                                return Err(DecibriError::OrtLoadFailed {
+                                    path: candidate,
+                                    source: Box::new(e),
+                                });
+                            }
                         }
                     }
-                    // Keep the runtime resident rather than unloading it:
-                    // `ort::init()` loads the same library next, so this
-                    // avoids a pointless unload/reload cycle and matches the
-                    // process state a successful init produces.
-                    std::mem::forget(library);
-                }
-                Err(_) => {
-                    // ort also resolves the bare library name against the
-                    // executable's directory, which the system loader does
-                    // not search on Linux and macOS; accept that placement
-                    // and leave the load to `ort::init()` itself.
-                    let beside_exe = exe_sibling(Path::new(ORT_DEFAULT_LIBRARY));
-                    if !beside_exe.as_deref().is_some_and(Path::is_file) {
+                    Err(error) if !bare_name => {
+                        // The copy beside the executable, which `ort` loads
+                        // in preference to the system loader's resolution.
+                        return Err(DecibriError::OrtLoadFailed {
+                            path: candidate.clone(),
+                            source: Box::new(ort::LoadDynamicError::Dlopen {
+                                error,
+                                path: candidate,
+                            }),
+                        });
+                    }
+                    Err(_) => {
                         return Err(DecibriError::OrtPathInvalid {
                             path: PathBuf::from(ORT_DEFAULT_LIBRARY),
                             reason: "no ONNX Runtime is resolvable: ORT_DYLIB_PATH \
@@ -399,7 +533,7 @@ pub(crate) fn init_ort_once(path: Option<&Path>) -> Result<(), DecibriError> {
                         });
                     }
                 }
-            },
+            }
         },
     }
 
@@ -1011,6 +1145,54 @@ mod tests {
             "OrtPathInvalid intentionally has no source (constructing ort::Error \
              would trigger the hang the pre-check prevents)"
         );
+    }
+
+    /// The runtime minor version parse matches `ort`'s: the second dotted
+    /// field, or 0 when it is missing or not a number.
+    #[cfg(feature = "ort-load-dynamic")]
+    #[test]
+    fn ort_runtime_minor_is_the_second_dotted_field() {
+        assert_eq!(ort_runtime_minor("1.28.1"), 28);
+        assert_eq!(ort_runtime_minor("1.24.4"), 24);
+        assert_eq!(ort_runtime_minor("1.30"), 30);
+        assert_eq!(ort_runtime_minor("1"), 0);
+        assert_eq!(ort_runtime_minor(""), 0);
+        assert_eq!(ort_runtime_minor("1.x.3"), 0);
+    }
+
+    /// `ort_candidate` follows `ort`'s resolution: an absolute path passes
+    /// through, a relative path that exists beside the executable resolves
+    /// there, and any other relative path is passed on unchanged.
+    #[cfg(feature = "ort-load-dynamic")]
+    #[test]
+    fn ort_candidate_mirrors_ort_resolution() {
+        let absolute = std::env::temp_dir().join("decibri-ort-candidate-absolute");
+        assert_eq!(ort_candidate(&absolute), absolute);
+
+        let relative = Path::new("decibri-ort-candidate-does-not-exist-xyz");
+        assert_eq!(ort_candidate(relative), relative);
+
+        // The executable's own file name exists beside the executable.
+        let exe = std::env::current_exe().expect("current_exe");
+        let name = exe.file_name().expect("executable file name");
+        assert_eq!(ort_candidate(Path::new(name)), exe);
+    }
+
+    /// A regular file that is not a loadable library fails the probe with the
+    /// `Dlopen` value `ort` would report, and the probe touches no ORT symbol.
+    #[cfg(feature = "ort-load-dynamic")]
+    #[test]
+    fn probe_rejects_a_file_that_is_not_a_library() {
+        let dir = std::env::temp_dir();
+        let file = dir.join(format!("decibri-not-a-library-{}.bin", std::process::id()));
+        std::fs::write(&file, b"this is not a shared library\n").expect("write probe fixture");
+        let outcome = probe_ort_library(&file);
+        let _ = std::fs::remove_file(&file);
+        match outcome {
+            Err(ort::LoadDynamicError::Dlopen { path, .. }) => assert_eq!(path, file),
+            Err(other) => panic!("expected Dlopen, got {other:?}"),
+            Ok(_) => panic!("expected the probe to reject a non-library file"),
+        }
     }
 
     /// Trivial in-memory [`OnnxSession`] for trait-shape testing without ORT.

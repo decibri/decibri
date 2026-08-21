@@ -709,8 +709,10 @@ mod tests {
                 bits = read_u16(&bytes, body + 14);
             } else if id == b"data" {
                 samples = bytes[body..body + size]
-                    .chunks_exact(2)
-                    .map(|s| i16::from_le_bytes([s[0], s[1]]) as f32 / 32768.0)
+                    .as_chunks::<2>()
+                    .0
+                    .iter()
+                    .map(|s| i16::from_le_bytes(*s) as f32 / 32768.0)
                     .collect();
             }
             pos = body + size + (size & 1);

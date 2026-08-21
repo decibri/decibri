@@ -26,7 +26,7 @@ const PACKAGE_VERSION = require('../package.json').version;
  *
  * Dylib filenames are unversioned across all platforms for consistency. The
  * release workflow (.github/workflows/release.yml) copies Microsoft's
- * versioned upstream tarball file (e.g. libonnxruntime.1.24.4.dylib) into the
+ * versioned upstream tarball file (e.g. libonnxruntime.1.28.1.dylib) into the
  * platform package with the unversioned name listed here.
  *
  * If you add a new platform, update this table AND the matching platform job

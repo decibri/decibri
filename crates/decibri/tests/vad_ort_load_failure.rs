@@ -9,14 +9,20 @@
 //!
 //! The tests rely on the defensive pre-check in
 //! `crates/decibri/src/onnx.rs::init_ort_once`, which validates that the
-//! provided `ort_library_path` points at a regular file before handing it
-//! to `ort::init_from`. Without that pre-check, Windows hangs indefinitely
+//! provided `ort_library_path` points at a regular file, then loads it and
+//! checks it the way `ort` does (it exports `OrtGetApiBase` and reports the
+//! ONNX Runtime version `ort` requires), before handing it to
+//! `ort::init_from`. Without the filesystem check, Windows hangs indefinitely
 //! inside `ort::init_from` on a nonexistent path (reproduced 2026-04-22
-//! against pyke/ort 2.0.0-rc.12 + onnxruntime 1.24.4). The pre-check
-//! returns [`DecibriError::OrtPathInvalid`], deliberately a string-only
-//! variant that does *not* construct an `ort::Error`, because
-//! `ort::Error::new` itself calls `ortsys![CreateStatus]` and would
-//! re-trigger the very dylib load we're avoiding.
+//! against pyke/ort 2.0.0-rc.12 + onnxruntime 1.24.4). That check returns
+//! [`DecibriError::OrtPathInvalid`], deliberately a string-only variant that
+//! does *not* construct an `ort::Error`, because `ort::Error::new` itself
+//! calls `ortsys![CreateStatus]` and would re-trigger the very dylib load
+//! we're avoiding. The load check returns [`DecibriError::OrtLoadFailed`]
+//! carrying the `ort::LoadDynamicError` for the condition; a load that fails
+//! inside `ort` cannot be retried in a process, so every attempt against a
+//! file that is not a usable runtime has to fail the same typed way, which
+//! the retry tests below pin.
 //!
 //! Gated behind `feature = "ort-load-dynamic"` because the tests are
 //! meaningful only under the dynamic-load distribution mode: under
@@ -165,5 +171,148 @@ fn test_ort_load_fails_when_path_is_directory() {
             );
         }
         other => panic!("expected OrtPathInvalid, got {other:?}"),
+    }
+}
+
+/// A `VadConfig` for the bundled model with the given `ort_library_path`.
+fn config_for(ort_library_path: Option<PathBuf>) -> VadConfig {
+    let mut config = VadConfig::default();
+    config.model_path = bundled_model_path();
+    config.ort_library_path = ort_library_path;
+    config
+}
+
+/// A regular file in the temp directory that is not a shared library, named
+/// for this process so concurrent test binaries cannot collide.
+fn write_non_library(tag: &str) -> PathBuf {
+    let file = std::env::temp_dir().join(format!("decibri-{tag}-{}.bin", std::process::id()));
+    std::fs::write(&file, b"this is not a shared library\n").expect("write the fixture file");
+    file
+}
+
+/// The `ort::LoadDynamicError` an `OrtLoadFailed` carries as its source.
+fn load_dynamic_source(err: &DecibriError) -> Option<&ort::LoadDynamicError> {
+    std::error::Error::source(err).and_then(|source| source.downcast_ref::<ort::LoadDynamicError>())
+}
+
+/// A regular file that is not a loadable library fails with `OrtLoadFailed`
+/// carrying `ort::LoadDynamicError::Dlopen`, and a second attempt in the same
+/// process fails the same way: the pre-check rejects the file before `ort`
+/// loads anything, so nothing in the process changes between the attempts.
+#[test]
+fn test_ort_load_fails_the_same_way_twice_for_a_file_that_is_not_a_library() {
+    let _env = ENV_LOCK.lock().unwrap_or_else(PoisonError::into_inner);
+    let file = write_non_library("not-a-library");
+
+    for attempt in 1..=2 {
+        let err = SileroVad::new(config_for(Some(file.clone())))
+            .err()
+            .unwrap_or_else(|| panic!("attempt {attempt}: expected OrtLoadFailed"));
+        match &err {
+            DecibriError::OrtLoadFailed { path, .. } => {
+                assert_eq!(path, &file, "attempt {attempt}: OrtLoadFailed.path");
+            }
+            other => panic!("attempt {attempt}: expected OrtLoadFailed, got {other:?}"),
+        }
+        match load_dynamic_source(&err) {
+            Some(ort::LoadDynamicError::Dlopen { path, .. }) => {
+                assert_eq!(path, &file, "attempt {attempt}: Dlopen.path");
+            }
+            Some(other) => panic!("attempt {attempt}: expected Dlopen, got {other:?}"),
+            None => {
+                panic!("attempt {attempt}: OrtLoadFailed should carry an ort::LoadDynamicError")
+            }
+        }
+    }
+
+    let _ = std::fs::remove_file(&file);
+}
+
+/// A module that loads but is not ONNX Runtime, the test executable itself
+/// where the loader accepts an executable, fails with `OrtLoadFailed` on
+/// every attempt. The source is `MissingApi` where the module loads and
+/// `Dlopen` where the loader refuses an executable; it is never anything
+/// else, and the second attempt reports what the first did.
+#[test]
+fn test_ort_load_fails_the_same_way_twice_for_a_module_without_the_entry_point() {
+    let _env = ENV_LOCK.lock().unwrap_or_else(PoisonError::into_inner);
+    let exe = std::env::current_exe().expect("current_exe");
+
+    let mut first: Option<&'static str> = None;
+    for attempt in 1..=2 {
+        let err = SileroVad::new(config_for(Some(exe.clone())))
+            .err()
+            .unwrap_or_else(|| panic!("attempt {attempt}: expected OrtLoadFailed"));
+        match &err {
+            DecibriError::OrtLoadFailed { path, .. } => {
+                assert_eq!(path, &exe, "attempt {attempt}: OrtLoadFailed.path");
+            }
+            other => panic!("attempt {attempt}: expected OrtLoadFailed, got {other:?}"),
+        }
+        let variant = match load_dynamic_source(&err) {
+            Some(ort::LoadDynamicError::MissingApi { .. }) => "MissingApi",
+            Some(ort::LoadDynamicError::Dlopen { .. }) => "Dlopen",
+            Some(other) => {
+                panic!("attempt {attempt}: expected MissingApi or Dlopen, got {other:?}")
+            }
+            None => {
+                panic!("attempt {attempt}: OrtLoadFailed should carry an ort::LoadDynamicError")
+            }
+        };
+        #[cfg(target_os = "windows")]
+        assert_eq!(
+            variant, "MissingApi",
+            "attempt {attempt}: on Windows the executable loads as a module and lacks OrtGetApiBase"
+        );
+        match first {
+            None => first = Some(variant),
+            Some(previous) => assert_eq!(
+                variant, previous,
+                "the second attempt reports what the first did"
+            ),
+        }
+    }
+}
+
+/// With no `ort_library_path`, an `ORT_DYLIB_PATH` that names a regular file
+/// which is not a loadable library fails with `OrtLoadFailed` carrying
+/// `Dlopen`, on the first attempt and on the second. Without the load check
+/// this path reaches `ort::init()`, which loads lazily at the first C API
+/// call and panics there.
+///
+/// Environment note: sets `ORT_DYLIB_PATH` for its own scope under `ENV_LOCK`,
+/// like the bogus-path test above.
+#[test]
+fn test_ort_load_fails_the_same_way_twice_for_an_unusable_env_var_and_no_path() {
+    let _env = ENV_LOCK.lock().unwrap_or_else(PoisonError::into_inner);
+    let file = write_non_library("not-a-library-env");
+    std::env::set_var("ORT_DYLIB_PATH", &file);
+    let results: Vec<_> = (1..=2).map(|_| SileroVad::new(config_for(None))).collect();
+    std::env::remove_var("ORT_DYLIB_PATH");
+    let _ = std::fs::remove_file(&file);
+
+    for (index, result) in results.into_iter().enumerate() {
+        let attempt = index + 1;
+        let err = result
+            .err()
+            .unwrap_or_else(|| panic!("attempt {attempt}: expected OrtLoadFailed"));
+        match &err {
+            DecibriError::OrtLoadFailed { path, .. } => {
+                assert_eq!(
+                    path, &file,
+                    "attempt {attempt}: OrtLoadFailed.path is the ORT_DYLIB_PATH value"
+                );
+            }
+            other => panic!("attempt {attempt}: expected OrtLoadFailed, got {other:?}"),
+        }
+        match load_dynamic_source(&err) {
+            Some(ort::LoadDynamicError::Dlopen { path, .. }) => {
+                assert_eq!(path, &file, "attempt {attempt}: Dlopen.path");
+            }
+            Some(other) => panic!("attempt {attempt}: expected Dlopen, got {other:?}"),
+            None => {
+                panic!("attempt {attempt}: OrtLoadFailed should carry an ort::LoadDynamicError")
+            }
+        }
     }
 }
