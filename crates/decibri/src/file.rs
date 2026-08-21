@@ -1828,8 +1828,10 @@ mod tests {
         );
         let (at, len) = data.expect("the golden recording has a data chunk");
         bytes[at..at + len]
-            .chunks_exact(2)
-            .map(|c| f32::from(i16::from_le_bytes([c[0], c[1]])) / 32768.0)
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .map(|c| f32::from(i16::from_le_bytes(*c)) / 32768.0)
             .collect()
     }
 
@@ -2681,7 +2683,8 @@ mod tests {
         // the cursor without the caller ever seeing a delivery.
         assert!(
             refuses_after(|f| {
-                let _ = f.by_ref().peekable().peek().is_some();
+                let mut lookahead = f.by_ref().peekable();
+                let _ = lookahead.peek().is_some();
             }),
             "after peekable().peek()"
         );
@@ -2831,7 +2834,7 @@ mod tests {
         })
         .unwrap();
         let mut expected: Vec<f32> = Vec::new();
-        for window in samples.chunks_exact(512) {
+        for window in samples.as_chunks::<512>().0 {
             expected.push(detector.process(window).unwrap().probability);
         }
 

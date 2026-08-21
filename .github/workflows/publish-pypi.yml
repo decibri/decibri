@@ -150,8 +150,10 @@ jobs:
       # Mirrors python-ci.yml lines 178-305 for the host-build paths.
       - name: Compute ORT URL and archive digest
         if: runner.os != 'Linux'
-        id: ort-meta
         shell: bash
+        # The URL and digest travel to the download steps below as plain
+        # environment variables via GITHUB_ENV, not as step outputs, so no
+        # run block expands them through the template layer.
         run: |
           URL="https://github.com/microsoft/onnxruntime/releases/download/v${ORT_VERSION}/onnxruntime-${{ matrix.ort_platform_slug }}-${ORT_VERSION}.${{ matrix.ort_ext }}"
           case "${{ matrix.ort_platform_slug }}" in
@@ -166,8 +168,8 @@ jobs:
             echo "ERROR: the ORT_SHA256_* digest for ${{ matrix.ort_platform_slug }} is empty"
             exit 1
           fi
-          echo "url=${URL}" >> "$GITHUB_OUTPUT"
-          echo "sha256=${SHA256}" >> "$GITHUB_OUTPUT"
+          echo "ORT_URL=${URL}" >> "$GITHUB_ENV"
+          echo "ORT_SHA256=${SHA256}" >> "$GITHUB_ENV"
           echo "Resolved: ${URL}"
           echo "Expected SHA-256: ${SHA256}"
 
@@ -179,11 +181,11 @@ jobs:
         # unversioned to match what _ort_resolver.py looks for.
         run: |
           mkdir -p bindings/python/python/decibri/_ort
-          curl -sL --retry 3 --retry-delay 2 -o ort.tgz "${{ steps.ort-meta.outputs.url }}"
+          curl -sL --retry 3 --retry-delay 2 -o ort.tgz "$ORT_URL"
           ACTUAL=$(shasum -a 256 ort.tgz | cut -d' ' -f1)
-          if [ "$ACTUAL" != "${{ steps.ort-meta.outputs.sha256 }}" ]; then
-            echo "ERROR: SHA-256 mismatch for ${{ steps.ort-meta.outputs.url }}"
-            echo "  expected: ${{ steps.ort-meta.outputs.sha256 }}"
+          if [ "$ACTUAL" != "$ORT_SHA256" ]; then
+            echo "ERROR: SHA-256 mismatch for $ORT_URL"
+            echo "  expected: $ORT_SHA256"
             echo "  actual:   $ACTUAL"
             exit 1
           fi
@@ -197,11 +199,11 @@ jobs:
         run: |
           $ProgressPreference = 'SilentlyContinue'
           New-Item -ItemType Directory -Force -Path bindings/python/python/decibri/_ort | Out-Null
-          Invoke-WebRequest -Uri "${{ steps.ort-meta.outputs.url }}" -OutFile ort.zip -MaximumRetryCount 3 -RetryIntervalSec 2
-          $expected = "${{ steps.ort-meta.outputs.sha256 }}"
+          Invoke-WebRequest -Uri $env:ORT_URL -OutFile ort.zip -MaximumRetryCount 3 -RetryIntervalSec 2
+          $expected = $env:ORT_SHA256
           $actual = (Get-FileHash -Path ort.zip -Algorithm SHA256).Hash.ToLowerInvariant()
           if ($actual -ne $expected) {
-            Write-Host "ERROR: SHA-256 mismatch for ${{ steps.ort-meta.outputs.url }}"
+            Write-Host "ERROR: SHA-256 mismatch for $env:ORT_URL"
             Write-Host "  expected: $expected"
             Write-Host "  actual:   $actual"
             exit 1

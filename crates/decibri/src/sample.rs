@@ -56,9 +56,11 @@ pub fn i16_le_bytes_to_f32(bytes: &[u8]) -> Vec<f32> {
         "i16_le_bytes_to_f32 expects an even-length buffer; a trailing odd byte is dropped"
     );
     bytes
-        .chunks_exact(2)
+        .as_chunks::<2>()
+        .0
+        .iter()
         .map(|c| {
-            let val = i16::from_le_bytes([c[0], c[1]]);
+            let val = i16::from_le_bytes(*c);
             val as f32 / 32768.0
         })
         .collect()
@@ -70,8 +72,10 @@ pub fn i16_le_bytes_to_f32(bytes: &[u8]) -> Vec<f32> {
 /// Used by the output path: JS sends f32 LE bytes, Rust needs f32 for cpal.
 pub fn f32_le_bytes_to_f32(bytes: &[u8]) -> Vec<f32> {
     bytes
-        .chunks_exact(4)
-        .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .map(|c| f32::from_le_bytes(*c))
         .collect()
 }
 
@@ -243,8 +247,10 @@ mod tests {
 
         // Reconstruct i16 values
         let i16_samples: Vec<i16> = bytes
-            .chunks_exact(2)
-            .map(|c| i16::from_le_bytes([c[0], c[1]]))
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .map(|c| i16::from_le_bytes(*c))
             .collect();
 
         // Convert back to f32
@@ -266,8 +272,10 @@ mod tests {
         let bytes = f32_to_f32_le_bytes(&original);
 
         let reconstructed: Vec<f32> = bytes
-            .chunks_exact(4)
-            .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .map(|c| f32::from_le_bytes(*c))
             .collect();
 
         assert_eq!(original, reconstructed);

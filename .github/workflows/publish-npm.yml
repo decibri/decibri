@@ -172,11 +172,12 @@ jobs:
           echo "OK: tarball is available"
 
       - name: Resolve the ONNX Runtime archive digest
-        id: ort-digest
         shell: bash
         # Selects the workflow-level ORT_SHA256_* digest for this platform's
         # archive. Each download step below compares the archive against it
-        # before extracting anything.
+        # before extracting anything. The digest travels to those steps as a
+        # plain environment variable via GITHUB_ENV, not as a step output,
+        # so no run block expands it through the template layer.
         run: |
           case "${{ matrix.ort_platform_slug }}" in
             linux-x64)     SHA256="$ORT_SHA256_LINUX_X64" ;;
@@ -192,7 +193,7 @@ jobs:
             echo "ERROR: the ORT_SHA256_* digest for ${{ matrix.ort_platform_slug }} is empty"
             exit 1
           fi
-          echo "sha256=${SHA256}" >> "$GITHUB_OUTPUT"
+          echo "ORT_SHA256=${SHA256}" >> "$GITHUB_ENV"
           echo "Expected SHA-256: ${SHA256}"
 
       - name: Download and extract ONNX Runtime (macOS)
@@ -202,9 +203,9 @@ jobs:
           URL="https://github.com/microsoft/onnxruntime/releases/download/v${ORT_VERSION}/onnxruntime-${{ matrix.ort_platform_slug }}-${ORT_VERSION}.tgz"
           curl -sL --retry 3 --retry-delay 2 -o ort.tgz "$URL"
           ACTUAL=$(shasum -a 256 ort.tgz | cut -d' ' -f1)
-          if [ "$ACTUAL" != "${{ steps.ort-digest.outputs.sha256 }}" ]; then
+          if [ "$ACTUAL" != "$ORT_SHA256" ]; then
             echo "ERROR: SHA-256 mismatch for $URL"
-            echo "  expected: ${{ steps.ort-digest.outputs.sha256 }}"
+            echo "  expected: $ORT_SHA256"
             echo "  actual:   $ACTUAL"
             exit 1
           fi
@@ -231,9 +232,9 @@ jobs:
           URL="https://github.com/microsoft/onnxruntime/releases/download/v${ORT_VERSION}/onnxruntime-${{ matrix.ort_platform_slug }}-${ORT_VERSION}.tgz"
           curl -sL --retry 3 --retry-delay 2 -o ort.tgz "$URL"
           ACTUAL=$(sha256sum ort.tgz | cut -d' ' -f1)
-          if [ "$ACTUAL" != "${{ steps.ort-digest.outputs.sha256 }}" ]; then
+          if [ "$ACTUAL" != "$ORT_SHA256" ]; then
             echo "ERROR: SHA-256 mismatch for $URL"
-            echo "  expected: ${{ steps.ort-digest.outputs.sha256 }}"
+            echo "  expected: $ORT_SHA256"
             echo "  actual:   $ACTUAL"
             exit 1
           fi
@@ -254,7 +255,7 @@ jobs:
           $ProgressPreference = 'SilentlyContinue'  # speeds up Invoke-WebRequest
           $url = "https://github.com/microsoft/onnxruntime/releases/download/v$env:ORT_VERSION/onnxruntime-${{ matrix.ort_platform_slug }}-$env:ORT_VERSION.zip"
           Invoke-WebRequest -Uri $url -OutFile ort.zip -MaximumRetryCount 3 -RetryIntervalSec 2
-          $expected = "${{ steps.ort-digest.outputs.sha256 }}"
+          $expected = $env:ORT_SHA256
           $actual = (Get-FileHash -Path ort.zip -Algorithm SHA256).Hash.ToLowerInvariant()
           if ($actual -ne $expected) {
             Write-Host "ERROR: SHA-256 mismatch for $url"

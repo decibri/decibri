@@ -845,7 +845,7 @@ mod tests {
         // takes; it pins the entire per-window probability trajectory,
         // including LSTM state evolution across the two bursts.
         let mut actual: Vec<f32> = Vec::with_capacity(GOLDEN_WINDOWS);
-        for window in fixture.chunks_exact(GOLDEN_WINDOW_SIZE) {
+        for window in fixture.as_chunks::<GOLDEN_WINDOW_SIZE>().0 {
             let result = vad.process(window).unwrap();
             actual.push(result.probability);
         }
@@ -1216,7 +1216,7 @@ mod tests {
 
         let mut vad = SileroVad::new(default_config()).unwrap();
         let mut actual: Vec<f32> = Vec::new();
-        for window in samples.chunks_exact(GOLDEN_WINDOW_SIZE) {
+        for window in samples.as_chunks::<GOLDEN_WINDOW_SIZE>().0 {
             actual.push(vad.process(window).unwrap().probability);
         }
 
@@ -1314,7 +1314,9 @@ mod tests {
         let window_probs = |input: &[f32]| -> Vec<f32> {
             let mut vad = SileroVad::new(default_config()).unwrap();
             input
-                .chunks_exact(GOLDEN_WINDOW_SIZE)
+                .as_chunks::<GOLDEN_WINDOW_SIZE>()
+                .0
+                .iter()
                 .map(|w| vad.process(w).unwrap().probability)
                 .collect()
         };

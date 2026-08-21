@@ -191,7 +191,6 @@ jobs:
         run: uv sync --dev --locked
 
       - name: Compute ORT platform metadata
-        id: ort-meta
         shell: bash
         # Maps RUNNER_OS + RUNNER_ARCH to the upstream ONNX Runtime
         # tarball naming convention. The four expected combinations
@@ -200,7 +199,9 @@ jobs:
         # matrix is conditional (sized by trigger) so the slug cannot be
         # carried as a matrix dimension; computing it here keeps a single
         # source of truth and lets the preflight + download steps below
-        # share one URL and one archive digest.
+        # share one URL and one archive digest. The values travel to those
+        # steps as plain environment variables via GITHUB_ENV, not as step
+        # outputs, so no run block expands them through the template layer.
         run: |
           case "${RUNNER_OS}-${RUNNER_ARCH}" in
             Linux-X64)    SLUG="linux-x64";     EXT="tgz"; SHA256="$ORT_SHA256_LINUX_X64" ;;
@@ -217,10 +218,10 @@ jobs:
             exit 1
           fi
           URL="https://github.com/microsoft/onnxruntime/releases/download/v${ORT_VERSION}/onnxruntime-${SLUG}-${ORT_VERSION}.${EXT}"
-          echo "slug=${SLUG}" >> "$GITHUB_OUTPUT"
-          echo "ext=${EXT}" >> "$GITHUB_OUTPUT"
-          echo "url=${URL}" >> "$GITHUB_OUTPUT"
-          echo "sha256=${SHA256}" >> "$GITHUB_OUTPUT"
+          echo "ORT_SLUG=${SLUG}" >> "$GITHUB_ENV"
+          echo "ORT_EXT=${EXT}" >> "$GITHUB_ENV"
+          echo "ORT_URL=${URL}" >> "$GITHUB_ENV"
+          echo "ORT_SHA256=${SHA256}" >> "$GITHUB_ENV"
           echo "Resolved: ${URL}"
           echo "Expected SHA-256: ${SHA256}"
 
@@ -232,7 +233,7 @@ jobs:
         # an opaque mid-build failure. Same pattern in production for the
         # Node release pipeline since 3.0.
         run: |
-          URL="${{ steps.ort-meta.outputs.url }}"
+          URL="$ORT_URL"
           echo "Verifying: $URL"
           if ! curl -sIfL --retry 3 --retry-delay 2 -o /dev/null "$URL"; then
             echo "ERROR: expected ONNX Runtime tarball not available at $URL"
@@ -252,14 +253,14 @@ jobs:
         # post-pip-install. Renamed to unversioned to match what the Python
         # resolver looks for under python/decibri/_ort/.
         run: |
-          SLUG="${{ steps.ort-meta.outputs.slug }}"
-          URL="${{ steps.ort-meta.outputs.url }}"
+          SLUG="$ORT_SLUG"
+          URL="$ORT_URL"
           mkdir -p bindings/python/python/decibri/_ort
           curl -sL --retry 3 --retry-delay 2 -o ort.tgz "$URL"
           ACTUAL=$(shasum -a 256 ort.tgz | cut -d' ' -f1)
-          if [ "$ACTUAL" != "${{ steps.ort-meta.outputs.sha256 }}" ]; then
+          if [ "$ACTUAL" != "$ORT_SHA256" ]; then
             echo "ERROR: SHA-256 mismatch for $URL"
-            echo "  expected: ${{ steps.ort-meta.outputs.sha256 }}"
+            echo "  expected: $ORT_SHA256"
             echo "  actual:   $ACTUAL"
             exit 1
           fi
@@ -306,10 +307,10 @@ jobs:
         # future GPU EP integration needs it, revisit.
         run: |
           $ProgressPreference = 'SilentlyContinue'
-          $url = "${{ steps.ort-meta.outputs.url }}"
+          $url = $env:ORT_URL
           New-Item -ItemType Directory -Force -Path bindings/python/python/decibri/_ort | Out-Null
           Invoke-WebRequest -Uri $url -OutFile ort.zip -MaximumRetryCount 3 -RetryIntervalSec 2
-          $expected = "${{ steps.ort-meta.outputs.sha256 }}"
+          $expected = $env:ORT_SHA256
           $actual = (Get-FileHash -Path ort.zip -Algorithm SHA256).Hash.ToLowerInvariant()
           if ($actual -ne $expected) {
             Write-Host "ERROR: SHA-256 mismatch for $url"
@@ -318,7 +319,7 @@ jobs:
             exit 1
           }
           Expand-Archive -Path ort.zip -DestinationPath .
-          $src = "onnxruntime-${{ steps.ort-meta.outputs.slug }}-$env:ORT_VERSION"
+          $src = "onnxruntime-$env:ORT_SLUG-$env:ORT_VERSION"
           Copy-Item "$src/lib/onnxruntime.dll" bindings/python/python/decibri/_ort/
 
       - name: Inspect onnxruntime.dll imports (Windows, diagnostic)
