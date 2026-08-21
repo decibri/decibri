@@ -138,11 +138,14 @@ jobs:
           - os: windows-11-arm
             python-version: "3.10"
     env:
-      # Drives uv's interpreter selection per matrix entry. Replaces the
-      # previous workflow-wide UV_PYTHON: "3.10" pin (single-version CI was
-      # the abi3-floor canary; the matrix now exercises every supported
-      # runtime explicitly).
-      UV_PYTHON: ${{ matrix.python-version }}
+      # Drives uv's interpreter selection per matrix entry. The install step
+      # installs this request and every uv command in the job resolves it.
+      # On windows-11-arm the request names the native architecture, because
+      # uv's default on Windows ARM64 selects an x86_64 CPython that runs
+      # under emulation, and the build backend uv installs for that
+      # interpreter then builds for x86_64, which the runner's aarch64-hosted
+      # Rust toolchain cannot do.
+      UV_PYTHON: ${{ matrix.os == 'windows-11-arm' && format('cpython-{0}-windows-aarch64-none', matrix.python-version) || matrix.python-version }}
     # Action references are pinned to commit SHAs with a `# vX.Y.Z` version
     # comment that dependabot parses for updates. The policy, and its one
     # exception (dtolnay/rust-toolchain), live in .github/zizmor.yml, which
@@ -186,14 +189,17 @@ jobs:
         # interpreter it can install is 3.11, which is why the 3.10 cell is
         # excluded above.
         #
+        # The request comes from the job-level UV_PYTHON, so the interpreter
+        # installed here is the one every later uv command resolves. uv
+        # prints the full key of the interpreter it installed, architecture
+        # included.
+        #
         # `shell: bash` is required, not cosmetic: the matrix includes
-        # windows-latest, whose default shell is pwsh, and `$PYTHON_VERSION`
+        # windows-latest, whose default shell is pwsh, and `$UV_PYTHON`
         # below is bash syntax. pwsh reads it as an undefined PowerShell
         # variable and passes an empty argument to `uv python install`.
         shell: bash
-        env:
-          PYTHON_VERSION: ${{ matrix.python-version }}
-        run: uv python install "$PYTHON_VERSION"
+        run: uv python install "$UV_PYTHON"
 
       - name: Sync dev environment (locked)
         working-directory: bindings/python
