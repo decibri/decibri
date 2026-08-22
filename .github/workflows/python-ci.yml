@@ -151,7 +151,7 @@ jobs:
     # exception (dtolnay/rust-toolchain), live in .github/zizmor.yml, which
     # enforces them across every workflow.
     steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
 
@@ -168,7 +168,7 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@stable
 
-      - uses: Swatinem/rust-cache@23869a5bd66c73db3c0ac40331f3206eb23791dc # v2.9.1
+      - uses: Swatinem/rust-cache@f0d9c3887740aee45f6153b24b3a6b815192ec16 # v2.9.1
         with:
           # Distinct from ci.yml's "rust" shared-key. The two workflows'
           # target graphs diverge (napi cdylib vs pyo3 cdylib + python3-dll-a
@@ -176,7 +176,7 @@ jobs:
           # state independently without write contention.
           shared-key: "rust-python"
 
-      - uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
+      - uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
         with:
           enable-cache: true
           cache-dependency-glob: "bindings/python/uv.lock"
