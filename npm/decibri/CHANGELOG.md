@@ -11,6 +11,10 @@ For other decibri packages, see:
 
 ## [Unreleased]
 
+### Changed
+
+- `File.save` and `AudioWriter` refuse an AIFF above 32767 channels, reported as a `DecibriError` with code `AUDIO_FORMAT_UNSUPPORTED` carrying the container layer's own text (`File.save` rejects with it; `AudioWriter` destroys the stream with it when the stream finishes), the refusal a FLAC above 8 channels and a WAV above 32767 already receive: an AIFF `COMM` chunk's `numChannels` is a signed 16-bit field, so 32767 is the format's own maximum. There is nothing a caller needs to do, because no container decibri writes accepts more. Reading an AIFF, every count up to 32767, WAV, FLAC and `File.buffer` delivery at any count are unchanged.
+
 ### Fixed
 
 - With a VAD active on a multichannel stream that has an enhancement step enabled, the detector feed holds two seconds of frames at every channel count and evicts whole frames. A stream whose delivered block exceeded the feed's bound (more than 20 channels at 16 kHz, or 60 at 48 kHz, at the default `framesPerBuffer` of 1600; fewer channels with a larger `framesPerBuffer`) lost feed frames on every block, and at a channel count that does not divide the bound also fed the detector a channel other than the one `vad: { source }` named. Mono streams and streams with no enhancement step are unchanged.
