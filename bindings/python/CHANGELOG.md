@@ -8,6 +8,12 @@ For Rust core (`crates/decibri`) and npm package (`npm/decibri`) changes, see [t
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+
+- With a VAD active on a multichannel stream that has an enhancement step enabled, the detector feed holds two seconds of frames at every channel count and evicts whole frames. A stream whose delivered block exceeded the feed's bound (more than 20 channels at 16 kHz, or 60 at 48 kHz, at the default `frames_per_buffer` of 1600; fewer channels with a larger `frames_per_buffer`) lost feed frames on every block, and at a channel count that does not divide the bound also fed the detector a channel other than the one `detector_source` named. Mono streams and streams with no enhancement step are unchanged.
+
 ## [0.12.0] - 2026-08-21
 
 ### Added

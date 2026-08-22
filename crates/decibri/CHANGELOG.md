@@ -9,6 +9,12 @@ For other decibri packages, see:
 - npm package: [npm/decibri/CHANGELOG.md](../../npm/decibri/CHANGELOG.md)
 - Python package: [bindings/python/CHANGELOG.md](../../bindings/python/CHANGELOG.md)
 
+## [Unreleased]
+
+### Fixed
+
+- The capture stream's pre-transform detector tap (`vad_input` / `detector_feed`) holds two seconds of frames at every channel count and evicts whole frames. The bound was sized in samples, so a multichannel tap held `2 / channels` seconds, and at a channel count that does not divide the bound's sample count (3 at 16 kHz, for example) an eviction left a partial frame at the front of the tap and every later drain read frames shifted by that offset: a `DetectorSource::Channel` feed carried a channel other than the one named, and an `Average` feed averaged across frame boundaries. Only a tap that passes its bound is affected, which is a consumer that does not drain it once per delivered block, or a delivered block larger than the bound at that channel count. Mono streams, streams with no enhancement step and `File` are unchanged.
+
 ## [6.3.0] - 2026-08-21
 
 ### Added
