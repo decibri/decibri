@@ -20,7 +20,7 @@ license = "Apache-2.0"
 repository = "https://github.com/decibri/decibri"
 
 [workspace.dependencies]
-cpal = "0.17"
+cpal = "0.18"
 thiserror = "2"
 crossbeam-channel = "0.5"
 # ort 2.0.0-rc.13 targets ONNX Runtime C API version 28 (ORT_API_VERSION = 28).
