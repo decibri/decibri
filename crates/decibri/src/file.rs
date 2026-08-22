@@ -882,10 +882,12 @@ impl File {
     ///
     /// Each container's own channel ceiling applies, reported as
     /// [`DecibriError::AudioFormatUnsupported`] carrying the container
-    /// layer's own text: a FLAC frame carries at most 8 channels, and a WAV
+    /// layer's own text: a FLAC frame carries at most 8 channels, a WAV
     /// `fmt ` chunk's `nBlockAlign` is a 16-bit field, so at the 16-bit
-    /// samples decibri writes a WAV holds at most 32767 channels. decibri
-    /// enforces no ceiling of its own on any format.
+    /// samples decibri writes a WAV holds at most 32767 channels, and an
+    /// AIFF `COMM` chunk's `numChannels` is a signed 16-bit field, so an
+    /// AIFF holds at most 32767 channels. decibri enforces no ceiling of
+    /// its own on any format.
     ///
     /// A finite sample outside `[-1.0, 1.0]`, which AGC or AEC without a
     /// limiter can produce, is clamped to full scale and counted in the
@@ -3876,10 +3878,46 @@ mod tests {
         });
     }
 
-    /// The negative control on the channel count: where no container limit
-    /// applies, the whole path serves `u16::MAX` channels, delivery and AIFF
-    /// save alike. An invented decibri-side maximum added anywhere on the
-    /// file path fails here loudly.
+    /// AIFF's ceiling is `numChannels`, the signed 16-bit field of the
+    /// `COMM` chunk: 32767 channels are written and read back exactly, and
+    /// 32768 are refused with the container layer's exact text forwarded.
+    /// Both sides of the boundary are the container layer's answer, not
+    /// decibri's.
+    #[test]
+    fn aiff_limit_is_the_signed_comm_field_not_decibris() {
+        with_save_path("over.aiff", |path| {
+            let file =
+                File::buffer(vec![0.0; 32768], 16000, 32768, channels_config(32768)).unwrap();
+            let err = file
+                .save(path, SaveOptions::default())
+                .expect_err("the save should be refused");
+            match &err {
+                DecibriError::AudioFormatUnsupported { reason } => {
+                    assert_eq!(
+                        reason, "32768-channel audio is not a supported layout",
+                        "the refusal is the container layer's own text"
+                    );
+                }
+                other => panic!("expected AudioFormatUnsupported, got {other:?}"),
+            }
+        });
+
+        let source = grid_samples(32767);
+        with_save_path("wide.aiff", |path| {
+            let file = File::buffer(source.clone(), 16000, 32767, channels_config(32767)).unwrap();
+            file.save(path, SaveOptions::default()).unwrap();
+            let back = collect_at(File::open(path, channels_config(32767)).unwrap(), 32767);
+            assert_eq!(back, source, "the boundary itself is accepted");
+        });
+    }
+
+    /// The negative control on the channel count: decibri invents no
+    /// maximum of its own on the file path. Delivery serves `u16::MAX`
+    /// channels, the widest count a `FileConfig` can name, and the only
+    /// ceiling a save meets is each container's own, pinned at its boundary
+    /// by the three container tests above. An invented decibri-side maximum
+    /// on delivery fails here loudly; one on the save path fails the
+    /// container test it undercuts.
     #[test]
     fn no_invented_channel_maximum_on_the_file_path() {
         let channels = u16::MAX;
@@ -3889,16 +3927,5 @@ mod tests {
             channels,
         );
         assert_eq!(delivered, source, "delivery serves u16::MAX channels");
-
-        with_save_path("widest.aiff", |path| {
-            let file =
-                File::buffer(source.clone(), 16000, channels, channels_config(channels)).unwrap();
-            file.save(path, SaveOptions::default()).unwrap();
-            let back = collect_at(
-                File::open(path, channels_config(channels)).unwrap(),
-                channels,
-            );
-            assert_eq!(back, source, "AIFF carries the count unbounded");
-        });
     }
 }

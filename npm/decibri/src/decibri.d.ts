@@ -928,9 +928,10 @@ export interface AudioWriterOptions extends SaveOptions, WritableOptions {
    * number of frames at this count. Bounded below at `1` (the default);
    * above it, each container's own ceiling applies (a FLAC frame carries at
    * most 8 channels; a WAV `fmt ` chunk's `nBlockAlign` is a 16-bit field,
-   * so 16-bit samples allow at most 32767), reported when the stream
-   * finishes as the container layer's own refusal. decibri enforces no
-   * ceiling of its own.
+   * so 16-bit samples allow at most 32767; an AIFF `COMM` chunk's
+   * `numChannels` is a signed 16-bit field, so at most 32767), reported
+   * when the stream finishes as the container layer's own refusal. decibri
+   * enforces no ceiling of its own.
    * @default 1
    */
   channels?: number;
