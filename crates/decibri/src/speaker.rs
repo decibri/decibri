@@ -111,7 +111,12 @@ fn render_output(
 
     let mut written = 0;
 
-    // First, play any leftover from the accumulator.
+    // First, play any leftover from the accumulator. `data` is a whole number
+    // of frames (asserted in `Speaker::start`), so the accumulator's front
+    // always lands on a frame boundary, and this drain removes exactly the
+    // count it copied, so the played stream is the sent samples in order.
+    // Removing any other count here would rotate the channels of everything
+    // queued behind it.
     if !accum.is_empty() {
         let take = accum.len().min(data.len());
         data[..take].copy_from_slice(&accum[..take]);
@@ -499,6 +504,13 @@ impl Speaker {
         // Realtime render callback: fill the buffer from the playback queue.
         // Identical work as before; the seam wraps only stream construction.
         let on_data: OutputDataCallback = Box::new(move |data: &mut [f32]| {
+            // The backend fills whole frames: the buffer length is a multiple
+            // of the channel count, which keeps the accumulator drain in
+            // `render_output` on a frame boundary.
+            debug_assert!(
+                data.len().is_multiple_of(usize::from(channels)),
+                "the output buffer holds a whole number of frames"
+            );
             render_output(
                 data,
                 &mut accum,

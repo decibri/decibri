@@ -16,7 +16,7 @@ All commits, tags, and registry publishes are performed manually. If a task appe
 
 ## Code Quality
 
-- Run `cargo clippy --workspace -- -D warnings` before committing Rust changes. Fix all warnings. Do not suppress with `#[allow]`.
+- Run `cargo clippy --workspace --all-targets -- -D warnings` before committing Rust changes. Fix all warnings. Do not suppress with `#[allow]`.
 - Run `cargo fmt --all -- --check` before committing. If it reports formatting drift, run `cargo fmt --all` and stage the result.
 - Run `cargo test-decibri` after any Rust changes to verify no regressions. This alias (defined in `.cargo/config.toml`) builds with `ort-download-binaries` so VAD tests run without a pre-staged ORT dylib; plain `cargo test -p decibri` hangs on VAD tests in a fresh workspace.
 - Run `node tests/test-capture.js`, `node tests/test-api.js`, `node tests/test-output.js`, `node tests/test-vad-silero.js` after JS or napi binding changes.
@@ -29,7 +29,6 @@ All commits, tags, and registry publishes are performed manually. If a task appe
 ## API Compatibility
 
 - The Node.js `Decibri` class API is frozen. Do not change constructor options, event names, method signatures, or error messages without explicit approval.
-- Downstream consumers (mcp-listen, voxagent, Wake Word) depend on exact API compatibility. Any change must be tested against all three.
 - Error messages are exact string matches. Do not rephrase them.
 
 ## CI
@@ -43,5 +42,5 @@ All commits, tags, and registry publishes are performed manually. If a task appe
 ## Changelog
 
 - Update `CHANGELOG.md` when adding features, fixing bugs, or making breaking changes.
-- Add entries under the `## [<next-version>] - Unreleased` section in the appropriate subsection (Added, Changed, Fixed, Removed).
+- Add entries under the `## [Unreleased]` section in the appropriate subsection (Added, Changed, Fixed, Removed). At a release that heading becomes `## [X.Y.Z] - YYYY-MM-DD`.
 - Use [Keep a Changelog](https://keepachangelog.com) format. One bullet per change, concise. A version section that contains breaking changes opens with a `### Breaking changes` heading above those subsections; the heading groups the breaking entries and replaces none of the named types.

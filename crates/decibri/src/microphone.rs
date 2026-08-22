@@ -489,14 +489,16 @@ pub struct AudioChunk {
 #[cfg(feature = "capture")]
 const CAPTURE_CHANNEL_CAPACITY: usize = 64;
 
-/// Memory bound for the pre-transform VAD tap, in seconds of audio at the target
+/// Memory bound for the pre-transform VAD tap, in seconds of frames at the target
 /// rate. The tap accumulates the post-normalize signal in lockstep with the
 /// delivered output and is drained by [`MicrophoneStream::vad_input`]. A consumer
 /// that enables an enhancement step but never drains the tap would otherwise grow
-/// memory without limit; beyond this many seconds the oldest tapped samples are
-/// dropped. Sized far above the in-flight reblock depth and any transform
-/// latency, so an actively draining VAD never reaches it even when the tap leads
-/// the delivered output (as it does once a length-changing denoise stage runs).
+/// memory without limit; beyond this many seconds the oldest tapped frames are
+/// dropped, whole frames at a time, so the tap holds the same duration at every
+/// channel count and stays on its frame boundary. Sized far above the in-flight
+/// reblock depth and any transform latency, so an actively draining VAD never
+/// reaches it even when the tap leads the delivered output (as it does once a
+/// length-changing denoise stage runs).
 #[cfg(feature = "capture")]
 const VAD_TAP_BOUND_SECS: usize = 2;
 
@@ -625,8 +627,10 @@ pub struct MicrophoneStream {
     // Copied from the configuration at start and fixed for the stream's
     // lifetime.
     detector_source: DetectorSource,
-    // Memory bound (in samples) for `vad_tap`, computed from the target rate at
-    // construction (see `VAD_TAP_BOUND_SECS`). Oldest tapped samples are dropped
+    // Memory bound for `vad_tap`, in interleaved samples: `VAD_TAP_BOUND_SECS`
+    // seconds of frames at the target rate, multiplied by `tap_channels`, so it
+    // is always a whole number of frames and holds the same duration at every
+    // channel count. Computed at construction. Oldest tapped frames are dropped
     // beyond this so a consumer that enables an enhancement step but never drains
     // `vad_input` cannot grow memory without limit. Never reached while a VAD
     // actively drains the tap, so it does not perturb alignment.
@@ -993,14 +997,27 @@ impl MicrophoneStream {
     /// the [`VAD_TAP_BOUND_SECS`] memory bound. A no-op when the tap is inactive
     /// (no transform). The bound only trips when a transform is enabled but the
     /// tap is not being drained, so it never perturbs an actively draining VAD.
+    ///
+    /// The eviction drains whole frames at `tap_channels`: every push is a whole
+    /// number of frames, so the tap stays on its frame boundary and a later
+    /// [`detector_feed`](Self::detector_feed) collapses real frames rather than
+    /// a run shifted by a partial one. The excess rounds up to the frame, which
+    /// keeps the tap at or under the bound.
     fn push_vad_tap(&self, samples: Vec<f32>) {
         if let Some(tap) = &self.vad_tap {
             let mut tap = tap.lock().unwrap_or_else(PoisonError::into_inner);
             tap.extend(samples);
             if tap.len() > self.vad_tap_cap {
-                let excess = tap.len() - self.vad_tap_cap;
+                let frame = usize::from(self.tap_channels);
+                let excess = (tap.len() - self.vad_tap_cap)
+                    .next_multiple_of(frame)
+                    .min(tap.len());
                 tap.drain(..excess);
             }
+            debug_assert!(
+                tap.len().is_multiple_of(usize::from(self.tap_channels)),
+                "the VAD tap holds a whole number of frames after eviction"
+            );
         }
     }
 
@@ -1091,6 +1108,10 @@ impl MicrophoneStream {
     pub fn vad_input(&self, samples: usize) -> Option<Vec<f32>> {
         let tap = self.vad_tap.as_ref()?;
         let mut tap = tap.lock().unwrap_or_else(PoisonError::into_inner);
+        debug_assert!(
+            tap.len().is_multiple_of(usize::from(self.tap_channels)),
+            "the VAD tap holds a whole number of frames before a drain"
+        );
         let take = samples.min(tap.len());
         Some(tap.drain(..take).collect())
     }
@@ -1660,17 +1681,21 @@ impl Microphone {
         let tap_channels = capture_stage
             .as_ref()
             .map_or(native_channels, CaptureStage::tap_channels);
-        let vad_tap_cap = target_rate as usize * VAD_TAP_BOUND_SECS;
+        // The bound is sized in frames and held in interleaved samples at the
+        // tap count, so it is a whole number of frames at every channel count.
+        let vad_tap_cap_frames = target_rate as usize * VAD_TAP_BOUND_SECS;
+        let vad_tap_cap = vad_tap_cap_frames * usize::from(tap_channels);
         // The tap memory bound must sit far above the chain's conditioning
         // latency, so an actively draining detector never reaches it even when a
         // length-changing stage leaves the tap leading the delivered output.
         // Checked once here, not per block, since the latency is fixed when the
-        // chain is built.
+        // chain is built. The latency is a per-channel figure, so it is checked
+        // against the bound in frames.
         debug_assert!(
             capture_stage
                 .as_ref()
                 .map_or(0, CaptureStage::transform_latency)
-                < vad_tap_cap,
+                < vad_tap_cap_frames,
             "the VAD tap memory bound must exceed the chain's transform latency"
         );
 
@@ -1753,7 +1778,7 @@ mod tests {
             vad_tap,
             tap_channels,
             detector_source: DetectorSource::Average,
-            vad_tap_cap: 16000 * VAD_TAP_BOUND_SECS,
+            vad_tap_cap: 16000 * VAD_TAP_BOUND_SECS * usize::from(tap_channels),
             chain_flushed: AtomicBool::new(false),
             #[cfg(feature = "aec")]
             aec_reference: None,
@@ -2765,6 +2790,95 @@ mod tests {
                 .expect("a multichannel delivered chunk is collapsed");
             assert_eq!(feed, expected, "the delivered path feeds {source:?} alone");
         }
+    }
+
+    /// Past its memory bound the tap evicts whole frames. Exercised at a
+    /// channel count that does not divide the bound's frame count (3 at
+    /// 16 kHz: two seconds is 32 000 frames), where an eviction that drains a
+    /// raw sample count leaves a partial frame at the front and every later
+    /// frame reads shifted by that offset. Each sample encodes its channel and
+    /// frame (`channel * 1e6 + frame`), so a shift is visible: a `Channel`
+    /// source returns another channel's values while every length still
+    /// agrees. Regression: an eviction that leaves the tap off its frame
+    /// boundary for the rest of the stream.
+    fn assert_tap_evicts_whole_frames(channels: u16) {
+        let stage = build_capture_stage(
+            channels,
+            channels,
+            16_000,
+            16_000,
+            Transforms {
+                dc_removal: true,
+                ..Default::default()
+            },
+        )
+        .unwrap()
+        .expect("a transform builds a chain");
+        let (stream, _sender, _running) =
+            test_stream_with_source(Some(stage), channels, DetectorSource::Channel(1));
+        assert_eq!(
+            stream.tap_channels, channels,
+            "the chain taps at the device count"
+        );
+
+        // Push well past the bound in whole-frame blocks, every sample naming
+        // its channel and frame.
+        let block_frames = 400;
+        let blocks = 100;
+        for b in 0..blocks {
+            let block: Vec<f32> = (0..block_frames)
+                .flat_map(|f| {
+                    let frame = (b * block_frames + f) as f32;
+                    (0..channels).map(move |c| f32::from(c) * 1e6 + frame)
+                })
+                .collect();
+            stream.push_vad_tap(block);
+        }
+        assert!(
+            blocks * block_frames * channels as usize > stream.vad_tap_cap,
+            "the pushes cross the bound"
+        );
+        let len = stream
+            .vad_tap
+            .as_ref()
+            .expect("a transform keeps the tap active")
+            .lock()
+            .unwrap()
+            .len();
+        assert!(len <= stream.vad_tap_cap, "the tap holds at most its bound");
+
+        // One delivered block's feed reads channel 1 alone, frame after frame.
+        let delivered = vec![0.0_f32; block_frames * channels as usize];
+        let feed = stream
+            .detector_feed(&delivered)
+            .expect("a transform keeps the tap active");
+        assert_eq!(feed.len(), block_frames, "the feed is one sample per frame");
+        for (i, &s) in feed.iter().enumerate() {
+            let channel = (s / 1e6).floor();
+            assert!(
+                channel == 1.0,
+                "feed sample {i} reads channel {channel}, not channel 1 \
+                 (the tap held {len} samples at {channels} channels before the drain)"
+            );
+        }
+        for (i, pair) in feed.windows(2).enumerate() {
+            assert!(
+                (pair[1] - pair[0] - 1.0).abs() < 1e-6,
+                "feed frames are consecutive at {i} ({} then {})",
+                pair[0],
+                pair[1]
+            );
+        }
+        assert!(
+            len.is_multiple_of(channels as usize),
+            "the tap holds a whole number of frames after eviction \
+             ({len} samples at {channels} channels)"
+        );
+    }
+
+    #[test]
+    fn the_tap_evicts_whole_frames_past_its_bound() {
+        assert_tap_evicts_whole_frames(3);
     }
 
     /// `validate` refuses a detector source at or above the configured
