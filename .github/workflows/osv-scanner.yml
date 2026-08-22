@@ -57,13 +57,13 @@ jobs:
     steps:
       # Action references are pinned to commit SHAs with a version comment,
       # per the policy in .github/zizmor.yml.
-      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
       # Pinned exactly, as cargo-deny and zizmor are. The scanner is installed
       # from its GitHub release rather than run as a container action, which
       # keeps the version visible here instead of inside an image tag.
-      - uses: taiki-e/install-action@cb33e69fad06166ca28a42b2575e4dadabf62ee8 # v2.85.8
+      - uses: taiki-e/install-action@5b4d68e2e660441203ab128a23676f1e4faf1532 # v2.86.3
         with:
           tool: osv-scanner@2.4.0
       # Recursive from the repository root, so a lockfile added later is
@@ -78,7 +78,7 @@ jobs:
         run: osv-scanner scan source --recursive --format=sarif --output-file=results.sarif ./
       - name: Upload results to the Security tab
         if: ${{ !cancelled() && hashFiles('results.sarif') != '' }}
-        uses: github/codeql-action/upload-sarif@5595ccaf912efad79be6eef63a5619ff05969be3 # v4.37.6
+        uses: github/codeql-action/upload-sarif@ff2f1c621b7f889edc0d3c761ac2e6a3f8cdb0dd # v4.37.7
         with:
           sarif_file: results.sarif
           category: osv-scanner
