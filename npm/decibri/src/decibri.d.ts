@@ -828,9 +828,10 @@ export declare class File extends Readable {
 
   /**
    * Wrap in-memory samples as an offline source. `samples` must be a
-   * `Float32Array` of mono samples in [-1.0, 1.0]; a raw `Buffer` of PCM
-   * bytes is rejected as ambiguous. `inputRate` is required (raw samples
-   * carry no header). Synchronous: no I/O is involved.
+   * `Float32Array` of samples in [-1.0, 1.0], frame-interleaved at
+   * `inputChannels` (1, mono, by default); a raw `Buffer` of PCM bytes is
+   * rejected as ambiguous. `inputRate` is required (raw samples carry no
+   * header). Synchronous: no I/O is involved.
    */
   static buffer(samples: Float32Array, options: FileBufferOptions): File;
 
@@ -876,11 +877,11 @@ export declare class File extends Readable {
   /**
    * Write the conditioned recording to disk, off the event loop. Runs the
    * recording once through the same conditioning pass iteration delivers,
-   * whole, and writes it as 16-bit PCM mono at `sampleRate`. The container
-   * comes from the path's extension (`.wav`, `.aiff`, `.aif`, `.aifc` or
-   * `.flac`), or from `options.format`: decibri reads a file by its content
-   * and writes one by its name. Consumes the source (a `File` is a single
-   * pass).
+   * whole, and writes it as 16-bit PCM at `sampleRate`, frame-interleaved at
+   * the delivered channel count. The container comes from the path's
+   * extension (`.wav`, `.aiff`, `.aif`, `.aifc` or `.flac`), or from
+   * `options.format`: decibri reads a file by its content and writes one by
+   * its name. Consumes the source (a `File` is a single pass).
    *
    * Resolves to a `SaveReport`: how many samples were clamped to full scale
    * and how many non-finite samples were replaced (NaN as silence, an

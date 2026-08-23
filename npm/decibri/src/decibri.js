@@ -1423,8 +1423,9 @@ class File extends Readable {
   /**
    * Write the conditioned recording to disk, off the event loop. Runs the
    * recording once through the same conditioning pass iteration delivers,
-   * whole, and writes it as 16-bit PCM mono at `sampleRate`. Consumes the
-   * source: a save is a single pass, separate from iteration and analysis.
+   * whole, and writes it as 16-bit PCM at `sampleRate`, frame-interleaved at
+   * the delivered channel count. Consumes the source: a save is a single
+   * pass, separate from iteration and analysis.
    *
    * The container comes from the path's extension (`.wav`, `.aiff`, `.aif`,
    * `.aifc` or `.flac`), or from `options.format`: decibri reads a file by

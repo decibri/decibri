@@ -2302,9 +2302,10 @@ class File:
         """Write the conditioned recording to ``path`` as an audio file.
 
         Runs the recording once through the same conditioning pass
-        iteration delivers, whole, and writes it as 16-bit PCM mono at
-        ``sample_rate``. Consumes the source: a save is a single pass,
-        separate from iteration and analysis.
+        iteration delivers, whole, and writes it as 16-bit PCM at
+        ``sample_rate``, frame-interleaved at the delivered channel count.
+        Consumes the source: a save is a single pass, separate from
+        iteration and analysis.
 
         The container comes from the path's extension (``.wav``, ``.aiff``,
         ``.aif``, ``.aifc`` or ``.flac``), or from ``format``: decibri
