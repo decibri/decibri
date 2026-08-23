@@ -54,13 +54,13 @@ rules:
     ignore:
       - publish-npm.yml
 
-  # Remaining expansions in these two workflows are values the workflow
+  # The remaining expansions in publish-pypi.yml are values the workflow
   # computed itself: a static build matrix and the ORT download URL derived
   # from it by an earlier step. No external input reaches them. The
   # expansions that did carry external input (the crates.io and GitHub API
   # responses in check-upstream.yml, and the tag name in the publish
-  # workflows) are passed through `env:` instead.
+  # workflows) are passed through `env:` instead. python-ci.yml expands
+  # nothing into a run block and needs no entry here.
   template-injection:
     ignore:
       - publish-pypi.yml
-      - python-ci.yml
