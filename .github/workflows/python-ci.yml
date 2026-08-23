@@ -105,16 +105,16 @@ jobs:
         # manual dispatch for comprehensive coverage. Roughly 60% reduction
         # in push-triggered CI minutes vs. the prior 4 OS x 5 Python shape.
         #
-        # OS matrix (full) mirrors release.yml's cross-platform precedent:
+        # OS matrix (full) mirrors publish-npm.yml's cross-platform precedent:
         # - ubuntu-latest         (x86_64-unknown-linux-gnu)
         # - ubuntu-24.04-arm      (aarch64-unknown-linux-gnu)
         # - windows-latest        (x86_64-pc-windows-msvc)
         # - windows-11-arm        (aarch64-pc-windows-msvc; Python 3.11 and
         #                          newer, see the exclude below)
         # - macos-14              (aarch64-apple-darwin; Apple Silicon only,
-        #                          no Intel coverage matching release.yml)
+        #                          no Intel coverage matching publish-npm.yml)
         # macos-14 is pinned (not macos-latest) for consistency with
-        # release.yml; pin-bumping is a deliberate cross-workflow action.
+        # publish-npm.yml; pin-bumping is a deliberate cross-workflow action.
         # ubuntu-24.04-arm is the explicit pin for native ARM64 runners.
         #
         # Python version matrix (full): floor 3.10 per pyproject.toml
@@ -240,7 +240,6 @@ jobs:
           fi
           URL="https://github.com/microsoft/onnxruntime/releases/download/v${ORT_VERSION}/onnxruntime-${SLUG}-${ORT_VERSION}.${EXT}"
           echo "ORT_SLUG=${SLUG}" >> "$GITHUB_ENV"
-          echo "ORT_EXT=${EXT}" >> "$GITHUB_ENV"
           echo "ORT_URL=${URL}" >> "$GITHUB_ENV"
           echo "ORT_SHA256=${SHA256}" >> "$GITHUB_ENV"
           echo "Resolved: ${URL}"
@@ -248,7 +247,7 @@ jobs:
 
       - name: Verify ONNX Runtime tarball availability
         shell: bash
-        # Mirrors release.yml lines 131-143: HEAD-check the URL before
+        # Mirrors the same step in publish-npm.yml: HEAD-check the URL before
         # the heavier download runs, so a Microsoft asset rename or yank
         # surfaces immediately with a clear error message rather than as
         # an opaque mid-build failure. Same pattern in production for the
@@ -268,7 +267,7 @@ jobs:
       - name: Download and extract ONNX Runtime (macOS)
         if: runner.os == 'macOS'
         shell: bash
-        # Mirrors release.yml lines 145-155. cp -L dereferences the
+        # Mirrors the same step in publish-npm.yml. cp -L dereferences the
         # symlink chain (libonnxruntime.dylib -> libonnxruntime.<ver>.dylib)
         # so the bundled file is a real signed dylib, not a dangling link
         # post-pip-install. Renamed to unversioned to match what the Python
@@ -292,7 +291,7 @@ jobs:
       - name: Verify libonnxruntime.dylib codesign (macOS, diagnostic)
         if: runner.os == 'macOS'
         continue-on-error: true
-        # Non-gating mirror of release.yml lines 157-167: cp -L on a real
+        # Non-gating mirror of publish-npm.yml's same step: cp -L on a real
         # file preserves signed bytes but does not preserve the original
         # filename the signature may be scoped to. Microsoft's upstream
         # dylib is signed; this surfaces whether the rename invalidates
@@ -319,10 +318,10 @@ jobs:
       - name: Download and extract ONNX Runtime (Windows)
         if: runner.os == 'Windows'
         shell: pwsh
-        # Mirrors release.yml lines 185-195. The Windows zip ships
+        # Mirrors the same step in publish-npm.yml. The Windows zip ships
         # onnxruntime.dll (no rename needed; upstream name matches what
         # the Python resolver looks for) and onnxruntime_providers_shared.dll;
-        # we bundle only the main DLL, matching release.yml's proven Node
+        # we bundle only the main DLL, matching publish-npm.yml's proven Node
         # distribution. CPU EP (the only path Phase 3 uses per master-plan
         # Decision 1) does not load providers_shared on Windows. If a
         # future GPU EP integration needs it, revisit.

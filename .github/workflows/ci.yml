@@ -108,10 +108,12 @@ jobs:
         run: cargo test-decibri
       # Exercise the ort-load-dynamic load-failure path (compiled out by the
       # test-decibri alias, which uses download-binaries). The failure-path
-      # tests pass a bad ort_library_path and assert the OrtPathInvalid
-      # pre-check fires, so they need no real ORT dylib. Runs on every OS,
-      # which matters most on Windows where the original init_from hang
-      # reproduced.
+      # tests point ort_library_path or ORT_DYLIB_PATH at something that is
+      # not a usable ONNX Runtime and assert the pre-check fires:
+      # OrtPathInvalid where the path is missing or is not a regular file,
+      # OrtLoadFailed where the file exists but does not load as the runtime.
+      # They need no real ORT dylib. Runs on every OS, which matters most on
+      # Windows where the original init_from hang reproduced.
       - name: ORT load-dynamic failure-path tests
         run: cargo test -p decibri --no-default-features --features capture,playback,vad,denoise,gain,ort-load-dynamic --test vad_ort_load_failure
 
