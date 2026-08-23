@@ -30,13 +30,15 @@
 //! | `capture`               | on      | Microphone input stream support              |
 //! | `playback`              | on      | Speaker output stream support                |
 //! | `vad`                   | on      | Silero voice-activity detection (pulls `ort`)|
+//! | `denoise`               | on      | Capture-path single-channel speech enhancement (pulls `ort`)|
+//! | `gain`                  | on      | Capture-path AGC and peak limiter (pure DSP) |
 //! | `aec`                   | on      | Acoustic echo cancellation on the capture path|
 //! | `ort-load-dynamic`      | on      | ONNX Runtime loaded at runtime from a path   |
 //! | `ort-download-binaries` | off     | ONNX Runtime downloaded at build time        |
 //!
 //! `ort-load-dynamic` and `ort-download-binaries` are mutually exclusive;
-//! selecting both is a compile error. Disabling `vad` drops the ONNX Runtime
-//! dependency entirely.
+//! selecting both is a compile error. `vad` and `denoise` each pull in ONNX
+//! Runtime; disabling both drops the dependency entirely.
 //!
 //! Execution-provider features (`coreml`, `cuda`, `directml`, `rocm`) are off by
 //! default and opt in to GPU acceleration on specific platforms. See

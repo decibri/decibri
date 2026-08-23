@@ -5,7 +5,7 @@ build-backend = "maturin"
 [project]
 name = "decibri"
 version = "0.12.0"
-description = "Cross-platform audio capture, playback, and voice activity detection"
+description = "Cross-platform audio capture, conditioning, and playback for Python, with voice activity detection on live and recorded audio"
 readme = "README.md"
 requires-python = ">=3.10"
 license = { text = "Apache-2.0" }

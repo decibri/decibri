@@ -1,7 +1,7 @@
 {
   "name": "decibri",
   "version": "5.7.0",
-  "description": "Cross-platform audio capture, playback, and processing for Node.js and browsers",
+  "description": "Cross-platform audio capture, conditioning, and playback for Node.js and browsers, with voice activity detection on live and recorded audio",
   "main": "src/decibri.js",
   "types": "src/decibri.d.ts",
   "browser": "./src/browser/index.js",

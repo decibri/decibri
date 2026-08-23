@@ -6,11 +6,12 @@ Reference guide to the Cargo features exposed by the `decibri` crate. Aimed at R
 
 | Flag | Default | Purpose |
 |------|---------|---------|
-| `capture` | on | Microphone input stream support (pulls in `cpal`, `crossbeam-channel`) |
+| `capture` | on | Microphone input stream support (pulls in `cpal`, `crossbeam-channel`, `decibri-resampler`, `decibri-decode`) |
 | `playback` | on | Speaker output stream support (pulls in `cpal`, `crossbeam-channel`) |
 | `vad` | on | Silero VAD ONNX inference (pulls in `ort`) |
 | `denoise` | on | On by default; no runtime cost when off |
 | `gain` | on | On by default; no runtime cost when off |
+| `aec` | on | Acoustic echo cancellation on the capture path (pulls in `decibri-aec`) |
 | `ort-load-dynamic` | **on** | ORT loaded at runtime from a user-supplied path |
 | `ort-download-binaries` | off | ORT downloaded at build time, statically embedded |
 | `coreml` | off | ORT CoreML execution provider passthrough (macOS) |
@@ -18,7 +19,7 @@ Reference guide to the Cargo features exposed by the `decibri` crate. Aimed at R
 | `directml` | off | ORT DirectML execution provider passthrough (Windows) |
 | `rocm` | off | ORT ROCm execution provider passthrough (Linux AMD) |
 
-The default feature set is `["capture", "playback", "vad", "denoise", "gain", "ort-load-dynamic"]`, giving the full decibri experience with runtime ORT loading. This is the set decibri's own Node.js and Python bindings build against.
+The default feature set is `["capture", "playback", "vad", "denoise", "gain", "aec", "ort-load-dynamic"]`, giving the full decibri experience with runtime ORT loading. This is the set decibri's own Node.js and Python bindings build against.
 
 ## Choosing an ORT distribution mode
 
@@ -71,12 +72,13 @@ To switch modes in a consumer crate, disable default features and enable the one
 ```toml
 # Cargo.toml of a consumer
 [dependencies]
-decibri = { version = "3.3", default-features = false, features = [
+decibri = { version = "6", default-features = false, features = [
     "capture",
     "playback",
     "vad",
     "denoise",
     "gain",
+    "aec",
     "ort-download-binaries",
 ] }
 ```
@@ -97,9 +99,9 @@ Internally, the ONNX session builder selects an execution provider per session, 
 ## Feature constraints
 
 - `capture` and `playback` both depend on `cpal`. Disabling both removes all cpal code. Without either you have only VAD and sample conversion, which is rarely useful on its own.
-- `vad` pulls in `ort` as an optional dependency (`dep:ort`). Without `vad`, the `ort-load-dynamic` / `ort-download-binaries` features are no-ops since the `ort` crate is not in the dependency graph.
-- Builds without `vad` compile cleanly: the `ort::Error`-carrying `DecibriError` variants are all `#[cfg(feature = "vad")]`-gated, so a build such as `--no-default-features --features capture,playback,denoise,gain` has no `ort` in its dependency graph. The CI "Feature Combinations" job checks this and the other supported combinations on every push.
-- `docs.rs` builds the published documentation with `["capture", "playback", "vad", "denoise", "gain", "ort-download-binaries"]` so docs.rs builders do not need a runtime ORT dylib. See `[package.metadata.docs.rs]` in `crates/decibri/Cargo.toml`.
+- `vad` and `denoise` each pull in `ort` as an optional dependency (`dep:ort`). Without both, the `ort-load-dynamic` / `ort-download-binaries` features are no-ops since the `ort` crate is not in the dependency graph.
+- Builds without `vad` and `denoise` compile cleanly: the ONNX Runtime error variants of `DecibriError` are all `#[cfg(any(feature = "vad", feature = "denoise"))]`-gated, so a build such as `--no-default-features --features capture,playback` has no `ort` in its dependency graph. The CI "Feature Combinations" job checks this and the other supported combinations on every push.
+- `docs.rs` builds the published documentation with `["capture", "playback", "vad", "denoise", "gain", "aec", "ort-download-binaries"]` so docs.rs builders do not need a runtime ORT dylib. See `[package.metadata.docs.rs]` in `crates/decibri/Cargo.toml`.
 
 ## Related documentation
 

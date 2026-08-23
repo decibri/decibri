@@ -146,7 +146,7 @@ for s in &report.segments {
 
 ### Without ONNX Runtime
 
-If you do not need Silero VAD, disable the `vad` feature to drop the ONNX Runtime dependency entirely.
+If you need neither Silero VAD nor the denoise stage, disable the `vad` and `denoise` features to drop the ONNX Runtime dependency entirely.
 
 ## Feature flags
 

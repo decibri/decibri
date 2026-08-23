@@ -1,6 +1,6 @@
 # Decibri
 
-Cross-platform audio capture, playback, and processing for Python.
+Cross-platform audio capture, conditioning, and playback for Python, with voice activity detection on live and recorded audio.
 
 [![PyPI version](https://img.shields.io/pypi/v/decibri.svg)](https://pypi.org/project/decibri/)
 [![Python versions](https://img.shields.io/pypi/pyversions/decibri.svg)](https://pypi.org/project/decibri/)
@@ -102,7 +102,7 @@ with decibri.Speaker(sample_rate=24000, channels=1) as spk:
 
 - `Microphone`: synchronous audio capture
 - `Speaker`: synchronous audio output
-- `File`: offline source; conditions a recording or in-memory samples and analyzes it for speech
+- `File`: offline source; conditions a recording or in-memory samples, analyzes it for speech, or writes it back out
 - `AsyncMicrophone`: async-await audio capture
 - `AsyncSpeaker`: async-await audio output
 - `AsyncFile`: async-await offline source
@@ -117,7 +117,7 @@ with decibri.Speaker(sample_rate=24000, channels=1) as spk:
 
 ### Value types
 
-`MicrophoneInfo`, `SpeakerInfo`, `VersionInfo`, `Chunk`, `VadReport`, `VadWindow`, `Segment`.
+`MicrophoneInfo`, `SpeakerInfo`, `VersionInfo`, `Chunk`, `VadReport`, `VadWindow`, `Segment`, `AecMetrics`, `AecChannelMetrics`, `SaveReport`, and the config objects `Vad` and `Aec`.
 
 ### Exceptions
 
@@ -175,6 +175,38 @@ with decibri.Microphone(
 
 The denoise model is bundled in the wheel (the same way the Silero VAD model is), so `denoise="fastenhancer-t"` needs no download. VAD reads the signal before the chain, so `mic.vad_score` and `mic.is_speaking` are unaffected by which conditioning stages you enable. The same options are available on `AsyncMicrophone`.
 
+## Echo cancellation
+
+Acoustic echo cancellation removes the echo of far-end audio (what your application is playing out) from the captured audio. It is opt-in: pass `aec="tau"` on the `Microphone` constructor and push the far-end audio through `push_aec_reference()` as it is played, in played order. Leave `aec` unset and the capture path is unchanged; with no reference pushed the captured audio passes through unchanged. The canceller runs before voice activity detection, so `mic.vad_score` and `mic.is_speaking` read the echo-removed signal and playback stops triggering detection. It requires `sample_rate` in 8000 to 48000; a rate outside that raises `AecSampleRateUnsupported` at construction.
+
+`aec="tau"` selects the model with its defaults; an `Aec` config object tunes it:
+
+| Field | Default | Value |
+| --- | --- | --- |
+| `model` | `"tau"` | `"tau"`, the one model |
+| `tail_ms` | `None` (the canceller's 200) | int ms, 16 to 500 |
+| `suppression` | `None` (the canceller's `"conservative"`) | `"conservative"` or `"off"` |
+| `reference_sample_rate` | `None` (the capture `sample_rate`) | int Hz, 1000 to 384000 |
+| `reference_channels` | `1` | int, at least 1 |
+
+```python
+import decibri
+
+with decibri.Microphone(sample_rate=16000, aec="tau") as mic:
+    # Push the far-end audio as it is played, in played order: the same
+    # input shapes Speaker.write accepts, in the microphone's dtype.
+    mic.push_aec_reference(far_end_pcm)
+    for chunk in mic:
+        handle(chunk)                  # echo-cancelled int16 PCM bytes
+        metrics = mic.aec_metrics()    # AecMetrics while capture runs
+```
+
+`push_aec_reference()` never blocks and never raises on a full queue: samples that do not fit are discarded and counted by `aec_metrics().reference_dropped`. Silence between played audio need not be pushed. The canceller reads one mono reference: a reference at a `reference_sample_rate` other than the capture rate is converted before the canceller sees it, and with `reference_channels` above 1 each frame is averaged to one mono sample. With `channels` above 1, one canceller runs per delivered channel, each fed the same pushed reference, so one push serves every channel.
+
+`aec_metrics()` returns an `AecMetrics` dataclass, the canceller's report merged with the reference queue's counters (`delay_samples`, `erle_db`, `double_talk`, `reference_starved`, `acquisition_parked`, `reference_reanchors`, `reference_dropped`, `reference_silence`), or `None` when `aec` is unset or capture is not running. Its `channels` tuple holds one `AecChannelMetrics` per delivered channel, in delivered order; the top-level fields report the first delivered channel's. `erle_db` is not a quality ranking across channels: it rises with echo distance, so a far microphone reports a higher figure than a near one while removing less echo in absolute terms.
+
+The same `aec` parameter is available on `AsyncMicrophone`. `push_aec_reference()` is a plain method there too, so a renderer callback calls it without awaiting; `aec_metrics()` is awaited.
+
 ## Files
 
 Everything a `Microphone` does to live audio, `File` does to audio you already have: the same conditioning options (`dc_removal`, `denoise`, `highpass`, `agc`, `limiter`), the same iteration, the same conditioned chunks out, and the same opt-in `vad=`. A `File` reads WAV, AIFF, AIFF-C and FLAC (`File("clip.wav")`, or the identical `File.open("clip.wav")`; the container is identified from the file's own bytes rather than its extension) or wraps in-memory samples (`File.buffer(samples, input_rate=48000)`; raw samples carry no header, so their native rate is explicit). `sample_rate` stays the target output rate, the same meaning it has on `Microphone`, so a 44.1 kHz recording comes out at 16 kHz unless you set it.
@@ -189,7 +221,18 @@ for segment in report.segments:
     print(segment.start, segment.end)                 # merged speech regions
 ```
 
-`analyze()` requires VAD: a `File` built without `vad=` raises `VadNotConfigured` rather than constructing a detector silently. With `vad=` set, metadata iteration (`iter_with_metadata()`) carries per-chunk `vad_score` and `is_speaking` exactly as the microphone does, with one deliberate difference: on a `File`, the speaking holdoff and the `Chunk.timestamp` are measured in FILE time (sample positions in seconds), never wall-clock time, so a file processed faster than real time still reports correct speech timing. Iteration and analysis are separate single passes; construct one `File` per operation. `AsyncFile` mirrors the whole surface with `async` semantics.
+`analyze()` requires VAD: a `File` built without `vad=` raises `VadNotConfigured` rather than constructing a detector silently. With `vad=` set, metadata iteration (`iter_with_metadata()`) carries per-chunk `vad_score` and `is_speaking` exactly as the microphone does, with one deliberate difference: on a `File`, the speaking holdoff and the `Chunk.timestamp` are measured in FILE time (sample positions in seconds), never wall-clock time, so a file processed faster than real time still reports correct speech timing.
+
+A `File` can also be written back out. `save(path, format=None, compression=None)` runs the recording once through the same conditioning pass iteration delivers and writes it as 16-bit PCM at `sample_rate`, at the delivered channel count, in WAV, AIFF or FLAC:
+
+```python
+report = decibri.File("noisy.wav", denoise="fastenhancer-t").save("clean.flac")
+print(report.clipped_samples, report.non_finite_samples)
+```
+
+The container comes from the path's extension (`.wav`, `.aiff`, `.aif`, `.aifc` or `.flac`) or from `format`; an extension it does not recognise raises `AudioFormatUnsupported` rather than defaulting. `compression` sets the FLAC compression level, 0 to 8 with 5 the default. The returned `SaveReport` says what the write did to the samples: `clipped_samples` counts finite samples outside full scale clamped to `[-1.0, 1.0]`, and `non_finite_samples` counts non-finite samples that never reach the file (NaN is written as silence, an infinity as full scale). Saving consumes the source and raises `FileEngaged` once iteration has begun, exactly as `analyze()` does.
+
+Iteration, analysis and saving are separate single passes; construct one `File` per operation. `AsyncFile` mirrors the whole surface with `async` semantics, `await file.save(...)` included.
 
 ## Compatibility
 

@@ -1,6 +1,7 @@
 """decibri Python bindings.
 
-Cross-platform audio capture, output, and voice activity detection.
+Cross-platform audio capture, conditioning, and playback for Python, with
+voice activity detection on live and recorded audio.
 
 Public surface: ``Microphone`` and ``Speaker`` (sync), ``AsyncMicrophone``
 and ``AsyncSpeaker`` (async). Construct directly via the class

@@ -110,6 +110,7 @@ Creates a Readable stream that captures from the microphone.
 | `highpass` | `80` \| `100` | off | High-pass cutoff in Hz (second-order Butterworth) that removes low-frequency rumble. Runs after denoise. Out-of-set values throw a `RangeError` |
 | `agc` | number | off | AGC target level in dBFS, an integer in -40 to -3 (typical -18). Runs after the high-pass. Out-of-range throws a `RangeError` |
 | `limiter` | number | off | Peak limiter ceiling in dBFS, a number in -3.0 to 0.0 (typical -1.0). Runs last. Out-of-range throws a `RangeError` |
+| `aec` | `'tau'` \| `AecOptions` | off | Acoustic echo cancellation of the far-end audio pushed through `pushAecReference`. `'tau'` names the model; an object `{ model, tailMs, suppression, referenceSampleRate, referenceChannels }` tunes it. Runs before voice activity detection, so `vadScore` and the `'speech'` / `'silence'` events read the echo-removed signal. Requires `sampleRate` in 8000 to 48000. See [Echo cancellation](#echo-cancellation) |
 
 Standard `ReadableOptions` (e.g. `highWaterMark`) are also accepted.
 
@@ -122,6 +123,8 @@ Multichannel capture delivers interleaved frames: each chunk holds `framesPerBuf
 | Method | Description |
 | --- | --- |
 | `mic.stop()` | Stop capture and end stream. Safe to call multiple times |
+| `mic.pushAecReference(data)` | Queue far-end reference audio for the echo canceller, pushed as it is played, in played order. Accepts the same input shapes `Speaker.write` accepts. Never blocks and never throws on a full queue; a no-op when `aec` is unset. See [Echo cancellation](#echo-cancellation) |
+| `mic.aecMetrics()` | The echo canceller's metrics, or `null` when `aec` is unset or capture is not running |
 | `Microphone.open(options?)` | Construct without blocking the event loop. Returns a `Promise<Microphone>`. See [Non-blocking API](#non-blocking-api) |
 | `Microphone.devices()` | List available input devices |
 | `Microphone.version()` | Version info: `{ decibri, audioBackend, binding }` |
@@ -340,6 +343,42 @@ setTimeout(() => mic.stop(), 5000);
 
 VAD reads the signal before the chain, so `vadScore` and the `'speech'` / `'silence'` events are unaffected by which conditioning stages you enable. The conditioning chain runs in the native Node.js capture path; the browser build does not include it.
 
+## Echo cancellation
+
+Acoustic echo cancellation removes the echo of far-end audio (what your application is playing out) from the captured audio. It is opt-in: set `aec` on the `Microphone` and push the far-end audio through `pushAecReference` as it is played, in played order. With `aec` unset the capture path is unchanged, and with no reference pushed the captured audio passes through unchanged. The canceller runs before voice activity detection, so `vadScore` and the `'speech'` / `'silence'` events read the echo-removed signal and playback stops triggering detection. It requires `sampleRate` in 8000 to 48000.
+
+`aec: 'tau'` selects the model with its defaults; an `AecOptions` object tunes it:
+
+| Option | Default | Range |
+| --- | --- | --- |
+| `model` | required | `'tau'`, the one model |
+| `tailMs` | 200 | 16 to 500 ms |
+| `suppression` | `'conservative'` | `'conservative'` or `'off'` |
+| `referenceSampleRate` | the capture `sampleRate` | 1000 to 384000 Hz |
+| `referenceChannels` | 1 | 1 or more |
+
+```javascript
+const { Microphone, Speaker } = require('decibri');
+
+const mic = new Microphone({ sampleRate: 16000, aec: 'tau' });
+const speaker = new Speaker({ sampleRate: 16000, channels: 1 });
+
+// Push the far-end audio as it is played, in played order: the same
+// input shapes Speaker.write accepts, in the microphone's dtype.
+function playFarEnd(pcmBuffer) {
+  speaker.write(pcmBuffer);
+  mic.pushAecReference(pcmBuffer);
+}
+
+mic.on('data', (chunk) => { /* Buffer of echo-cancelled Int16 PCM */ });
+```
+
+`pushAecReference` never blocks and never throws on a full queue: samples that do not fit are discarded and counted by `aecMetrics().referenceDropped`. Silence between played audio need not be pushed. The canceller reads one mono reference: a reference at a `referenceSampleRate` other than the capture rate is converted before the canceller sees it, and with `referenceChannels` above 1 each frame is averaged to one mono sample. With `channels` above 1, one canceller runs per delivered channel, each fed the same pushed reference, so one push serves every channel.
+
+`aecMetrics()` returns the canceller's report merged with the reference queue's counters (`delaySamples`, `erleDb`, `doubleTalk`, `referenceStarved`, `acquisitionParked`, `referenceReanchors`, `referenceDropped`, `referenceSilence`), or `null` when `aec` is unset or capture is not running. Its `channels` array carries each delivered channel's report in delivered order; the top-level fields report the first delivered channel's. `erleDb` is not a quality ranking across channels: it rises with echo distance, so a far microphone reports a higher figure than a near one while removing less echo in absolute terms.
+
+Echo cancellation runs in the native Node.js capture path; the browser `Microphone` does not take the option, because browser capture already carries the platform's own echo cancellation through its `echoCancellation` constraint, on by default.
+
 ## ONNX Runtime telemetry
 
 Silero mode (`vad: 'silero'`) and the ACE `denoise` stage run on ONNX Runtime, which carries its own telemetry, separate from anything decibri does. Decibri disables it on the environment it commits when it initializes the runtime. Set `DECIBRI_ORT_TELEMETRY=1` in the environment before first use to leave it enabled; every other value, an empty value, and an absent variable leave it disabled.
@@ -356,9 +395,26 @@ Everything a `Microphone` does to live audio, `File` does to audio you already h
 - `new File(path, options?)`: the same result, synchronous (blocks on disk I/O; fine for scripts).
 - `File.buffer(samples, options)`: wrap a `Float32Array` of samples you already hold. `options.inputRate` is required (raw samples carry no header); a raw `Buffer` of bytes is rejected as ambiguous. `options.inputChannels` states the interleave of the samples, `1` by default, the channel counterpart of `inputRate`.
 - `await file.analyze()` (also spelled `analyse()`): consume the source and resolve to a `VadReport` of per-window `scores` (`{ start, end, vadScore, isSpeech }`) and merged speech `segments` (`{ start, end }`), in seconds of file time. Requires `vad: 'silero'`; a `File` opened without `vad` rejects with `analysis requires VAD`.
+- `await file.save(path, options?)`: write the conditioned recording to disk, off the event loop, as 16-bit PCM at `sampleRate` and at the delivered channel count, in WAV, AIFF or FLAC. The container comes from the path's extension (`.wav`, `.aiff`, `.aif`, `.aifc` or `.flac`) or from `options.format`; an extension it does not recognise rejects rather than defaulting. `options.compression` sets the FLAC compression level, 0 to 8 with 5 the default. Resolves to a `SaveReport` (`{ clippedSamples, nonFiniteSamples }`). Consumes the source, and rejects with `FILE_ENGAGED` once the stream is engaged, exactly as `analyze()` does.
 - `file.vadScore`, `'speech'` / `'silence'` events: per-chunk VAD alongside the stream, with the holdoff measured in FILE time (sample positions), never wall-clock time, so processing speed does not change the reported events.
 
-Options mirror `Microphone` (`sampleRate`, `channels`, `channelMap`, `dtype`, `vad`, `dcRemoval`, `denoise`, `highpass`, `agc`, `limiter`), with `channels` and `channelMap` read against the source's own channel count (the file's header, or `inputChannels` for `File.buffer`) where the live path reads the device's report, and the vad `source` naming a delivered channel exactly as on `Microphone`; the live-capture options (`device`, `framesPerBuffer`) do not apply. Iteration and analysis are separate single passes: construct one `File` per operation. Note: Node also has a global `File` (the web File API); import decibri's explicitly to avoid shadowing surprises.
+Options mirror `Microphone` (`sampleRate`, `channels`, `channelMap`, `dtype`, `vad`, `dcRemoval`, `denoise`, `highpass`, `agc`, `limiter`), with `channels` and `channelMap` read against the source's own channel count (the file's header, or `inputChannels` for `File.buffer`) where the live path reads the device's report, and the vad `source` naming a delivered channel exactly as on `Microphone`; the live-capture options (`device`, `framesPerBuffer`, `aec`) do not apply. A save clamps finite samples outside full scale to `[-1.0, 1.0]` and counts them in `clippedSamples`, and replaces non-finite samples before they reach the file (NaN as silence, an infinity as full scale), counted in `nonFiniteSamples`. Iteration, analysis and saving are separate single passes: construct one `File` per operation. Note: Node also has a global `File` (the web File API); import decibri's explicitly to avoid shadowing surprises.
+
+## API: AudioWriter (file sink)
+
+`AudioWriter` is a Writable file sink for PCM audio: the stream to pair with decibri's Readable sources (`File`, `Microphone`) and with any other stream of PCM bytes. It collects the whole stream, then writes it as one audio file when the stream finishes, exactly as `File.save` writes: the same containers from the same extension rule, the same 16-bit PCM encoding, the same clamp and non-finite handling, the same bytes.
+
+```javascript
+const { pipeline } = require('node:stream/promises');
+const { File, AudioWriter } = require('decibri');
+
+await pipeline(
+  new File('noisy.wav', { denoise: 'fastenhancer-t' }),
+  new AudioWriter('clean.flac', { sampleRate: 16000 }),
+);
+```
+
+`sampleRate` is required (raw audio carries no header to read a rate from). `channels` (default 1) and `dtype` (default `'int16'`) describe the incoming bytes: the stream's total sample count must be a whole number of frames at `channels`, and each container's own channel ceiling applies at the write. The `File.save` options (`format`, `compression`) are accepted as well. `'finish'` fires after the file is on disk, and `writer.report` then carries the `SaveReport`; a failure destroys the stream with the error.
 
 ## Device Selection
 
