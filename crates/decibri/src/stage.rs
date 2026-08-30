@@ -119,6 +119,10 @@ impl<'a> Block<'a> {
     }
 
     /// Whether the block carries no samples.
+    ///
+    /// Read by the denoise and echo-cancellation stages and by the descriptor
+    /// tests, so it is compiled only where one of those is.
+    #[cfg(any(feature = "aec", feature = "denoise", test))]
     pub(crate) fn is_empty(&self) -> bool {
         self.samples.is_empty()
     }
@@ -1180,6 +1184,7 @@ impl<T: InPlaceDsp> Stage for PerChannel<T> {
 ///
 /// `Send` for the same reason as [`InPlaceDsp`]; `pub(crate)` so the engines
 /// authored in [`crate::gain`] can implement it.
+#[cfg(feature = "gain")]
 pub(crate) trait LinkedDsp: Send {
     /// Filter `planar` in place: `channels` contiguous equal-length runs, one
     /// detector reading per frame across the channels, one gain applied to
@@ -1193,8 +1198,10 @@ pub(crate) trait LinkedDsp: Send {
 /// [`Stage`] default no-op. The wrapped engine holds one detector and one
 /// gain whatever the count, so no per-instance count is stored; the chain's
 /// resolved-count assertions in the walks hold the count steady.
+#[cfg(feature = "gain")]
 struct Linked<T: LinkedDsp>(T);
 
+#[cfg(feature = "gain")]
 impl<T: LinkedDsp> Stage for Linked<T> {
     fn process(&mut self, input: Block<'_>, out: &mut Vec<f32>) -> Result<(), DecibriError> {
         out.extend_from_slice(input.samples());
@@ -1415,6 +1422,7 @@ impl CaptureStage {
     /// the signal [`run`](Self::run) snapshots into [`tap`](Self::tap), so a
     /// caller that reads the pre-`transform` signal and never delivers the
     /// conditioned output takes this instead of a full [`run`](Self::run).
+    #[cfg(feature = "vad")]
     pub(crate) fn run_normalize(&mut self, input: &[f32]) -> Result<&[f32], DecibriError> {
         self.run_normalize_planar(input)?;
         self.reinterleave_work(self.tap_channels);
@@ -1546,6 +1554,7 @@ impl CaptureStage {
     /// The counterpart of [`run_normalize`](Self::run_normalize) on the close
     /// path: the resampler's group-delay tail, before it passes through
     /// `transform`.
+    #[cfg(feature = "vad")]
     pub(crate) fn flush_normalize(&mut self) -> Result<&[f32], DecibriError> {
         self.flush_normalize_planar()?;
         self.reinterleave_work(self.tap_channels);
