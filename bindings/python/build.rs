@@ -19,6 +19,11 @@
 //! Exactly one `pyproject.toml` is tracked, so the two paths never both
 //! resolve within a single build.
 //!
+//! The change-tracking directive (`cargo:rerun-if-changed`) names a candidate
+//! only when it exists. Cargo treats a named path that is absent as always
+//! stale, so naming the other layout's candidate would rerun this script, and
+//! relink the extension, on every build.
+//!
 //! # Parsing
 //!
 //! The parse is anchored to the `[project]` table and to the `version` key
@@ -45,7 +50,10 @@ fn main() {
     }
 
     println!("cargo:rerun-if-changed=build.rs");
-    for candidate in &candidates {
+    // Only a candidate present on disk is named: cargo treats an absent
+    // `rerun-if-changed` path as always stale, which would rerun this script
+    // on every build in the layout that lacks it.
+    for candidate in candidates.iter().filter(|c| c.exists()) {
         println!("cargo:rerun-if-changed={}", candidate.display());
     }
 
