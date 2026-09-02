@@ -1650,7 +1650,6 @@ impl Microphone {
         // consumer that sees the stream close can distinguish a driver failure
         // from stop(). The backend builds the typed `DeviceFailed`.
         let on_error: StreamErrorCallback = Box::new(move |err: DecibriError| {
-            eprintln!("{err}");
             if let Ok(mut slot) = err_last_error.lock() {
                 *slot = Some(err);
             }

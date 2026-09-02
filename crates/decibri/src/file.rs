@@ -891,9 +891,13 @@ impl File {
     ///
     /// A finite sample outside `[-1.0, 1.0]`, which AGC or AEC without a
     /// limiter can produce, is clamped to full scale and counted in the
-    /// returned [`SaveReport`]. A non-finite sample never reaches the file:
-    /// NaN becomes silence and an infinity becomes full scale, the same on
-    /// every format, counted separately in the report.
+    /// returned [`SaveReport`]. A non-finite sample never reaches the file.
+    /// On the direct path (a mono source already at the target rate with no
+    /// conditioning enabled) the save replaces it, NaN with silence and an
+    /// infinity with full scale, and counts it separately in the report.
+    /// When the conditioning chain runs it has already replaced every
+    /// non-finite sample with silence at its entry, so the count reports
+    /// what the save's repair saw, not what the source carried.
     ///
     /// Runs only on a source still at its start. Once iteration has pulled
     /// from the `File`, saving reports [`DecibriError::FileEngaged`].

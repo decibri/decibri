@@ -9,7 +9,7 @@
 //! decibri-owned types ([`DecibriError`], [`DeviceSelector`], [`MicrophoneInfo`],
 //! [`SpeakerInfo`], and the small support types defined below).
 
-use std::sync::Mutex;
+use std::sync::{Mutex, PoisonError};
 
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 
@@ -42,9 +42,8 @@ impl BackendStream {
     /// drop. Idempotent and poison-tolerant: a poisoned lock still clears the
     /// slot rather than panicking.
     pub(crate) fn stop(&self) {
-        if let Ok(mut guard) = self.inner.lock() {
-            *guard = None;
-        }
+        let mut guard = self.inner.lock().unwrap_or_else(PoisonError::into_inner);
+        *guard = None;
     }
 
     /// Whether the stream is still held (not yet dropped by [`stop`](Self::stop)).
@@ -539,23 +538,24 @@ fn resolve_device_generic<D: DeviceDirection>(
                 }
             }
 
-            match matches.len() {
-                0 => Err(D::not_found_error(query.clone())),
-                1 => Ok(matches.into_iter().next().unwrap().2),
-                _ => {
-                    let match_list = matches
-                        .iter()
-                        .map(|(idx, name, _)| format!("  [{idx}] {name}"))
-                        .collect::<Vec<_>>()
-                        .join("\n");
-                    Err(DecibriError::MultipleDevicesMatch {
-                        name: query.clone(),
-                        matches: format!(
-                            "{match_list}\nUse a more specific name or pass the device index directly."
-                        ),
-                    })
-                }
+            if matches.len() > 1 {
+                let match_list = matches
+                    .iter()
+                    .map(|(idx, name, _)| format!("  [{idx}] {name}"))
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                return Err(DecibriError::MultipleDevicesMatch {
+                    name: query.clone(),
+                    matches: format!(
+                        "{match_list}\nUse a more specific name or pass the device index directly."
+                    ),
+                });
             }
+            matches
+                .into_iter()
+                .next()
+                .map(|(_, _, device)| device)
+                .ok_or_else(|| D::not_found_error(query.clone()))
         }
 
         DeviceSelector::Id(query) => {
