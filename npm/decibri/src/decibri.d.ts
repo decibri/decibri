@@ -772,7 +772,11 @@ export interface SaveReport {
   clippedSamples: number;
   /**
    * Non-finite samples replaced before writing: NaN with silence, an
-   * infinity with full scale. The same replacement on every format.
+   * infinity with full scale. The same replacement on every format. When
+   * the conditioning chain runs it has already replaced every non-finite
+   * sample with silence at its entry, so this count covers the direct path
+   * only (a mono source already at `sampleRate` with no conditioning
+   * enabled).
    */
   nonFiniteSamples: number;
 }
@@ -885,7 +889,10 @@ export declare class File extends Readable {
    *
    * Resolves to a `SaveReport`: how many samples were clamped to full scale
    * and how many non-finite samples were replaced (NaN as silence, an
-   * infinity as full scale).
+   * infinity as full scale). When the conditioning chain runs it has already
+   * replaced every non-finite sample with silence at its entry, so the file
+   * carries silence where one was and the count covers the direct path only
+   * (a mono source already at `sampleRate` with no conditioning enabled).
    *
    * Requires a File that is not already being streamed: once the stream has
    * been engaged this rejects with a `DecibriError` carrying the code

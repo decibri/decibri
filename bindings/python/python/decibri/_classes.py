@@ -1633,7 +1633,11 @@ class SaveReport:
             preserve the overshoot instead, and would report zero.
         non_finite_samples: Non-finite samples replaced before writing:
             NaN with silence, an infinity with full scale. The same
-            replacement on every format.
+            replacement on every format. When the conditioning chain runs
+            it has already replaced every non-finite sample with silence
+            at its entry, so this count covers the direct path only (a
+            mono source already at ``sample_rate`` with no conditioning
+            enabled).
     """
 
     clipped_samples: int
@@ -2319,7 +2323,11 @@ class File:
         samples outside full scale clamped to ``[-1.0, 1.0]`` (AGC or AEC
         without a limiter can overshoot, and 16-bit PCM cannot hold it),
         and ``non_finite_samples`` counts NaN samples written as silence
-        and infinite samples written as full scale.
+        and infinite samples written as full scale. When the conditioning
+        chain runs it has already replaced every non-finite sample with
+        silence at its entry, so the file carries silence where one was
+        and ``non_finite_samples`` covers the direct path only (a mono
+        source already at ``sample_rate`` with no conditioning enabled).
 
         Requires a ``File`` still at its start: once iteration has pulled
         from it, this raises ``FileEngaged``. Every failure detected

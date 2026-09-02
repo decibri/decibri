@@ -14,6 +14,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 - `File.save` and `AsyncFile.save` refuse an AIFF above 32767 channels with `AudioFormatUnsupported` carrying the container layer's own text, the refusal a FLAC above 8 channels and a WAV above 32767 already receive: an AIFF `COMM` chunk's `numChannels` is a signed 16-bit field, so 32767 is the format's own maximum. There is nothing a caller needs to do, because no container decibri writes accepts more. Reading an AIFF, every count up to 32767, WAV, FLAC and `File.buffer` and `AsyncFile.buffer` delivery at any count are unchanged.
 - A device failure during capture or playback is no longer written to stderr. The failure reaches the consumer as before, raised as `DeviceFailed` from the next `read`, `write` or `drain`.
+- The `File.save` and `SaveReport.non_finite_samples` documentation states that when the conditioning chain runs it has already replaced every non-finite sample with silence at its entry, so the save's own replacement (NaN with silence, an infinity with full scale) and the `non_finite_samples` count cover the direct path only, a mono source already at `sample_rate` with no conditioning enabled. The behaviour is unchanged.
 
 ### Fixed
 
