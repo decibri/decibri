@@ -1310,7 +1310,10 @@ impl DecibriOutputBridge {
             SampleFormat::Float32 => sample::f32_le_bytes_to_f32(&buffer),
         };
 
-        let stream = self.stream.as_ref().unwrap();
+        let stream = self
+            .stream
+            .as_ref()
+            .ok_or_else(|| Error::new(Status::GenericFailure, "Output stream not started"))?;
         stream
             .send(samples)
             .map_err(|e| to_napi_error(speaker_failure_cause(e, || stream.take_last_error())))
@@ -1541,6 +1544,9 @@ pub struct SaveOptions {
 /// What a save did to the samples on their way into the file: finite
 /// samples outside full scale clamped and counted, non-finite samples
 /// replaced (NaN with silence, an infinity with full scale) and counted.
+/// When the conditioning chain runs it has already replaced every
+/// non-finite sample with silence at its entry, so the non-finite count is
+/// what the save's own repair saw, not what the source carried.
 #[napi(object)]
 pub struct SaveReport {
     pub clipped_samples: f64,

@@ -14,6 +14,7 @@ For other decibri packages, see:
 ### Changed
 
 - `File.save` and `AudioWriter` refuse an AIFF above 32767 channels, reported as a `DecibriError` with code `AUDIO_FORMAT_UNSUPPORTED` carrying the container layer's own text (`File.save` rejects with it; `AudioWriter` destroys the stream with it when the stream finishes), the refusal a FLAC above 8 channels and a WAV above 32767 already receive: an AIFF `COMM` chunk's `numChannels` is a signed 16-bit field, so 32767 is the format's own maximum. There is nothing a caller needs to do, because no container decibri writes accepts more. Reading an AIFF, every count up to 32767, WAV, FLAC and `File.buffer` delivery at any count are unchanged.
+- A device failure during capture or playback is no longer written to stderr. The failure reaches the consumer as before: `Microphone` emits it on `'error'` with code `DEVICE_FAILED`, and `Speaker` reports it from the next `write` or `drain`.
 
 ### Fixed
 

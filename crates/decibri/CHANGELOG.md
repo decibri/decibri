@@ -14,10 +14,12 @@ For other decibri packages, see:
 ### Changed
 
 - `File::save` refuses an AIFF above 32767 channels with `DecibriError::AudioFormatUnsupported` carrying the container layer's own text, the refusal a FLAC above 8 channels and a WAV above 32767 already receive: an AIFF `COMM` chunk's `numChannels` is a signed 16-bit field, so 32767 is the format's own maximum. There is nothing a caller needs to do, because no container decibri writes accepts more. Reading an AIFF, every count up to 32767, WAV, FLAC and `File::buffer` delivery at any count are unchanged.
+- A device failure during capture or playback is no longer written to stderr. The failure reaches the consumer as before: the stream closes, and `MicrophoneStream::take_last_error` or `SpeakerStream::take_last_error` returns the `DecibriError::DeviceFailed` that caused it.
 
 ### Fixed
 
 - The capture stream's pre-transform detector tap (`vad_input` / `detector_feed`) holds two seconds of frames at every channel count and evicts whole frames. The bound was sized in samples, so a multichannel tap held `2 / channels` seconds, and at a channel count that does not divide the bound's sample count (3 at 16 kHz, for example) an eviction left a partial frame at the front of the tap and every later drain read frames shifted by that offset: a `DetectorSource::Channel` feed carried a channel other than the one named, and an `Average` feed averaged across frame boundaries. Only a tap that passes its bound is affected, which is a consumer that does not drain it once per delivered block, or a delivered block larger than the bound at that channel count. Mono streams, streams with no enhancement step and `File` are unchanged.
+- The `File::save` documentation describes the non-finite repair on a conditioned source. The conditioning chain replaces every non-finite sample with silence at its entry, so the save's own replacement (NaN with silence, an infinity with full scale) and the `SaveReport::non_finite_samples` count cover the direct path only, a mono source already at the target rate with no conditioning enabled. The behaviour is unchanged.
 
 ## [6.3.0] - 2026-08-21
 
