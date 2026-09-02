@@ -375,6 +375,10 @@ pub struct SaveReport {
     /// Non-finite samples replaced before writing: NaN with silence, an
     /// infinity with full scale. The same replacement on every format, so the
     /// same samples produce the same audio whatever container carries them.
+    /// When the conditioning chain runs it has already replaced every
+    /// non-finite sample with silence at its entry, so this count covers the
+    /// direct path only (a mono source already at the target rate with no
+    /// conditioning enabled).
     pub non_finite_samples: u64,
 }
 

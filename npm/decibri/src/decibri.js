@@ -1437,7 +1437,11 @@ class File extends Readable {
    * outside full scale clamped to `[-1.0, 1.0]` (AGC or AEC without a
    * limiter can overshoot, and 16-bit PCM cannot hold it), and
    * `nonFiniteSamples` counts NaN samples written as silence and infinite
-   * samples written as full scale.
+   * samples written as full scale. When the conditioning chain runs it has
+   * already replaced every non-finite sample with silence at its entry, so
+   * the file carries silence where one was and `nonFiniteSamples` covers
+   * the direct path only (a mono source already at `sampleRate` with no
+   * conditioning enabled).
    *
    * Requires a `File` that is not already being streamed: once the stream
    * has been engaged this rejects with a `DecibriError` carrying the code
