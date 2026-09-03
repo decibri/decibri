@@ -46,6 +46,7 @@ use crate::stage::{AecReferenceRing, AecSettings};
 /// invoked. The model weights ship with the binding that bundles them; the core
 /// loads them from [`MicrophoneConfig::denoise_model_path`] and embeds no model
 /// bytes.
+#[cfg(feature = "denoise")]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum DenoiseModel {
@@ -66,7 +67,7 @@ pub enum DenoiseModel {
 /// adding further cutoffs (a `300` Hz telephony cut, say) a non-breaking
 /// widening (a new variant), and keeps the caller on record about which cutoff
 /// they selected. The closed named set is deliberate: members are added without
-/// a breaking change, the way [`DenoiseModel`] grows. The filter is pure DSP, so
+/// a breaking change, the way `DenoiseModel` grows. The filter is pure DSP, so
 /// it bundles no file and loads no runtime.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
@@ -95,7 +96,7 @@ impl HighpassFilter {
 /// voice-activity detector reads.
 ///
 /// A closed, `#[non_exhaustive]` set, designed to grow the way
-/// [`DenoiseModel`] grows. The variants name DELIVERED channels, the 0-based
+/// `DenoiseModel` grows. The variants name DELIVERED channels, the 0-based
 /// positions of the interleaved frames a consumer receives, after any
 /// [`MicrophoneConfig::channel_map`] is applied: with a map present,
 /// delivered channel `j` carries device channel `channel_map[j]`, and the

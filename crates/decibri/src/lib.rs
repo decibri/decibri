@@ -276,9 +276,11 @@ pub mod gain;
 // rather than reaching through the module path.
 #[cfg(feature = "capture")]
 pub use microphone::{
-    AudioChunk, DenoiseModel, DetectorSource, HighpassFilter, Microphone, MicrophoneConfig,
-    MicrophoneStream,
+    AudioChunk, DetectorSource, HighpassFilter, Microphone, MicrophoneConfig, MicrophoneStream,
 };
+
+#[cfg(all(feature = "capture", feature = "denoise"))]
+pub use microphone::DenoiseModel;
 
 #[cfg(feature = "capture")]
 pub use file::{File, FileConfig, SaveFormat, SaveOptions, SaveReport};

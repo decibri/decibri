@@ -900,7 +900,7 @@ class File extends Readable {
    * Validate the constructor options and resolve them into the native options
    * object plus the wrapper-side state. The checks and messages mirror
    * `Microphone._prepareOptions` exactly for every shared option; the
-   * live-capture-only options (device, channels, framesPerBuffer) do not
+   * live-capture-only options (device, framesPerBuffer, aec) do not
    * apply to an offline source.
    * @internal
    * @param {import('./decibri').FileOptions} options

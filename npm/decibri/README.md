@@ -1,6 +1,6 @@
 # decibri
 
-Cross-platform audio capture, conditioning, and playback for Node.js and browsers, with voice activity detection on live and recorded audio.
+Cross-platform audio capture, conditioning, and playback for Node.js, with browser capture and voice activity detection on live and recorded audio.
 
 ## Installation
 
@@ -232,14 +232,16 @@ The browser API uses `getUserMedia` and `AudioWorklet`. It differs from the Node
 
 ### `new Microphone(options?)` (browser)
 
-Same options as Node.js, plus:
+Takes `sampleRate`, `channels`, `channelMap`, `framesPerBuffer`, `dtype` and `vad` as Node.js does, plus:
 
 | Option | Type | Default | Description |
 | --- | --- | --- | --- |
 | `device` | string | system default | Device ID from `Microphone.devices()` (not index) |
-| `echoCancellation` | boolean | true | Browser echo cancellation |
-| `noiseSuppression` | boolean | true | Browser noise suppression |
+| `echoCancellation` | boolean | true | Browser echo cancellation, applied by the platform before decibri sees the audio |
+| `noiseSuppression` | boolean | true | Browser noise suppression, applied by the platform before decibri sees the audio |
 | `workletUrl` | string | inline blob | Custom worklet URL for strict CSP |
+
+The conditioning options run in the native Node.js capture path: `dcRemoval`, `denoise`, `highpass`, `agc`, `limiter`, `aec` and `modelPath`. The browser `Microphone` throws a `TypeError` naming the option if one is passed.
 
 The browser runs energy-mode VAD only, so its `vad` option accepts `false`, `'energy'`, or a config object `{ model: 'energy', threshold, holdoffMs, source }`. The browser `version()` returns `{ decibri }` only: the browser build has no native core, so `decibri` reports the installed package version. In Node, `version().decibri` reports the native core version.
 
@@ -253,6 +255,8 @@ The browser runs energy-mode VAD only, so its `vad` option accepts `false`, `'en
 | `devices()` | Sync, returns array | Async, returns Promise |
 | Sample rate | Native device rate | Resampled from native rate |
 | VAD | `'silero'` or `'energy'` | `'energy'` only |
+| Conditioning | ACE chain and `aec` | Platform `echoCancellation` and `noiseSuppression` |
+| Offline audio | `File` and `AudioWriter` | Capture and playback only |
 
 ### `new Speaker(options?)` (browser)
 
@@ -389,7 +393,7 @@ Neither ONNX Runtime nor this setting applies to the browser build, which has no
 
 ## API: File (offline source)
 
-Everything a `Microphone` does to live audio, `File` does to audio you already have: the same conditioning options, the same Readable stream of conditioned chunks (finite: it ends at EOF), and the same opt-in `vad`. Because a `File` is a complete recording, it can also analyze the whole recording for speech.
+`File` runs the same conditioning chain on audio you already have. Because a `File` is a complete recording, it can also analyze the whole recording for speech.
 
 - `await File.open(path, options?)`: read a file off the event loop (recommended, like `Microphone.open`). Reads WAV, AIFF, AIFF-C and FLAC, identified from the file's own bytes rather than its extension.
 - `new File(path, options?)`: the same result, synchronous (blocks on disk I/O; fine for scripts).

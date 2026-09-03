@@ -183,7 +183,7 @@ Full Rust guide: [here](crates/decibri/README.md).
 
 ## Files
 
-Everything a `Microphone` does to live audio, `File` does to audio you already have: the same conditioning options, the same iteration, the same conditioned chunks out. And because a `File` is a complete recording, it can analyze the whole recording for speech, which a live stream cannot do.
+`File` runs the same conditioning chain as `Microphone` on audio you already have: channel and rate normalization, DC removal, denoise, high-pass, AGC and limiter, with the same options and the same conditioned chunks out. Echo cancellation is a live-capture option and is not offered on `File`. And because a `File` is a complete recording, it can analyze the whole recording for speech, which a live stream cannot do.
 
 ```python
 import decibri
@@ -257,7 +257,7 @@ Decibri delivers and accepts PCM in the shapes cloud and local speech services e
 
 Decibri is built on a single Rust core. The same audio engine powers all three language bindings, ensuring consistent behavior regardless of which language you use.
 
-Python and Node.js install pre-built native binaries for your platform. Browsers run the same API via a JavaScript implementation that ships inside the npm package.
+Python and Node.js install pre-built native binaries for your platform. Browsers get a JavaScript implementation shipped inside the npm package, covering capture, channel selection, resampling and energy-based voice activity detection. The conditioning chain, Silero and the offline `File` surface run in the native Node.js path.
 
 <br/>
 
