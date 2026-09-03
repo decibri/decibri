@@ -8,6 +8,12 @@ const { WORKLET_SOURCE } = require('./worklet-inline.js');
 // does, so this is a maintained constant.
 const VERSION = '5.7.0';
 
+// The node entry's options this entry cannot serve: the conditioning chain
+// and the detector model file. Each is refused on presence, whatever its
+// value; an explicit undefined is absence, as on the node entry. Node option
+// table order, so the first present key is the one the error names.
+const UNSUPPORTED_OPTIONS = ['modelPath', 'dcRemoval', 'denoise', 'highpass', 'agc', 'limiter', 'aec'];
+
 /**
  * Browser microphone capture.
  *
@@ -49,6 +55,11 @@ class Microphone extends Emitter {
       throw new TypeError(
         "vadThreshold and vadHoldoff are no longer supported. Pass them on the vad config object: vad: { model: 'energy', threshold: 0.01, holdoffMs: 300 }."
       );
+    }
+    for (const key of UNSUPPORTED_OPTIONS) {
+      if (options[key] !== undefined) {
+        throw new TypeError(`${key} is not supported in the browser`);
+      }
     }
     const vad = options.vad ?? false;
     let vadThreshold = 0.01;

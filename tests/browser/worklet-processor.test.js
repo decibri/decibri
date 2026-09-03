@@ -32,6 +32,76 @@ function createProcessor(opts = {}) {
   return new registeredProcessor.ctor({ processorOptions });
 }
 
+// ── Resampler drive helpers ──────────────────────────────────────────────────
+
+// The rate pairs the resampler's cadence is pinned at: the context rates
+// browsers run at against the common capture targets, the fractional pairs
+// alongside the pairs whose ratio is an integer.
+const RATE_PAIRS = [
+  [48000, 16000],
+  [44100, 16000],
+  [48000, 24000],
+  [44100, 48000],
+  [48000, 44100],
+  [96000, 16000],
+];
+
+// The frames a linear-interpolation resampler delivers from n input samples
+// at a pair: frame k sits at k * native / target input samples and needs the
+// input sample after its floor, so frame k exists while
+// k * native < (n - 1) * target. Integer arithmetic throughout.
+function expectedFrames(n, native, target) {
+  return Math.ceil(((n - 1) * target) / native);
+}
+
+// A processor that flushes every frame on its own, with a port that tallies
+// the posted frames and optionally keeps their samples, so a drive's whole
+// output is observable without reading the processor's state.
+function createDrivenProcessor(native, target, channels = 1, keep = false) {
+  const proc = createProcessor({
+    framesPerBuffer: 1,
+    format: 'float32',
+    nativeSampleRate: native,
+    targetSampleRate: target,
+    channels,
+  });
+  const out = { frames: 0, chunks: [] };
+  proc.port = {
+    postMessage: (buffer) => {
+      out.frames++;
+      if (keep) out.chunks.push(new Float32Array(buffer));
+    },
+  };
+  return { proc, out };
+}
+
+// The kept samples of a drive, concatenated in delivery order.
+function delivered(out) {
+  const all = new Float32Array(out.chunks.reduce((n, c) => n + c.length, 0));
+  let offset = 0;
+  for (const chunk of out.chunks) {
+    all.set(chunk, offset);
+    offset += chunk.length;
+  }
+  return all;
+}
+
+// A ramp of n samples whose value is the sample's index from `start`, scaled
+// by 2^-10 so every value is exact in single precision. A linear
+// interpolator reproduces a ramp exactly at every position, so each
+// delivered sample's value is the input time it was taken at.
+function ramp(start, n) {
+  const a = new Float32Array(n);
+  for (let i = 0; i < n; i++) a[i] = (start + i) / 1024;
+  return a;
+}
+
+function maxAbsDiff(a, b) {
+  let worst = 0;
+  for (let i = 0; i < a.length; i++) worst = Math.max(worst, Math.abs(a[i] - b[i]));
+  return worst;
+}
+
 // ── Tests ─────────────────────────────────────────────────────────────────────
 
 describe('DecibriProcessor registration', () => {
@@ -137,20 +207,106 @@ describe('DecibriProcessor resampling', () => {
     expect(result[3]).toBeCloseTo(9 / 11, 4);
   });
 
-  it('maintains continuity across multiple process() calls', () => {
-    const proc = createProcessor({ framesPerBuffer: 8, format: 'float32', nativeSampleRate: 48000, targetSampleRate: 16000 });
-
-    const chunk1 = new Float32Array(24);
-    const chunk2 = new Float32Array(24);
-    for (let i = 0; i < 24; i++) {
-      chunk1[i] = Math.sin(2 * Math.PI * 1000 * i / 48000);
-      chunk2[i] = Math.sin(2 * Math.PI * 1000 * (i + 24) / 48000);
+  it('carries the phase across blocks and interpolates the frame that straddles them', () => {
+    // Blocks of 10 at 3:1: the frames at 0, 3 and 6 leave the next at 9,
+    // which needs sample 10, the next block's first, so its position is
+    // carried as -1 and it interpolates between the stored sample 9 and that
+    // block's sample 10. The ramp makes every frame's value its input time,
+    // so 120 samples deliver exactly 0, 3, 6, ..., 117.
+    const proc = createProcessor({ framesPerBuffer: 4, format: 'float32', nativeSampleRate: 48000, targetSampleRate: 16000 });
+    for (let b = 0; b < 12; b++) {
+      const block = new Float32Array(10);
+      for (let i = 0; i < 10; i++) block[i] = 10 * b + i;
+      proc.process([[block]], [[]], {});
     }
+    expect(proc.port.postMessage).toHaveBeenCalledTimes(10);
+    const values = [];
+    for (const call of proc.port.postMessage.mock.calls) values.push(...new Float32Array(call[0]));
+    const expected = [];
+    for (let k = 0; k < 40; k++) expected.push(3 * k);
+    expect(values).toEqual(expected);
+  });
 
-    proc.process([[chunk1]], [[]], {});
-    proc.process([[chunk2]], [[]], {});
+  it('preserves the frequency of a sine through the 3:1 downsample', () => {
+    // 1 kHz at 48 kHz is 48 samples a cycle; at 16 kHz it is 16, so the
+    // first peak lands on delivered frame 4.
+    const proc = createProcessor({ framesPerBuffer: 160, format: 'float32', nativeSampleRate: 48000, targetSampleRate: 16000 });
+    const input = new Float32Array(480);
+    for (let i = 0; i < 480; i++) input[i] = Math.sin((2 * Math.PI * 1000 * i) / 48000);
+    proc.process([[input]], [[]], {});
+    expect(proc.port.postMessage).toHaveBeenCalledTimes(1);
+    const output = new Float32Array(proc.port.postMessage.mock.calls[0][0]);
+    expect(output.length).toBe(160);
+    let peak = 0;
+    for (let i = 1; i < 16; i++) if (output[i] > output[peak]) peak = i;
+    expect(peak).toBe(4);
+  });
+});
 
-    expect(proc.port.postMessage).toHaveBeenCalled();
+describe('DecibriProcessor resampler cadence', () => {
+  it('delivers the exact frame count over a long drive at every rate pair', () => {
+    // 37,500 render quanta of 128 frames: 100 seconds of capture at 48 kHz.
+    // The count is exact at every pair, the integer ratios included, so a
+    // deficit of even one frame per block boundary fails here.
+    const quanta = 37500;
+    const frames = 128;
+    const block = new Float32Array(frames);
+    for (const [native, target] of RATE_PAIRS) {
+      const { proc, out } = createDrivenProcessor(native, target);
+      for (let q = 0; q < quanta; q++) proc.process([[block]], [[]], {});
+      expect(out.frames, `${native} -> ${target}`).toBe(expectedFrames(quanta * frames, native, target));
+    }
+  }, 60000);
+
+  it('delivers the same frames whole and in blocks of any size', () => {
+    // Chunking moves frames between blocks, never the total and never the
+    // samples: the input fed in one call and fed in blocks, of the render
+    // quantum, of single samples, of sizes that never divide the whole and
+    // with empty blocks between, delivers the same frames.
+    const n = 100000;
+    const input = ramp(0, n);
+    const strategies = [[128], [1], [7], [64], [3, 1, 64, 0, 7, 129, 13]];
+    for (const [native, target] of RATE_PAIRS) {
+      const whole = createDrivenProcessor(native, target, 1, true);
+      whole.proc.process([[input]], [[]], {});
+      expect(whole.out.frames, `${native} -> ${target} whole`).toBe(expectedFrames(n, native, target));
+      const wholeSamples = delivered(whole.out);
+      for (const sizes of strategies) {
+        const chunked = createDrivenProcessor(native, target, 1, true);
+        let fed = 0;
+        for (let s = 0; fed < n; s++) {
+          const end = Math.min(fed + sizes[s % sizes.length], n);
+          chunked.proc.process([[input.subarray(fed, end)]], [[]], {});
+          fed = end;
+        }
+        const label = `${native} -> ${target} in blocks ${JSON.stringify(sizes)}`;
+        expect(chunked.out.frames, label).toBe(whole.out.frames);
+        expect(maxAbsDiff(delivered(chunked.out), wholeSamples), label).toBeLessThan(1e-4);
+      }
+    }
+  });
+
+  it('delivers every frame at its exact input time', () => {
+    // A ramp through the resampler is the identity from time to value:
+    // delivered frame k must carry the value at k * ratio input samples. A
+    // frame taken one input sample late, an interpolation weighted the wrong
+    // way round, or a boundary frame taken from the wrong pair of samples
+    // all move the value by up to one input sample, 2^-10 here, against a
+    // single-precision resolution of about 3e-5 at the ramp's top.
+    const quanta = 2000;
+    const frames = 128;
+    for (const [native, target] of RATE_PAIRS) {
+      const ratio = native / target;
+      const { proc, out } = createDrivenProcessor(native, target, 1, true);
+      for (let q = 0; q < quanta; q++) proc.process([[ramp(q * frames, frames)]], [[]], {});
+      const samples = delivered(out);
+      expect(samples.length, `${native} -> ${target}`).toBe(expectedFrames(quanta * frames, native, target));
+      let worst = 0;
+      for (let k = 0; k < samples.length; k++) {
+        worst = Math.max(worst, Math.abs(samples[k] - (k * ratio) / 1024));
+      }
+      expect(worst, `${native} -> ${target}`).toBeLessThan(1e-4);
+    }
   });
 });
 
@@ -382,17 +538,17 @@ describe('DecibriProcessor multichannel delivery', () => {
     // Each delivered channel of a stereo 3:1 downsample must equal the mono
     // downsample of the same signal, sample for sample: one shared position
     // drives every channel, so a frame stays a frame across the rate change.
-    const ramp = () => {
+    const twelve = () => {
       const a = new Float32Array(12);
       for (let i = 0; i < 12; i++) a[i] = i / 11;
       return a;
     };
     const mono = createProcessor({ framesPerBuffer: 4, nativeSampleRate: 48000, targetSampleRate: 16000 });
-    mono.process([[ramp()]], [[]], {});
+    mono.process([[twelve()]], [[]], {});
     const monoOut = Array.from(new Float32Array(mono.port.postMessage.mock.calls[0][0]));
 
     const stereo = createProcessor({ framesPerBuffer: 4, channels: 2, nativeSampleRate: 48000, targetSampleRate: 16000 });
-    stereo.process([[ramp(), ramp()]], [[]], {});
+    stereo.process([[twelve(), twelve()]], [[]], {});
     expect(stereo.port.postMessage).toHaveBeenCalledTimes(1);
     const interleaved = Array.from(new Float32Array(stereo.port.postMessage.mock.calls[0][0]));
     expect(interleaved.length).toBe(8);
@@ -400,6 +556,38 @@ describe('DecibriProcessor multichannel delivery', () => {
     const right = interleaved.filter((_, i) => i % 2 === 1);
     expect(left).toEqual(monoOut);
     expect(right).toEqual(monoOut);
+
+    // Across blocks at a fractional ratio, with different content per
+    // channel: the stereo drive's left channel equals the mono drive of the
+    // left content and its right the mono drive of the right, frame for
+    // frame, so both channels cross every block boundary at one position.
+    const quanta = 500;
+    const frames = 128;
+    const leftBlock = (q) => ramp(q * frames, frames);
+    const rightBlock = (q) => {
+      const r = ramp(q * frames, frames);
+      for (let i = 0; i < frames; i++) r[i] = -r[i];
+      return r;
+    };
+    const monoLeft = createDrivenProcessor(44100, 16000, 1, true);
+    const monoRight = createDrivenProcessor(44100, 16000, 1, true);
+    const stereoDrive = createDrivenProcessor(44100, 16000, 2, true);
+    for (let q = 0; q < quanta; q++) {
+      monoLeft.proc.process([[leftBlock(q)]], [[]], {});
+      monoRight.proc.process([[rightBlock(q)]], [[]], {});
+      stereoDrive.proc.process([[leftBlock(q), rightBlock(q)]], [[]], {});
+    }
+    expect(stereoDrive.out.frames).toBe(expectedFrames(quanta * frames, 44100, 16000));
+    expect(monoLeft.out.frames).toBe(stereoDrive.out.frames);
+    expect(monoRight.out.frames).toBe(stereoDrive.out.frames);
+    const driven = delivered(stereoDrive.out);
+    const l = delivered(monoLeft.out);
+    const r = delivered(monoRight.out);
+    let mismatches = 0;
+    for (let k = 0; k < stereoDrive.out.frames; k++) {
+      if (driven[2 * k] !== l[k] || driven[2 * k + 1] !== r[k]) mismatches++;
+    }
+    expect(mismatches).toBe(0);
   });
 
   it('converts interleaved channels to int16', () => {
@@ -521,5 +709,36 @@ describe('worklet-inline parity', () => {
       type: 'error',
       message: 'the input device does not support 4 delivered channels; it reports 2',
     });
+  });
+
+  it('the minified runtime string carries the resampler phase across blocks like the source', () => {
+    // 300 blocks of 10 at 3:1 cross a boundary mid-phase on every block. The
+    // count is the analytic one and the samples are the source's own.
+    const { ctor } = evaluateInline();
+    const blocks = 300;
+    const inline = new ctor({
+      processorOptions: {
+        framesPerBuffer: 1,
+        format: 'float32',
+        nativeSampleRate: 48000,
+        targetSampleRate: 16000,
+        channels: 1,
+        channelMap: null,
+      },
+    });
+    const inlineOut = { frames: 0, chunks: [] };
+    inline.port = {
+      postMessage: (buffer) => {
+        inlineOut.frames++;
+        inlineOut.chunks.push(new Float32Array(buffer));
+      },
+    };
+    const source = createDrivenProcessor(48000, 16000, 1, true);
+    for (let b = 0; b < blocks; b++) {
+      inline.process([[ramp(b * 10, 10)]], [[]], {});
+      source.proc.process([[ramp(b * 10, 10)]], [[]], {});
+    }
+    expect(inlineOut.frames).toBe(expectedFrames(blocks * 10, 48000, 16000));
+    expect(Array.from(delivered(inlineOut))).toEqual(Array.from(delivered(source.out)));
   });
 });

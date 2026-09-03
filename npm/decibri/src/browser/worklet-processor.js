@@ -23,7 +23,8 @@ class DecibriProcessor extends AudioWorkletProcessor {
     const opts = options.processorOptions;
     this.framesPerBuffer = opts.framesPerBuffer;
     this.format = opts.format;
-    this.ratio = opts.nativeSampleRate / opts.targetSampleRate;
+    this.native = opts.nativeSampleRate;
+    this.target = opts.targetSampleRate;
     this.needsResample = opts.nativeSampleRate !== opts.targetSampleRate;
     // Optional list of 0-based channel indices into the granted track's
     // channels; delivered channel j carries granted channel channelMap[j].
@@ -38,7 +39,23 @@ class DecibriProcessor extends AudioWorkletProcessor {
     // channel, so its length is the count when one is present.
     this.channels = this.channelMap ? this.channelMap.length : (opts.channels ?? 1);
     this.channelError = false;
-    this.position = 0;
+    // The resampler's phase: the position of the next delivered frame in
+    // input samples relative to the current block's first sample, held as an
+    // integer numerator over the target rate so it is exact across any
+    // number of blocks. It may sit below zero, down to one input sample
+    // before the block, for a frame whose time falls between the previous
+    // block's last sample and this block's first; that last sample is kept
+    // per delivered channel in `last`. The first block starts at zero, on
+    // its own first sample.
+    this.phase = 0;
+    this.last = new Float32Array(this.channels);
+    // The delivered channels of the current block, planar, gathered into
+    // this array in place so a block allocates nothing.
+    this.planar = new Array(this.channels);
+    // The average of every granted channel, for one delivered channel
+    // derived from more than one granted: sized to the block on first use
+    // and reused while the block length holds.
+    this.mono = null;
     // The accumulation buffer holds framesPerBuffer frames of the delivered
     // count, interleaved frame by frame; bufferIndex counts samples. Chunks
     // are flushed at whole frames only.
@@ -54,9 +71,9 @@ class DecibriProcessor extends AudioWorkletProcessor {
 
     const granted = input.length;
     // The delivered channels, planar: one Float32Array per delivered
-    // channel, equal lengths. Gathered here, resampled per channel in
-    // lockstep, interleaved at accumulation.
-    let planar;
+    // channel, equal lengths. Gathered here into the preallocated array,
+    // resampled per channel in lockstep, interleaved at accumulation.
+    const planar = this.planar;
 
     if (this.channelMap) {
       // The granted track's channel count is the only ceiling. A map entry
@@ -71,20 +88,22 @@ class DecibriProcessor extends AudioWorkletProcessor {
       // Delivered channel j is granted channel channelMap[j], in map order.
       // Entries may repeat and may appear in any order, so a map both
       // selects and permutes.
-      planar = [];
       for (let j = 0; j < this.channelMap.length; j++) {
-        planar.push(input[this.channelMap[j]]);
+        planar[j] = input[this.channelMap[j]];
       }
     } else if (this.channels === 1) {
       if (granted === 1) {
-        planar = [input[0]];
+        planar[0] = input[0];
       } else {
         // The documented average of every granted channel: each frame's
         // arithmetic mean, accumulated at single precision (Math.fround per
         // step) and stored as f32, matching the engine's average sample for
         // sample.
         const frames = input[0].length;
-        const mono = new Float32Array(frames);
+        if (this.mono === null || this.mono.length !== frames) {
+          this.mono = new Float32Array(frames);
+        }
+        const mono = this.mono;
         for (let i = 0; i < frames; i++) {
           let sum = 0;
           for (let c = 0; c < granted; c++) {
@@ -92,12 +111,11 @@ class DecibriProcessor extends AudioWorkletProcessor {
           }
           mono[i] = sum / granted;
         }
-        planar = [mono];
+        planar[0] = mono;
       }
     } else if (this.channels === granted) {
       // Every granted channel, in granted order: the unmapped identity.
-      planar = [];
-      for (let c = 0; c < granted; c++) planar.push(input[c]);
+      for (let c = 0; c < granted; c++) planar[c] = input[c];
     } else if (this.channels > granted) {
       return this.refuse('the input device does not support ' + this.channels +
         ' delivered channels; it reports ' + granted);
@@ -109,23 +127,30 @@ class DecibriProcessor extends AudioWorkletProcessor {
     }
 
     if (this.needsResample) {
-      planar = this.resample(planar);
+      this.resample(planar);
+    } else {
+      this.accumulate(planar);
     }
 
-    // Interleave the planar channels into the accumulation buffer frame by
-    // frame, flushing at whole chunks, so every posted chunk is a whole
-    // number of frames.
+    return true;
+  }
+
+  /**
+   * Interleave the block's frames into the accumulation buffer as they are,
+   * flushing at whole chunks, so every posted chunk is a whole number of
+   * frames.
+   */
+  accumulate(planar) {
     const frames = planar[0].length;
+    const channels = this.channels;
     for (let i = 0; i < frames; i++) {
-      for (let c = 0; c < this.channels; c++) {
+      for (let c = 0; c < channels; c++) {
         this.buffer[this.bufferIndex++] = planar[c][i];
       }
       if (this.bufferIndex >= this.samplesPerChunk) {
         this.flush();
       }
     }
-
-    return true;
   }
 
   /**
@@ -139,54 +164,75 @@ class DecibriProcessor extends AudioWorkletProcessor {
     return false;
   }
 
+  /**
+   * Resample the block by linear interpolation at one phase shared by every
+   * channel, so a delivered frame stays a frame, interleaving each frame
+   * straight into the accumulation buffer and flushing at whole chunks.
+   * Frame k of the stream sits at k * native / target input samples. The
+   * phase carries that position across blocks as an exact integer numerator
+   * over the target rate, without clamping, and the previous block's last
+   * sample per channel is kept, so a frame whose time falls between two
+   * blocks is interpolated across the boundary. Every input sample's time is
+   * represented once, and the delivered count over any length of capture is
+   * exact.
+   */
   resample(planar) {
     const inputLength = planar[0].length;
+    const channels = this.channels;
+    const native = this.native;
+    const target = this.target;
+    const last = this.last;
+    let phase = this.phase;
 
-    // Calculate how many output frames we can produce. One position shared
-    // by every channel: the channels advance in lockstep, so a delivered
-    // frame stays a frame.
-    let count = 0;
-    let pos = this.position;
-    while (pos < inputLength - 1) {
-      count++;
-      pos += this.ratio;
-    }
-
-    const output = planar.map(() => new Float32Array(count));
-    pos = this.position;
-
-    for (let i = 0; i < count; i++) {
-      const idx = Math.floor(pos);
-      const frac = pos - idx;
-      for (let c = 0; c < planar.length; c++) {
-        output[c][i] = planar[c][idx] * (1 - frac) + planar[c][idx + 1] * frac;
+    // A frame needs the input sample after its floor, so the block serves
+    // every position below inputLength - 1.
+    const end = (inputLength - 1) * target;
+    while (phase < end) {
+      const idx = Math.floor(phase / target);
+      const frac = (phase - idx * target) / target;
+      if (idx < 0) {
+        // Between the stored sample and this block's first.
+        for (let c = 0; c < channels; c++) {
+          this.buffer[this.bufferIndex++] = last[c] * (1 - frac) + planar[c][0] * frac;
+        }
+      } else {
+        for (let c = 0; c < channels; c++) {
+          this.buffer[this.bufferIndex++] = planar[c][idx] * (1 - frac) + planar[c][idx + 1] * frac;
+        }
       }
-      pos += this.ratio;
+      if (this.bufferIndex >= this.samplesPerChunk) {
+        this.flush();
+      }
+      phase += native;
     }
 
-    // Carry fractional remainder relative to consumed input.
-    this.position = Math.max(0, pos - inputLength);
-
-    return output;
+    // Carry the phase relative to the next block's first sample; it sits in
+    // [-target, native - target). Keep the block's last sample for the frame
+    // that may fall before that block begins.
+    this.phase = phase - inputLength * target;
+    for (let c = 0; c < channels; c++) last[c] = planar[c][inputLength - 1];
   }
 
   flush() {
     let transferBuffer;
 
     if (this.format === 'int16') {
+      // The posted buffer is transferred, so each chunk converts into a
+      // fresh Int16Array; the accumulation buffer stays and is refilled from
+      // its start.
       const int16 = new Int16Array(this.samplesPerChunk);
       for (let i = 0; i < this.samplesPerChunk; i++) {
         int16[i] = Math.max(-32768, Math.min(32767, Math.round(this.buffer[i] * 32768)));
       }
       transferBuffer = int16.buffer;
     } else {
-      transferBuffer = this.buffer.slice(0, this.samplesPerChunk).buffer;
+      // The accumulation buffer itself is transferred, so a fresh one
+      // replaces it.
+      transferBuffer = this.buffer.buffer;
+      this.buffer = new Float32Array(this.samplesPerChunk);
     }
 
     this.port.postMessage(transferBuffer, [transferBuffer]);
-
-    // Reset accumulation buffer
-    this.buffer = new Float32Array(this.samplesPerChunk);
     this.bufferIndex = 0;
   }
 }

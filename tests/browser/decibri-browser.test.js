@@ -123,9 +123,11 @@ describe('Microphone constructor', () => {
   });
 
   it('accepts all options', () => {
+    // The ten options the browser entry reads, every one present.
     const mic = new Microphone({
       sampleRate: 44100,
       channels: 1,
+      channelMap: [0],
       framesPerBuffer: 800,
       device: 'mic2',
       dtype: 'float32',
@@ -226,6 +228,60 @@ describe('Microphone constructor validation', () => {
   it('accepts vad: false and vad: energy', () => {
     expect(() => new Microphone({ vad: false })).not.toThrow();
     expect(() => new Microphone({ vad: 'energy' })).not.toThrow();
+  });
+});
+
+describe('Microphone options the browser cannot serve', () => {
+  // The node entry's conditioning options and its detector model path are
+  // refused on presence, with a TypeError naming the key, whatever the value
+  // (Group 7d asserts the node entry accepts each of the same values).
+
+  const unsupported = [
+    ['modelPath', '/models/silero_vad.onnx'],
+    ['dcRemoval', true],
+    ['denoise', 'fastenhancer-t'],
+    ['highpass', 80],
+    ['agc', -18],
+    ['limiter', -1.0],
+    ['aec', 'tau'],
+  ];
+
+  it('refuses each option with a TypeError naming it', () => {
+    for (const [key, value] of unsupported) {
+      const err = thrownBy(() => new Microphone({ [key]: value }));
+      expect(err).toBeInstanceOf(TypeError);
+      expect(err.message).toBe(`${key} is not supported in the browser`);
+    }
+  });
+
+  it('refuses on presence, whatever the value', () => {
+    for (const [key] of unsupported) {
+      for (const value of [false, null, 0, '', {}]) {
+        const err = thrownBy(() => new Microphone({ [key]: value }));
+        expect(err).toBeInstanceOf(TypeError);
+        expect(err.message).toBe(`${key} is not supported in the browser`);
+      }
+    }
+  });
+
+  it('names the first option present in node option table order', () => {
+    const err = thrownBy(() => new Microphone({ aec: 'tau', limiter: -1.0, denoise: 'fastenhancer-t' }));
+    expect(err.message).toBe('denoise is not supported in the browser');
+  });
+
+  it('treats an explicit undefined as absence', () => {
+    const options = {};
+    for (const [key] of unsupported) options[key] = undefined;
+    expect(new Microphone(options)).toBeInstanceOf(Microphone);
+    expect(new Microphone()).toBeInstanceOf(Microphone);
+    expect(new Microphone({})).toBeInstanceOf(Microphone);
+  });
+
+  it('refuses before any other option is read', () => {
+    // A key the browser cannot serve is named ahead of a value it would
+    // refuse on its own.
+    const err = thrownBy(() => new Microphone({ sampleRate: 0, denoise: 'fastenhancer-t' }));
+    expect(err.message).toBe('denoise is not supported in the browser');
   });
 });
 
