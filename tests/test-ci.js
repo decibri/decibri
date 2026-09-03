@@ -913,6 +913,73 @@ for (const options of [
   }
 }
 
+// Browser-only refusals: the options the node entry documents and the
+// browser entry cannot serve. The node entry accepts each at construction;
+// the browser entry refuses each on presence, whatever its value, with a
+// TypeError naming the key. This is the one place the two entries part, and
+// the pairing is asserted here so the parting stays exactly this wide.
+const browserUnsupported = [
+  ['modelPath', path.join(__dirname, '..', 'npm', 'decibri', 'models', 'silero_vad.onnx')],
+  ['dcRemoval', true],
+  ['denoise', 'fastenhancer-t'],
+  ['highpass', 80],
+  ['agc', -18],
+  ['limiter', -1.0],
+  ['aec', 'tau'],
+];
+for (const [key, value] of browserUnsupported) {
+  const options = { sampleRate: 16000, channels: 1, [key]: value };
+  try {
+    const instance = new Microphone(options);
+    instance.stop();
+    assert(true, `node entry accepts ${key} at construction`);
+  } catch (e) {
+    assert(false, `node entry accepts ${key} at construction (got ${e.constructor.name}: ${e.message})`);
+  }
+  const message = `${key} is not supported in the browser`;
+  assertThrows(() => new BrowserMicrophone(options), TypeError, message);
+  let thrown = null;
+  try {
+    new BrowserMicrophone(options);
+  } catch (e) {
+    thrown = e;
+  }
+  assert(thrown !== null && thrown.message === message, `browser entry message for ${key} is exactly "${message}"`);
+  // Whatever the value: a value the node entry would itself reject still
+  // names the key on the browser entry.
+  assertThrows(() => new BrowserMicrophone({ [key]: null }), TypeError, message);
+}
+
+// The controls: the ten options the browser entry reads construct with every
+// one present, and an explicit undefined on an unsupported key is absence on
+// both entries.
+try {
+  new BrowserMicrophone({
+    sampleRate: 16000,
+    channels: 1,
+    channelMap: [0],
+    framesPerBuffer: 1600,
+    device: 'mic1',
+    dtype: 'int16',
+    vad: 'energy',
+    echoCancellation: false,
+    noiseSuppression: false,
+    workletUrl: '/worklet.js',
+  });
+  assert(true, 'browser entry constructs with all ten of its options present');
+} catch (e) {
+  assert(false, `browser entry constructs with all ten of its options present (got ${e.constructor.name}: ${e.message})`);
+}
+for (const [entry, Ctor] of [['node', Microphone], ['browser', BrowserMicrophone]]) {
+  try {
+    const instance = new Ctor({ sampleRate: 16000, channels: 1, denoise: undefined, agc: undefined });
+    if (entry === 'node') instance.stop();
+    assert(true, `${entry} entry treats an explicit undefined as absence`);
+  } catch (e) {
+    assert(false, `${entry} entry treats an explicit undefined as absence (got ${e.constructor.name}: ${e.message})`);
+  }
+}
+
 console.log('  Group 7d done\n');
 
 // ═══════════════════════════════════════════════════════════════════════════════

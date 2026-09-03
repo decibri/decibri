@@ -63,7 +63,7 @@ var decibri = (function() {
 	//#endregion
 	//#region npm/decibri/src/browser/worklet-inline.js
 	var require_worklet_inline = /* @__PURE__ */ __commonJSMin(((exports, module) => {
-		module.exports = { WORKLET_SOURCE: "var e=class extends AudioWorkletProcessor{constructor(e){super();let t=e.processorOptions;this.framesPerBuffer=t.framesPerBuffer,this.format=t.format,this.ratio=t.nativeSampleRate/t.targetSampleRate,this.needsResample=t.nativeSampleRate!==t.targetSampleRate,this.channelMap=t.channelMap??null,this.channels=this.channelMap?this.channelMap.length:t.channels??1,this.channelError=!1,this.position=0,this.samplesPerChunk=this.framesPerBuffer*this.channels,this.buffer=new Float32Array(this.samplesPerChunk),this.bufferIndex=0}process(e,t,n){let r=e[0];if(!r||r.length===0||!r[0]||r[0].length===0)return!0;if(this.channelError)return!1;let i=r.length,a;if(this.channelMap){for(let e=0;e<this.channelMap.length;e++)if(this.channelMap[e]>=i)return this.refuse(`the channel map names device channel `+this.channelMap[e]+`; the device reports `+i+` input channels`);a=[];for(let e=0;e<this.channelMap.length;e++)a.push(r[this.channelMap[e]])}else if(this.channels===1)if(i===1)a=[r[0]];else{let e=r[0].length,t=new Float32Array(e);for(let n=0;n<e;n++){let e=0;for(let t=0;t<i;t++)e=Math.fround(e+r[t][n]);t[n]=e/i}a=[t]}else if(this.channels===i){a=[];for(let e=0;e<i;e++)a.push(r[e])}else if(this.channels>i)return this.refuse(`the input device does not support `+this.channels+` delivered channels; it reports `+i);else return this.refuse(`a channel map is required to deliver `+this.channels+` of the device's `+i+` input channels`);this.needsResample&&(a=this.resample(a));let o=a[0].length;for(let e=0;e<o;e++){for(let t=0;t<this.channels;t++)this.buffer[this.bufferIndex++]=a[t][e];this.bufferIndex>=this.samplesPerChunk&&this.flush()}return!0}refuse(e){return this.channelError=!0,this.port.postMessage({type:`error`,message:e}),!1}resample(e){let t=e[0].length,n=0,r=this.position;for(;r<t-1;)n++,r+=this.ratio;let i=e.map(()=>new Float32Array(n));r=this.position;for(let t=0;t<n;t++){let n=Math.floor(r),a=r-n;for(let r=0;r<e.length;r++)i[r][t]=e[r][n]*(1-a)+e[r][n+1]*a;r+=this.ratio}return this.position=Math.max(0,r-t),i}flush(){let e;if(this.format===`int16`){let t=new Int16Array(this.samplesPerChunk);for(let e=0;e<this.samplesPerChunk;e++)t[e]=Math.max(-32768,Math.min(32767,Math.round(this.buffer[e]*32768)));e=t.buffer}else e=this.buffer.slice(0,this.samplesPerChunk).buffer;this.port.postMessage(e,[e]),this.buffer=new Float32Array(this.samplesPerChunk),this.bufferIndex=0}};registerProcessor(`decibri-processor`,e);" };
+		module.exports = { WORKLET_SOURCE: "var e=class extends AudioWorkletProcessor{constructor(e){super();let t=e.processorOptions;this.framesPerBuffer=t.framesPerBuffer,this.format=t.format,this.native=t.nativeSampleRate,this.target=t.targetSampleRate,this.needsResample=t.nativeSampleRate!==t.targetSampleRate,this.channelMap=t.channelMap??null,this.channels=this.channelMap?this.channelMap.length:t.channels??1,this.channelError=!1,this.phase=0,this.last=new Float32Array(this.channels),this.planar=Array(this.channels),this.mono=null,this.samplesPerChunk=this.framesPerBuffer*this.channels,this.buffer=new Float32Array(this.samplesPerChunk),this.bufferIndex=0}process(e,t,n){let r=e[0];if(!r||r.length===0||!r[0]||r[0].length===0)return!0;if(this.channelError)return!1;let i=r.length,a=this.planar;if(this.channelMap){for(let e=0;e<this.channelMap.length;e++)if(this.channelMap[e]>=i)return this.refuse(`the channel map names device channel `+this.channelMap[e]+`; the device reports `+i+` input channels`);for(let e=0;e<this.channelMap.length;e++)a[e]=r[this.channelMap[e]]}else if(this.channels===1)if(i===1)a[0]=r[0];else{let e=r[0].length;(this.mono===null||this.mono.length!==e)&&(this.mono=new Float32Array(e));let t=this.mono;for(let n=0;n<e;n++){let e=0;for(let t=0;t<i;t++)e=Math.fround(e+r[t][n]);t[n]=e/i}a[0]=t}else if(this.channels===i)for(let e=0;e<i;e++)a[e]=r[e];else if(this.channels>i)return this.refuse(`the input device does not support `+this.channels+` delivered channels; it reports `+i);else return this.refuse(`a channel map is required to deliver `+this.channels+` of the device's `+i+` input channels`);return this.needsResample?this.resample(a):this.accumulate(a),!0}accumulate(e){let t=e[0].length,n=this.channels;for(let r=0;r<t;r++){for(let t=0;t<n;t++)this.buffer[this.bufferIndex++]=e[t][r];this.bufferIndex>=this.samplesPerChunk&&this.flush()}}refuse(e){return this.channelError=!0,this.port.postMessage({type:`error`,message:e}),!1}resample(e){let t=e[0].length,n=this.channels,r=this.native,i=this.target,a=this.last,o=this.phase,s=(t-1)*i;for(;o<s;){let t=Math.floor(o/i),s=(o-t*i)/i;if(t<0)for(let t=0;t<n;t++)this.buffer[this.bufferIndex++]=a[t]*(1-s)+e[t][0]*s;else for(let r=0;r<n;r++)this.buffer[this.bufferIndex++]=e[r][t]*(1-s)+e[r][t+1]*s;this.bufferIndex>=this.samplesPerChunk&&this.flush(),o+=r}this.phase=o-t*i;for(let r=0;r<n;r++)a[r]=e[r][t-1]}flush(){let e;if(this.format===`int16`){let t=new Int16Array(this.samplesPerChunk);for(let e=0;e<this.samplesPerChunk;e++)t[e]=Math.max(-32768,Math.min(32767,Math.round(this.buffer[e]*32768)));e=t.buffer}else e=this.buffer.buffer,this.buffer=new Float32Array(this.samplesPerChunk);this.port.postMessage(e,[e]),this.bufferIndex=0}};registerProcessor(`decibri-processor`,e);" };
 	}));
 	//#endregion
 	//#region npm/decibri/src/browser/decibri-browser.js
@@ -71,6 +71,15 @@ var decibri = (function() {
 		const { Emitter } = require_emitter();
 		const { WORKLET_SOURCE } = require_worklet_inline();
 		const VERSION = "5.7.0";
+		const UNSUPPORTED_OPTIONS = [
+			"modelPath",
+			"dcRemoval",
+			"denoise",
+			"highpass",
+			"agc",
+			"limiter",
+			"aec"
+		];
 		/**
 		* Browser microphone capture.
 		*
@@ -100,6 +109,7 @@ var decibri = (function() {
 				this._starting = null;
 				this._stopRequested = false;
 				if (options.vadThreshold !== void 0 || options.vadHoldoff !== void 0) throw new TypeError("vadThreshold and vadHoldoff are no longer supported. Pass them on the vad config object: vad: { model: 'energy', threshold: 0.01, holdoffMs: 300 }.");
+				for (const key of UNSUPPORTED_OPTIONS) if (options[key] !== void 0) throw new TypeError(`${key} is not supported in the browser`);
 				const vad = options.vad ?? false;
 				let vadThreshold = .01;
 				let vadHoldoff = 300;
@@ -402,33 +412,41 @@ var decibri = (function() {
 		/**
 		* Linear-interpolation resampler, the inverse of the capture worklet's: it
 		* takes samples at the user's rate and produces samples at the context rate.
-		* Carries a fractional position across calls so successive writes stay
-		* continuous. Logic mirrors worklet-processor.js resample(), with from and to
-		* swapped (from = user rate, to = context rate).
+		* Carries its phase and the previous call's last sample across calls, so
+		* successive writes stay continuous and the delivered count over any number
+		* of writes is exact. Logic mirrors worklet-processor.js resample(), with
+		* from and to swapped (from = user rate, to = context rate).
 		*/
 		var Resampler = class {
 			constructor(fromRate, toRate) {
-				this.ratio = fromRate / toRate;
-				this.position = 0;
+				this.from = fromRate;
+				this.to = toRate;
+				this.identity = fromRate === toRate;
+				this.phase = 0;
+				this.last = 0;
 			}
 			process(input) {
-				if (this.ratio === 1) return input;
+				if (this.identity) return input;
 				const inputLength = input.length;
+				const from = this.from;
+				const to = this.to;
+				const end = (inputLength - 1) * to;
 				let count = 0;
-				let pos = this.position;
-				while (pos < inputLength - 1) {
+				let phase = this.phase;
+				while (phase < end) {
 					count++;
-					pos += this.ratio;
+					phase += from;
 				}
 				const output = new Float32Array(count);
-				pos = this.position;
+				phase = this.phase;
 				for (let i = 0; i < count; i++) {
-					const idx = Math.floor(pos);
-					const frac = pos - idx;
-					output[i] = input[idx] * (1 - frac) + input[idx + 1] * frac;
-					pos += this.ratio;
+					const idx = Math.floor(phase / to);
+					const frac = (phase - idx * to) / to;
+					output[i] = (idx < 0 ? this.last : input[idx]) * (1 - frac) + input[idx + 1] * frac;
+					phase += from;
 				}
-				this.position = Math.max(0, pos - inputLength);
+				this.phase = phase - inputLength * to;
+				if (inputLength > 0) this.last = input[inputLength - 1];
 				return output;
 			}
 		};

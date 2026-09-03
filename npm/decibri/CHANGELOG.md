@@ -11,6 +11,10 @@ For other decibri packages, see:
 
 ## [Unreleased]
 
+### Breaking changes
+
+- **The browser `Microphone` refuses the options it cannot serve: `modelPath`, `dcRemoval`, `denoise`, `highpass`, `agc`, `limiter` and `aec`.** It accepted each of them and did nothing with it, so the delivered audio was unconditioned with nothing to indicate the option was ignored. Passing any of them now throws `TypeError: <option> is not supported in the browser` from the constructor, naming the first one present in the order above, whatever its value; an explicit `undefined` counts as absent. Code passing one of these options to the browser entry has to drop it, and code sharing one options object between the Node and browser entries has to strip them for the browser. The Node entry accepts the same options as before. The browser entry's other options, `sampleRate`, `channels`, `channelMap`, `framesPerBuffer`, `device`, `dtype`, `vad`, `echoCancellation`, `noiseSuppression` and `workletUrl`, are unchanged, as is every other browser `Microphone` message.
+
 ### Changed
 
 - `File.save` and `AudioWriter` refuse an AIFF above 32767 channels, reported as a `DecibriError` with code `AUDIO_FORMAT_UNSUPPORTED` carrying the container layer's own text (`File.save` rejects with it; `AudioWriter` destroys the stream with it when the stream finishes), the refusal a FLAC above 8 channels and a WAV above 32767 already receive: an AIFF `COMM` chunk's `numChannels` is a signed 16-bit field, so 32767 is the format's own maximum. There is nothing a caller needs to do, because no container decibri writes accepts more. Reading an AIFF, every count up to 32767, WAV, FLAC and `File.buffer` delivery at any count are unchanged.
@@ -20,6 +24,7 @@ For other decibri packages, see:
 ### Fixed
 
 - With a VAD active on a multichannel stream that has an enhancement step enabled, the detector feed holds two seconds of frames at every channel count and evicts whole frames. A stream whose delivered block exceeded the feed's bound (more than 20 channels at 16 kHz, or 60 at 48 kHz, at the default `framesPerBuffer` of 1600; fewer channels with a larger `framesPerBuffer`) lost feed frames on every block, and at a channel count that does not divide the bound also fed the detector a channel other than the one `vad: { source }` named. Mono streams and streams with no enhancement step are unchanged.
+- The browser `Microphone` and `Speaker` resamplers deliver the exact number of samples for the audio they receive. Each carried the resampling position across blocks and clamped a negative carry to zero, so a sample whose time fell between one block's last input sample and the next block's first was moved onto that first sample, and one input sample's time was dropped at every such boundary: at a 48 kHz context capturing at 16 kHz the `Microphone` delivered 15,937.5 samples a second, 0.39 % short, about 14 seconds an hour, with 44.1 kHz contexts, 44.1 kHz targets and the `Speaker` at the common source rates short by between 0.03 % and 0.62 % depending on the block size. Both now keep the previous block's last sample and carry the position across the boundary as an exact integer phase, and the delivered count matches the input at every rate pair over any length of audio. Capture and playback at the context's own rate never resampled and are unchanged.
 
 ## [5.7.0] - 2026-08-21
 

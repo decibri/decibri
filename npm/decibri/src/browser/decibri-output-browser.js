@@ -10,39 +10,60 @@ const BUFFER_SECONDS = 2;
 /**
  * Linear-interpolation resampler, the inverse of the capture worklet's: it
  * takes samples at the user's rate and produces samples at the context rate.
- * Carries a fractional position across calls so successive writes stay
- * continuous. Logic mirrors worklet-processor.js resample(), with from and to
- * swapped (from = user rate, to = context rate).
+ * Carries its phase and the previous call's last sample across calls, so
+ * successive writes stay continuous and the delivered count over any number
+ * of writes is exact. Logic mirrors worklet-processor.js resample(), with
+ * from and to swapped (from = user rate, to = context rate).
  */
 class Resampler {
   constructor(fromRate, toRate) {
-    this.ratio = fromRate / toRate;
-    this.position = 0;
+    this.from = fromRate;
+    this.to = toRate;
+    this.identity = fromRate === toRate;
+    // The position of the next output sample in input samples relative to
+    // the current call's first sample, held as an integer numerator over the
+    // context rate so it is exact across any number of calls. It may sit
+    // below zero, down to one input sample before the call, for a sample
+    // whose time falls between the previous call's last sample, kept in
+    // `last`, and this call's first. The first call starts at zero, on its
+    // own first sample.
+    this.phase = 0;
+    this.last = 0;
   }
 
   process(input) {
-    if (this.ratio === 1) return input;
+    if (this.identity) return input;
 
     const inputLength = input.length;
+    const from = this.from;
+    const to = this.to;
+    // A sample needs the input sample after its floor, so the call serves
+    // every position below inputLength - 1.
+    const end = (inputLength - 1) * to;
 
     let count = 0;
-    let pos = this.position;
-    while (pos < inputLength - 1) {
+    let phase = this.phase;
+    while (phase < end) {
       count++;
-      pos += this.ratio;
+      phase += from;
     }
 
     const output = new Float32Array(count);
-    pos = this.position;
+    phase = this.phase;
 
     for (let i = 0; i < count; i++) {
-      const idx = Math.floor(pos);
-      const frac = pos - idx;
-      output[i] = input[idx] * (1 - frac) + input[idx + 1] * frac;
-      pos += this.ratio;
+      const idx = Math.floor(phase / to);
+      const frac = (phase - idx * to) / to;
+      const before = idx < 0 ? this.last : input[idx];
+      output[i] = before * (1 - frac) + input[idx + 1] * frac;
+      phase += from;
     }
 
-    this.position = Math.max(0, pos - inputLength);
+    // Carry the phase relative to the next call's first sample, and keep
+    // this call's last sample for the output that may fall before that call
+    // begins. An empty call leaves both as they are.
+    this.phase = phase - inputLength * to;
+    if (inputLength > 0) this.last = input[inputLength - 1];
 
     return output;
   }

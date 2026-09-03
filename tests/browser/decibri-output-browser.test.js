@@ -5,6 +5,9 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 // Controllable audio clock so backpressure (which decays the queue estimate by
 // elapsed context time) can be driven deterministically.
 const mockTime = { value: 0 };
+// The context rate the next AudioContext reports, so the resampler can be
+// driven at more than one context rate.
+const mockContextRate = { value: 48000 };
 
 const mockPort = {
   postMessage: vi.fn(),
@@ -31,7 +34,7 @@ const mockContextResume = vi.fn().mockImplementation(async () => { contextState 
 
 const MockAudioContext = vi.fn().mockImplementation(function () {
   return {
-    sampleRate: 48000,
+    sampleRate: mockContextRate.value,
     get state() { return contextState; },
     get currentTime() { return mockTime.value; },
     resume: mockContextResume,
@@ -64,6 +67,7 @@ function resetMocks() {
   mockPort.onmessage = null;
   capturedWorkletOptions = null;
   mockTime.value = 0;
+  mockContextRate.value = 48000;
   contextState = 'suspended';
   mockContextResume.mockImplementation(async () => { contextState = 'running'; });
   mockAddModule.mockResolvedValue(undefined);
@@ -271,6 +275,134 @@ describe('Speaker conversion pipeline', () => {
     await speaker.start();
     await expect(speaker.write('not audio')).rejects.toThrow('Int16Array');
     speaker.stop();
+  });
+});
+
+// ── Resampler cadence ────────────────────────────────────────────────────────
+
+// The rate pairs the playback resampler's cadence is pinned at, as user rate
+// to context rate: the common source rates against the two context rates
+// browsers run at, the pair whose ratio is exact in binary included.
+const RATE_PAIRS = [
+  [16000, 48000],
+  [44100, 48000],
+  [24000, 48000],
+  [22050, 48000],
+  [48000, 44100],
+  [16000, 44100],
+];
+
+// The samples a linear-interpolation resampler delivers from n input samples
+// at a pair: sample k sits at k * user / context input samples and needs the
+// input sample after its floor, so sample k exists while
+// k * user < (n - 1) * context. Integer arithmetic throughout.
+function expectedSamples(n, user, context) {
+  return Math.ceil(((n - 1) * context) / user);
+}
+
+// A ramp of n samples whose value is the sample's index from `start`, scaled
+// by 2^-10 so every value is exact in single precision. A linear
+// interpolator reproduces a ramp exactly at every position, so each
+// delivered sample's value is the input time it was taken at.
+function ramp(start, n) {
+  const a = new Float32Array(n);
+  for (let i = 0; i < n; i++) a[i] = (start + i) / 1024;
+  return a;
+}
+
+// Write `chunks` in order through a fresh Speaker at the pair, advancing the
+// audio clock past each chunk's duration first so the queue estimate has
+// drained and no write waits on backpressure. Returns the fed samples
+// concatenated in feed order.
+async function feed(user, context, chunks) {
+  mockPort.postMessage.mockClear();
+  mockContextRate.value = context;
+  const speaker = new Speaker({ sampleRate: user, dtype: 'float32' });
+  await speaker.start();
+  for (const chunk of chunks) {
+    mockTime.value += (2 * chunk.length) / user;
+    await speaker.write(chunk);
+  }
+  speaker.stop();
+  const buffers = mockPort.postMessage.mock.calls
+    .filter(c => c[0] instanceof ArrayBuffer)
+    .map(c => new Float32Array(c[0]));
+  const all = new Float32Array(buffers.reduce((n, b) => n + b.length, 0));
+  let offset = 0;
+  for (const b of buffers) {
+    all.set(b, offset);
+    offset += b.length;
+  }
+  return all;
+}
+
+describe('Speaker resampler cadence', () => {
+  beforeEach(resetMocks);
+
+  it('delivers the exact sample count over a long run of writes at every rate pair', async () => {
+    // 320,000 samples, 20 seconds at 16 kHz, in writes of 160 and of 1600.
+    // The count is exact at every pair and both write sizes, so a deficit
+    // of even one sample per write boundary fails here.
+    const total = 320000;
+    for (const writeSize of [160, 1600]) {
+      const chunks = [];
+      for (let w = 0; w < total / writeSize; w++) chunks.push(new Float32Array(writeSize));
+      for (const [user, context] of RATE_PAIRS) {
+        const fed = await feed(user, context, chunks);
+        expect(fed.length, `${user} -> ${context} in writes of ${writeSize}`)
+          .toBe(expectedSamples(total, user, context));
+      }
+    }
+  });
+
+  it('delivers the same samples whole and in writes of any size', async () => {
+    // Chunking moves samples between writes, never the total and never the
+    // samples: the input written once and written in pieces, of the common
+    // sizes, of single samples, of sizes that never divide the whole and
+    // with empty writes between, delivers the same samples.
+    const n = 8000;
+    const input = ramp(0, n);
+    const strategies = [[1600], [160], [1], [7], [3, 1, 64, 0, 7, 129, 13]];
+    for (const [user, context] of RATE_PAIRS) {
+      const whole = await feed(user, context, [input]);
+      expect(whole.length, `${user} -> ${context} whole`).toBe(expectedSamples(n, user, context));
+      for (const sizes of strategies) {
+        const chunks = [];
+        let fed = 0;
+        for (let s = 0; fed < n; s++) {
+          const end = Math.min(fed + sizes[s % sizes.length], n);
+          chunks.push(input.subarray(fed, end));
+          fed = end;
+        }
+        const chunked = await feed(user, context, chunks);
+        const label = `${user} -> ${context} in writes ${JSON.stringify(sizes)}`;
+        expect(chunked.length, label).toBe(whole.length);
+        let worst = 0;
+        for (let i = 0; i < whole.length; i++) worst = Math.max(worst, Math.abs(chunked[i] - whole[i]));
+        expect(worst, label).toBeLessThan(1e-4);
+      }
+    }
+  });
+
+  it('delivers every sample at its exact input time', async () => {
+    // A ramp through the resampler is the identity from time to value:
+    // delivered sample k must carry the value at k * ratio input samples. A
+    // sample taken one input sample late, an interpolation weighted the
+    // wrong way round, or a boundary sample taken from the wrong pair all
+    // move the value by up to one input sample, 2^-10 here, against a
+    // single-precision resolution of about 2e-6 at the ramp's top.
+    const n = 16000;
+    const input = ramp(0, n);
+    const chunks = [];
+    for (let offset = 0; offset < n; offset += 160) chunks.push(input.subarray(offset, offset + 160));
+    for (const [user, context] of RATE_PAIRS) {
+      const ratio = user / context;
+      const fed = await feed(user, context, chunks);
+      expect(fed.length, `${user} -> ${context}`).toBe(expectedSamples(n, user, context));
+      let worst = 0;
+      for (let k = 0; k < fed.length; k++) worst = Math.max(worst, Math.abs(fed[k] - (k * ratio) / 1024));
+      expect(worst, `${user} -> ${context}`).toBeLessThan(1e-4);
+    }
   });
 });
 
