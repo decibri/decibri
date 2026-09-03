@@ -111,7 +111,7 @@ The denoise stage needs the `denoise` feature and an explicit `denoise_model_pat
 
 ### Condition and analyze a file
 
-Everything a `Microphone` does to live audio, `File` does to audio you already have, through the same chain. A `File` is a finite `Iterator` over conditioned chunks; `File::open` mirrors `std::fs::File::open`, and `File::buffer` wraps in-memory samples with an explicit input rate.
+`File` runs `Microphone`'s conditioning chain on audio you already have. Echo cancellation, which needs a live far-end reference, is the one `Microphone` option `File` does not offer. A `File` is a finite `Iterator` over conditioned chunks; `File::open` mirrors `std::fs::File::open`, and `File::buffer` wraps in-memory samples with an explicit input rate.
 
 ```rust
 use decibri::{File, FileConfig, VadConfig};
