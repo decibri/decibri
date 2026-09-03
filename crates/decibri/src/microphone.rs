@@ -27,6 +27,7 @@ use crate::backend::{
     AudioBackend, BackendDevice, BackendStream, CpalBackend, InputDataCallback,
     StreamErrorCallback, StreamParams,
 };
+#[cfg(feature = "denoise")]
 use std::path::PathBuf;
 
 use crate::device::DeviceSelector;
@@ -222,13 +223,16 @@ pub struct MicrophoneConfig {
     /// Single-channel speech-enhancement (denoise) model to run on the captured
     /// audio, applied after DC removal. `None` (the default) leaves denoise off.
     /// Naming a model also requires [`denoise_model_path`](Self::denoise_model_path);
-    /// with the model set but no path the stage stays off. Honoured only when the
+    /// with the model set but no path the stage stays off. Present only when the
     /// `denoise` feature is compiled in.
+    #[cfg(feature = "denoise")]
     pub denoise: Option<DenoiseModel>,
     /// Filesystem path to the denoise model's ONNX file, supplied by the caller
     /// (the bindings resolve it from their bundled copy; the core ships no model
     /// bytes). Required when [`denoise`](Self::denoise) names a model; ignored
-    /// otherwise. Default: `None`.
+    /// otherwise. Present only when the `denoise` feature is compiled in.
+    /// Default: `None`.
+    #[cfg(feature = "denoise")]
     pub denoise_model_path: Option<PathBuf>,
     /// Filesystem path to the ONNX Runtime dynamic library, used to initialise
     /// ORT for the capture-path denoise stage (the same role
@@ -239,7 +243,9 @@ pub struct MicrophoneConfig {
     /// `None` (the default) leaves ORT to its own discovery (the `ORT_DYLIB_PATH`
     /// environment variable, then the system loader). ORT initialises once per
     /// process (first-wins), so when a VAD has already initialised it this is a
-    /// no-op. Default: `None`.
+    /// no-op. Present only when the `denoise` feature is compiled in. Default:
+    /// `None`.
+    #[cfg(feature = "denoise")]
     pub ort_library_path: Option<PathBuf>,
     /// High-pass filter to apply to the captured audio, removing low-frequency
     /// rumble below the voice band. Runs in the transform chain after denoise,
@@ -251,16 +257,18 @@ pub struct MicrophoneConfig {
     /// audio. Drives the running level toward this target with a smoothed,
     /// rate-limited gain. Range: -40 to -3 dBFS (typical -18). `None` (the
     /// default) builds no level-control stage, leaving the level untouched (a
-    /// true byte-identical no-op). Runs after the high-pass step, honoured only
+    /// true byte-identical no-op). Runs after the high-pass step. Present only
     /// when the `gain` feature is compiled in. Pure DSP: no model, no path.
+    #[cfg(feature = "gain")]
     pub agc: Option<i8>,
     /// Peak limiter ceiling in dBFS (sample-peak), applied to the captured audio.
     /// Holds the signal at or below this ceiling, the safety net that catches a
     /// transient the AGC's gain would let exceed full scale. Range: -3.0 to 0.0
     /// dBFS (typical -1.0). `None` (the default) builds no limiter stage, leaving
     /// the level untouched (a true byte-identical no-op). Runs last in the
-    /// transform chain, after the level-control step, honoured only when the
+    /// transform chain, after the level-control step. Present only when the
     /// `gain` feature is compiled in. Pure DSP: no model, no path.
+    #[cfg(feature = "gain")]
     pub limiter: Option<f32>,
     /// Acoustic echo canceller model to run on the captured audio, removing the
     /// echo of far-end audio the caller pushes through
@@ -344,11 +352,16 @@ impl Default for MicrophoneConfig {
             frames_per_buffer: 1600,
             device: DeviceSelector::Default,
             dc_removal: false,
+            #[cfg(feature = "denoise")]
             denoise: None,
+            #[cfg(feature = "denoise")]
             denoise_model_path: None,
+            #[cfg(feature = "denoise")]
             ort_library_path: None,
             highpass: None,
+            #[cfg(feature = "gain")]
             agc: None,
+            #[cfg(feature = "gain")]
             limiter: None,
             #[cfg(feature = "aec")]
             aec: None,
@@ -400,6 +413,7 @@ impl MicrophoneConfig {
         // core directly from a Rust consumer that bypasses the bindings. Guard it
         // here, the load-bearing backstop, returning an error rather than
         // clamping (matching `sample_rate`).
+        #[cfg(feature = "gain")]
         if let Some(target) = self.agc {
             if !(-40..=-3).contains(&target) {
                 return Err(DecibriError::AgcTargetOutOfRange);
@@ -409,6 +423,7 @@ impl MicrophoneConfig {
         // the core directly from a Rust consumer that bypasses the bindings. Guard
         // it here, the load-bearing backstop, returning an error rather than
         // clamping (matching `agc`).
+        #[cfg(feature = "gain")]
         if let Some(ceiling) = self.limiter {
             if !(-3.0..=0.0).contains(&ceiling) {
                 return Err(DecibriError::LimiterCeilingOutOfRange);
@@ -1568,6 +1583,7 @@ impl Microphone {
         // model but no path (or vice versa) the chain leaves denoise off. The
         // path is borrowed for construction only (the stage loads the model and
         // does not retain the path).
+        #[cfg(feature = "denoise")]
         let denoise = self
             .config
             .denoise
@@ -1604,9 +1620,12 @@ impl Microphone {
             Transforms {
                 channel_map: self.config.channel_map.as_deref(),
                 dc_removal: self.config.dc_removal,
+                #[cfg(feature = "denoise")]
                 denoise,
                 highpass: self.config.highpass,
+                #[cfg(feature = "gain")]
                 agc: self.config.agc,
+                #[cfg(feature = "gain")]
                 limiter: self.config.limiter,
                 #[cfg(feature = "aec")]
                 aec,
@@ -3187,6 +3206,7 @@ mod tests {
     /// while an in-range target and the `None` default both validate. The guard
     /// runs in `MicrophoneConfig::validate`, the same site that range-checks
     /// `sample_rate`, so a Rust consumer that bypasses the bindings is protected.
+    #[cfg(feature = "gain")]
     #[test]
     fn agc_target_out_of_range_is_a_core_error() {
         let mut cfg = MicrophoneConfig::default();
@@ -3222,6 +3242,7 @@ mod tests {
     /// validate. The guard runs in `MicrophoneConfig::validate`, the same site that
     /// range-checks `sample_rate` and `agc`, so a Rust consumer that bypasses the
     /// bindings is protected.
+    #[cfg(feature = "gain")]
     #[test]
     fn limiter_ceiling_out_of_range_is_a_core_error() {
         let mut cfg = MicrophoneConfig::default();
