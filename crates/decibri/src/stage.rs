@@ -55,6 +55,7 @@
 
 #[cfg(feature = "aec")]
 use std::collections::VecDeque;
+#[cfg(feature = "denoise")]
 use std::path::Path;
 #[cfg(feature = "aec")]
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -66,7 +67,9 @@ use decibri_aec::{Aec, AecConfig, AecMetrics, AecModel, Suppression};
 use decibri_resampler::{PolyphaseResampler, Resampler};
 
 use crate::error::DecibriError;
-use crate::microphone::{DenoiseModel, HighpassFilter};
+#[cfg(feature = "denoise")]
+use crate::microphone::DenoiseModel;
+use crate::microphone::HighpassFilter;
 use crate::sample;
 
 /// One block of interleaved f32 samples together with the channel count they
@@ -1710,15 +1713,18 @@ pub(crate) struct Transforms<'a> {
     /// Remove a constant DC offset (the [`DcBlocker`]).
     pub dc_removal: bool,
     /// Denoise model selector with its model-file path and optional ORT library
-    /// path; `None` leaves denoise off. Honoured only with the `denoise` feature.
+    /// path; `None` leaves denoise off. Present only with the `denoise` feature.
+    #[cfg(feature = "denoise")]
     pub denoise: Option<(DenoiseModel, &'a Path, Option<&'a Path>)>,
     /// High-pass cutoff selector (the [`Biquad`]); `None` leaves it off.
     pub highpass: Option<HighpassFilter>,
     /// AGC target level in dBFS (the [`crate::gain::LevelControl`] engine); `None`
-    /// leaves it off. Honoured only with the `gain` feature.
+    /// leaves it off. Present only with the `gain` feature.
+    #[cfg(feature = "gain")]
     pub agc: Option<i8>,
     /// Limiter ceiling in dBFS (the [`crate::gain::Limiter`] stage); `None` leaves
-    /// it off. Honoured only with the `gain` feature.
+    /// it off. Present only with the `gain` feature.
+    #[cfg(feature = "gain")]
     pub limiter: Option<f32>,
     /// Echo-cancellation settings with the shared far-end reference queue;
     /// `None` leaves echo cancellation off.
@@ -1785,9 +1791,12 @@ pub(crate) fn build_capture_stage(
     let Transforms {
         channel_map,
         dc_removal,
+        #[cfg(feature = "denoise")]
         denoise,
         highpass,
+        #[cfg(feature = "gain")]
         agc,
+        #[cfg(feature = "gain")]
         limiter,
         #[cfg(feature = "aec")]
         aec,
@@ -1887,9 +1896,6 @@ pub(crate) fn build_capture_stage(
             tap_channels,
         )?));
     }
-    // Without the `denoise` feature the parameter is accepted but unused.
-    #[cfg(not(feature = "denoise"))]
-    let _ = denoise;
 
     // High-pass (user rumble cut) runs immediately AFTER denoise (chain order:
     // Denoise -> HighPass), so the denoise model receives near-full-band input.
@@ -1907,8 +1913,7 @@ pub(crate) fn build_capture_stage(
     // whose detection runs linked across the channels (one detector, one gain
     // applied to all, so the inter-channel balance is preserved), so it wraps
     // via `Linked` and adds no latency. Gated on the `gain` feature, like
-    // denoise is gated on `denoise`; without the feature the target is accepted
-    // but unused.
+    // denoise is gated on `denoise`.
     #[cfg(feature = "gain")]
     if let Some(target_db) = agc {
         transform.push(Box::new(Linked(crate::gain::LevelControl::agc(
@@ -1916,16 +1921,13 @@ pub(crate) fn build_capture_stage(
             target_rate,
         ))));
     }
-    #[cfg(not(feature = "gain"))]
-    let _ = agc;
 
     // The limiter runs LAST in the transform tier, immediately after the level
     // control, so it catches any peak the upstream gain would let exceed the
     // ceiling. It is a same-length stage detecting linked across the channels
     // like the level control, so it wraps via `Linked` and adds no latency.
-    // Gated on the same `gain` feature as the level-control engine (the pair);
-    // without the feature the ceiling is accepted but unused. Nothing runs
-    // after it.
+    // Gated on the same `gain` feature as the level-control engine (the pair).
+    // Nothing runs after it.
     #[cfg(feature = "gain")]
     if let Some(ceiling_db) = limiter {
         transform.push(Box::new(Linked(crate::gain::Limiter::new(
@@ -1933,8 +1935,6 @@ pub(crate) fn build_capture_stage(
             target_rate,
         ))));
     }
-    #[cfg(not(feature = "gain"))]
-    let _ = limiter;
 
     let output_channels = transform.iter().fold(tap_channels, |channels, stage| {
         stage.output_channels(channels)
@@ -4391,12 +4391,7 @@ mod tests {
         // otherwise poison its gain on the non-finite sample rather than freeze).
         // The glitches sit early so a poisoned stream would be corrupt or silent by
         // the time the second half is checked.
-        fn run_glitched(
-            dc: bool,
-            highpass: Option<HighpassFilter>,
-            agc: Option<i8>,
-            limiter: Option<f32>,
-        ) -> Vec<f32> {
+        fn run_glitched(transforms: Transforms<'_>) -> Vec<f32> {
             let sr = 16_000u32;
             let mut input: Vec<f32> = (0..8_000)
                 .map(|i| 0.3 * (2.0 * std::f32::consts::PI * 220.0 * i as f32 / sr as f32).sin())
@@ -4404,21 +4399,9 @@ mod tests {
             input[100] = f32::NAN;
             input[200] = f32::INFINITY;
             input[300] = f32::NEG_INFINITY;
-            let mut chain = build_capture_stage(
-                1,
-                1,
-                sr,
-                sr,
-                Transforms {
-                    dc_removal: dc,
-                    highpass,
-                    agc,
-                    limiter,
-                    ..Default::default()
-                },
-            )
-            .unwrap()
-            .expect("a conditioned config builds a chain");
+            let mut chain = build_capture_stage(1, 1, sr, sr, transforms)
+                .unwrap()
+                .expect("a conditioned config builds a chain");
             let mut out = chain.run(&input).expect("run").to_vec();
             let mut tail = Vec::new();
             chain.flush(&mut tail).expect("flush");
@@ -4440,24 +4423,47 @@ mod tests {
             );
         }
 
-        assert_clean("dc-only", &run_glitched(true, None, None, None));
+        assert_clean(
+            "dc-only",
+            &run_glitched(Transforms {
+                dc_removal: true,
+                ..Default::default()
+            }),
+        );
         assert_clean(
             "highpass-only",
-            &run_glitched(false, Some(HighpassFilter::Hz80), None, None),
+            &run_glitched(Transforms {
+                highpass: Some(HighpassFilter::Hz80),
+                ..Default::default()
+            }),
         );
         #[cfg(feature = "gain")]
         {
             assert_clean(
                 "agc-only (no limiter)",
-                &run_glitched(false, None, Some(-18), None),
+                &run_glitched(Transforms {
+                    agc: Some(-18),
+                    ..Default::default()
+                }),
             );
             assert_clean(
                 "dc+hp+agc (no limiter)",
-                &run_glitched(true, Some(HighpassFilter::Hz80), Some(-18), None),
+                &run_glitched(Transforms {
+                    dc_removal: true,
+                    highpass: Some(HighpassFilter::Hz80),
+                    agc: Some(-18),
+                    ..Default::default()
+                }),
             );
             assert_clean(
                 "full chain",
-                &run_glitched(true, Some(HighpassFilter::Hz80), Some(-18), Some(-1.0)),
+                &run_glitched(Transforms {
+                    dc_removal: true,
+                    highpass: Some(HighpassFilter::Hz80),
+                    agc: Some(-18),
+                    limiter: Some(-1.0),
+                    ..Default::default()
+                }),
             );
         }
     }
@@ -4553,9 +4559,12 @@ mod tests {
         let all_off = Transforms {
             channel_map: None,
             dc_removal: false,
+            #[cfg(feature = "denoise")]
             denoise: None,
             highpass: None,
+            #[cfg(feature = "gain")]
             agc: None,
+            #[cfg(feature = "gain")]
             limiter: None,
             #[cfg(feature = "aec")]
             aec: None,
@@ -4569,6 +4578,7 @@ mod tests {
             default.dc_removal, all_off.dc_removal,
             "the default must not remove DC"
         );
+        #[cfg(feature = "denoise")]
         assert_eq!(
             default.denoise, all_off.denoise,
             "the default must not denoise"
@@ -4577,7 +4587,9 @@ mod tests {
             default.highpass, all_off.highpass,
             "the default must not high-pass"
         );
+        #[cfg(feature = "gain")]
         assert_eq!(default.agc, all_off.agc, "the default must not apply AGC");
+        #[cfg(feature = "gain")]
         assert_eq!(
             default.limiter, all_off.limiter,
             "the default must not limit"

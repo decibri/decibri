@@ -23,10 +23,14 @@
 //! what is delivered, in the capture surface's own vocabulary.
 
 use std::collections::VecDeque;
-use std::path::{Path, PathBuf};
+use std::path::Path;
+#[cfg(feature = "denoise")]
+use std::path::PathBuf;
 
 use crate::error::DecibriError;
-use crate::microphone::{AudioChunk, DenoiseModel, DetectorSource, HighpassFilter};
+#[cfg(feature = "denoise")]
+use crate::microphone::DenoiseModel;
+use crate::microphone::{AudioChunk, DetectorSource, HighpassFilter};
 use crate::stage::{build_capture_stage, CaptureStage, Transforms};
 
 #[cfg(feature = "vad")]
@@ -46,8 +50,9 @@ const FEED_FRAMES: usize = 1600;
 /// chunk may be shorter once the chain's end-of-stream tail has been drained.
 const DELIVERY_FRAMES: usize = 1600;
 
-/// Memory bound for the detector feed queue, in seconds of audio at the
-/// detector rate. Mirrors the live capture path's tap bound: a consumer that
+/// Memory bound for the detector feed queue, in seconds of audio at the rate
+/// the feed carries: the detector rate with VAD configured, the target rate
+/// otherwise. Mirrors the live capture path's tap bound: a consumer that
 /// enables VAD but never drains the feed cannot grow memory without limit.
 #[cfg(feature = "vad")]
 const VAD_QUEUE_BOUND_SECS: usize = 2;
@@ -148,29 +153,35 @@ pub struct FileConfig {
     /// Single-channel speech-enhancement (denoise) model to run on the audio,
     /// applied after DC removal. `None` (the default) leaves denoise off.
     /// Naming a model also requires [`denoise_model_path`](Self::denoise_model_path);
-    /// with the model set but no path the stage stays off. Honoured only when
+    /// with the model set but no path the stage stays off. Present only when
     /// the `denoise` feature is compiled in.
+    #[cfg(feature = "denoise")]
     pub denoise: Option<DenoiseModel>,
     /// Filesystem path to the denoise model's ONNX file, supplied by the
     /// caller (the bindings resolve it from their bundled copy; the core ships
     /// no model bytes). Required when [`denoise`](Self::denoise) names a
-    /// model; ignored otherwise. Default: `None`.
+    /// model; ignored otherwise. Present only when the `denoise` feature is
+    /// compiled in. Default: `None`.
+    #[cfg(feature = "denoise")]
     pub denoise_model_path: Option<PathBuf>,
     /// Filesystem path to the ONNX Runtime dynamic library, consulted exactly
     /// as [`crate::MicrophoneConfig::ort_library_path`] is on the live path.
-    /// Default: `None`.
+    /// Present only when the `denoise` feature is compiled in. Default: `None`.
+    #[cfg(feature = "denoise")]
     pub ort_library_path: Option<PathBuf>,
     /// High-pass filter applied after denoise, removing low-frequency rumble.
     /// `None` (the default) builds no high-pass stage.
     pub highpass: Option<HighpassFilter>,
     /// Automatic gain control target level in dBFS, applied after the
     /// high-pass. Range: -40 to -3. `None` (the default) builds no
-    /// level-control stage. Honoured only when the `gain` feature is compiled
+    /// level-control stage. Present only when the `gain` feature is compiled
     /// in.
+    #[cfg(feature = "gain")]
     pub agc: Option<i8>,
     /// Peak limiter ceiling in dBFS, applied last. Range: -3.0 to 0.0. `None`
-    /// (the default) builds no limiter stage. Honoured only when the `gain`
+    /// (the default) builds no limiter stage. Present only when the `gain`
     /// feature is compiled in.
+    #[cfg(feature = "gain")]
     pub limiter: Option<f32>,
     /// Voice-activity detection over the recording. `None` (the default)
     /// leaves VAD off: iteration delivers conditioned audio only and
@@ -198,11 +209,16 @@ impl Default for FileConfig {
             channel_map: None,
             detector_source: DetectorSource::Average,
             dc_removal: false,
+            #[cfg(feature = "denoise")]
             denoise: None,
+            #[cfg(feature = "denoise")]
             denoise_model_path: None,
+            #[cfg(feature = "denoise")]
             ort_library_path: None,
             highpass: None,
+            #[cfg(feature = "gain")]
             agc: None,
+            #[cfg(feature = "gain")]
             limiter: None,
             #[cfg(feature = "vad")]
             vad: None,
@@ -254,11 +270,13 @@ impl FileConfig {
                 });
             }
         }
+        #[cfg(feature = "gain")]
         if let Some(target) = self.agc {
             if !(-40..=-3).contains(&target) {
                 return Err(DecibriError::AgcTargetOutOfRange);
             }
         }
+        #[cfg(feature = "gain")]
         if let Some(ceiling) = self.limiter {
             if !(-3.0..=0.0).contains(&ceiling) {
                 return Err(DecibriError::LimiterCeilingOutOfRange);
@@ -656,6 +674,7 @@ impl File {
 
         // Denoise is enabled only when a model AND its path are both set,
         // exactly as on the live path.
+        #[cfg(feature = "denoise")]
         let denoise = config
             .denoise
             .zip(config.denoise_model_path.as_deref())
@@ -668,9 +687,12 @@ impl File {
             Transforms {
                 channel_map: config.channel_map.as_deref(),
                 dc_removal: config.dc_removal,
+                #[cfg(feature = "denoise")]
                 denoise,
                 highpass: config.highpass,
+                #[cfg(feature = "gain")]
                 agc: config.agc,
+                #[cfg(feature = "gain")]
                 limiter: config.limiter,
                 // The offline path has no far-end reference to cancel against, so
                 // echo cancellation is not offered on it.
@@ -691,6 +713,16 @@ impl File {
             }
         } else {
             (16000, None)
+        };
+        // The feed carries samples at the detector rate with VAD configured
+        // (resampled to it above when the target rate is not one the detector
+        // accepts) and at the target rate otherwise, so its bound is sized
+        // from that rate.
+        #[cfg(feature = "vad")]
+        let feed_rate = if config.vad.is_some() {
+            vad_rate
+        } else {
+            target_rate
         };
 
         Ok(Self {
@@ -714,7 +746,7 @@ impl File {
             #[cfg(feature = "vad")]
             vad_queue: VecDeque::new(),
             #[cfg(feature = "vad")]
-            vad_queue_cap: vad_rate.max(target_rate) as usize * VAD_QUEUE_BOUND_SECS,
+            vad_queue_cap: feed_rate as usize * VAD_QUEUE_BOUND_SECS,
             #[cfg(feature = "vad")]
             detector_source: config.detector_source,
             #[cfg(feature = "vad")]
@@ -1354,6 +1386,9 @@ mod tests {
     // The module-level resampler import is `vad`-gated; the reference
     // resampler in the buffer tests must resolve under `capture` alone.
     use decibri_resampler::{PolyphaseResampler, Resampler};
+    // The module-level `PathBuf` import is `denoise`-gated; the fixture path
+    // helpers must resolve under `capture` alone.
+    use std::path::PathBuf;
 
     // ── Building input files by hand ─────────────────────────────────────
     //
@@ -2413,23 +2448,26 @@ mod tests {
             Err(DecibriError::ChannelsOutOfRange)
         ));
 
-        let config = FileConfig {
-            agc: Some(-2),
-            ..Default::default()
-        };
-        assert!(matches!(
-            File::buffer(vec![0.0], 16000, 1, config),
-            Err(DecibriError::AgcTargetOutOfRange)
-        ));
+        #[cfg(feature = "gain")]
+        {
+            let config = FileConfig {
+                agc: Some(-2),
+                ..Default::default()
+            };
+            assert!(matches!(
+                File::buffer(vec![0.0], 16000, 1, config),
+                Err(DecibriError::AgcTargetOutOfRange)
+            ));
 
-        let config = FileConfig {
-            limiter: Some(0.5),
-            ..Default::default()
-        };
-        assert!(matches!(
-            File::buffer(vec![0.0], 16000, 1, config),
-            Err(DecibriError::LimiterCeilingOutOfRange)
-        ));
+            let config = FileConfig {
+                limiter: Some(0.5),
+                ..Default::default()
+            };
+            assert!(matches!(
+                File::buffer(vec![0.0], 16000, 1, config),
+                Err(DecibriError::LimiterCeilingOutOfRange)
+            ));
+        }
 
         assert!(matches!(
             File::buffer(vec![0.0], 999, 1, FileConfig::default()),
@@ -2883,8 +2921,11 @@ mod tests {
         let mut config = vad_file_config();
         config.dc_removal = true;
         config.highpass = Some(HighpassFilter::Hz80);
-        config.agc = Some(-18);
-        config.limiter = Some(-1.0);
+        #[cfg(feature = "gain")]
+        {
+            config.agc = Some(-18);
+            config.limiter = Some(-1.0);
+        }
         let conditioned = File::open(&path, config).unwrap().analyze().unwrap();
 
         assert_eq!(plain.scores, conditioned.scores);
@@ -2998,6 +3039,47 @@ mod tests {
 
         let mut plain = File::buffer(input, 16000, 1, FileConfig::default()).unwrap();
         assert!(plain.vad_input().is_none());
+    }
+
+    /// The detector feed holds two seconds at the rate it carries. With VAD
+    /// configured at a target rate the detector does not accept, the feed
+    /// carries detector-rate samples, so a feed that is never drained holds
+    /// two seconds at that rate and no more.
+    #[cfg(feature = "vad")]
+    #[test]
+    fn undrained_feed_holds_two_seconds_at_the_detector_rate() {
+        let mut config = vad_file_config();
+        config.sample_rate = 384000;
+        let mut file = File::buffer(sine(384000, 3.0), 384000, 1, config).unwrap();
+        assert_eq!(file.vad_rate(), Some(16000));
+        for chunk in file.by_ref() {
+            chunk.expect("iteration should not error");
+        }
+        let fed = file.vad_input().expect("vad configured");
+        assert_eq!(fed.len(), 16000 * 2, "two seconds at the detector rate");
+    }
+
+    /// Without VAD the feed carries target-rate samples (a conditioning
+    /// transform keeps it active), so at a target rate below the detector's a
+    /// feed that is never drained holds two seconds at the target rate and no
+    /// more.
+    #[cfg(feature = "vad")]
+    #[test]
+    fn undrained_feed_holds_two_seconds_at_the_target_rate_without_vad() {
+        let config = FileConfig {
+            sample_rate: 8000,
+            dc_removal: true,
+            ..Default::default()
+        };
+        let mut file = File::buffer(sine(8000, 3.0), 8000, 1, config).unwrap();
+        assert_eq!(file.vad_rate(), None);
+        for chunk in file.by_ref() {
+            chunk.expect("iteration should not error");
+        }
+        let fed = file
+            .vad_input()
+            .expect("a conditioning transform keeps the feed active");
+        assert_eq!(fed.len(), 8000 * 2, "two seconds at the target rate");
     }
 
     // ── Save: writing the conditioned recording ─────────────────────────
