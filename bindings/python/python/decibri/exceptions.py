@@ -115,7 +115,11 @@ class SpeakerNotFound(DeviceError):
 
 
 class MultipleDevicesMatch(DeviceError):
-    """Raised when device name is ambiguous; suggests using device ID."""
+    """Raised when a device name substring matches more than one device.
+
+    The message lists the matching devices and suggests a more specific
+    name or the device index.
+    """
 
 
 class DeviceIndexOutOfRange(DeviceError):
