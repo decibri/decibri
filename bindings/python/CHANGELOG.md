@@ -10,6 +10,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+### Added
+
+- `Device`, a device selector object (`from decibri import Device`) carrying a device's stable per-host identifier, the `id` field `MicrophoneInfo` and `SpeakerInfo` report. Pass it on the `device` parameter of `Microphone`, `AsyncMicrophone`, `Speaker`, `AsyncSpeaker`, `record_to_file` and `async_record_to_file` (`Microphone(device=Device(id=info.id))`) to select that device by exact identifier. An identifier no device carries raises `MicrophoneNotFound` or `SpeakerNotFound` from `start()`, as a name miss does, and a non-string `id` raises `TypeError` at construction. `None`, an index and a name substring select as before; a `device` of any other type raises `ValueError` naming the four accepted forms, where it named three.
+
 ### Changed
 
 - `File.save` and `AsyncFile.save` refuse an AIFF above 32767 channels with `AudioFormatUnsupported` carrying the container layer's own text, the refusal a FLAC above 8 channels and a WAV above 32767 already receive: an AIFF `COMM` chunk's `numChannels` is a signed 16-bit field, so 32767 is the format's own maximum. There is nothing a caller needs to do, because no container decibri writes accepts more. Reading an AIFF, every count up to 32767, WAV, FLAC and `File.buffer` and `AsyncFile.buffer` delivery at any count are unchanged.

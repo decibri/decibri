@@ -459,10 +459,12 @@ impl From<CoreOutputDeviceInfo> for OutputDeviceInfo {
 
 // ---------------------------------------------------------------------------
 // Device selector helper: translates Python-side device parameter into the
-// core's DeviceSelector enum. Accepts None (Default), int (Index), or str
-// (Name). A string is always a name selector, which the core matches as a
-// case-insensitive substring of the display name; nothing here produces
-// DeviceSelector::Id.
+// core's DeviceSelector enum. Accepts None (Default), int (Index), str
+// (Name), or a `decibri.Device` object (Id). A string is always a name
+// selector, which the core matches as a case-insensitive substring of the
+// display name. A `Device` object carries the identifier its `id` field
+// names, which the core matches by exact equality against the `id` the
+// enumeration reports; it is the only form that produces DeviceSelector::Id.
 // ---------------------------------------------------------------------------
 
 fn build_device_selector(device: Option<&Bound<'_, PyAny>>) -> PyResult<DeviceSelector> {
@@ -478,7 +480,14 @@ fn build_device_selector(device: Option<&Bound<'_, PyAny>>) -> PyResult<DeviceSe
     if let Ok(s) = d.extract::<String>() {
         return Ok(DeviceSelector::Name(s));
     }
-    Err(PyValueError::new_err("device must be None, int, or str"))
+    let device_class = d.py().import("decibri._classes")?.getattr("Device")?;
+    if d.is_instance(&device_class)? {
+        let id: String = d.getattr("id")?.extract()?;
+        return Ok(DeviceSelector::Id(id));
+    }
+    Err(PyValueError::new_err(
+        "device must be None, int, str, or Device",
+    ))
 }
 
 // ---------------------------------------------------------------------------

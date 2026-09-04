@@ -34,6 +34,8 @@ Wrapper-only naming translations:
 from pathlib import Path
 from typing import Awaitable, Coroutine, Any, TYPE_CHECKING, Union
 
+from decibri._classes import Device
+
 if TYPE_CHECKING:
     import numpy as np
 
@@ -210,7 +212,7 @@ class MicrophoneBridge:
         channels: int,
         frames_per_buffer: int,
         format: str,
-        device: int | str | None = None,
+        device: int | str | Device | None = None,
         vad: bool = False,
         vad_threshold: float = 0.5,
         vad_mode: str = "silero",
@@ -287,7 +289,7 @@ class SpeakerBridge:
         sample_rate: int,
         channels: int,
         format: str,
-        device: int | str | None = None,
+        device: int | str | Device | None = None,
     ) -> None: ...
     def start(self) -> None: ...
     def stop(self) -> None: ...
@@ -336,7 +338,7 @@ class AsyncMicrophoneBridge:
         channels: int,
         frames_per_buffer: int,
         format: str,
-        device: int | str | None = None,
+        device: int | str | Device | None = None,
         vad: bool = False,
         vad_threshold: float = 0.5,
         vad_mode: str = "silero",
@@ -410,7 +412,7 @@ class AsyncSpeakerBridge:
         sample_rate: int,
         channels: int,
         format: str,
-        device: int | str | None = None,
+        device: int | str | Device | None = None,
     ) -> None: ...
     def start(self) -> Coroutine[Any, Any, None]: ...
     def stop(self) -> Coroutine[Any, Any, None]: ...

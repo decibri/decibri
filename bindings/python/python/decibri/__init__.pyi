@@ -7,6 +7,7 @@ from decibri._classes import Aec as Aec
 from decibri._classes import AecChannelMetrics as AecChannelMetrics
 from decibri._classes import AecMetrics as AecMetrics
 from decibri._classes import Chunk as Chunk
+from decibri._classes import Device as Device
 from decibri._classes import File as File
 from decibri._classes import Microphone as Microphone
 from decibri._classes import SaveReport as SaveReport
@@ -97,12 +98,12 @@ def record_to_file(
     duration_seconds: float,
     sample_rate: int = 16000,
     channels: int = 1,
-    device: int | str | None = None,
+    device: int | str | Device | None = None,
 ) -> None: ...
 async def async_record_to_file(
     path: str,
     duration_seconds: float,
     sample_rate: int = 16000,
     channels: int = 1,
-    device: int | str | None = None,
+    device: int | str | Device | None = None,
 ) -> None: ...
