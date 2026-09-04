@@ -60,6 +60,7 @@ from decibri._classes import (
     Aec,
     AecMetrics,
     Chunk,
+    Device,
     File,
     SaveReport,
     Vad,
@@ -145,7 +146,7 @@ class AsyncMicrophone:
         channels: int = 1,
         frames_per_buffer: int = 1600,
         dtype: str = "int16",
-        device: int | str | None = None,
+        device: int | str | Device | None = None,
         vad: bool | str | Vad = False,
         model_path: str | Path | None = None,
         as_ndarray: bool = False,
@@ -833,7 +834,7 @@ class AsyncSpeaker:
         sample_rate: int = 16000,
         channels: int = 1,
         dtype: str = "int16",
-        device: int | str | None = None,
+        device: int | str | Device | None = None,
     ) -> None:
         """Construct an AsyncSpeaker audio output instance.
 
@@ -850,13 +851,15 @@ class AsyncSpeaker:
             Sample dtype: ``"int16"`` (default) or ``"float32"``. Must
             match the dtype of the data passed to ``write()``; mismatch
             raises ``TypeError`` at write time.
-        device : int | str | None, optional
+        device : int | str | Device | None, optional
             Output device selector. ``None`` (default) uses the system
             default output. Pass an integer index from
-            ``AsyncSpeaker.devices()`` or a substring of the device
-            name. ``AsyncSpeaker`` does not load ONNX Runtime, so there
-            is no ``ort_library_path`` parameter (output never invokes
-            VAD).
+            ``AsyncSpeaker.devices()``, a substring of the device name,
+            or a ``Device`` object carrying the stable per-host
+            identifier ``SpeakerInfo.id`` reports
+            (``device=Device(id=info.id)``), matched by exact equality.
+            ``AsyncSpeaker`` does not load ONNX Runtime, so there is no
+            ``ort_library_path`` parameter (output never invokes VAD).
         """
         if dtype not in _VALID_FORMATS:
             raise exceptions.InvalidFormat(

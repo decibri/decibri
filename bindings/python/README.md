@@ -117,7 +117,7 @@ with decibri.Speaker(sample_rate=24000, channels=1) as spk:
 
 ### Value types
 
-`MicrophoneInfo`, `SpeakerInfo`, `VersionInfo`, `Chunk`, `VadReport`, `VadWindow`, `Segment`, `AecMetrics`, `AecChannelMetrics`, `SaveReport`, and the config objects `Vad` and `Aec`.
+`MicrophoneInfo`, `SpeakerInfo`, `VersionInfo`, `Chunk`, `VadReport`, `VadWindow`, `Segment`, `AecMetrics`, `AecChannelMetrics`, `SaveReport`, the config objects `Vad` and `Aec`, and the device selector `Device`.
 
 ### Exceptions
 
@@ -128,6 +128,27 @@ The full hierarchy lives at `decibri.exceptions`. Top-level catch-targets surfac
 - `OrtError`: ONNX Runtime issues
 - `OrtPathError`: ORT dylib path resolution issues
 - `ForkAfterOrtInit`: Linux fork-after-ORT-init detection
+
+## Device selection
+
+```python
+import decibri
+
+# System default
+mic = decibri.Microphone()
+
+# By name (case-insensitive substring match)
+mic = decibri.Microphone(device="USB")
+
+# By index
+devices = decibri.input_devices()
+mic = decibri.Microphone(device=devices[1].index)
+
+# By stable per-host identifier (exact match; survives across enumerations)
+mic = decibri.Microphone(device=decibri.Device(id=devices[1].id))
+```
+
+`Speaker`, `AsyncMicrophone`, `AsyncSpeaker`, `record_to_file` and `async_record_to_file` take the same `device` forms. The device is resolved when the stream starts: a name that matches more than one device raises `MultipleDevicesMatch`, and a selector that matches none raises `MicrophoneNotFound` or `SpeakerNotFound`.
 
 ## Voice Activity Detection
 

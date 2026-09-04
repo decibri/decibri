@@ -65,6 +65,7 @@ __all__ = [
     "Aec",
     "AecMetrics",
     "AecChannelMetrics",
+    "Device",
     "Microphone",
     "Speaker",
     "File",
@@ -309,6 +310,51 @@ class Aec:
                 f"reference_channels must be at least 1; "
                 f"got {self.reference_channels}"
             )
+
+
+# ---------------------------------------------------------------------------
+# Device: named device selector object.
+#
+# Carries a device's stable per-host identifier, the ``id`` field
+# ``MicrophoneInfo`` and ``SpeakerInfo`` report, in the named-config-object
+# shape beside ``Vad`` and ``Aec``. Pass it as
+# ``Microphone(device=Device(id=info.id))``; a bare int keeps index selection
+# and a bare str keeps name-substring selection. The bridge reads the ``id``
+# field and hands it to the core as its identifier selector, which the core
+# matches by exact equality, so an identifier and a name never collide.
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True, slots=True)
+class Device:
+    """Device selector by stable per-host identifier.
+
+    Pass an instance on the ``device`` parameter of ``Microphone`` /
+    ``AsyncMicrophone`` / ``Speaker`` / ``AsyncSpeaker`` (and of
+    ``record_to_file`` / ``async_record_to_file``) to select the device
+    whose ``id`` equals the one given. A bare ``int`` selects by index and a
+    bare ``str`` selects by case-insensitive name substring; a ``Device``
+    object is the way to select by identifier.
+
+    Attributes:
+        id: The device's stable per-host identifier, the ``id`` field of a
+            ``MicrophoneInfo`` or ``SpeakerInfo`` returned by ``devices()``,
+            ``input_devices()`` or ``output_devices()``: the lowercase host
+            name, a colon, then the platform's own device identifier. Matched
+            by exact equality when the stream starts; an identifier no device
+            carries raises ``MicrophoneNotFound`` or ``SpeakerNotFound`` from
+            ``start()``. Must be a ``str`` (``TypeError`` otherwise).
+
+    Example:
+        info = decibri.input_devices()[0]
+        Microphone(device=Device(id=info.id))
+    """
+
+    id: str
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.id, str):
+            raise TypeError(f"id must be a string; got {self.id!r}")
 
 
 @dataclass(frozen=True, slots=True)
@@ -665,6 +711,16 @@ class Microphone:
     channel count when the stream starts (``ChannelMapOutOfRange`` names an
     entry the device does not have); the device's report is the only ceiling.
 
+    The ``device`` parameter selects the input device. ``None`` (the default)
+    uses the system default input. An ``int`` is an index from
+    ``Microphone.devices()``; a ``str`` is a case-insensitive substring of the
+    device name (``MultipleDevicesMatch`` at ``start()`` when it matches more
+    than one device); a ``Device`` object (``device=Device(id=info.id)``)
+    selects by the stable per-host identifier ``MicrophoneInfo.id`` reports,
+    matched by exact equality. The device is resolved when the stream starts,
+    so a selector that matches no device raises ``MicrophoneNotFound`` from
+    ``start()``, and an index past the end raises ``DeviceIndexOutOfRange``.
+
     This class is synchronous. For async iteration, use ``AsyncMicrophone``.
 
     Cleanup and disconnect:
@@ -697,7 +753,7 @@ class Microphone:
         channels: int = 1,
         frames_per_buffer: int = 1600,
         dtype: str = "int16",
-        device: int | str | None = None,
+        device: int | str | Device | None = None,
         vad: bool | str | Vad = False,
         model_path: str | Path | None = None,
         as_ndarray: bool = False,
@@ -1402,7 +1458,7 @@ class Speaker:
         sample_rate: int = 16000,
         channels: int = 1,
         dtype: str = "int16",
-        device: int | str | None = None,
+        device: int | str | Device | None = None,
     ) -> None:
         """Construct a Speaker audio output instance.
 
@@ -1422,12 +1478,15 @@ class Speaker:
             Sample dtype: ``"int16"`` (default) or ``"float32"``. Must
             match the dtype of the data passed to ``write()``; mismatch
             raises ``TypeError`` at write time.
-        device : int | str | None, optional
+        device : int | str | Device | None, optional
             Output device selector. ``None`` (default) uses the system
             default output. Pass an integer index from
-            ``Speaker.devices()`` or a substring of the device name.
-            ``Speaker`` does not load ONNX Runtime, so there is no
-            ``ort_library_path`` parameter (output never invokes VAD).
+            ``Speaker.devices()``, a substring of the device name, or a
+            ``Device`` object carrying the stable per-host identifier
+            ``SpeakerInfo.id`` reports (``device=Device(id=info.id)``),
+            matched by exact equality. ``Speaker`` does not load ONNX
+            Runtime, so there is no ``ort_library_path`` parameter (output
+            never invokes VAD).
         """
         if dtype not in _VALID_FORMATS:
             raise exceptions.InvalidFormat(

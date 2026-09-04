@@ -14,6 +14,7 @@ from decibri._classes import (
     AecChannelMetrics,
     AecMetrics,
     Chunk,
+    Device,
     File,
     Microphone,
     SaveReport,
@@ -128,7 +129,7 @@ def record_to_file(
     duration_seconds: float,
     sample_rate: int = 16000,
     channels: int = 1,
-    device: int | str | None = None,
+    device: int | str | Device | None = None,
 ) -> None:
     """Record microphone audio to a 16-bit PCM WAV file for ``duration_seconds``.
 
@@ -152,10 +153,12 @@ def record_to_file(
         averages every device channel. A count equal to the device's own
         writes every device channel interleaved; a strict subset needs
         ``Microphone`` directly, so it can carry a ``channel_map``.
-    device : int | str | None, optional
+    device : int | str | Device | None, optional
         Input device selector. ``None`` (default) uses the system
-        default input. Pass an integer index from ``input_devices()``
-        or a substring of the device name.
+        default input. Pass an integer index from ``input_devices()``,
+        a substring of the device name, or a ``Device`` object carrying
+        the stable per-host identifier ``MicrophoneInfo.id`` reports
+        (``device=Device(id=info.id)``).
 
     Notes
     -----
@@ -201,7 +204,7 @@ async def async_record_to_file(
     duration_seconds: float,
     sample_rate: int = 16000,
     channels: int = 1,
-    device: int | str | None = None,
+    device: int | str | Device | None = None,
 ) -> None:
     """Async parallel of ``record_to_file``.
 
@@ -267,6 +270,8 @@ __all__ = [
     "Aec",
     "AecMetrics",
     "AecChannelMetrics",
+    # Device selector object
+    "Device",
     # Whole-recording analysis report types
     "VadReport",
     "VadWindow",
