@@ -460,8 +460,9 @@ impl From<CoreOutputDeviceInfo> for OutputDeviceInfo {
 // ---------------------------------------------------------------------------
 // Device selector helper: translates Python-side device parameter into the
 // core's DeviceSelector enum. Accepts None (Default), int (Index), or str
-// (Name). The string form does not attempt id/name disambiguation; the core
-// resolves both.
+// (Name). A string is always a name selector, which the core matches as a
+// case-insensitive substring of the display name; nothing here produces
+// DeviceSelector::Id.
 // ---------------------------------------------------------------------------
 
 fn build_device_selector(device: Option<&Bound<'_, PyAny>>) -> PyResult<DeviceSelector> {
