@@ -218,11 +218,11 @@ mod onnx;
 /// Populated by `build.rs` parsing the cpal entry from the crate's
 /// `Cargo.toml` (with workspace fallback for `{ workspace = true }`
 /// inherits) and truncating to major.minor. Used by binding
-/// layers (Node, Python) as the value of the `portaudio` field in their
-/// version-info responses:
+/// layers (Node, Python) as the value of the `audio_backend` field in their
+/// version-info responses (`audioBackend` in JavaScript):
 ///
 /// ```text
-/// portaudio: format!("cpal {}", decibri::CPAL_VERSION)
+/// audio_backend: format!("cpal {}", decibri::CPAL_VERSION)
 /// // -> "cpal 0.17"
 /// ```
 ///

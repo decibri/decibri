@@ -34,7 +34,8 @@ crate-type = ["cdylib"]
 # changes in `bindings/node/Cargo.toml`. Cargo's workspace resolver unifies
 # features across both bindings silently; diverging overrides produce a build
 # that neither binding tests in isolation. Both bindings inherit decibri's
-# default features (capture, playback, vad, denoise, gain, ort-load-dynamic).
+# default features (capture, playback, vad, denoise, gain, aec,
+# ort-load-dynamic).
 decibri = { path = "../../crates/decibri" }
 
 # PyO3 0.29 line (MSRV 1.83, below the workspace 1.88 floor, so headroom is

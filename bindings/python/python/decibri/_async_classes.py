@@ -42,9 +42,7 @@ import importlib.resources
 import time
 from pathlib import Path
 from types import TracebackType
-from typing import TYPE_CHECKING, Any, AsyncIterator, Literal, Union
-
-from typing_extensions import Self
+from typing import TYPE_CHECKING, Any, AsyncIterator, Literal, TypeVar, Union
 
 if TYPE_CHECKING:
     import numpy as np
@@ -79,6 +77,13 @@ from decibri._classes import (
 from decibri._decibri import MicrophoneInfo, SpeakerInfo, VersionInfo
 
 __all__ = ["AsyncMicrophone", "AsyncSpeaker", "AsyncFile"]
+
+# Self types for the async context-manager entry methods below, each bound to
+# its class. typing.Self is not available on Python 3.10, the oldest version
+# the package supports.
+_AsyncMicrophoneT = TypeVar("_AsyncMicrophoneT", bound="AsyncMicrophone")
+_AsyncSpeakerT = TypeVar("_AsyncSpeakerT", bound="AsyncSpeaker")
+_AsyncFileT = TypeVar("_AsyncFileT", bound="AsyncFile")
 
 
 # ---------------------------------------------------------------------------
@@ -505,7 +510,7 @@ class AsyncMicrophone:
         # to ensure VAD state is reset on every close.
         await self.stop()
 
-    async def __aenter__(self) -> Self:
+    async def __aenter__(self: _AsyncMicrophoneT) -> _AsyncMicrophoneT:
         await self.start()
         return self
 
@@ -932,7 +937,7 @@ class AsyncSpeaker:
         """
         await self._bridge.drain()
 
-    async def __aenter__(self) -> Self:
+    async def __aenter__(self: _AsyncSpeakerT) -> _AsyncSpeakerT:
         await self.start()
         return self
 
@@ -1076,7 +1081,7 @@ class AsyncFile:
         loop = asyncio.get_running_loop()
         await loop.run_in_executor(None, self._file.close)
 
-    async def __aenter__(self) -> Self:
+    async def __aenter__(self: _AsyncFileT) -> _AsyncFileT:
         return self
 
     async def __aexit__(
