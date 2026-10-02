@@ -1527,7 +1527,13 @@ class Speaker:
         self._bridge.start()
 
     def stop(self) -> None:
-        """Stop the output stream."""
+        """Stop the output stream.
+
+        Playback ends at once and queued samples are discarded. ``stop()``
+        may be called from another thread while ``drain()`` or ``write()``
+        waits: the waiting call then raises ``SpeakerStreamClosed``, as the
+        same call made after ``stop()`` does.
+        """
         self._bridge.stop()
 
     def close(self) -> None:
@@ -1537,6 +1543,10 @@ class Speaker:
         httpx convention and for use cases where ``close()`` reads
         more naturally than ``stop()``. The two methods are guaranteed
         to remain semantically equivalent across all decibri versions.
+
+        Like ``stop()``, ``close()`` may be called from another thread
+        while ``drain()`` or ``write()`` waits: playback ends at once and
+        the waiting call raises ``SpeakerStreamClosed``.
         """
         self._bridge.close()
 
@@ -1551,11 +1561,21 @@ class Speaker:
         input on each call rather than committing at construction time.
 
         Raises ``TypeError`` on dtype mismatch or unsupported input type.
+
+        When the playback queue is full, ``write()`` waits until there is
+        room. ``stop()`` or ``close()`` from another thread ends the wait
+        at once, and ``write()`` then raises ``SpeakerStreamClosed``, as a
+        ``write()`` made after ``stop()`` does.
         """
         self._bridge.write(samples)
 
     def drain(self) -> None:
-        """Block until all queued samples have been played."""
+        """Block until all queued samples have been played.
+
+        ``stop()`` or ``close()`` from another thread ends the wait at
+        once, and ``drain()`` then raises ``SpeakerStreamClosed``, as a
+        ``drain()`` made after ``stop()`` does.
+        """
         self._bridge.drain()
 
     def __enter__(self: _SpeakerT) -> _SpeakerT:
