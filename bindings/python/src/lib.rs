@@ -28,7 +28,7 @@
 
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU16, AtomicU32, Ordering};
-use std::sync::{Arc, Mutex as StdMutex};
+use std::sync::{Arc, Condvar, Mutex as StdMutex, PoisonError};
 use std::time::Duration;
 
 use std::collections::HashMap;
@@ -657,8 +657,8 @@ fn numpy_smoke(py: Python<'_>) -> Bound<'_, PyArray1<i16>> {
 //     for diagnostic introspection)
 //   - format: BindingSampleFormat (parsed from constructor 'format' arg)
 //   - vad_holdoff_ms: u32 (inert; wrapper layer reads this if it wants to)
-//   - active: Mutex<Option<ActiveCapture>> (the open Microphone plus an
-//     Arc<MicrophoneStream>; None until start(), cleared by stop())
+//   - active: StreamSlot<ActiveCapture> (the open Microphone plus an
+//     Arc<MicrophoneStream>; running from a successful start() until stop())
 //   - vad: Mutex<Option<SileroVad>> (None unless constructor's vad=True AND
 //     vad_mode=="silero")
 //   - energy_vad: bool (vad=True AND vad_mode=="energy"; mutually exclusive
@@ -667,14 +667,16 @@ fn numpy_smoke(py: Python<'_>) -> Bound<'_, PyArray1<i16>> {
 //     Silero probability in silero mode or the energy RMS in energy mode;
 //     updated on each read() that runs a detector)
 //
-// The mutable state lives behind interior-mutability primitives so read() and
-// stop() are both `&self`. read() takes only a transient lock to clone the
+// The mutable state lives behind interior-mutability primitives so every
+// method is `&self`. read() takes only a transient lock to clone the
 // Arc<MicrophoneStream>, never holding it across the blocking next_chunk, so a
 // concurrent stop() can take the same lock, call the core stream's stop()
 // (which wakes a parked next_chunk in ~20ms), and clear the state. This is the
 // shape the Node binding already uses, and it is what lets stop() safely
 // interrupt a read() that is in flight on another thread (sync) or task
-// (async) instead of panicking on a borrow or deadlocking on a lock.
+// (async) instead of panicking on a borrow or deadlocking on a lock. start()
+// and stop() run the device open and teardown without the GIL; see
+// `StreamSlot` for how they order against each other.
 // ---------------------------------------------------------------------------
 
 /// Lock a `std::sync::Mutex`, recovering the guard if a previous holder
@@ -684,6 +686,172 @@ fn numpy_smoke(py: Python<'_>) -> Bound<'_, PyArray1<i16>> {
 /// into a poison panic. Mirrors the poison tolerance in the core's stop().
 fn lock_recover<T>(m: &StdMutex<T>) -> std::sync::MutexGuard<'_, T> {
     m.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+// ---------------------------------------------------------------------------
+// StreamSlot: the start and stop state both device bridges share.
+//
+// start() opens the device and stop() tears it down without the GIL and
+// outside the slot's lock, so the two are ordered through the slot instead:
+//
+//   - `Starting` marks a claimed start. A second start() sees it and raises
+//     AlreadyRunning, and stop() waits until the start settles, then stops
+//     whatever it opened.
+//   - `stopping` marks a stop tearing down the stream it took. A start claims
+//     the slot at once but opens the device only after that teardown ends, and
+//     another stop() returns only after it ends, so a device is released
+//     before it is opened again and before any stop() returns.
+//
+// Every wait on the condition variable happens without the GIL, and every
+// start and stop settles before it takes the GIL back. A claimed start that
+// unwinds settles idle and a teardown that unwinds still ends, so no wait
+// depends on the GIL or on a call that has unwound. The lock is held
+// only for state transitions and for reading the running stream: never across
+// a device call, never across a wait for the GIL, and never while calling
+// into Python, so a thread that holds the GIL and waits for the lock always
+// gets it. Those rules are what keep the bridges free of deadlock; keep them
+// when changing anything here.
+// ---------------------------------------------------------------------------
+
+enum StreamState<T> {
+    Idle,
+    Starting,
+    Running(T),
+}
+
+struct SlotState<T> {
+    stream: StreamState<T>,
+    stopping: bool,
+}
+
+struct StreamSlot<T> {
+    state: StdMutex<SlotState<T>>,
+    changed: Condvar,
+}
+
+impl<T> StreamSlot<T> {
+    fn new() -> Self {
+        StreamSlot {
+            state: StdMutex::new(SlotState {
+                stream: StreamState::Idle,
+                stopping: false,
+            }),
+            changed: Condvar::new(),
+        }
+    }
+
+    /// Claim the slot for a start, or `None` when a stream is running or
+    /// another start is in progress. Never waits, so it may be called with
+    /// the GIL held.
+    fn begin_start(&self) -> Option<StartClaim<'_, T>> {
+        let mut state = lock_recover(&self.state);
+        match state.stream {
+            StreamState::Idle => {
+                state.stream = StreamState::Starting;
+                Some(StartClaim { slot: Some(self) })
+            }
+            StreamState::Starting | StreamState::Running(_) => None,
+        }
+    }
+
+    /// Stop the running stream: wait for a start in progress to settle and
+    /// for another stop's teardown to end, take the stream, leave the slot
+    /// idle, then run `teardown` on the stream outside the lock. A start that
+    /// arrives during the teardown opens its device after `teardown` returns.
+    /// Call without the GIL.
+    fn stop_with(&self, teardown: impl FnOnce(T)) {
+        let taken = {
+            let state = lock_recover(&self.state);
+            let mut state = self
+                .changed
+                .wait_while(state, |s| {
+                    s.stopping || matches!(s.stream, StreamState::Starting)
+                })
+                .unwrap_or_else(PoisonError::into_inner);
+            match std::mem::replace(&mut state.stream, StreamState::Idle) {
+                StreamState::Running(stream) => {
+                    state.stopping = true;
+                    Some(stream)
+                }
+                StreamState::Idle | StreamState::Starting => None,
+            }
+        };
+        if let Some(stream) = taken {
+            let _ended = TeardownEnd { slot: self };
+            teardown(stream);
+        }
+    }
+
+    /// Apply `f` to the running stream under the lock, or `None` when no
+    /// stream is running, including while a start or a stop is in progress.
+    /// `f` must stay short and must not call into Python.
+    fn with_running<R>(&self, f: impl FnOnce(&T) -> R) -> Option<R> {
+        match &lock_recover(&self.state).stream {
+            StreamState::Running(stream) => Some(f(stream)),
+            StreamState::Idle | StreamState::Starting => None,
+        }
+    }
+
+    /// Leave `Starting` for running or idle and wake every waiting stop().
+    fn settle(&self, opened: Option<T>) {
+        lock_recover(&self.state).stream = match opened {
+            Some(stream) => StreamState::Running(stream),
+            None => StreamState::Idle,
+        };
+        self.changed.notify_all();
+    }
+}
+
+/// A claimed start. [`open`](Self::open) settles the slot with the result of
+/// the device open; a claim dropped without settling, as when the open
+/// unwinds, settles the slot idle.
+struct StartClaim<'a, T> {
+    slot: Option<&'a StreamSlot<T>>,
+}
+
+impl<T> StartClaim<'_, T> {
+    /// Wait for a stop's teardown to end, run the device open, and settle the
+    /// slot with its result: running on success, idle on failure. Call
+    /// without the GIL.
+    fn open<E>(mut self, open: impl FnOnce() -> Result<T, E>) -> Result<(), E> {
+        if let Some(slot) = self.slot {
+            let state = lock_recover(&slot.state);
+            drop(
+                slot.changed
+                    .wait_while(state, |s| s.stopping)
+                    .unwrap_or_else(PoisonError::into_inner),
+            );
+        }
+        let (opened, result) = match open() {
+            Ok(stream) => (Some(stream), Ok(())),
+            Err(e) => (None, Err(e)),
+        };
+        if let Some(slot) = self.slot.take() {
+            slot.settle(opened);
+        }
+        result
+    }
+}
+
+impl<T> Drop for StartClaim<'_, T> {
+    fn drop(&mut self) {
+        if let Some(slot) = self.slot.take() {
+            slot.settle(None);
+        }
+    }
+}
+
+/// Ends a teardown when dropped, including when the teardown unwinds, and
+/// wakes the starts and stops waiting on it.
+struct TeardownEnd<'a, T> {
+    slot: &'a StreamSlot<T>,
+}
+
+impl<T> Drop for TeardownEnd<'_, T> {
+    fn drop(&mut self) {
+        lock_recover(&self.slot.state).stopping = false;
+        self.slot.changed.notify_all();
+    }
 }
 
 /// The live capture state: the open `Microphone` (kept alive so the device
@@ -701,7 +869,7 @@ struct MicrophoneBridge {
     capture_config: MicrophoneConfig,
     format: BindingSampleFormat,
     vad_holdoff_ms: u32,
-    active: StdMutex<Option<ActiveCapture>>,
+    active: StreamSlot<ActiveCapture>,
     vad: StdMutex<Option<SileroVad>>,
     // Energy VAD active (vad=True and vad_mode=="energy"). Mutually exclusive
     // with `vad` (Silero): read() computes the energy score (RMS of the
@@ -740,18 +908,15 @@ impl MicrophoneBridge {
         // lock BEFORE the blocking read. Holding only an Arc clone (not the
         // `active` lock) across next_chunk is what lets a concurrent stop()
         // take the lock and interrupt a parked read.
-        let stream = {
-            let guard = lock_recover(&self.active);
-            match guard.as_ref() {
-                Some(active) => Arc::clone(&active.stream),
-                None => {
-                    return Err(raise_named(
-                        py,
-                        "MicrophoneStreamClosed",
-                        "capture is not running",
-                    ))
-                }
-            }
+        let Some(stream) = self
+            .active
+            .with_running(|active| Arc::clone(&active.stream))
+        else {
+            return Err(raise_named(
+                py,
+                "MicrophoneStreamClosed",
+                "capture is not running",
+            ));
         };
 
         // Requested block size in interleaved OUTPUT samples: frames_per_buffer
@@ -808,6 +973,19 @@ impl MicrophoneBridge {
         Ok(Some((chunk.data, chunk.channels)))
     }
 
+    /// Stop the capture: take the running capture out of the slot (see
+    /// `StreamSlot::stop_with`), then call the core stop() outside the lock.
+    /// The core stop() flips the running flag and drops the platform stream,
+    /// disconnecting the capture channel and waking any next_chunk parked in a
+    /// concurrent read() within ~20ms. A parked read holds only an Arc clone of
+    /// the stream, never the slot's lock, so taking the stream never blocks on
+    /// it. Dropping the capture then releases the device. Needs no GIL: the
+    /// sync stop() detaches around it and the async bridge calls it on a
+    /// blocking worker.
+    fn stop_stream(&self) {
+        self.active.stop_with(|active| active.stream.stop());
+    }
+
     /// numpy-mode flag accessor for the async wrapper's encoding step.
     fn numpy_mode(&self) -> bool {
         self.numpy
@@ -846,10 +1024,9 @@ impl MicrophoneBridge {
     /// with no active stream. GIL-free: callable from any thread, including a
     /// Tokio worker.
     fn push_aec_reference_f32(&self, samples: &[f32]) {
-        let stream = {
-            let guard = lock_recover(&self.active);
-            guard.as_ref().map(|active| Arc::clone(&active.stream))
-        };
+        let stream = self
+            .active
+            .with_running(|active| Arc::clone(&active.stream));
         if let Some(stream) = stream {
             stream.push_aec_reference(samples);
         }
@@ -860,10 +1037,9 @@ impl MicrophoneBridge {
     /// cancellation off. GIL-free, so the async bridge calls it from
     /// `spawn_blocking` without attaching.
     fn aec_metrics_raw(&self) -> Option<AecMetricsTuple> {
-        let stream = {
-            let guard = lock_recover(&self.active);
-            guard.as_ref().map(|active| Arc::clone(&active.stream))
-        }?;
+        let stream = self
+            .active
+            .with_running(|active| Arc::clone(&active.stream))?;
         let per_channel = stream.aec_metrics_per_channel()?;
         let metrics = per_channel.first()?;
         Some((
@@ -1193,7 +1369,13 @@ impl MicrophoneBridge {
             vad_config.sample_rate = sample_rate;
             vad_config.threshold = vad_threshold;
             vad_config.ort_library_path = ort_library_path;
-            Some(SileroVad::new(vad_config).map_err(|e| to_py_err(py, e))?)
+            // The load reads the model file and builds the ONNX Runtime
+            // session, initialising the runtime on first use. It touches no
+            // Python object, so it runs without the GIL.
+            Some(
+                py.detach(|| SileroVad::new(vad_config))
+                    .map_err(|e| to_py_err(py, e))?,
+            )
         } else {
             None
         };
@@ -1207,7 +1389,7 @@ impl MicrophoneBridge {
             capture_config,
             format: parsed_format,
             vad_holdoff_ms: vad_holdoff,
-            active: StdMutex::new(None),
+            active: StreamSlot::new(),
             vad: StdMutex::new(vad_instance),
             energy_vad,
             last_vad_probability: AtomicU32::new(0),
@@ -1216,43 +1398,41 @@ impl MicrophoneBridge {
     }
 
     fn start(&self, py: Python<'_>) -> PyResult<()> {
-        let mut active = lock_recover(&self.active);
-        if active.is_some() {
+        let Some(claim) = self.active.begin_start() else {
             return Err(raise_named(
                 py,
                 "AlreadyRunning",
                 "capture is already running",
             ));
-        }
-        let capture = Microphone::new(self.capture_config.clone()).map_err(|e| to_py_err(py, e))?;
-        let stream = capture.start().map_err(|e| to_py_err(py, e))?;
-        *active = Some(ActiveCapture {
-            _capture: capture,
-            stream: Arc::new(stream),
-        });
+        };
+        let config = self.capture_config.clone();
+        // Resolve the device, open the stream and build the capture chain
+        // (which loads the denoise model when denoise is set) without the GIL.
+        // The claim waits out a stop's teardown first and settles the slot
+        // before the GIL is taken back.
+        py.detach(|| {
+            claim.open(|| {
+                let capture = Microphone::new(config)?;
+                let stream = capture.start()?;
+                Ok(ActiveCapture {
+                    _capture: capture,
+                    stream: Arc::new(stream),
+                })
+            })
+        })
+        .map_err(|e| to_py_err(py, e))
+    }
+
+    fn stop(&self, py: Python<'_>) -> PyResult<()> {
+        py.detach(|| self.stop_stream());
         Ok(())
     }
 
-    fn stop(&self) -> PyResult<()> {
-        // Take the live capture out under a tiny lock, then signal the core
-        // stop OUTSIDE the lock. The core MicrophoneStream::stop() flips the
-        // running flag and drops the cpal stream, disconnecting the capture
-        // channel and waking any next_chunk parked in a concurrent read()
-        // within ~20ms. A parked read holds only an Arc clone of the stream
-        // (not the `active` lock), so taking the Option here never blocks on
-        // it. Dropping `active` then releases the device.
-        let active = lock_recover(&self.active).take();
-        if let Some(active) = active {
-            active.stream.stop();
-        }
-        Ok(())
-    }
-
-    fn close(&self) -> PyResult<()> {
+    fn close(&self, py: Python<'_>) -> PyResult<()> {
         // Literal alias for stop, mirroring SpeakerBridge::close.
         // Bridge-level symmetry for users constructing MicrophoneBridge
         // directly (advanced use; surface in __all__).
-        self.stop()
+        self.stop(py)
     }
 
     #[pyo3(signature = (timeout_ms = None))]
@@ -1302,17 +1482,18 @@ impl MicrophoneBridge {
 
     fn __exit__(
         &self,
+        py: Python<'_>,
         _exc_type: Option<&Bound<'_, PyAny>>,
         _exc_value: Option<&Bound<'_, PyAny>>,
         _traceback: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<bool> {
-        self.stop()?;
+        self.stop(py)?;
         Ok(false)
     }
 
     #[getter]
     fn is_open(&self) -> bool {
-        lock_recover(&self.active).is_some()
+        self.active.with_running(|_| ()).is_some()
     }
 
     #[getter]
@@ -1332,10 +1513,9 @@ impl MicrophoneBridge {
     /// keeps up or when no stream is active.
     #[getter]
     fn overrun_count(&self) -> u64 {
-        match lock_recover(&self.active).as_ref() {
-            Some(active) => active.stream.overrun_count(),
-            None => 0,
-        }
+        self.active
+            .with_running(|active| active.stream.overrun_count())
+            .unwrap_or(0)
     }
 
     /// Queue far-end reference audio for the echo canceller: samples at the
@@ -1393,16 +1573,32 @@ impl MicrophoneBridge {
 // Owns:
 //   - output_config: SpeakerConfig (no frames_per_buffer)
 //   - format: BindingSampleFormat
-//   - output: Option<Speaker>
-//   - stream: Option<SpeakerStream>
+//   - playback: StreamSlot<ActivePlayback> (the open Speaker plus an
+//     Arc<SpeakerStream>; running from a successful start() until stop())
+//
+// Every method is `&self`. write() and drain() clone the Arc<SpeakerStream>
+// under the slot's lock and wait in the core send() or drain() holding only
+// that clone, never the lock and never the GIL, so stop(), is_playing and
+// underrun_count proceed while either waits on another thread. stop() takes
+// the stream out of the slot and calls the core stop(), which clears the
+// running flag (ending a waiting drain) and drops the platform stream
+// (ending a send waiting for queue room, and releasing the device). A write()
+// or drain() whose stream stop() took raises the SpeakerStreamClosed a call
+// made after stop() raises.
 // ---------------------------------------------------------------------------
+
+/// The live playback state: the open `Speaker` (kept alive for the stream's
+/// lifetime) and a shared handle to its `SpeakerStream`.
+struct ActivePlayback {
+    _output: Speaker,
+    stream: Arc<SpeakerStream>,
+}
 
 #[pyclass(module = "decibri._decibri")]
 struct SpeakerBridge {
     output_config: SpeakerConfig,
     format: BindingSampleFormat,
-    output: Option<Speaker>,
-    stream: Option<SpeakerStream>,
+    playback: StreamSlot<ActivePlayback>,
 }
 
 // Internal helpers for SpeakerBridge. Not exposed to
@@ -1412,6 +1608,47 @@ struct SpeakerBridge {
 // public `write` pymethod dispatches on the input PyAny type and
 // calls the appropriate helper.
 impl SpeakerBridge {
+    /// A handle to the running stream, or the `SpeakerStreamClosed` a call
+    /// made with no stream running raises.
+    fn running_stream(&self, py: Python<'_>) -> PyResult<Arc<SpeakerStream>> {
+        self.playback
+            .with_running(|active| Arc::clone(&active.stream))
+            .ok_or_else(|| raise_named(py, "SpeakerStreamClosed", "output is not running"))
+    }
+
+    /// Whether `stream` is still the running stream: false once stop() has
+    /// taken it, including when a later start() has opened another.
+    fn is_running(&self, stream: &Arc<SpeakerStream>) -> bool {
+        self.playback
+            .with_running(|active| Arc::ptr_eq(&active.stream, stream))
+            .unwrap_or(false)
+    }
+
+    /// Queue converted samples on `stream`, waiting without the GIL or the
+    /// slot's lock while the queue is full. A write whose stream stop() took
+    /// while it ran raises as a write made after stop() does.
+    fn send(&self, py: Python<'_>, stream: &Arc<SpeakerStream>, samples: Vec<f32>) -> PyResult<()> {
+        let sent = py.detach(|| stream.send(samples));
+        if !self.is_running(stream) {
+            return Err(raise_named(
+                py,
+                "SpeakerStreamClosed",
+                "output is not running",
+            ));
+        }
+        sent.map_err(|e| speaker_failure_cause(e, || stream.take_last_error()))
+            .map_err(|e| to_py_err(py, e))
+    }
+
+    /// Stop playback: take the running stream out of the slot (see
+    /// `StreamSlot::stop_with`), then call the core stop() outside the lock.
+    /// Dropping the playback state then releases the speaker. Needs no GIL:
+    /// the sync stop() detaches around it and the async bridge calls it on a
+    /// blocking worker.
+    fn stop_stream(&self) {
+        self.playback.stop_with(|active| active.stream.stop());
+    }
+
     fn require_format(
         &self,
         expected: BindingSampleFormat,
@@ -1433,49 +1670,31 @@ impl SpeakerBridge {
         }
     }
 
-    fn write_bytes_internal(&mut self, py: Python<'_>, samples: &[u8]) -> PyResult<()> {
-        let stream = self
-            .stream
-            .as_mut()
-            .ok_or_else(|| raise_named(py, "SpeakerStreamClosed", "output is not running"))?;
+    fn write_bytes_internal(&self, py: Python<'_>, samples: &[u8]) -> PyResult<()> {
+        let stream = self.running_stream(py)?;
         let owned_samples: Vec<u8> = samples.to_vec();
         let samples_f32 = match self.format {
             BindingSampleFormat::Int16 => py.detach(|| i16_le_bytes_to_f32(&owned_samples)),
             BindingSampleFormat::Float32 => py.detach(|| f32_le_bytes_to_f32(&owned_samples)),
         };
-        py.detach(|| stream.send(samples_f32))
-            .map_err(|e| speaker_failure_cause(e, || stream.take_last_error()))
-            .map_err(|e| to_py_err(py, e))?;
-        Ok(())
+        self.send(py, &stream, samples_f32)
     }
 
-    fn write_int16_samples(&mut self, py: Python<'_>, samples: &[i16]) -> PyResult<()> {
-        let stream = self
-            .stream
-            .as_mut()
-            .ok_or_else(|| raise_named(py, "SpeakerStreamClosed", "output is not running"))?;
+    fn write_int16_samples(&self, py: Python<'_>, samples: &[i16]) -> PyResult<()> {
+        let stream = self.running_stream(py)?;
         // Per-sample i16 -> f32 conversion mirrors i16_le_bytes_to_f32:
         // divide by 32768.0 to map [i16::MIN, i16::MAX] into approximately
         // [-1.0, 1.0). Avoids the bytes round-trip for the numpy path.
         let owned: Vec<i16> = samples.to_vec();
         let samples_f32: Vec<f32> =
             py.detach(|| owned.iter().map(|&s| s as f32 / 32768.0).collect());
-        py.detach(|| stream.send(samples_f32))
-            .map_err(|e| speaker_failure_cause(e, || stream.take_last_error()))
-            .map_err(|e| to_py_err(py, e))?;
-        Ok(())
+        self.send(py, &stream, samples_f32)
     }
 
-    fn write_float32_samples(&mut self, py: Python<'_>, samples: &[f32]) -> PyResult<()> {
-        let stream = self
-            .stream
-            .as_mut()
-            .ok_or_else(|| raise_named(py, "SpeakerStreamClosed", "output is not running"))?;
+    fn write_float32_samples(&self, py: Python<'_>, samples: &[f32]) -> PyResult<()> {
+        let stream = self.running_stream(py)?;
         let samples_f32: Vec<f32> = samples.to_vec();
-        py.detach(|| stream.send(samples_f32))
-            .map_err(|e| speaker_failure_cause(e, || stream.take_last_error()))
-            .map_err(|e| to_py_err(py, e))?;
-        Ok(())
+        self.send(py, &stream, samples_f32)
     }
 }
 
@@ -1507,27 +1726,36 @@ impl SpeakerBridge {
         Ok(SpeakerBridge {
             output_config,
             format: parsed_format,
-            output: None,
-            stream: None,
+            playback: StreamSlot::new(),
         })
     }
 
-    fn start(&mut self, py: Python<'_>) -> PyResult<()> {
-        if self.stream.is_some() {
+    fn start(&self, py: Python<'_>) -> PyResult<()> {
+        let Some(claim) = self.playback.begin_start() else {
             return Err(raise_named(
                 py,
                 "AlreadyRunning",
                 "output is already running",
             ));
-        }
-        let output = Speaker::new(self.output_config.clone()).map_err(|e| to_py_err(py, e))?;
-        let stream = output.start().map_err(|e| to_py_err(py, e))?;
-        self.output = Some(output);
-        self.stream = Some(stream);
-        Ok(())
+        };
+        let config = self.output_config.clone();
+        // Resolve the device and open the stream without the GIL. The claim
+        // waits out a stop's teardown first and settles the slot before the
+        // GIL is taken back.
+        py.detach(|| {
+            claim.open(|| {
+                let output = Speaker::new(config)?;
+                let stream = output.start()?;
+                Ok(ActivePlayback {
+                    _output: output,
+                    stream: Arc::new(stream),
+                })
+            })
+        })
+        .map_err(|e| to_py_err(py, e))
     }
 
-    fn write(&mut self, py: Python<'_>, samples: &Bound<'_, PyAny>) -> PyResult<()> {
+    fn write(&self, py: Python<'_>, samples: &Bound<'_, PyAny>) -> PyResult<()> {
         // Duck-typed dispatch. Accept Python `bytes` (the wire
         // format; cheap path, hit by existing users), 1-D and 2-D
         // numpy.ndarray with dtype matching the configured format, and
@@ -1587,50 +1815,56 @@ impl SpeakerBridge {
         ))
     }
 
-    fn drain(&mut self, py: Python<'_>) -> PyResult<()> {
-        let stream = self
-            .stream
-            .as_mut()
-            .ok_or_else(|| raise_named(py, "SpeakerStreamClosed", "output is not running"))?;
+    fn drain(&self, py: Python<'_>) -> PyResult<()> {
+        let stream = self.running_stream(py)?;
         py.detach(|| stream.drain());
         // The drain returns early once the stream stops running, which covers a
-        // deliberate stop and a driver failure alike; only the failure stashes a
-        // typed cause, so an empty slot leaves a normal drain silent.
+        // deliberate stop and a driver failure alike. A drain whose stream
+        // stop() took raises as a drain made after stop() does. Otherwise only
+        // a driver failure stashes a typed cause, so an empty slot leaves a
+        // normal drain silent.
+        if !self.is_running(&stream) {
+            return Err(raise_named(
+                py,
+                "SpeakerStreamClosed",
+                "output is not running",
+            ));
+        }
         match stream.take_last_error() {
             Some(cause) => Err(to_py_err(py, cause)),
             None => Ok(()),
         }
     }
 
-    fn stop(&mut self) -> PyResult<()> {
-        self.stream = None;
-        self.output = None;
+    fn stop(&self, py: Python<'_>) -> PyResult<()> {
+        py.detach(|| self.stop_stream());
         Ok(())
     }
 
-    fn close(&mut self) -> PyResult<()> {
-        self.stop()
+    fn close(&self, py: Python<'_>) -> PyResult<()> {
+        self.stop(py)
     }
 
-    fn __enter__(mut slf: PyRefMut<'_, Self>) -> PyResult<PyRefMut<'_, Self>> {
+    fn __enter__(slf: PyRef<'_, Self>) -> PyResult<PyRef<'_, Self>> {
         let py = slf.py();
         slf.start(py)?;
         Ok(slf)
     }
 
     fn __exit__(
-        &mut self,
+        &self,
+        py: Python<'_>,
         _exc_type: Option<&Bound<'_, PyAny>>,
         _exc_value: Option<&Bound<'_, PyAny>>,
         _traceback: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<bool> {
-        self.stop()?;
+        self.stop(py)?;
         Ok(false)
     }
 
     #[getter]
     fn is_playing(&self) -> bool {
-        self.stream.is_some()
+        self.playback.with_running(|_| ()).is_some()
     }
 
     /// Number of samples emitted as silence fill because the playback queue
@@ -1638,10 +1872,9 @@ impl SpeakerBridge {
     /// producer keeps the queue fed or when no stream is active.
     #[getter]
     fn underrun_count(&self) -> u64 {
-        match &self.stream {
-            Some(stream) => stream.underrun_count(),
-            None => 0,
-        }
+        self.playback
+            .with_running(|active| active.stream.underrun_count())
+            .unwrap_or(0)
     }
 
     #[staticmethod]
@@ -1823,10 +2056,9 @@ impl AsyncMicrophoneBridge {
             // no bridge-wide lock, so it proceeds even while a read() is parked
             // in next_chunk, waking that read within ~20ms.
             tokio::task::spawn_blocking(move || -> PyResult<()> {
-                inner.stop()?;
-                // Clear the atomic after the inner
-                // stop() succeeds. inner.stop() itself is infallible, but
-                // mirroring the pattern from start() keeps the symmetry.
+                inner.stop_stream();
+                // Clear the atomic after the inner stop, mirroring start(),
+                // which sets it after the inner start succeeds.
                 is_open_atomic.store(false, Ordering::Release);
                 Ok(())
             })
@@ -2033,7 +2265,7 @@ impl AsyncWriteData {
         ))
     }
 
-    fn dispatch(self, py: Python<'_>, bridge: &mut SpeakerBridge) -> PyResult<()> {
+    fn dispatch(self, py: Python<'_>, bridge: &SpeakerBridge) -> PyResult<()> {
         match self {
             AsyncWriteData::Bytes(v) => bridge.write_bytes_internal(py, &v),
             AsyncWriteData::Int16Samples(v) => {
@@ -2051,7 +2283,7 @@ impl AsyncWriteData {
 #[pyclass(module = "decibri._decibri")]
 pub(crate) struct AsyncSpeakerBridge {
     inner: Arc<Mutex<SpeakerBridge>>,
-    // Lock-free mirror of inner.stream
+    // Lock-free mirror of the inner bridge's playing
     // state. Same shape as AsyncMicrophoneBridge.is_open_atomic; same
     // motivation (sync wrapper property needs lock-free truth).
     is_playing_atomic: Arc<AtomicBool>,
@@ -2080,7 +2312,7 @@ impl AsyncSpeakerBridge {
         let is_playing_atomic = Arc::clone(&self.is_playing_atomic);
         future_into_py(py, async move {
             tokio::task::spawn_blocking(move || -> PyResult<()> {
-                let mut bridge = inner.blocking_lock();
+                let bridge = inner.blocking_lock();
                 Python::attach(|py| bridge.start(py))?;
                 // Set atomic only after
                 // inner.start() succeeds. ? returns early on Err.
@@ -2106,8 +2338,8 @@ impl AsyncSpeakerBridge {
         let inner = Arc::clone(&self.inner);
         future_into_py(py, async move {
             tokio::task::spawn_blocking(move || -> PyResult<()> {
-                let mut bridge = inner.blocking_lock();
-                Python::attach(|py| owned.dispatch(py, &mut bridge))
+                let bridge = inner.blocking_lock();
+                Python::attach(|py| owned.dispatch(py, &bridge))
             })
             .await
             .map_err(|e| PyRuntimeError::new_err(format!("spawn_blocking failed: {e}")))?
@@ -2118,7 +2350,7 @@ impl AsyncSpeakerBridge {
         let inner = Arc::clone(&self.inner);
         future_into_py(py, async move {
             tokio::task::spawn_blocking(move || -> PyResult<()> {
-                let mut bridge = inner.blocking_lock();
+                let bridge = inner.blocking_lock();
                 Python::attach(|py| bridge.drain(py))
             })
             .await
@@ -2131,11 +2363,10 @@ impl AsyncSpeakerBridge {
         let is_playing_atomic = Arc::clone(&self.is_playing_atomic);
         future_into_py(py, async move {
             tokio::task::spawn_blocking(move || -> PyResult<()> {
-                let mut bridge = inner.blocking_lock();
-                bridge.stop()?;
-                // Clear atomic after
-                // inner.stop() succeeds (infallible today; mirroring
-                // pattern keeps symmetry with start()).
+                let bridge = inner.blocking_lock();
+                bridge.stop_stream();
+                // Clear the atomic after the inner stop, mirroring start(),
+                // which sets it after the inner start succeeds.
                 is_playing_atomic.store(false, Ordering::Release);
                 Ok(())
             })
