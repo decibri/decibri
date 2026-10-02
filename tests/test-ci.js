@@ -65,6 +65,24 @@ async function assertRejects(fn, errorType, messagePart) {
   }
 }
 
+// Passes when fn throws exactly errorType (not a subclass) carrying exactly
+// this code and this message.
+function assertThrowsExact(fn, errorType, code, message) {
+  try {
+    fn();
+    console.log(`  FAIL: expected ${errorType.name} but no error thrown`);
+    failed++;
+  } catch (e) {
+    if (e.constructor === errorType && e.code === code && e.message === message) {
+      passed++;
+    } else {
+      console.log(`  FAIL: expected ${errorType.name} [${code}]: ${message}`);
+      console.log(`    actual: ${e.constructor.name} [${e.code}]: ${e.message}`);
+      failed++;
+    }
+  }
+}
+
 // ═══════════════════════════════════════════════════════════════════════════════
 // Group 1: Microphone constructor error messages
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -151,6 +169,31 @@ assertThrows(
   () => new Microphone({ device: { id: 123 } }),
   TypeError,
   'device.id must be a string'
+);
+
+// device of a type the native option parser does not accept
+assertThrowsExact(
+  () => new Microphone({ device: true }),
+  DecibriError,
+  'DECIBRI_ERROR',
+  "device must be a number (index), string (name), or object with 'id' property"
+);
+
+// device object whose id is not enumerable: the wrapper reads it as a string,
+// the native option parser does not see it
+assertThrowsExact(
+  () => new Microphone({ device: Object.defineProperty({}, 'id', { value: 'x', enumerable: false }) }),
+  DecibriError,
+  'DECIBRI_ERROR',
+  "device object must have an 'id' string property"
+);
+
+// negative BigInt index: the wrapper bounds-checks only a number index
+assertThrowsExact(
+  () => new Microphone({ device: -1n }),
+  DecibriError,
+  'DECIBRI_ERROR',
+  'device index must be a non-negative integer'
 );
 
 // boundary values that SHOULD work
@@ -249,6 +292,31 @@ assertThrows(
   () => new Speaker({ device: { id: 123 } }),
   TypeError,
   'device.id must be a string'
+);
+
+// device of a type the native option parser does not accept
+assertThrowsExact(
+  () => new Speaker({ device: true }),
+  DecibriError,
+  'DECIBRI_ERROR',
+  "device must be a number (index), string (name), or object with 'id' property"
+);
+
+// device object whose id is not enumerable: the wrapper reads it as a string,
+// the native option parser does not see it
+assertThrowsExact(
+  () => new Speaker({ device: Object.defineProperty({}, 'id', { value: 'x', enumerable: false }) }),
+  DecibriError,
+  'DECIBRI_ERROR',
+  "device object must have an 'id' string property"
+);
+
+// negative BigInt index: the wrapper bounds-checks only a number index
+assertThrowsExact(
+  () => new Speaker({ device: -1n }),
+  DecibriError,
+  'DECIBRI_ERROR',
+  'device index must be a non-negative integer'
 );
 
 // zero-byte write is a no-op

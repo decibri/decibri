@@ -33,15 +33,11 @@ classifiers = [
     "Topic :: Multimedia :: Sound/Audio :: Capture/Recording",
 ]
 
-# Runtime dependencies. typing_extensions is required because
-# python/decibri/_classes.py imports `Self` from it for compatibility with
-# Python 3.10 (the abi3 floor); typing.Self only exists in 3.11+. The dev
-# group below pins the same package for the development environment, but
-# that group does not propagate into wheel metadata, so the runtime
-# declaration is the one that reaches end users via `pip install decibri`.
-dependencies = [
-    "typing-extensions>=4.15",
-]
+# Runtime dependencies: none. The package imports only the standard library
+# and its own modules, except numpy on the ndarray paths, which is the
+# optional extra below. python-ci.yml imports the built wheel on Python 3.10
+# in an environment holding nothing else.
+dependencies = []
 
 # numpy is the optional ndarray-support extra. Users who want ndarray
 # output (`as_ndarray=True`) or who want to pass an ndarray to playback

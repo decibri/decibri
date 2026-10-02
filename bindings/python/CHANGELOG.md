@@ -20,6 +20,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - A device failure during capture or playback is no longer written to stderr. The failure reaches the consumer as before, raised as `DeviceFailed` from the next `read`, `write` or `drain`.
 - The `File.save` and `SaveReport.non_finite_samples` documentation states that when the conditioning chain runs it has already replaced every non-finite sample with silence at its entry, so the save's own replacement (NaN with silence, an infinity with full scale) and the `non_finite_samples` count cover the direct path only, a mono source already at `sample_rate` with no conditioning enabled. The behaviour is unchanged.
 - The `MultipleDevicesMatch` docstring states that the message lists the matching devices and suggests a more specific name or the device index. The message itself is unchanged.
+- The package installs with no runtime dependencies, as it no longer requires `typing-extensions`. The `numpy` extra is unchanged.
 
 ### Fixed
 

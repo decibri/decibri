@@ -40,9 +40,7 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 from types import TracebackType
-from typing import TYPE_CHECKING, Any, Iterator, Literal, Union
-
-from typing_extensions import Self
+from typing import TYPE_CHECKING, Any, Iterator, Literal, TypeVar, Union
 
 if TYPE_CHECKING:
     import numpy as np
@@ -76,6 +74,13 @@ __all__ = [
     "SpeakerInfo",
     "VersionInfo",
 ]
+
+# Self types for the context-manager entry methods below, each bound to its
+# class. typing.Self is not available on Python 3.10, the oldest version the
+# package supports.
+_MicrophoneT = TypeVar("_MicrophoneT", bound="Microphone")
+_SpeakerT = TypeVar("_SpeakerT", bound="Speaker")
+_FileT = TypeVar("_FileT", bound="File")
 
 
 # ---------------------------------------------------------------------------
@@ -1162,7 +1167,7 @@ class Microphone:
         # VAD state is reset on every close.
         self.stop()
 
-    def __enter__(self) -> Self:
+    def __enter__(self: _MicrophoneT) -> _MicrophoneT:
         self.start()
         return self
 
@@ -1553,7 +1558,7 @@ class Speaker:
         """Block until all queued samples have been played."""
         self._bridge.drain()
 
-    def __enter__(self) -> Self:
+    def __enter__(self: _SpeakerT) -> _SpeakerT:
         self.start()
         return self
 
@@ -2202,7 +2207,7 @@ class File:
         """Release the source. Idempotent; a closed ``File`` reads as ended."""
         self._bridge.close()
 
-    def __enter__(self) -> Self:
+    def __enter__(self: _FileT) -> _FileT:
         return self
 
     def __exit__(

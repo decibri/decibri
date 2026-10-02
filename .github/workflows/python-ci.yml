@@ -692,6 +692,31 @@ jobs:
           fi
           abi3audit --strict --verbose --assume-minimum-abi3 3.10 "$WHEEL"
 
+      - name: Wheel import with no other packages (Python 3.10)
+        if: matrix.python-version == '3.10'
+        working-directory: bindings/python
+        shell: bash
+        # Installs the built wheel alone into a fresh environment on Python
+        # 3.10, the package floor, and imports it. The environment holds the
+        # wheel and nothing it does not declare, so a module the package
+        # imports without declaring it fails the import. `-I` keeps the
+        # working directory and the user site directory off sys.path.
+        run: |
+          set -euo pipefail
+          WHEEL=$(ls "${GITHUB_WORKSPACE}/target/wheels/decibri-"*.whl | head -1)
+          if [ -z "$WHEEL" ]; then
+            echo "ERROR: no wheel found in ${GITHUB_WORKSPACE}/target/wheels/"
+            exit 1
+          fi
+          uv venv .wheel-only
+          if [ "$RUNNER_OS" = "Windows" ]; then
+            VENV_PY=".wheel-only/Scripts/python.exe"
+          else
+            VENV_PY=".wheel-only/bin/python"
+          fi
+          uv pip install --python "$VENV_PY" "$WHEEL"
+          "$VENV_PY" -I -c "import decibri"
+
       - name: Wheel install-test (Phase 3 acceptance gate)
         working-directory: bindings/python
         shell: bash

@@ -1,6 +1,7 @@
 {
   "private": true,
   "devDependencies": {
+    "rolldown": "1.1.5",
     "vitest": "^4.0.0"
   },
   "scripts": {

@@ -669,18 +669,15 @@ pub struct MicrophoneStream {
 
 #[cfg(feature = "capture")]
 impl MicrophoneStream {
-    /// Direct access to the underlying `crossbeam_channel::Receiver`.
+    /// Returns the stream's capture channel, the `crossbeam_channel::Receiver`
+    /// on which the capture callback sends each device buffer as an
+    /// [`AudioChunk`] at the device's native rate and channel count, before
+    /// any conditioning.
     ///
-    /// Intended for **in-process Rust consumers** and for bindings (like the
-    /// decibri Node.js addon) that integrate the channel into their own
-    /// drain pump or event loop.
-    ///
-    /// FFI bindings targeting languages without native `crossbeam_channel`
-    /// support, such as Python and the eventual mobile platforms, should
-    /// prefer [`try_next_chunk`](Self::try_next_chunk) and
-    /// [`next_chunk`](Self::next_chunk): they expose the same data with a
-    /// three-state return (`Some` / `None` / `Err(MicrophoneStreamClosed)`)
-    /// that maps cleanly across a language boundary.
+    /// [`try_next_chunk`](Self::try_next_chunk) and
+    /// [`next_chunk`](Self::next_chunk) drain the same channel, apply the
+    /// stream's conditioning, and return blocks of the requested size. A
+    /// chunk received from this channel directly is not delivered by either.
     pub fn receiver(&self) -> &Receiver<AudioChunk> {
         &self.receiver
     }
