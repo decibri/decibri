@@ -33,6 +33,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 - A `read()` or `close()` on a `File` or `AsyncFile` made while another thread's `read()` on the same file is in progress waits for that read without holding the GIL and then completes.
 - With a VAD active on a multichannel stream that has an enhancement step enabled, the detector feed holds two seconds of frames at every channel count and evicts whole frames. A stream whose delivered block exceeded the feed's bound (more than 20 channels at 16 kHz, or 60 at 48 kHz, at the default `frames_per_buffer` of 1600; fewer channels with a larger `frames_per_buffer`) lost feed frames on every block, and at a channel count that does not divide the bound also fed the detector a channel other than the one `detector_source` named. Mono streams and streams with no enhancement step are unchanged.
+- On Windows, listing devices and starting a `Microphone` or `Speaker` work from any thread, including after the thread that made the process's first device call has exited, such as a worker of the `AsyncMicrophone` and `AsyncSpeaker` thread pool. The first device call in a process takes a usage reference on the process's multithreaded COM apartment and holds it for the life of the process. Device lists, identifiers and errors are unchanged, and so is every other platform.
 
 ## [0.12.0] - 2026-08-21
 

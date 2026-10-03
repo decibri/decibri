@@ -4,9 +4,8 @@ Three sections:
 
 1. GIL release: Microphone and Speaker start() and stop(), and Microphone
    construction with Silero VAD, let other threads run while they work. The
-   method and threshold are those of test_read_releases_gil in
-   test_lifecycle.py: a background thread's progress during the calls is
-   compared against its progress during a sleep measured in the same run.
+   check is _gil_probe's: a thread that runs only while the GIL is free runs
+   during at least one of the bracketed native calls.
 2. start() races: a second start() while a start is in progress raises
    AlreadyRunning, and a stop() that arrives while a start is in progress
    leaves the stream stopped.
@@ -29,8 +28,9 @@ import time
 from typing import Callable, Iterator
 
 import pytest
+from _gil_probe import BRACKETS, Bracket, GilProbe, assert_releases_gil
 
-from decibri import AlreadyRunning, Microphone, Speaker, SpeakerStreamClosed
+from decibri import AlreadyRunning, Microphone, Speaker, SpeakerStreamClosed, _decibri
 
 # One second of int16 mono silence at the default 16 kHz.
 _SECOND = b"\x00\x00" * 16000
@@ -39,94 +39,29 @@ _SECOND = b"\x00\x00" * 16000
 # ---------------------------------------------------------------------------
 # Section 1: GIL release.
 #
-# A background daemon thread increments a counter and sleeps 1ms in a tight
-# loop. While a call releases the GIL the counter advances at its natural
-# rate; while a call holds it the background thread cannot run. start() and
-# stop() each take milliseconds, so the counter is read immediately before
-# and after every call, and the ticks and the time spent inside the calls are
-# summed over several start/stop cycles. The rates are compared against the
-# rate during a sleep that follows the cycles, in the same run.
+# The check is _gil_probe's. The start/stop tests make BRACKETS start/stop
+# cycles, bracket every start() and every stop(), and pass when the probe's
+# thread ran during at least one start() and at least one stop().
 # ---------------------------------------------------------------------------
-
-_CYCLES = 8
-
-
-class _Counter:
-    """A daemon thread that increments a counter and sleeps 1ms, in a loop."""
-
-    def __init__(self) -> None:
-        self.ticks = 0
-        self._stop = threading.Event()
-        self._thread = threading.Thread(target=self._run, daemon=True)
-
-    def _run(self) -> None:
-        while not self._stop.is_set():
-            self.ticks += 1
-            time.sleep(0.001)
-
-    def __enter__(self) -> _Counter:
-        self._thread.start()
-        return self
-
-    def __exit__(self, *exc: object) -> None:
-        self._stop.set()
-        self._thread.join(timeout=1.0)
-
-    def baseline_rate(self) -> float:
-        """Ticks per millisecond during a 150ms sleep."""
-        ticks = self.ticks
-        began = time.perf_counter()
-        time.sleep(0.15)
-        elapsed_ms = (time.perf_counter() - began) * 1000.0
-        rate = (self.ticks - ticks) / elapsed_ms
-        # The baseline is the yardstick, so a stalled one makes the comparison
-        # meaningless rather than merely generous.
-        assert rate > 0, (
-            f"background thread made no progress during a {elapsed_ms:.0f}ms "
-            "sleep; the baseline is unusable"
-        )
-        return rate
-
-
-def _timed(counter: _Counter, call: Callable[[], object]) -> tuple[int, float]:
-    """Run one call, returning the counter's ticks during it and its duration in ms."""
-    ticks = counter.ticks
-    began = time.perf_counter()
-    call()
-    elapsed_ms = (time.perf_counter() - began) * 1000.0
-    return counter.ticks - ticks, elapsed_ms
 
 
 def _assert_start_and_stop_release_gil(source: Microphone | Speaker) -> None:
-    start_ticks = stop_ticks = 0
-    start_ms = stop_ms = 0.0
-    with _Counter() as counter:
+    starts: list[Bracket] = []
+    stops: list[Bracket] = []
+    # The wrappers' start() and stop() pass the bridge no arguments, so the
+    # bridge's own start() and stop() are bracketed.
+    start, stop = source._bridge.start, source._bridge.stop
+    with GilProbe() as probe:
         try:
-            for _ in range(_CYCLES):
-                ticks, elapsed = _timed(counter, source.start)
-                start_ticks += ticks
-                start_ms += elapsed
+            for _ in range(BRACKETS):
+                starts.append(probe.bracket(start))
                 time.sleep(0.02)
-                ticks, elapsed = _timed(counter, source.stop)
-                stop_ticks += ticks
-                stop_ms += elapsed
+                stops.append(probe.bracket(stop))
                 time.sleep(0.02)
         finally:
             source.stop()
-        base_rate = counter.baseline_rate()
-
-    start_rate = start_ticks / start_ms
-    stop_rate = stop_ticks / stop_ms
-    assert start_rate > base_rate / 2, (
-        f"background thread advanced at {start_rate:.4f} ticks/ms across "
-        f"{_CYCLES} start() calls totalling {start_ms:.1f}ms against "
-        f"{base_rate:.4f} ticks/ms during a sleep; start() holds the GIL"
-    )
-    assert stop_rate > base_rate / 2, (
-        f"background thread advanced at {stop_rate:.4f} ticks/ms across "
-        f"{_CYCLES} stop() calls totalling {stop_ms:.1f}ms against "
-        f"{base_rate:.4f} ticks/ms during a sleep; stop() holds the GIL"
-    )
+    assert_releases_gil(starts, "start()", "start() holds the GIL")
+    assert_releases_gil(stops, "stop()", "stop() holds the GIL")
 
 
 @pytest.mark.requires_audio_input
@@ -142,19 +77,24 @@ def test_speaker_start_and_stop_release_gil() -> None:
 
 
 @pytest.mark.requires_bundled_ort
-def test_silero_construction_releases_gil() -> None:
+def test_silero_construction_releases_gil(monkeypatch: pytest.MonkeyPatch) -> None:
     """Constructing a Microphone with Silero VAD lets other threads run while
     the model loads. Construction opens no device."""
-    with _Counter() as counter:
-        ticks, build_ms = _timed(counter, lambda: Microphone(vad="silero"))
-        base_rate = counter.baseline_rate()
-
-    build_rate = ticks / build_ms
-    assert build_rate > base_rate / 2, (
-        f"background thread advanced at {build_rate:.4f} ticks/ms during a "
-        f"{build_ms:.0f}ms Silero construction against {base_rate:.4f} "
-        f"ticks/ms during a sleep; construction holds the GIL while the "
-        f"model loads"
+    brackets: list[Bracket] = []
+    with GilProbe() as probe:
+        # The constructor resolves the bridge's arguments itself, so the
+        # native constructor it calls is bracketed where it is called.
+        monkeypatch.setattr(
+            _decibri,
+            "MicrophoneBridge",
+            probe.bracketed(_decibri.MicrophoneBridge, brackets),
+        )
+        for _ in range(BRACKETS):
+            Microphone(vad="silero")
+    assert_releases_gil(
+        brackets,
+        "Silero construction",
+        "construction holds the GIL while the model loads",
     )
 
 
