@@ -63,7 +63,7 @@ jobs:
       # Pinned exactly, as cargo-deny and zizmor are. The scanner is installed
       # from its GitHub release rather than run as a container action, which
       # keeps the version visible here instead of inside an image tag.
-      - uses: taiki-e/install-action@5b4d68e2e660441203ab128a23676f1e4faf1532 # v2.86.3
+      - uses: taiki-e/install-action@83ac0ad63c0167e6f06796fab0fce28db1bf3db0 # v2.87.22
         with:
           tool: osv-scanner@2.4.0
       # Recursive from the repository root, so a lockfile added later is
@@ -78,7 +78,7 @@ jobs:
         run: osv-scanner scan source --recursive --format=sarif --output-file=results.sarif ./
       - name: Upload results to the Security tab
         if: ${{ !cancelled() && hashFiles('results.sarif') != '' }}
-        uses: github/codeql-action/upload-sarif@ff2f1c621b7f889edc0d3c761ac2e6a3f8cdb0dd # v4.37.7
+        uses: github/codeql-action/upload-sarif@2892aa5e19bbd11bc0cff5427e3b750a04d9e3c2 # v4.38.2
         with:
           sarif_file: results.sarif
           category: osv-scanner
