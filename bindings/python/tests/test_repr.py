@@ -140,7 +140,7 @@ def test_extension_classes_report_their_module() -> None:
         for name in _decibri.__all__
         if isinstance(getattr(_decibri, name), type)
     ]
-    assert len(exported) == 8
+    assert len(exported) == 6
     for cls in exported:
         assert cls.__module__ == "decibri._decibri", cls.__name__
 

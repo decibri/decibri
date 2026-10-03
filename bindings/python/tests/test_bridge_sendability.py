@@ -11,9 +11,8 @@ implicitly depends on, or a future PyO3 release that tightens runtime
 checks beyond what Send + 'static guarantees).
 
 The strongest signal is `test_decibri_can_be_passed_through_threadpool_for_callable`,
-which simulates the capture pattern
-`pyo3_async_runtimes::tokio::future_into_py` uses. If that test
-passes, the bridge will compile and run inside an async closure.
+which uses a bridge from a worker thread, as `AsyncMicrophone` and
+`AsyncSpeaker` do on decibri's worker pool.
 
 These tests do not exercise audio capture or playback; they only exercise
 the bridge's identity and a pure read-only method (`is_open`). No audio
@@ -67,16 +66,11 @@ def test_decibri_method_call_from_worker_thread() -> None:
 
 
 def test_decibri_can_be_passed_through_threadpool_for_callable() -> None:
-    """Closure-capture pattern that mirrors future_into_py.
+    """Closure-capture pattern that mirrors the async classes.
 
-    `pyo3_async_runtimes::tokio::future_into_py` captures the bridge
-    into an async closure and submits the closure to a Tokio worker.
-    Python's threadpool is not the same runtime, but the requirement
-    on the captured value is the same: it must survive being moved
-    out of the calling thread.
-
-    If this test passes, the async wiring will compile when the
-    bridge is captured into a tokio::spawn_blocking-shaped closure.
+    `AsyncMicrophone` and `AsyncSpeaker` call their bridge from a worker
+    thread on decibri's pool, so the bridge must work from a thread other
+    than the one that built it.
     """
     decibri = Microphone(vad=False)
 
@@ -92,8 +86,9 @@ def test_decibri_can_be_passed_through_threadpool_for_callable() -> None:
 # ---------------------------------------------------------------------------
 # Bridge-level close() symmetry
 #
-# MicrophoneBridge::close() and AsyncMicrophoneBridge::close() are literal
-# aliases for stop(), so all four bridges have the same lifecycle surface.
+# MicrophoneBridge::close() is a literal alias for stop(), as
+# SpeakerBridge::close() is, so both device bridges have the same lifecycle
+# surface.
 # ---------------------------------------------------------------------------
 
 
@@ -105,19 +100,9 @@ def test_microphone_bridge_close_exists() -> None:
     assert callable(MicrophoneBridge.close)
 
 
-def test_async_microphone_bridge_close_exists() -> None:
-    """AsyncMicrophoneBridge.close() is exposed and callable as alias for stop()."""
-    from decibri._decibri import AsyncMicrophoneBridge
-
-    assert hasattr(AsyncMicrophoneBridge, "close")
-    assert callable(AsyncMicrophoneBridge.close)
-
-
-def test_all_four_bridges_have_close() -> None:
-    """All four bridges expose close() (sync + async, capture + output)."""
+def test_both_device_bridges_have_close() -> None:
+    """Both device bridges expose close() (capture and output)."""
     from decibri._decibri import (
-        AsyncMicrophoneBridge,
-        AsyncSpeakerBridge,
         MicrophoneBridge,
         SpeakerBridge,
     )
@@ -125,7 +110,5 @@ def test_all_four_bridges_have_close() -> None:
     for bridge in (
         MicrophoneBridge,
         SpeakerBridge,
-        AsyncMicrophoneBridge,
-        AsyncSpeakerBridge,
     ):
         assert hasattr(bridge, "close"), f"{bridge.__name__} missing close()"

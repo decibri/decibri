@@ -1453,9 +1453,10 @@ class Speaker:
         A playback device that fails mid-stream (USB unplug, driver reset)
         raises ``DeviceFailed`` from the next ``write()`` or ``drain()``,
         carrying the driver's own cause. A producer that has stopped writing
-        is not told; ``is_playing`` goes false immediately either way. A
-        deliberate ``stop()`` or ``close()`` is never reported as a device
-        failure: a later ``write()`` raises ``SpeakerStreamClosed`` as before.
+        is not told, and ``is_playing`` stays true until ``stop()`` or
+        ``close()``. A deliberate ``stop()`` or ``close()`` is never reported
+        as a device failure: a later ``write()`` raises
+        ``SpeakerStreamClosed`` as before.
     """
 
     def __init__(
@@ -1592,6 +1593,12 @@ class Speaker:
 
     @property
     def is_playing(self) -> bool:
+        """True once ``start()`` has opened the output stream, until
+        ``stop()`` or ``close()``.
+
+        A device failure does not change it; the failure is raised as
+        ``DeviceFailed`` from the next ``write()`` or ``drain()``.
+        """
         return self._bridge.is_playing
 
     @property

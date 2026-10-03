@@ -1,48 +1,54 @@
-"""Async Python wrappers for decibri: AsyncMicrophone and AsyncSpeaker.
+"""Async Python wrappers for decibri: AsyncMicrophone, AsyncSpeaker and AsyncFile.
 
-These classes mirror the sync
-``Microphone`` and ``Speaker`` surfaces method-for-method, with
-``async def`` semantics, async context manager support
-(``__aenter__`` / ``__aexit__``), and (for capture only) async iterator
-support (``__aiter__`` / ``__anext__``).
+These classes mirror the sync ``Microphone``, ``Speaker`` and ``File``
+surfaces method-for-method, with ``async def`` semantics, async context
+manager support (``__aenter__`` / ``__aexit__``), and (for capture and the
+offline source) async iterator support (``__aiter__`` / ``__anext__``).
 
-Implementation: each method proxies to the underlying Rust async pyclass
-(``AsyncMicrophoneBridge`` / ``AsyncSpeakerBridge``) which dispatches blocking
-work to a Tokio worker thread via ``spawn_blocking``. The Tokio runtime
-is lazily initialized; no explicit init call is needed.
+Implementation: ``AsyncMicrophone`` and ``AsyncSpeaker`` hold the same
+bridges as ``Microphone`` and ``Speaker`` and await each blocking call on
+decibri's worker pool, a set of daemon threads shared by every instance and
+every event loop. A call goes to an idle worker, or to a new worker when none
+is idle, so a call that ends another, such as ``stop()`` while a ``read()`` or
+a ``drain()`` waits, never waits behind it. The bridges release the GIL while
+they wait, so the event loop keeps running. ``AsyncFile`` and the ``open()``
+factories await their calls on the event loop's default executor.
 
-Cancellation: ``asyncio.CancelledError`` propagates through
-``pyo3-async-runtimes`` to the underlying Rust future. By design
-(abort-immediately), cancellation is non-recoverable for the in-flight
-chunk: any cpal data captured in the spawn_blocking thread between the
-Python-side cancellation and the thread's natural completion is dropped.
-The spawn_blocking OS thread itself does not cooperatively cancel; the
-Python coroutine sees ``CancelledError`` immediately while the Rust thread
-runs to completion.
+Cancellation: cancelling an awaited call raises ``asyncio.CancelledError`` at
+once. The bridge call it started keeps running on its worker until it
+returns, and its result is discarded.
 
 State properties (``is_open``, ``is_speaking``, ``vad_score``,
-``is_playing``) are synchronous Python properties backed by Python-side
-state tracking. The Rust async bridge exposes these as awaitables, but
-awaiting from a property is not idiomatic Python and would surprise
-callers who expect ``decibri.is_open`` to behave like sync ``Microphone``.
-The sync ``is_open`` / ``is_playing`` properties
-delegate to lock-free atomic mirrors on the Rust bridge, so they
-report bridge truth (not stale Python-side cache) even when the Rust
-side closes the stream itself.
-
-Cross-binding compat: pure Python. The Rust core is unchanged. The sync
-``Microphone`` and ``Speaker`` classes (in ``_classes.py``) are
-unchanged and exist alongside this module.
+``is_playing``) are synchronous Python properties. ``is_open`` and
+``is_playing`` read the bridge's own state, as the sync classes do;
+``is_speaking`` and ``vad_score`` read the wrapper's VAD state.
 """
 
 from __future__ import annotations
 
 import asyncio
+import concurrent.futures
+import functools
 import importlib.resources
+import itertools
+import os
+import queue
+import sys
+import threading
 import time
 from pathlib import Path
 from types import TracebackType
-from typing import TYPE_CHECKING, Any, AsyncIterator, Literal, TypeVar, Union
+from typing import (
+    TYPE_CHECKING,
+    Any,
+    AsyncIterator,
+    Callable,
+    Literal,
+    ParamSpec,
+    TypeVar,
+    Union,
+    cast,
+)
 
 if TYPE_CHECKING:
     import numpy as np
@@ -85,6 +91,123 @@ _AsyncMicrophoneT = TypeVar("_AsyncMicrophoneT", bound="AsyncMicrophone")
 _AsyncSpeakerT = TypeVar("_AsyncSpeakerT", bound="AsyncSpeaker")
 _AsyncFileT = TypeVar("_AsyncFileT", bound="AsyncFile")
 
+_P = ParamSpec("_P")
+_R = TypeVar("_R")
+
+
+# ---------------------------------------------------------------------------
+# The worker pool: AsyncMicrophone and AsyncSpeaker await every blocking
+# bridge call here.
+# ---------------------------------------------------------------------------
+
+# A worker idle for this many seconds exits.
+_IDLE_SECONDS = 10.0
+
+# A submitted call: the future it settles and the call itself.
+_WorkItem = tuple["concurrent.futures.Future[Any]", Callable[[], Any]]
+
+
+class _WorkerPool(concurrent.futures.Executor):
+    """Runs each call at once on a daemon thread owned by decibri.
+
+    A call goes to an idle worker, or to a new worker when none is idle, so
+    no call waits behind another: a ``stop()`` reaches its bridge while a
+    ``read()`` or a ``drain()`` on the same bridge still waits. A worker idle
+    for ``_IDLE_SECONDS`` exits. Workers are daemon threads named
+    ``decibri-worker-<n>``, so a call still running at interpreter exit does
+    not hold the process open. Each future is marked running when its call is
+    submitted, so cancelling the task that awaits it never stops the call;
+    every submitted call runs to completion.
+
+    One pool serves every instance and every event loop. In a child process
+    created by ``os.fork()`` the pool starts with no workers, because the
+    parent's worker threads are not copied into the child.
+    """
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._idle: list[queue.SimpleQueue[_WorkItem]] = []
+        self._numbers = itertools.count(1)
+
+    def _forget_workers(self) -> None:
+        """Drop every worker and replace the lock, in a forked child.
+
+        The child has none of the parent's worker threads, so their inboxes
+        would never be served, and the lock may have been held at the fork by
+        a thread the child does not have. The next call starts a new worker.
+        """
+        self._lock = threading.Lock()
+        self._idle = []
+
+    def submit(
+        self, fn: Callable[_P, _R], /, *args: _P.args, **kwargs: _P.kwargs
+    ) -> concurrent.futures.Future[_R]:
+        future: concurrent.futures.Future[_R] = concurrent.futures.Future()
+        future.set_running_or_notify_cancel()
+        item: _WorkItem = (future, functools.partial(fn, *args, **kwargs))
+        with self._lock:
+            inbox = self._idle.pop() if self._idle else None
+            name = f"decibri-worker-{next(self._numbers)}" if inbox is None else ""
+        if inbox is None:
+            inbox = queue.SimpleQueue()
+            inbox.put(item)
+            threading.Thread(
+                target=self._work, args=(inbox,), name=name, daemon=True
+            ).start()
+        else:
+            inbox.put(item)
+        return future
+
+    def _work(self, inbox: queue.SimpleQueue[_WorkItem]) -> None:
+        while True:
+            try:
+                future, call = inbox.get(timeout=_IDLE_SECONDS)
+            except queue.Empty:
+                with self._lock:
+                    if inbox in self._idle:
+                        self._idle.remove(inbox)
+                        return
+                # A call claimed this worker as the wait ran out; it is on
+                # its way.
+                future, call = inbox.get()
+            try:
+                result = call()
+            except BaseException as exc:  # noqa: BLE001
+                future.set_exception(exc)
+            else:
+                future.set_result(result)
+            # Drop the finished call before waiting, so the worker does not
+            # keep its arguments alive.
+            del future, call
+            with self._lock:
+                self._idle.append(inbox)
+
+
+_POOL = _WorkerPool()
+
+if hasattr(os, "register_at_fork"):
+    os.register_at_fork(after_in_child=_POOL._forget_workers)
+
+
+async def _blocking(fn: Callable[..., _R], *args: Any) -> _R:
+    """Await ``fn(*args)`` on decibri's worker pool."""
+    return await asyncio.get_running_loop().run_in_executor(_POOL, fn, *args)
+
+
+def _snapshot(samples: SampleData) -> SampleData:
+    """A copy of a C-contiguous numpy array, and any other input unchanged.
+
+    Taken on the calling task, so a write sends what the array held when the
+    call began, even when the write then waits for the speaker or for room in
+    its queue. Other inputs reach the bridge as given, so the bridge's own
+    checks report them.
+    """
+    numpy = sys.modules.get("numpy")
+    if numpy is None or not isinstance(samples, numpy.ndarray):
+        return samples
+    array: Any = samples
+    return cast(SampleData, array.copy()) if array.flags.c_contiguous else samples
+
 
 # ---------------------------------------------------------------------------
 # AsyncMicrophone: async audio capture; mirror of decibri.Microphone.
@@ -107,14 +230,16 @@ class AsyncMicrophone:
 
     Cancellation: any awaited method that is cancelled (via
     ``asyncio.CancelledError``, ``asyncio.wait_for``, or explicit
-    ``task.cancel()``) propagates the cancellation to the Rust side. The
-    Python coroutine raises immediately; the spawn_blocking OS thread on
-    the Rust side runs to completion with its result dropped. Subsequent
-    operations on the same instance see consistent bridge state.
+    ``task.cancel()``) raises at once. The bridge call it started keeps
+    running on its worker thread until it returns, and its result is
+    discarded: a cancelled ``read()`` consumes the chunk it was waiting
+    for. Subsequent operations on the same instance see consistent bridge
+    state.
 
-    Concurrency: concurrent calls on the same instance serialize via the
-    Rust-side ``tokio::sync::Mutex``. This is a behavioural characteristic
-    of the architecture, not advertised concurrency.
+    Concurrency: ``stop()`` and ``close()`` may be awaited from another
+    task while a ``read()`` on the same instance waits. They do not wait for
+    the read: the read returns the audio buffered before the stop, or raises
+    ``MicrophoneStreamClosed`` as a read made after ``stop()`` does.
 
     Cleanup and disconnect:
         Mid-stream device disconnect (USB unplug, default-device switch,
@@ -126,12 +251,6 @@ class AsyncMicrophone:
         ``MicrophoneStreamClosed``, so catch ``DecibriError`` (or
         ``DeviceFailed`` itself) to handle a disconnect. A deliberate
         ``stop()`` still raises ``MicrophoneStreamClosed``.
-
-        Sibling-task cancellation works correctly here: cancelling a
-        concurrent ``await stop()`` from another asyncio task while a
-        ``read()`` is in flight is safe (the Tokio mutex serializes the
-        operations cleanly). This is the recommended path when a sync
-        ``Microphone`` would hit the 0.1.0 threaded-shutdown limitation.
 
     Resource cleanup:
         Always use ``async with AsyncMicrophone(...) as d:`` or call
@@ -421,7 +540,7 @@ class AsyncMicrophone:
 
         # Wrapper-only rename: public surface uses `dtype`; bridge keeps
         # `format` for cross-binding consistency.
-        self._bridge = _decibri.AsyncMicrophoneBridge(
+        self._bridge = _decibri.MicrophoneBridge(
             sample_rate=sample_rate,
             channels=channels,
             frames_per_buffer=frames_per_buffer,
@@ -486,11 +605,11 @@ class AsyncMicrophone:
             Calling ``await start()`` while already started raises
             ``AlreadyRunning``.
         """
-        await self._bridge.start()
+        await _blocking(self._bridge.start)
 
     async def stop(self) -> None:
         """Stop the capture stream and reset VAD state."""
-        await self._bridge.stop()
+        await _blocking(self._bridge.stop)
         self._vad.reset()
         self._sequence = 0
 
@@ -504,10 +623,10 @@ class AsyncMicrophone:
         """
         # Calls self.stop() rather than self._bridge.close() so the
         # wrapper-side cleanup (vad.reset() in stop()) runs. The
-        # bridge-level AsyncMicrophoneBridge.close() exists for
-        # symmetry with AsyncSpeakerBridge.close() and for advanced
-        # direct-bridge users; the wrapper keeps its own routing here
-        # to ensure VAD state is reset on every close.
+        # bridge-level MicrophoneBridge.close() exists for symmetry
+        # with SpeakerBridge.close() and for advanced direct-bridge
+        # users; the wrapper keeps its own routing here to ensure VAD
+        # state is reset on every close.
         await self.stop()
 
     async def __aenter__(self: _AsyncMicrophoneT) -> _AsyncMicrophoneT:
@@ -547,17 +666,17 @@ class AsyncMicrophone:
         modes), so the returned chunk is not inspected for VAD and the
         return type (bytes vs ndarray) does not affect it.
 
-        Cancellation: by the abort-immediately design, cancelling
-        this await raises ``CancelledError`` immediately. The spawn_blocking
-        thread on the Rust side runs to completion; its result (if any) is
-        dropped. The bridge state remains consistent for subsequent reads.
+        Cancellation: cancelling this await raises ``CancelledError`` at
+        once. The read keeps running on its worker thread until its chunk
+        arrives or the stream stops, and that chunk is discarded. The
+        bridge state remains consistent for subsequent reads.
 
         ``as_ndarray=True`` requires the optional ``numpy`` extra; a
         missing numpy raises ``ImportError`` at construction (install
         with ``pip install decibri[numpy]``).
         """
         try:
-            chunk = await self._bridge.read(timeout_ms=timeout_ms)
+            chunk = await _blocking(self._bridge.read, timeout_ms)
         except ImportError as exc:
             if self._as_ndarray:
                 raise ImportError(
@@ -569,8 +688,7 @@ class AsyncMicrophone:
         if self._vad_enabled:
             # Both modes read the score the bridge computed on the
             # pre-enhancement signal; the chunk data is not inspected here.
-            probability = await self._bridge.vad_probability
-            self._vad.process_chunk(probability)
+            self._vad.process_chunk(self._bridge.vad_probability)
         self._sequence += 1
         return chunk
 
@@ -622,14 +740,13 @@ class AsyncMicrophone:
 
     @property
     def is_open(self) -> bool:
-        """True if the capture stream is currently running.
+        """True once ``start()`` has opened the capture stream, until
+        ``stop()`` or ``close()``.
 
-        Queries the Rust bridge directly via a lock-free atomic mirror.
-        Reports honestly even when the Rust side
-        closes the stream itself (e.g., device disconnect or cpal driver
-        error), unlike the prior Python-side cache.
+        Reads the bridge's own state, as ``Microphone.is_open`` does, so it
+        answers while a ``read()`` waits.
         """
-        return bool(self._bridge.is_open_sync)
+        return self._bridge.is_open
 
     @property
     def is_speaking(self) -> bool:
@@ -697,7 +814,7 @@ class AsyncMicrophone:
         ``AecMetrics`` for the fields and the diagnostic signatures they
         carry.
         """
-        raw = await self._bridge.aec_metrics()
+        raw = await _blocking(self._bridge.aec_metrics)
         if raw is None:
             return None
         return _aec_metrics_from_raw(raw)
@@ -715,8 +832,8 @@ class AsyncMicrophone:
     # explicitly. See the class docstring's "Resource cleanup" section.
 
     def __repr__(self) -> str:
-        # Mirrors Microphone.__repr__; is_open is queried from the bridge's
-        # lock-free atomic mirror so the repr reflects current bridge truth.
+        # Mirrors Microphone.__repr__; is_open is read from the bridge so
+        # the repr reflects its current state.
         is_open: bool | str
         try:
             is_open = self.is_open
@@ -772,7 +889,7 @@ class AsyncMicrophone:
     @staticmethod
     async def devices() -> list[MicrophoneInfo]:
         """List available audio input devices."""
-        return await _decibri.AsyncMicrophoneBridge.devices()
+        return await _blocking(_decibri.MicrophoneBridge.devices)
 
     @staticmethod
     def version() -> VersionInfo:
@@ -781,9 +898,7 @@ class AsyncMicrophone:
         Synchronous because it reads compile-time constants only; no I/O.
         Intentionally not async to avoid forcing callers to await for what
         is effectively a metadata lookup. Reuses the sync ``MicrophoneBridge``
-        static method directly; the async bridge's ``version()`` wraps the
-        same data in a coroutine for uniformity but offers no benefit for
-        this purely-compile-time lookup.
+        static method directly.
         """
         return _decibri.MicrophoneBridge.version()
 
@@ -805,20 +920,22 @@ class AsyncSpeaker:
     push-only; you write to it, you do not iterate over it). This mirrors
     the sync ``Speaker``, which also has no iterator protocol.
 
-    Cancellation note for ``drain()``: cancelling a ``await drain()`` call
-    raises ``CancelledError`` immediately, but the audio continues to play
-    until the cpal output buffer empties on the callback's own schedule.
-    The bridge's drain state may be inconsistent if a cancelled drain is
-    immediately followed by another write/drain cycle (spawn_blocking does
-    not cooperatively cancel OS threads); for production use, complete
-    drains before initiating new writes.
+    Ordering and cancellation: ``start()``, ``write()`` and ``drain()``
+    reach the output one at a time. Cancelling one of them raises
+    ``CancelledError`` at once, but the call keeps running on its worker
+    thread until it returns: a cancelled ``drain()`` waits until the queued
+    audio has played, and a ``start()``, ``write()`` or ``drain()`` made
+    meanwhile waits for it. ``stop()`` and ``close()`` do not wait for any
+    of them: they end playback at once, and a ``drain()`` or ``write()``
+    still waiting then raises ``SpeakerStreamClosed``, as the same call
+    made after ``stop()`` does.
 
     Disconnect:
         A playback device that fails mid-stream (USB unplug, driver reset)
         raises ``DeviceFailed`` from the next ``await write()`` or
         ``await drain()``, carrying the driver's own cause. A producer that
-        has stopped writing is not told; ``is_playing`` goes false
-        immediately either way. A deliberate ``await stop()`` is never
+        has stopped writing is not told, and ``is_playing`` stays true until
+        ``stop()`` or ``close()``. A deliberate ``await stop()`` is never
         reported as a device failure: a later write raises
         ``SpeakerStreamClosed`` as before.
 
@@ -872,17 +989,27 @@ class AsyncSpeaker:
             )
         # Wrapper-only rename: public surface uses `dtype`; bridge keeps
         # `format` for cross-binding consistency.
-        self._bridge = _decibri.AsyncSpeakerBridge(
+        self._bridge = _decibri.SpeakerBridge(
             sample_rate=sample_rate,
             channels=channels,
             format=dtype,
             device=device,
         )
+        # start(), write() and drain() reach the bridge one at a time. Each
+        # takes this lock on its worker thread and holds it until its bridge
+        # call returns, including after the awaiting task has been cancelled.
+        # stop() and close() do not take it.
+        self._serial = threading.Lock()
         # Capture construction parameters for __repr__.
         self._sample_rate = sample_rate
         self._channels = channels
         self._format = dtype
         self._device = device
+
+    def _one_at_a_time(self, call: Callable[..., _R], *args: Any) -> _R:
+        """Run a start, write or drain bridge call once no other is running."""
+        with self._serial:
+            return call(*args)
 
     async def start(self) -> None:
         """Open and start the output stream.
@@ -898,11 +1025,17 @@ class AsyncSpeaker:
             Calling ``await start()`` while already started raises
             ``AlreadyRunning``.
         """
-        await self._bridge.start()
+        await _blocking(self._one_at_a_time, self._bridge.start)
 
     async def stop(self) -> None:
-        """Stop the output stream."""
-        await self._bridge.stop()
+        """Stop the output stream.
+
+        Playback ends at once and queued samples are discarded. ``stop()``
+        does not wait for a pending ``drain()`` or ``write()`` on the same
+        instance: the waiting call raises ``SpeakerStreamClosed``, as the
+        same call made after ``stop()`` does.
+        """
+        await _blocking(self._bridge.stop)
 
     async def close(self) -> None:
         """Stop the output stream. Permanent alias for ``stop()``.
@@ -912,8 +1045,12 @@ class AsyncSpeaker:
         for ergonomic parity with the asyncio / aiohttp / httpx
         convention. ``close()`` and ``stop()`` are guaranteed to
         remain semantically equivalent across all decibri versions.
+
+        Like ``stop()``, ``close()`` does not wait for a pending
+        ``drain()`` or ``write()``: playback ends at once and the waiting
+        call raises ``SpeakerStreamClosed``.
         """
-        await self._bridge.close()
+        await _blocking(self._bridge.close)
 
     async def write(self, samples: SampleData) -> None:
         """Write a chunk of audio samples to the output buffer.
@@ -923,19 +1060,27 @@ class AsyncSpeaker:
         Multi-channel ndarrays use shape ``(N, channels)`` (interleaved).
         Output bridges duck-type the input on each call.
 
-        Raises ``TypeError`` on dtype mismatch or unsupported input type.
+        Raises ``TypeError`` on dtype mismatch or unsupported input type,
+        with the same messages as ``Speaker.write``.
+
+        When the playback queue is full, ``write()`` waits until there is
+        room. ``stop()`` or ``close()`` ends the wait at once, and
+        ``write()`` then raises ``SpeakerStreamClosed``, as a ``write()``
+        made after ``stop()`` does.
         """
-        await self._bridge.write(samples)
+        await _blocking(self._one_at_a_time, self._bridge.write, _snapshot(samples))
 
     async def drain(self) -> None:
         """Block until all queued samples have been played.
 
-        Cancellation note: cancelling this await
-        raises ``CancelledError`` immediately, but the audio continues to
-        play until the cpal output buffer empties on the callback's own
-        schedule. See the class docstring for details.
+        Cancelling this await raises ``CancelledError`` at once, but the
+        drain keeps waiting on its worker thread until the queued audio has
+        played, and a ``start()``, ``write()`` or ``drain()`` made meanwhile
+        waits for it. ``stop()`` or ``close()`` ends the wait at once, and
+        ``drain()`` then raises ``SpeakerStreamClosed``, as a ``drain()``
+        made after ``stop()`` does.
         """
-        await self._bridge.drain()
+        await _blocking(self._one_at_a_time, self._bridge.drain)
 
     async def __aenter__(self: _AsyncSpeakerT) -> _AsyncSpeakerT:
         await self.start()
@@ -951,13 +1096,15 @@ class AsyncSpeaker:
 
     @property
     def is_playing(self) -> bool:
-        """True if the output stream is currently running.
+        """True once ``start()`` has opened the output stream, until
+        ``stop()`` or ``close()``.
 
-        Queries the Rust bridge directly via a lock-free atomic mirror.
-        Reports honestly even when the Rust side closes the stream itself,
-        unlike the prior Python-side cache.
+        Reads the bridge's own state, as ``Speaker.is_playing`` does, so it
+        answers while a ``drain()`` or ``write()`` waits. A device failure
+        does not change it; the failure is raised as ``DeviceFailed`` from
+        the next ``write()`` or ``drain()``.
         """
-        return bool(self._bridge.is_playing_sync)
+        return self._bridge.is_playing
 
     # Note: no __del__ on AsyncSpeaker by design.
     # A finalizer cannot await; calling `await self.stop()` from __del__
@@ -968,8 +1115,8 @@ class AsyncSpeaker:
     # See the class docstring's "Resource cleanup" section.
 
     def __repr__(self) -> str:
-        # Mirrors Speaker.__repr__; is_playing reflects the bridge's atomic
-        # mirror so the repr is honest about current state.
+        # Mirrors Speaker.__repr__; is_playing is read from the bridge so
+        # the repr reflects its current state.
         is_playing: bool | str
         try:
             is_playing = self.is_playing
@@ -1000,7 +1147,7 @@ class AsyncSpeaker:
     @staticmethod
     async def devices() -> list[SpeakerInfo]:
         """List available audio output devices."""
-        return await _decibri.AsyncSpeakerBridge.devices()
+        return await _blocking(_decibri.SpeakerBridge.devices)
 
 
 # ---------------------------------------------------------------------------

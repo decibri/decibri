@@ -4,9 +4,9 @@ Matches the Rust surface in ``bindings/python/src/lib.rs``. Kept alongside
 the compiled ``.pyd`` / ``.so`` so mypy and IDEs see types without loading
 the extension. Update this file when the Rust surface changes.
 
-Internal module. The four bridge classes
-(``MicrophoneBridge``, ``SpeakerBridge``, ``AsyncMicrophoneBridge``,
-``AsyncSpeakerBridge``) are accessible only via ``decibri._decibri.<X>``;
+Internal module. The bridge classes
+(``MicrophoneBridge``, ``SpeakerBridge``, ``FileBridge``) are accessible
+only via ``decibri._decibri.<X>``;
 they are NOT re-exported on the top-level ``decibri`` module and are NOT
 part of the public 0.1.0 API. Consumers should construct the wrapper
 classes (``decibri.Microphone``, ``decibri.Speaker``,
@@ -32,7 +32,7 @@ Wrapper-only naming translations:
 """
 
 from pathlib import Path
-from typing import Awaitable, Coroutine, Any, TYPE_CHECKING, Union
+from typing import Any, TYPE_CHECKING, Union
 
 from decibri._classes import Device
 
@@ -46,8 +46,6 @@ else:
     SampleData = bytes
 
 __all__ = [
-    "AsyncMicrophoneBridge",
-    "AsyncSpeakerBridge",
     "FileBridge",
     "MicrophoneBridge",
     "SpeakerBridge",
@@ -309,119 +307,3 @@ class SpeakerBridge:
     def underrun_count(self) -> int: ...
     @staticmethod
     def devices() -> list[SpeakerInfo]: ...
-
-
-class AsyncMicrophoneBridge:
-    """Async wrapper around ``MicrophoneBridge``.
-
-    Internal pyclass. Public ``AsyncMicrophone`` wrapper lives in
-    ``decibri._async_classes``; consumers should construct
-    ``AsyncMicrophone``, not ``AsyncMicrophoneBridge``, directly. Each method
-    that maps to a blocking sync method dispatches via
-    ``tokio::task::spawn_blocking`` and returns a Python awaitable.
-
-    Constructor signature matches ``MicrophoneBridge`` exactly. Construction
-    itself is sync (Python class instantiation is always sync) and may
-    block on ORT model load when ``vad=True and vad_mode='silero'``.
-
-    The non-blocking getters (``is_open``, ``vad_probability``,
-    ``vad_holdoff_ms``) are exposed as awaitables here because the Rust
-    binding implements them via ``future_into_py`` for uniformity. The
-    public ``AsyncMicrophone`` wrapper provides synchronous-property access
-    backed by Python-side state tracking; consumers should prefer that
-    surface.
-    """
-
-    def __init__(
-        self,
-        sample_rate: int,
-        channels: int,
-        frames_per_buffer: int,
-        format: str,
-        device: int | str | Device | None = None,
-        vad: bool = False,
-        vad_threshold: float = 0.5,
-        vad_mode: str = "silero",
-        vad_holdoff: int = 0,
-        model_path: str | Path | None = None,
-        numpy: bool = False,
-        ort_library_path: str | Path | None = None,
-        denoise: str | None = None,
-        denoise_model_path: str | Path | None = None,
-        highpass: int | None = None,
-        agc: int | None = None,
-        limiter: float | None = None,
-        dc_removal: bool = False,
-        aec: str | None = None,
-        aec_tail_ms: int | None = None,
-        aec_suppression: str | None = None,
-        aec_reference_sample_rate: int | None = None,
-        aec_reference_channels: int | None = None,
-        channel_map: list[int] | None = None,
-        detector_source: int | None = None,
-    ) -> None: ...
-    def start(self) -> Coroutine[Any, Any, None]: ...
-    def stop(self) -> Coroutine[Any, Any, None]: ...
-    def close(self) -> Coroutine[Any, Any, None]: ...
-    def read(
-        self, timeout_ms: int | None = None
-    ) -> Coroutine[Any, Any, SampleData | None]: ...
-    def push_aec_reference(self, samples: SampleData) -> None: ...
-    def aec_metrics(
-        self,
-    ) -> Coroutine[
-        Any,
-        Any,
-        tuple[
-            int | None,
-            float,
-            bool,
-            int,
-            int,
-            int,
-            int,
-            int,
-            list[tuple[int | None, float, bool, int, int, int]],
-        ]
-        | None,
-    ]: ...
-    @property
-    def is_open(self) -> Awaitable[bool]: ...
-    @property
-    def is_open_sync(self) -> bool: ...
-    @property
-    def vad_probability(self) -> Awaitable[float]: ...
-    @property
-    def vad_holdoff_ms(self) -> Awaitable[int]: ...
-    @staticmethod
-    def devices() -> Coroutine[Any, Any, list[MicrophoneInfo]]: ...
-    @staticmethod
-    def version() -> Coroutine[Any, Any, VersionInfo]: ...
-
-
-class AsyncSpeakerBridge:
-    """Async wrapper around ``SpeakerBridge``.
-
-    Internal pyclass. Public ``AsyncSpeaker`` wrapper lives in
-    ``decibri._async_classes``; consumers should construct
-    ``AsyncSpeaker``, not ``AsyncSpeakerBridge``, directly.
-    """
-
-    def __init__(
-        self,
-        sample_rate: int,
-        channels: int,
-        format: str,
-        device: int | str | Device | None = None,
-    ) -> None: ...
-    def start(self) -> Coroutine[Any, Any, None]: ...
-    def stop(self) -> Coroutine[Any, Any, None]: ...
-    def close(self) -> Coroutine[Any, Any, None]: ...
-    def write(self, samples: SampleData) -> Coroutine[Any, Any, None]: ...
-    def drain(self) -> Coroutine[Any, Any, None]: ...
-    @property
-    def is_playing(self) -> Awaitable[bool]: ...
-    @property
-    def is_playing_sync(self) -> bool: ...
-    @staticmethod
-    def devices() -> Coroutine[Any, Any, list[SpeakerInfo]]: ...
