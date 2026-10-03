@@ -39,8 +39,6 @@ def test_extension_module_loads() -> None:
 
     assert _decibri.MicrophoneBridge is not None
     assert _decibri.SpeakerBridge is not None
-    assert _decibri.AsyncMicrophoneBridge is not None
-    assert _decibri.AsyncSpeakerBridge is not None
     assert _decibri.VersionInfo is decibri.VersionInfo
 
 

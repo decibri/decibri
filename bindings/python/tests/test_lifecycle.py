@@ -749,7 +749,7 @@ def test_async_microphone_pyo3_drop_releases_resource() -> None:
 
     We can't synchronously `await stop()` from a sync test, but we can
     construct an AsyncMicrophone, drop the reference, and confirm gc.collect()
-    completes without raising. The pyo3 Drop on AsyncMicrophoneBridge handles
+    completes without raising. The pyo3 Drop on MicrophoneBridge handles
     bridge teardown.
     """
     import gc

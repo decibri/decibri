@@ -310,9 +310,6 @@ def test_missing_numpy_bridge_construction_raises_importerror(
         _decibri.MicrophoneBridge(16000, 1, 1600, "int16", numpy=True)
     assert str(excinfo.value) == _MISSING_NUMPY_MESSAGE
     with pytest.raises(ImportError) as excinfo:
-        _decibri.AsyncMicrophoneBridge(16000, 1, 1600, "int16", numpy=True)
-    assert str(excinfo.value) == _MISSING_NUMPY_MESSAGE
-    with pytest.raises(ImportError) as excinfo:
         _decibri.FileBridge.open(str(tmp_path / "absent.wav"), numpy=True)
     assert str(excinfo.value) == _MISSING_NUMPY_MESSAGE
     with pytest.raises(ImportError) as excinfo:

@@ -127,8 +127,8 @@ def test_microphone_construct_destroy_no_growth() -> None:
 # Section 2: async Microphone lifecycle.
 #
 # Same shape as Section 1 but inside an asyncio event loop. Catches leaks
-# specific to the async wrapper (tokio runtime handles, asyncio-bridged
-# Future objects). pytest-asyncio is already a dev dependency.
+# specific to the async wrapper (worker-pool calls, asyncio-wrapped Future
+# objects). pytest-asyncio is already a dev dependency.
 # ---------------------------------------------------------------------------
 
 

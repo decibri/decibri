@@ -75,32 +75,9 @@ pyo3 = { version = "0.29", features = [
 ] }
 
 # rust-numpy powers the optional numpy=True ndarray return paths on
-# Decibri.read and AsyncDecibri.read. Pinned exactly to 0.29.0 because the
-# crate's release cadence tracks PyO3 minor versions; this bump is the
-# deliberate cross-workflow action paired with the pyo3 0.29 bump (numpy 0.29.0
-# depends on pyo3 ^0.29, so the two move together).
+# Microphone.read, AsyncMicrophone.read, File.read and AsyncFile.read. Pinned
+# exactly to 0.29.0 because the crate's release cadence tracks PyO3 minor
+# versions; this bump is the deliberate cross-workflow action paired with the
+# pyo3 0.29 bump (numpy 0.29.0 depends on pyo3 ^0.29, so the two move
+# together).
 numpy = "=0.29.0"
-
-# pyo3-async-runtimes powers the AsyncDecibri / AsyncDecibriOutput surfaces.
-# Pinned exactly to 0.29.0 because the crate is young and version drift in the
-# absence of a long stability track record is a real risk; this bump is the
-# deliberate cross-workflow action paired with the pyo3 0.29 bump (it depends
-# on pyo3 ^0.29). The `tokio-runtime` feature selects the Tokio backend; `attributes`
-# enables the `#[pyo3_async_runtimes::tokio::main]` macro (we do not currently
-# use the macro from a cdylib context, but it is part of the standard feature
-# set and inert when unused).
-pyo3-async-runtimes = { version = "=0.29.0", features = ["tokio-runtime", "attributes"] }
-
-# tokio is the async runtime that pyo3-async-runtimes drives. Features:
-#   - `rt`: the runtime itself (required by pyo3-async-runtimes).
-#   - `rt-multi-thread`: the multi-thread executor used for spawn_blocking
-#     work; the AsyncDecibri wrapper dispatches the existing GIL-released
-#     sync calls through spawn_blocking so they do not block the runtime
-#     thread.
-#   - `sync`: tokio::sync::Mutex used by the AsyncDecibriBridge /
-#     AsyncOutputBridge wrappers around the sync bridges.
-#   - `time`: tokio::time::sleep used by the empirical smoke pyfunction in
-#     this crate's lib.rs.
-#   - `macros`: enables the proc-macro entry points (#[tokio::main] etc.)
-#     that pyo3-async-runtimes' attributes feature relies on internally.
-tokio = { version = "1", features = ["rt", "rt-multi-thread", "sync", "time", "macros"] }

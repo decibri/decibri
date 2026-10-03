@@ -70,7 +70,7 @@ def test_resolver_finds_bundled() -> None:
 
 
 def test_async_construct() -> None:
-    """AsyncMicrophone constructs cleanly (verifies pyo3-async-runtimes loads)."""
+    """AsyncMicrophone constructs cleanly."""
     d = decibri.AsyncMicrophone()
     assert d is not None
 

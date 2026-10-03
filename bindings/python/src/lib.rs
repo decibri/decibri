@@ -33,14 +33,10 @@ use std::time::Duration;
 
 use std::collections::HashMap;
 
-use tokio::sync::Mutex;
-
 use pyo3::exceptions::{PyImportError, PyRuntimeError, PyTypeError, PyValueError};
 use pyo3::prelude::*;
 use pyo3::sync::PyOnceLock;
 use pyo3::types::{PyBytes, PyModule, PyType};
-
-use pyo3_async_runtimes::tokio::future_into_py;
 
 use numpy::ndarray::Array2;
 use numpy::{IntoPyArray, PyArray1, PyArray2, PyArrayMethods};
@@ -65,31 +61,21 @@ use decibri::vad::{SileroVad, VadConfig};
 use decibri::CPAL_VERSION;
 
 // ---------------------------------------------------------------------------
-// Compile-time assertion: all four bridge pyclasses are Send + 'static.
+// Compile-time assertion: both device bridge pyclasses are Send + 'static.
 //
-// The 'static bound is what `pyo3_async_runtimes::tokio::future_into_py`
-// requires when capturing the bridge into an async closure. Asserting at
-// compile time means a future change that reintroduces a !Send field, or
-// adds a non-static reference, fails the build at the point of regression
-// rather than at async integration time, and makes the regression's blast
-// radius obvious from the error message (it points at the new field).
+// The async wrappers in python/decibri/_async_classes.py call the bridges
+// from decibri's worker threads. Asserting the property at compile time means
+// a field whose type is not `Send + 'static` fails the build at that field,
+// and the error message points at it. Both bridges have it because neither is
+// `unsendable`.
 //
-// Coverage:
-//   - MicrophoneBridge / SpeakerBridge: the sync pyclasses; their
-//     Send + 'static property comes from not being `unsendable`.
-//   - AsyncMicrophoneBridge: holds an Arc<MicrophoneBridge> directly (the
-//     sync mic bridge is internally thread-safe, so no outer Mutex is
-//     needed); AsyncSpeakerBridge holds an Arc<tokio::sync::Mutex<SpeakerBridge>>.
-//     Arc<T> is Send + Sync when T is Send + Sync, so both async wrappers
-//     inherit the Send + 'static property automatically.
+// If this assertion fails to compile, look for a recently added field on
+// either pyclass whose type is not `Send + 'static`: raw `cpal::Stream` (use a
+// sendable handle instead), `Rc<_>` / `RefCell<_>` (use `Arc<_>` /
+// `Mutex<_>`), `&'a T` for any non-static lifetime (extract owned data
+// instead).
 //
-// If this assertion fails to compile, look for a recently added field
-// on any of the four pyclasses whose type is not `Send + 'static`: raw
-// `cpal::Stream` (use a sendable handle instead), `Rc<_>` / `RefCell<_>`
-// (use `Arc<_>` / `Mutex<_>`), `&'a T` for any non-static lifetime
-// (extract owned data instead).
-//
-// Sendability of the sync bridges is empirically backed: the Rust core's
+// Sendability of the bridges is empirically backed: the Rust core's
 // `MicrophoneStream` is asserted `Send + Sync` by the
 // `test_microphone_stream_is_send_and_sync` compile-time guard in
 // `crates/decibri/src/microphone.rs` (unconditional, runs on every CI
@@ -101,8 +87,6 @@ const _: () = {
     const fn assert_send_static<T: Send + 'static>() {}
     let _ = assert_send_static::<MicrophoneBridge>;
     let _ = assert_send_static::<SpeakerBridge>;
-    let _ = assert_send_static::<AsyncMicrophoneBridge>;
-    let _ = assert_send_static::<AsyncSpeakerBridge>;
 };
 
 // ---------------------------------------------------------------------------
@@ -493,9 +477,9 @@ fn build_device_selector(device: Option<&Bound<'_, PyAny>>) -> PyResult<DeviceSe
 // ---------------------------------------------------------------------------
 // Helpers: encode an audio chunk's Vec<f32> into either a Python
 // bytes object (numpy=False, default) or a numpy.ndarray (numpy=True).
-// Used by both the sync MicrophoneBridge::read and the async
-// AsyncMicrophoneBridge::read paths; the async path constructs the Python
-// object outside spawn_blocking because Bound<'py, ...> is GIL-bound.
+// Used by MicrophoneBridge::read and FileBridge::read, which build the Python
+// object once the GIL is held again after the read, because Bound<'py, ...>
+// is GIL-bound.
 //
 // Memory model: rust-numpy 0.28.0's `into_pyarray` performs a memcpy at
 // the boundary
@@ -577,32 +561,6 @@ fn require_numpy_importable(py: Python<'_>) -> PyResult<()> {
 }
 
 // ---------------------------------------------------------------------------
-// Empirical smoke: pyo3-async-runtimes integration probe.
-//
-// pyo3-async-runtimes' docs assume a binary entry point with
-// #[pyo3_async_runtimes::tokio::main]. Microphone is a cdylib (Python extension
-// module) with no main() to attribute, so we rely on the crate's lazy-init
-// path. This pyfunction is the persistent regression test that the lazy init
-// works in our context. If
-// a future pyo3-async-runtimes upgrade breaks the runtime init or
-// cancellation propagation primitives, the matching tests in
-// tests/test_async_smoke.py fail first and surface the regression at the
-// build-pipeline level rather than at AsyncMicrophone integration time.
-//
-// Returns a Python awaitable that resolves to 42 after a 50 ms tokio sleep.
-// Underscored name marks it as internal; not part of the public API.
-// ---------------------------------------------------------------------------
-
-#[pyfunction]
-#[pyo3(name = "_async_smoke")]
-fn async_smoke(py: Python<'_>) -> PyResult<Bound<'_, PyAny>> {
-    future_into_py(py, async {
-        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-        Ok(42_i64)
-    })
-}
-
-// ---------------------------------------------------------------------------
 // Empirical smoke: rust-numpy 0.28.0 integration probe.
 //
 // Verifies that:
@@ -674,9 +632,11 @@ fn numpy_smoke(py: Python<'_>) -> Bound<'_, PyArray1<i16>> {
 // (which wakes a parked next_chunk in ~20ms), and clear the state. This is the
 // shape the Node binding already uses, and it is what lets stop() safely
 // interrupt a read() that is in flight on another thread (sync) or task
-// (async) instead of panicking on a borrow or deadlocking on a lock. start()
-// and stop() run the device open and teardown without the GIL; see
-// `StreamSlot` for how they order against each other.
+// (async) instead of panicking on a borrow or deadlocking on a lock. A read()
+// whose stream stop() took returns the audio buffered before the stop, or,
+// with none buffered, raises the MicrophoneStreamClosed a read made after
+// stop() raises. start() and stop() run the device open and teardown without
+// the GIL; see `StreamSlot` for how they order against each other.
 // ---------------------------------------------------------------------------
 
 /// Lock a `std::sync::Mutex`, recovering the guard if a previous holder
@@ -885,12 +845,8 @@ struct MicrophoneBridge {
     numpy: bool,
 }
 
-// Internal helpers on MicrophoneBridge; not exposed to Python.
-// Used by the public `read` pymethod (same module) and by
-// `AsyncMicrophoneBridge::read` (which calls these on the shared inner
-// bridge inside spawn_blocking to extract owned Vec data + metadata,
-// then constructs the Python object outside the spawn_blocking
-// boundary because `Bound<'py, ...>` is GIL-bound).
+// Internal helpers on MicrophoneBridge; not exposed to Python. Used by the
+// pymethods below.
 impl MicrophoneBridge {
     /// Read the next audio chunk, run VAD inference if configured, and
     /// return the raw `Vec<f32>` data plus the output channel count. No Python
@@ -932,11 +888,25 @@ impl MicrophoneBridge {
         let result: Result<Option<AudioChunk>, CoreDecibriError> =
             py.detach(|| stream.next_chunk(samples, timeout));
 
-        let Some(chunk) = result
-            .map_err(|e| capture_failure_cause(e, || stream.take_last_error()))
-            .map_err(|e| to_py_err(py, e))?
-        else {
-            return Ok(None);
+        // A read that stop() interrupts returns the audio buffered before the
+        // stop when there is some. With none buffered it raises as a read made
+        // after stop() does, whatever the core reported.
+        let chunk = match result {
+            Ok(Some(chunk)) => chunk,
+            Ok(None) => return Ok(None),
+            Err(_) if !self.is_running(&stream) => {
+                return Err(raise_named(
+                    py,
+                    "MicrophoneStreamClosed",
+                    "capture is not running",
+                ));
+            }
+            Err(e) => {
+                return Err(to_py_err(
+                    py,
+                    capture_failure_cause(e, || stream.take_last_error()),
+                ));
+            }
         };
 
         // Run VAD on the detector feed the core derives: the signal BEFORE the
@@ -979,21 +949,18 @@ impl MicrophoneBridge {
     /// disconnecting the capture channel and waking any next_chunk parked in a
     /// concurrent read() within ~20ms. A parked read holds only an Arc clone of
     /// the stream, never the slot's lock, so taking the stream never blocks on
-    /// it. Dropping the capture then releases the device. Needs no GIL: the
-    /// sync stop() detaches around it and the async bridge calls it on a
-    /// blocking worker.
+    /// it. Dropping the capture then releases the device. Needs no GIL:
+    /// stop() detaches around it.
     fn stop_stream(&self) {
         self.active.stop_with(|active| active.stream.stop());
     }
 
-    /// numpy-mode flag accessor for the async wrapper's encoding step.
-    fn numpy_mode(&self) -> bool {
-        self.numpy
-    }
-
-    /// Configured sample format accessor for the async wrapper.
-    fn binding_format(&self) -> BindingSampleFormat {
-        self.format
+    /// Whether `stream` is still the running stream: false once stop() has
+    /// taken it, including when a later start() has opened another.
+    fn is_running(&self, stream: &Arc<MicrophoneStream>) -> bool {
+        self.active
+            .with_running(|active| Arc::ptr_eq(&active.stream, stream))
+            .unwrap_or(false)
     }
 
     /// Raise `TypeError` when an ndarray's dtype does not match the configured
@@ -1021,8 +988,7 @@ impl MicrophoneBridge {
     }
 
     /// Queue converted far-end reference samples on the live stream, a no-op
-    /// with no active stream. GIL-free: callable from any thread, including a
-    /// Tokio worker.
+    /// with no active stream. GIL-free: callable from any thread.
     fn push_aec_reference_f32(&self, samples: &[f32]) {
         let stream = self
             .active
@@ -1034,8 +1000,7 @@ impl MicrophoneBridge {
 
     /// Read the echo canceller's metrics plus the reference queue's counters
     /// as one flat tuple, or `None` with no active stream or with echo
-    /// cancellation off. GIL-free, so the async bridge calls it from
-    /// `spawn_blocking` without attaching.
+    /// cancellation off. GIL-free, so `aec_metrics` runs it without the GIL.
     fn aec_metrics_raw(&self) -> Option<AecMetricsTuple> {
         let stream = self
             .active
@@ -1142,8 +1107,8 @@ type AecChannelMetricsTuple = (Option<u64>, f32, bool, u64, u64, u64);
 /// acquisition_parked, reference_reanchors, reference_dropped,
 /// reference_silence, channels). The leading engine fields report the first
 /// delivered channel's canceller; `channels` carries every delivered
-/// channel's engine report in delivered order. Every field is
-/// `Send + 'static`, so it crosses the `spawn_blocking` boundary.
+/// channel's engine report in delivered order. Every field is `Send`, so
+/// `aec_metrics` returns it from the GIL-free closure.
 type AecMetricsTuple = (
     Option<u64>,
     f32,
@@ -1643,8 +1608,7 @@ impl SpeakerBridge {
     /// Stop playback: take the running stream out of the slot (see
     /// `StreamSlot::stop_with`), then call the core stop() outside the lock.
     /// Dropping the playback state then releases the speaker. Needs no GIL:
-    /// the sync stop() detaches around it and the async bridge calls it on a
-    /// blocking worker.
+    /// stop() detaches around it.
     fn stop_stream(&self) {
         self.playback.stop_with(|active| active.stream.stop());
     }
@@ -1888,528 +1852,6 @@ impl SpeakerBridge {
 }
 
 // ---------------------------------------------------------------------------
-// AsyncMicrophoneBridge: async wrapper around MicrophoneBridge.
-//
-// Holds an `Arc<MicrophoneBridge>` (the sync mic bridge is internally
-// thread-safe, so no outer Mutex is needed) and exposes the same blocking
-// methods as the sync bridge, but async. Each blocking method dispatches the
-// underlying sync work to a Tokio worker thread via
-// `tokio::task::spawn_blocking`, keeping the runtime thread responsive.
-//
-// The compile-time `Send + 'static` assertion at the top of this module is
-// extended to cover this pyclass; PyO3 + pyo3-async-runtimes capture into
-// `future_into_py` requires it.
-//
-// Construction is sync (Python class instantiation is always sync). The
-// constructor's parameter list mirrors `MicrophoneBridge::new` exactly; users
-// instantiate with the same kwargs and accept that ORT model loading
-// happens during construction (potentially slow). The post-construction
-// async surface (`start`, `stop`, `read`, etc.) is what the
-// `AsyncMicrophone` Python wrapper proxies through.
-//
-// stop() no longer serializes behind an in-flight read(): the sync bridge's
-// read() and stop() are both `&self` and share the core stream by `Arc`, so a
-// concurrent stop() calls the core MicrophoneStream::stop() (waking a parked
-// next_chunk in ~20ms) without contending on any bridge-wide lock.
-// spawn_blocking does not cooperatively cancel OS threads; cancellation
-// surfaces immediately to Python while the spawned thread runs to completion.
-// For `read`, the thread returns once the current chunk arrives or stop()
-// closes the stream; for `drain`, the thread waits for the cpal output to
-// flush (potentially seconds). The Python coroutine's `CancelledError`
-// arrives immediately regardless.
-//
-// Iterator (`__iter__` / `__next__`) and context manager (`__enter__` /
-// `__exit__`) protocols are deliberately NOT implemented on this Rust
-// pyclass; those are sync-only protocols. The `AsyncMicrophone` Python
-// wrapper layers `__aiter__` / `__anext__` and `__aenter__` / `__aexit__`
-// on top of the async `read` / `start` / `stop` methods exposed here.
-// ---------------------------------------------------------------------------
-
-#[pyclass(module = "decibri._decibri")]
-pub(crate) struct AsyncMicrophoneBridge {
-    inner: Arc<MicrophoneBridge>,
-    // Lock-free mirror of the bridge's open state. The public is_open getter
-    // is awaitable (returns a future), which makes it unusable from a
-    // synchronous Python property. The wrapper class needs a sync property to
-    // keep API symmetry with sync Microphone.is_open; this AtomicBool is its
-    // source of truth. Updated by start() and stop() after the inner mutation
-    // succeeds; read by the is_open_sync getter without locking.
-    is_open_atomic: Arc<AtomicBool>,
-}
-
-#[pymethods]
-impl AsyncMicrophoneBridge {
-    #[new]
-    #[pyo3(signature = (
-        sample_rate,
-        channels,
-        frames_per_buffer,
-        format,
-        device = None,
-        vad = false,
-        vad_threshold = 0.5_f32,
-        vad_mode = "silero".to_string(),
-        vad_holdoff = 0_u32,
-        model_path = None,
-        numpy = false,
-        ort_library_path = None,
-        denoise = None,
-        denoise_model_path = None,
-        highpass = None,
-        agc = None,
-        limiter = None,
-        dc_removal = false,
-        aec = None,
-        aec_tail_ms = None,
-        aec_suppression = None,
-        aec_reference_sample_rate = None,
-        aec_reference_channels = None,
-        channel_map = None,
-        detector_source = None,
-    ))]
-    #[allow(clippy::too_many_arguments)]
-    fn new(
-        py: Python<'_>,
-        sample_rate: u32,
-        channels: u16,
-        frames_per_buffer: u32,
-        format: String,
-        device: Option<Bound<'_, PyAny>>,
-        vad: bool,
-        vad_threshold: f32,
-        vad_mode: String,
-        vad_holdoff: u32,
-        model_path: Option<PathBuf>,
-        numpy: bool,
-        ort_library_path: Option<PathBuf>,
-        denoise: Option<String>,
-        denoise_model_path: Option<PathBuf>,
-        highpass: Option<i64>,
-        agc: Option<i8>,
-        limiter: Option<f32>,
-        dc_removal: bool,
-        aec: Option<String>,
-        aec_tail_ms: Option<u16>,
-        aec_suppression: Option<String>,
-        aec_reference_sample_rate: Option<u32>,
-        aec_reference_channels: Option<u16>,
-        channel_map: Option<Vec<u16>>,
-        detector_source: Option<u16>,
-    ) -> PyResult<Self> {
-        let inner = MicrophoneBridge::new(
-            py,
-            sample_rate,
-            channels,
-            frames_per_buffer,
-            format,
-            device,
-            vad,
-            vad_threshold,
-            vad_mode,
-            vad_holdoff,
-            model_path,
-            numpy,
-            ort_library_path,
-            denoise,
-            denoise_model_path,
-            highpass,
-            agc,
-            limiter,
-            dc_removal,
-            aec,
-            aec_tail_ms,
-            aec_suppression,
-            aec_reference_sample_rate,
-            aec_reference_channels,
-            channel_map,
-            detector_source,
-        )?;
-        Ok(AsyncMicrophoneBridge {
-            inner: Arc::new(inner),
-            is_open_atomic: Arc::new(AtomicBool::new(false)),
-        })
-    }
-
-    fn start<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
-        let inner = Arc::clone(&self.inner);
-        let is_open_atomic = Arc::clone(&self.is_open_atomic);
-        future_into_py(py, async move {
-            tokio::task::spawn_blocking(move || -> PyResult<()> {
-                Python::attach(|py| inner.start(py))?;
-                // Only set the atomic AFTER the inner
-                // start() succeeds. If start() returns Err, the ? operator
-                // returns early and the atomic stays false.
-                is_open_atomic.store(true, Ordering::Release);
-                Ok(())
-            })
-            .await
-            .map_err(|e| PyRuntimeError::new_err(format!("spawn_blocking failed: {e}")))?
-        })
-    }
-
-    fn stop<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
-        let inner = Arc::clone(&self.inner);
-        let is_open_atomic = Arc::clone(&self.is_open_atomic);
-        future_into_py(py, async move {
-            // Run on a blocking worker: stop() calls the core stream stop(),
-            // which blocks briefly while the audio thread tears down. It needs
-            // no bridge-wide lock, so it proceeds even while a read() is parked
-            // in next_chunk, waking that read within ~20ms.
-            tokio::task::spawn_blocking(move || -> PyResult<()> {
-                inner.stop_stream();
-                // Clear the atomic after the inner stop, mirroring start(),
-                // which sets it after the inner start succeeds.
-                is_open_atomic.store(false, Ordering::Release);
-                Ok(())
-            })
-            .await
-            .map_err(|e| PyRuntimeError::new_err(format!("spawn_blocking failed: {e}")))?
-        })
-    }
-
-    fn close<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
-        // Close is a literal alias for stop, mirroring
-        // AsyncSpeakerBridge::close. Bridge-level symmetry for users
-        // constructing AsyncMicrophoneBridge directly.
-        self.stop(py)
-    }
-
-    #[pyo3(signature = (timeout_ms = None))]
-    fn read<'py>(&self, py: Python<'py>, timeout_ms: Option<u64>) -> PyResult<Bound<'py, PyAny>> {
-        let inner = Arc::clone(&self.inner);
-        future_into_py(py, async move {
-            // Extract Vec<f32> + metadata inside spawn_blocking,
-            // construct the Python object (PyBytes or PyArray) outside.
-            // Bound<'py, ...> is GIL-bound and not Send + 'static, so
-            // it cannot cross the spawn_blocking boundary. Vec<f32>,
-            // u16, bool, and BindingSampleFormat are all Send + 'static.
-            //
-            // read_raw is `&self` and holds no bridge-wide lock across the
-            // blocking next_chunk, so a concurrent stop() interrupts it.
-            let extracted: Option<AsyncReadOutput> =
-                tokio::task::spawn_blocking(move || -> PyResult<Option<AsyncReadOutput>> {
-                    Python::attach(|py| {
-                        let opt = inner.read_raw(py, timeout_ms)?;
-                        Ok(opt.map(|(data, channels)| {
-                            (data, inner.binding_format(), channels, inner.numpy_mode())
-                        }))
-                    })
-                })
-                .await
-                .map_err(|e| PyRuntimeError::new_err(format!("spawn_blocking failed: {e}")))??;
-            Python::attach(|py| -> PyResult<Option<Py<PyAny>>> {
-                let Some((data, format, channels, numpy)) = extracted else {
-                    return Ok(None);
-                };
-                let bound = if numpy {
-                    encode_chunk_numpy(py, data, format, channels)?
-                } else {
-                    encode_chunk_bytes(py, &data, format)
-                };
-                Ok(Some(bound.unbind()))
-            })
-        })
-    }
-
-    #[getter]
-    fn is_open<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
-        let inner = Arc::clone(&self.inner);
-        future_into_py(py, async move {
-            // Non-blocking getter: the bridge's is_open() takes only a tiny
-            // lock on the capture state. No spawn_blocking needed.
-            Ok(inner.is_open())
-        })
-    }
-
-    #[getter]
-    fn is_open_sync(&self) -> bool {
-        // Lock-free sync getter for the wrapper's
-        // synchronous AsyncMicrophone.is_open property. Reads the atomic
-        // mirror updated by start() and stop(); no Mutex acquisition,
-        // no awaiting, safe to call from any thread without a runtime.
-        self.is_open_atomic.load(Ordering::Acquire)
-    }
-
-    #[getter]
-    fn vad_probability<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
-        let inner = Arc::clone(&self.inner);
-        future_into_py(py, async move { Ok(inner.vad_probability()) })
-    }
-
-    #[getter]
-    fn vad_holdoff_ms<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
-        let inner = Arc::clone(&self.inner);
-        future_into_py(py, async move { Ok(inner.vad_holdoff_ms()) })
-    }
-
-    /// Queue far-end reference audio for the echo canceller. Deliberately a
-    /// plain method rather than a coroutine: the push never blocks (a bounded
-    /// queue behind a short critical section), so a renderer callback calls it
-    /// without awaiting, and the sync and async capture surfaces share one
-    /// contract. Accepts the same input shapes the sync bridge accepts.
-    fn push_aec_reference(&self, py: Python<'_>, samples: &Bound<'_, PyAny>) -> PyResult<()> {
-        let samples_f32 = self.inner.extract_aec_reference(py, samples)?;
-        py.detach(|| self.inner.push_aec_reference_f32(&samples_f32));
-        Ok(())
-    }
-
-    /// Awaitable echo-canceller metrics: the read serializes against block
-    /// processing on the capture chain's lock, so it runs on a blocking worker
-    /// like the other awaitable methods. Resolves to the same flat tuple the
-    /// sync bridge returns, or `None`.
-    fn aec_metrics<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
-        let inner = Arc::clone(&self.inner);
-        future_into_py(py, async move {
-            tokio::task::spawn_blocking(move || -> PyResult<Option<AecMetricsTuple>> {
-                Ok(inner.aec_metrics_raw())
-            })
-            .await
-            .map_err(|e| PyRuntimeError::new_err(format!("spawn_blocking failed: {e}")))?
-        })
-    }
-
-    #[staticmethod]
-    fn devices(py: Python<'_>) -> PyResult<Bound<'_, PyAny>> {
-        future_into_py(py, async move {
-            tokio::task::spawn_blocking(|| -> PyResult<Vec<DeviceInfo>> {
-                Python::attach(MicrophoneBridge::devices)
-            })
-            .await
-            .map_err(|e| PyRuntimeError::new_err(format!("spawn_blocking failed: {e}")))?
-        })
-    }
-
-    #[staticmethod]
-    fn version(py: Python<'_>) -> PyResult<Bound<'_, PyAny>> {
-        // version() is non-blocking (reads compile-time constants); no
-        // spawn_blocking, just wrap into a resolved future.
-        future_into_py(py, async move { Ok(MicrophoneBridge::version()) })
-    }
-}
-
-// ---------------------------------------------------------------------------
-// AsyncSpeakerBridge: async wrapper around SpeakerBridge.
-//
-// Same architecture as AsyncMicrophoneBridge:
-// `Arc<tokio::sync::Mutex<SpeakerBridge>>` with each blocking
-// method dispatched via spawn_blocking.
-//
-// The cancellation behaviour applies most visibly to `drain`: the cpal
-// output buffer can hold multiple seconds of pending audio; spawn_blocking
-// does not abort the
-// drain on Python cancellation, so the audio finishes playing even after
-// the Python coroutine is cancelled. The Python coroutine sees
-// CancelledError immediately; the audio finishes asynchronously to the
-// caller's logic. This is documented in the AsyncSpeaker.drain docstring
-// in the Python wrapper.
-// ---------------------------------------------------------------------------
-
-/// Owned bundle of (data, format, channels, numpy_flag) extracted from
-/// a `MicrophoneBridge` for the async read path. All fields are
-/// `Send + 'static` so they cross the `spawn_blocking` boundary.
-type AsyncReadOutput = (Vec<f32>, BindingSampleFormat, u16, bool);
-
-/// Owned input data for an async write call. Extracted from the input
-/// `Bound<'_, PyAny>` while the GIL is held; the resulting variants are
-/// all `Send + 'static` so they can cross the `spawn_blocking` boundary.
-/// On the worker thread, the `dispatch` method re-acquires the GIL
-/// (via `Python::attach`) and calls the appropriate sync helper on the
-/// inner `SpeakerBridge`.
-///
-/// dtype validation against the configured format happens twice: once
-/// at extraction time (via `require_format`) for the ndarray paths, and
-/// again inside the sync helpers (defense-in-depth; cheap). The bytes
-/// path skips the dtype check because bytes carry no dtype.
-enum AsyncWriteData {
-    Bytes(Vec<u8>),
-    Int16Samples(Vec<i16>),
-    Float32Samples(Vec<f32>),
-}
-
-impl AsyncWriteData {
-    fn extract(samples: &Bound<'_, PyAny>) -> PyResult<Self> {
-        if let Ok(byte_slice) = samples.extract::<&[u8]>() {
-            return Ok(AsyncWriteData::Bytes(byte_slice.to_vec()));
-        }
-        if let Ok(arr) = samples.cast::<PyArray1<i16>>() {
-            let readonly = arr.readonly();
-            let slice = readonly
-                .as_slice()
-                .map_err(|e| PyValueError::new_err(format!("ndarray must be C-contiguous: {e}")))?;
-            return Ok(AsyncWriteData::Int16Samples(slice.to_vec()));
-        }
-        if let Ok(arr) = samples.cast::<PyArray1<f32>>() {
-            let readonly = arr.readonly();
-            let slice = readonly
-                .as_slice()
-                .map_err(|e| PyValueError::new_err(format!("ndarray must be C-contiguous: {e}")))?;
-            return Ok(AsyncWriteData::Float32Samples(slice.to_vec()));
-        }
-        if let Ok(arr) = samples.cast::<PyArray2<i16>>() {
-            let readonly = arr.readonly();
-            let slice = readonly.as_slice().map_err(|e| {
-                PyValueError::new_err(format!("2-D ndarray must be C-contiguous: {e}"))
-            })?;
-            return Ok(AsyncWriteData::Int16Samples(slice.to_vec()));
-        }
-        if let Ok(arr) = samples.cast::<PyArray2<f32>>() {
-            let readonly = arr.readonly();
-            let slice = readonly.as_slice().map_err(|e| {
-                PyValueError::new_err(format!("2-D ndarray must be C-contiguous: {e}"))
-            })?;
-            return Ok(AsyncWriteData::Float32Samples(slice.to_vec()));
-        }
-        Err(PyTypeError::new_err(
-            "samples must be bytes or numpy.ndarray with dtype int16 or float32; \
-             1-D for mono or 2-D (N, channels) for multi-channel",
-        ))
-    }
-
-    fn dispatch(self, py: Python<'_>, bridge: &SpeakerBridge) -> PyResult<()> {
-        match self {
-            AsyncWriteData::Bytes(v) => bridge.write_bytes_internal(py, &v),
-            AsyncWriteData::Int16Samples(v) => {
-                bridge.require_format(BindingSampleFormat::Int16, "int16", "1-D or 2-D")?;
-                bridge.write_int16_samples(py, &v)
-            }
-            AsyncWriteData::Float32Samples(v) => {
-                bridge.require_format(BindingSampleFormat::Float32, "float32", "1-D or 2-D")?;
-                bridge.write_float32_samples(py, &v)
-            }
-        }
-    }
-}
-
-#[pyclass(module = "decibri._decibri")]
-pub(crate) struct AsyncSpeakerBridge {
-    inner: Arc<Mutex<SpeakerBridge>>,
-    // Lock-free mirror of the inner bridge's playing
-    // state. Same shape as AsyncMicrophoneBridge.is_open_atomic; same
-    // motivation (sync wrapper property needs lock-free truth).
-    is_playing_atomic: Arc<AtomicBool>,
-}
-
-#[pymethods]
-impl AsyncSpeakerBridge {
-    #[new]
-    #[pyo3(signature = (sample_rate, channels, format, device = None))]
-    fn new(
-        py: Python<'_>,
-        sample_rate: u32,
-        channels: u16,
-        format: String,
-        device: Option<Bound<'_, PyAny>>,
-    ) -> PyResult<Self> {
-        let inner = SpeakerBridge::new(py, sample_rate, channels, format, device)?;
-        Ok(AsyncSpeakerBridge {
-            inner: Arc::new(Mutex::new(inner)),
-            is_playing_atomic: Arc::new(AtomicBool::new(false)),
-        })
-    }
-
-    fn start<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
-        let inner = Arc::clone(&self.inner);
-        let is_playing_atomic = Arc::clone(&self.is_playing_atomic);
-        future_into_py(py, async move {
-            tokio::task::spawn_blocking(move || -> PyResult<()> {
-                let bridge = inner.blocking_lock();
-                Python::attach(|py| bridge.start(py))?;
-                // Set atomic only after
-                // inner.start() succeeds. ? returns early on Err.
-                is_playing_atomic.store(true, Ordering::Release);
-                Ok(())
-            })
-            .await
-            .map_err(|e| PyRuntimeError::new_err(format!("spawn_blocking failed: {e}")))?
-        })
-    }
-
-    fn write<'py>(
-        &self,
-        py: Python<'py>,
-        samples: &Bound<'py, PyAny>,
-    ) -> PyResult<Bound<'py, PyAny>> {
-        // Duck-typed dispatch on input type. Extract owned Send
-        // + 'static data while the GIL is held (PyReadonlyArray and
-        // Bound<PyAny> are GIL-bound and cannot cross spawn_blocking),
-        // then cross the boundary with the AsyncWriteData enum and
-        // dispatch against the inner sync bridge inside spawn_blocking.
-        let owned = AsyncWriteData::extract(samples)?;
-        let inner = Arc::clone(&self.inner);
-        future_into_py(py, async move {
-            tokio::task::spawn_blocking(move || -> PyResult<()> {
-                let bridge = inner.blocking_lock();
-                Python::attach(|py| owned.dispatch(py, &bridge))
-            })
-            .await
-            .map_err(|e| PyRuntimeError::new_err(format!("spawn_blocking failed: {e}")))?
-        })
-    }
-
-    fn drain<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
-        let inner = Arc::clone(&self.inner);
-        future_into_py(py, async move {
-            tokio::task::spawn_blocking(move || -> PyResult<()> {
-                let bridge = inner.blocking_lock();
-                Python::attach(|py| bridge.drain(py))
-            })
-            .await
-            .map_err(|e| PyRuntimeError::new_err(format!("spawn_blocking failed: {e}")))?
-        })
-    }
-
-    fn stop<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
-        let inner = Arc::clone(&self.inner);
-        let is_playing_atomic = Arc::clone(&self.is_playing_atomic);
-        future_into_py(py, async move {
-            tokio::task::spawn_blocking(move || -> PyResult<()> {
-                let bridge = inner.blocking_lock();
-                bridge.stop_stream();
-                // Clear the atomic after the inner stop, mirroring start(),
-                // which sets it after the inner start succeeds.
-                is_playing_atomic.store(false, Ordering::Release);
-                Ok(())
-            })
-            .await
-            .map_err(|e| PyRuntimeError::new_err(format!("spawn_blocking failed: {e}")))?
-        })
-    }
-
-    fn close<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
-        // close is documented in the sync bridge as an alias for stop.
-        self.stop(py)
-    }
-
-    #[getter]
-    fn is_playing<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
-        let inner = Arc::clone(&self.inner);
-        future_into_py(py, async move {
-            let bridge = inner.lock().await;
-            Ok(bridge.is_playing())
-        })
-    }
-
-    #[getter]
-    fn is_playing_sync(&self) -> bool {
-        // Lock-free sync getter for the
-        // wrapper's synchronous AsyncSpeaker.is_playing property. Same
-        // pattern as AsyncMicrophoneBridge.is_open_sync.
-        self.is_playing_atomic.load(Ordering::Acquire)
-    }
-
-    #[staticmethod]
-    fn devices(py: Python<'_>) -> PyResult<Bound<'_, PyAny>> {
-        future_into_py(py, async move {
-            tokio::task::spawn_blocking(|| -> PyResult<Vec<OutputDeviceInfo>> {
-                Python::attach(SpeakerBridge::devices)
-            })
-            .await
-            .map_err(|e| PyRuntimeError::new_err(format!("spawn_blocking failed: {e}")))?
-        })
-    }
-}
-
-// ---------------------------------------------------------------------------
 // FileBridge: offline source pyclass.
 //
 // Wraps the core offline File: constructed from an audio path or in-memory
@@ -2422,6 +1864,14 @@ impl AsyncSpeakerBridge {
 // The per-chunk detector is constructed lazily on the first read, so an
 // analysis-only File does not load the Silero model twice (analysis drives
 // the core's own detector).
+//
+// Construction, which reads the source and loads the denoise model, and each
+// read, including the detector build, run without the GIL. read() takes the
+// source's lock only inside its GIL-free pull and releases it before taking
+// the GIL back, so no thread ever holds the lock while it waits for the GIL.
+// close(), analyze() and save() take the lock without the GIL as well, so a
+// call that waits for a read in progress never stops other Python threads.
+// Keep both rules when changing anything here.
 // ---------------------------------------------------------------------------
 
 #[pyclass(module = "decibri._decibri")]
@@ -2637,7 +2087,12 @@ impl FileBridge {
             dc_removal,
             detector_source,
         )?;
-        let file = CoreFile::open(&path, config).map_err(|e| to_py_err(py, e))?;
+        // Reading and decoding the file and building the conditioning chain,
+        // which loads the denoise model when denoise is set, touch no Python
+        // object, so they run without the GIL.
+        let file = py
+            .detach(|| CoreFile::open(&path, config))
+            .map_err(|e| to_py_err(py, e))?;
         Ok(Self::from_core(
             file,
             parsed_format,
@@ -2727,7 +2182,11 @@ impl FileBridge {
             dc_removal,
             detector_source,
         )?;
-        let file = CoreFile::buffer(data, input_rate, input_channels, config)
+        // Building the conditioning chain, which loads the denoise model when
+        // denoise is set, touches no Python object, so it runs without the
+        // GIL.
+        let file = py
+            .detach(|| CoreFile::buffer(data, input_rate, input_channels, config))
             .map_err(|e| to_py_err(py, e))?;
         Ok(Self::from_core(
             file,
@@ -2756,65 +2215,11 @@ impl FileBridge {
                 "File already consumed; construct a new File for another pass",
             ));
         }
-        let (data, channels) = {
-            let mut guard = lock_recover(&self.inner);
-            let Some(file) = guard.as_mut() else {
-                return Ok(None);
-            };
-            // The cursor is about to move: analysis of this File is refused
-            // from here on. Set before the pull, so a pull that delivers
-            // nothing still counts.
-            self.engaged.store(true, Ordering::Relaxed);
-            let next = py.detach(|| file.next());
-            let chunk = match next {
-                None => {
-                    // Fully delivered: drop the source so held memory is
-                    // released as soon as the pass ends.
-                    *guard = None;
-                    return Ok(None);
-                }
-                Some(Err(e)) => return Err(to_py_err(py, e)),
-                Some(Ok(chunk)) => chunk,
-            };
-
-            if self.vad_enabled {
-                // The core hands out the pre-conditioning feed when it is
-                // maintained (VAD configured, or a transform makes the
-                // delivered output differ); on `None` the delivered chunk
-                // already is that signal, the same fallback the live pump
-                // applies.
-                let feed = file.vad_input();
-                if self.energy_vad {
-                    // Energy mode: the score is the RMS of the
-                    // pre-conditioning signal, on the same [0, 1] scale the
-                    // energy threshold compares against.
-                    let frame: &[f32] = match feed.as_deref() {
-                        Some(f) => f,
-                        None => &chunk.data,
-                    };
-                    if !frame.is_empty() {
-                        let score = rms(frame);
-                        self.last_vad_probability
-                            .store(score.to_bits(), Ordering::Relaxed);
-                    }
-                } else if let Some(feed) = feed {
-                    // Silero mode always configures the core detector feed.
-                    if !feed.is_empty() {
-                        let mut vad_guard = lock_recover(&self.vad);
-                        if vad_guard.is_none() {
-                            *vad_guard = Some(self.build_detector(py, file.vad_rate())?);
-                        }
-                        if let Some(vad) = vad_guard.as_mut() {
-                            let result = py
-                                .detach(|| vad.process(&feed))
-                                .map_err(|e| to_py_err(py, e))?;
-                            self.last_vad_probability
-                                .store(result.probability.to_bits(), Ordering::Relaxed);
-                        }
-                    }
-                }
-            }
-            (chunk.data, chunk.channels)
+        // The pull, including the detector build on the first read in Silero
+        // mode, runs without the GIL; see `pull`.
+        let Some((data, channels)) = py.detach(|| self.pull()).map_err(|e| e.into_py_err(py))?
+        else {
+            return Ok(None);
         };
 
         // Publish the count this chunk is interleaved at before handing the
@@ -2853,15 +2258,20 @@ impl FileBridge {
         if self.engaged.load(Ordering::Relaxed) {
             return Err(to_py_err(py, CoreDecibriError::FileEngaged));
         }
-        // The detector configuration is read off the source itself, so this
-        // check cannot drift from the one the core applies.
-        if lock_recover(&self.inner)
-            .as_ref()
-            .is_some_and(|file| file.vad_rate().is_none())
-        {
+        // The source's lock is taken without the GIL here and below, so a
+        // read in progress on another thread is waited for without stopping
+        // other Python threads. The detector configuration is read off the
+        // source itself, so this check cannot drift from the one the core
+        // applies.
+        let vad_not_configured = py.detach(|| {
+            lock_recover(&self.inner)
+                .as_ref()
+                .is_some_and(|file| file.vad_rate().is_none())
+        });
+        if vad_not_configured {
             return Err(to_py_err(py, CoreDecibriError::VadNotConfigured));
         }
-        let file = lock_recover(&self.inner).take();
+        let file = py.detach(|| lock_recover(&self.inner).take());
         let Some(file) = file else {
             return Err(raise_named(
                 py,
@@ -2921,7 +2331,8 @@ impl FileBridge {
             return Err(to_py_err(py, CoreDecibriError::FlacCompressionOutOfRange));
         }
         options.compression = compression;
-        let file = lock_recover(&self.inner).take();
+        // Taken without the GIL, as in analyze().
+        let file = py.detach(|| lock_recover(&self.inner).take());
         let Some(file) = file else {
             return Err(raise_named(
                 py,
@@ -2938,9 +2349,10 @@ impl FileBridge {
         Ok((report.clipped_samples, report.non_finite_samples))
     }
 
-    /// Release the source. Idempotent; a closed File reads as ended.
-    fn close(&self) {
-        *lock_recover(&self.inner) = None;
+    /// Release the source. Idempotent; a closed File reads as ended. Waits for
+    /// a read in progress, and drops the source, without the GIL.
+    fn close(&self, py: Python<'_>) {
+        py.detach(|| *lock_recover(&self.inner) = None);
     }
 
     /// Most recent per-chunk VAD score (0.0 to 1.0), computed on the
@@ -3006,20 +2418,105 @@ impl FileBridge {
         }
     }
 
+    /// Pull the next conditioned chunk and its channel count, advancing the
+    /// per-chunk VAD score on the pre-conditioning feed, or `None` once the
+    /// source is fully delivered or released. Call without the GIL: the
+    /// source's lock is held for the whole pull, which may load the Silero
+    /// model, and is released before the caller takes the GIL back.
+    fn pull(&self) -> Result<Option<(Vec<f32>, u16)>, PullError> {
+        let mut guard = lock_recover(&self.inner);
+        let Some(file) = guard.as_mut() else {
+            return Ok(None);
+        };
+        // The cursor is about to move: analysis of this File is refused
+        // from here on. Set before the pull, so a pull that delivers
+        // nothing still counts.
+        self.engaged.store(true, Ordering::Relaxed);
+        let chunk = match file.next() {
+            None => {
+                // Fully delivered: drop the source so held memory is
+                // released as soon as the pass ends.
+                *guard = None;
+                return Ok(None);
+            }
+            Some(Err(e)) => return Err(PullError::Core(e)),
+            Some(Ok(chunk)) => chunk,
+        };
+
+        if self.vad_enabled {
+            // The core hands out the pre-conditioning feed when it is
+            // maintained (VAD configured, or a transform makes the
+            // delivered output differ); on `None` the delivered chunk
+            // already is that signal, the same fallback the live pump
+            // applies.
+            let feed = file.vad_input();
+            if self.energy_vad {
+                // Energy mode: the score is the RMS of the
+                // pre-conditioning signal, on the same [0, 1] scale the
+                // energy threshold compares against.
+                let frame: &[f32] = match feed.as_deref() {
+                    Some(f) => f,
+                    None => &chunk.data,
+                };
+                if !frame.is_empty() {
+                    let score = rms(frame);
+                    self.last_vad_probability
+                        .store(score.to_bits(), Ordering::Relaxed);
+                }
+            } else if let Some(feed) = feed {
+                // Silero mode always configures the core detector feed.
+                if !feed.is_empty() {
+                    let mut vad_guard = lock_recover(&self.vad);
+                    if vad_guard.is_none() {
+                        *vad_guard = Some(self.build_detector(file.vad_rate())?);
+                    }
+                    if let Some(vad) = vad_guard.as_mut() {
+                        let result = vad.process(&feed).map_err(PullError::Core)?;
+                        self.last_vad_probability
+                            .store(result.probability.to_bits(), Ordering::Relaxed);
+                    }
+                }
+            }
+        }
+        Ok(Some((chunk.data, chunk.channels)))
+    }
+
     /// Construct the lazily-built per-chunk Silero detector at the rate the
     /// core File runs detection at (which already accounts for the internal
-    /// feed resample).
-    fn build_detector(&self, py: Python<'_>, vad_rate: Option<u32>) -> PyResult<SileroVad> {
-        let mp = self.vad_model_path.clone().ok_or_else(|| {
-            PyValueError::new_err("model_path is required when vad=True and vad_mode='silero'")
-        })?;
+    /// feed resample). Loads the model; called only from `pull`.
+    fn build_detector(&self, vad_rate: Option<u32>) -> Result<SileroVad, PullError> {
+        let mp = self
+            .vad_model_path
+            .clone()
+            .ok_or(PullError::ModelPathMissing)?;
         // `VadConfig` is `#[non_exhaustive]`: default-construct then assign.
         let mut vad_config = VadConfig::default();
         vad_config.model_path = mp;
         vad_config.sample_rate = vad_rate.unwrap_or(16000);
         vad_config.threshold = self.vad_threshold;
         vad_config.ort_library_path = self.ort_library_path.clone();
-        SileroVad::new(vad_config).map_err(|e| to_py_err(py, e))
+        SileroVad::new(vad_config).map_err(PullError::Core)
+    }
+}
+
+/// Why a `FileBridge` pull failed. A pull runs without the GIL, so the
+/// failure is carried out of it and raised once the GIL is held again.
+enum PullError {
+    /// A core error, raised through `to_py_err`.
+    Core(CoreDecibriError),
+    /// Silero detection configured with no model path, raised as a
+    /// `ValueError`.
+    ModelPathMissing,
+}
+
+impl PullError {
+    fn into_py_err(self, py: Python<'_>) -> PyErr {
+        match self {
+            PullError::Core(e) => to_py_err(py, e),
+            PullError::ModelPathMissing => {
+                PyValueError::new_err("model_path is required when vad=True and vad_mode='silero'")
+            }
+        }
     }
 }
 
@@ -3039,16 +2536,6 @@ fn _decibri(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<MicrophoneBridge>()?;
     m.add_class::<SpeakerBridge>()?;
     m.add_class::<FileBridge>()?;
-
-    // Async pyclasses. The Python wrappers (AsyncMicrophone,
-    // AsyncSpeaker) live in python/decibri/_async_classes.py and
-    // proxy to these via Arc<tokio::sync::Mutex<sync_bridge>>.
-    m.add_class::<AsyncMicrophoneBridge>()?;
-    m.add_class::<AsyncSpeakerBridge>()?;
-
-    // Empirical smoke; see comment block above the
-    // async_smoke fn declaration for rationale.
-    m.add_function(wrap_pyfunction!(async_smoke, m)?)?;
 
     // Empirical smoke; see comment block above the
     // numpy_smoke fn declaration for rationale.

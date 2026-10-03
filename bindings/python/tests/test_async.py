@@ -10,9 +10,8 @@ All cancellation tests use
 ``asyncio.wait_for(coro, timeout=X)`` rather than ``asyncio.timeout(X)``
 because the latter is Python 3.11+ only and the abi3 floor is 3.10.
 
-The smoke pyfunction in ``tests/test_async_smoke.py`` already proves
-runtime initialization and basic cancellation propagation; this file
-exercises the AsyncMicrophone / AsyncSpeaker public surface.
+This file exercises the AsyncMicrophone / AsyncSpeaker public surface;
+tests/test_async_executor.py covers the worker threads their calls run on.
 """
 
 from __future__ import annotations
@@ -185,9 +184,7 @@ async def test_async_decibri_cancellation_raises() -> None:
     On a not-started bridge, the bridge's own error handling fires
     immediately (MicrophoneStreamClosed); on a started bridge with no audio
     hardware, ``wait_for`` may time out. Either path proves the
-    cancellation pathway works on AsyncMicrophone's read coroutine. The
-    foundational cancellation propagation is already proven by
-    tests/test_async_smoke.py.
+    cancellation pathway works on AsyncMicrophone's read coroutine.
     """
     decibri = AsyncMicrophone(vad=False)
     with pytest.raises((asyncio.TimeoutError, Exception)):
@@ -242,13 +239,13 @@ async def test_async_decibri_concurrent_tasks_share_instance() -> None:
 
     Validates the bridge's ``Send + 'static`` guarantee under realistic
     async load (not just the ThreadPoolExecutor pattern from
-    tests/test_bridge_sendability.py). The Rust-side
-    ``tokio::sync::Mutex`` serializes concurrent calls; the test confirms
+    tests/test_bridge_sendability.py). The two calls run at once on two of
+    decibri's worker threads and the bridge orders them; the test confirms
     no panic, no deadlock.
 
     Test design: ``stop`` is idempotent at the bridge level (sets stream
     and capture options to None; calling twice is a no-op). Running two
-    concurrent stops on a started instance exercises mutex contention
+    concurrent stops on a started instance exercises contention
     on a real bridge mutation without surfacing state-machine errors
     that the non-idempotent operations (start, read) would raise.
     Concurrent ``start`` is intentionally avoided because the bridge
@@ -340,26 +337,21 @@ async def test_async_microphone_close_idempotent() -> None:
 @pytest.mark.requires_audio_input
 @pytest.mark.asyncio
 async def test_async_microphone_is_open_reflects_bridge_truth() -> None:
-    """AsyncMicrophone.is_open queries the Rust bridge atomic mirror.
-
-    Previously this was a Python-side cache that could lie when the Rust
-    side closed the stream itself. Now it delegates to the lock-free
-    atomic mirror on AsyncMicrophoneBridge.
-    """
+    """AsyncMicrophone.is_open reads the bridge's own state."""
     mic = AsyncMicrophone(vad=False)
-    assert mic.is_open is False, "Pre-start: bridge atomic should be False"
+    assert mic.is_open is False, "Pre-start: is_open should be False"
 
     await mic.start()
-    assert mic.is_open is True, "Post-start: bridge atomic should be True"
+    assert mic.is_open is True, "Post-start: is_open should be True"
 
     await mic.stop()
-    assert mic.is_open is False, "Post-stop: bridge atomic should be False"
+    assert mic.is_open is False, "Post-stop: is_open should be False"
 
 
 @pytest.mark.requires_audio_output
 @pytest.mark.asyncio
 async def test_async_speaker_is_playing_reflects_bridge_truth() -> None:
-    """AsyncSpeaker.is_playing queries the Rust bridge atomic mirror.
+    """AsyncSpeaker.is_playing reads the bridge's own state.
 
     Same shape as AsyncMicrophone.is_open.
     """
@@ -377,9 +369,9 @@ async def test_async_speaker_is_playing_reflects_bridge_truth() -> None:
 async def test_async_microphone_is_open_pre_start_no_hardware() -> None:
     """AsyncMicrophone.is_open returns False before start without hardware.
 
-    Validates the atomic-mirror sync getter is callable without an
-    active stream or audio device. Construction does not start the
-    stream; the atomic should be False from the constructor.
+    Validates the sync getter is callable without an active stream or
+    audio device. Construction does not start the stream, so it reads
+    False from the constructor.
     """
     mic = AsyncMicrophone(vad=False)
     assert mic.is_open is False
