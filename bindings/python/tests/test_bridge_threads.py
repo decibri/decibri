@@ -6,9 +6,8 @@ Three sections:
    File.open and File.buffer, and the first read of a File in Silero mode let
    other threads run while the model loads, and a close() made while another
    thread's read is in progress lets them run while it waits for the read. The
-   measurement is _gil_meter's: a background thread's progress during the
-   calls is compared, in the same run, against its progress during sleeps and
-   during GIL-holding sorts of the same lengths.
+   check is _gil_probe's: a thread that runs only while the GIL is free runs
+   during at least one of the bracketed native calls.
 2. Concurrent calls on one File: a read() or close() made while another
    thread's read() is in progress waits for it and then completes. Each case
    runs in a subprocess, which is ended if it does not finish in time.
@@ -31,12 +30,13 @@ import threading
 import time
 import wave
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Callable
 
 import pytest
-from _gil_meter import GilMeter, Window, assert_releases_gil, measure_calls
+from _gil_probe import BRACKETS, Bracket, GilProbe, assert_releases_gil
 
-from decibri import File, Microphone, MicrophoneStreamClosed
+from decibri import File, Microphone, MicrophoneStreamClosed, _decibri
 
 _RATE = 16000
 
@@ -60,17 +60,18 @@ def _write_wav(path: Path, seconds: float) -> None:
 # ---------------------------------------------------------------------------
 # Section 1: GIL release while a File loads a model.
 #
-# The measurement is _gil_meter's. Each model load takes tens of milliseconds,
-# so loads are repeated until the measured calls are long enough for the
-# comparison with the two controls to decide. Every measured call works on a
-# File built outside its window.
+# The check is _gil_probe's. Each test brackets BRACKETS native calls and
+# passes when the probe's thread ran during at least one of them. Every
+# bracketed read and close() works on a File built outside its bracket.
 # ---------------------------------------------------------------------------
 
 _MODEL_LOAD = "the calls hold the GIL while the model loads"
 
 
 @pytest.mark.requires_bundled_ort
-def test_file_construction_with_denoise_releases_gil(tmp_path: Path) -> None:
+def test_file_construction_with_denoise_releases_gil(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """Constructing a File with denoise lets other threads run while the
     denoise model loads, through File(path), File.open and File.buffer."""
     path = tmp_path / "clip.wav"
@@ -81,9 +82,22 @@ def test_file_construction_with_denoise_releases_gil(tmp_path: Path) -> None:
         lambda: File.open(path, denoise="fastenhancer-t"),
         lambda: File.buffer(samples, input_rate=_RATE, denoise="fastenhancer-t"),
     ]
-    with GilMeter() as meter:
-        windows = measure_calls(meter, lambda i: calls[i % len(calls)], minimum=len(calls))
-        assert_releases_gil(meter, windows, "File construction with denoise", _MODEL_LOAD)
+    brackets: list[Bracket] = []
+    with GilProbe() as probe:
+        # The constructors resolve the bridge's arguments themselves, so the
+        # native constructor each one calls is bracketed where it is called.
+        bridge = _decibri.FileBridge
+        monkeypatch.setattr(
+            _decibri,
+            "FileBridge",
+            SimpleNamespace(
+                open=probe.bracketed(bridge.open, brackets),
+                buffer=probe.bracketed(bridge.buffer, brackets),
+            ),
+        )
+        for i in range(BRACKETS):
+            calls[i % len(calls)]()
+    assert_releases_gil(brackets, "File construction with denoise", _MODEL_LOAD)
 
 
 @pytest.mark.requires_bundled_ort
@@ -93,21 +107,22 @@ def test_first_silero_read_of_a_file_releases_gil(tmp_path: Path) -> None:
     path = tmp_path / "clip.wav"
     _write_wav(path, 1.0)
     samples = _sine(1.0)
+    brackets: list[Bracket] = []
+    with GilProbe() as probe:
+        for i in range(BRACKETS):
+            # A new File for every call, from the path and from samples in
+            # turn, so every bracketed read is a first read. File.read passes
+            # the bridge no arguments, so the bridge's read is bracketed.
+            if i % 2 == 0:
+                file = File(path, vad="silero")
+            else:
+                file = File.buffer(samples, input_rate=_RATE, vad="silero")
+            brackets.append(probe.bracket(file._bridge.read))
+    assert_releases_gil(brackets, "first read in Silero mode", _MODEL_LOAD)
 
-    def first_read(i: int) -> Callable[[], object]:
-        # A new File for every call, from the path and from samples in turn,
-        # so every measured read is a first read.
-        if i % 2 == 0:
-            return File(path, vad="silero").read
-        return File.buffer(samples, input_rate=_RATE, vad="silero").read
 
-    with GilMeter() as meter:
-        windows = measure_calls(meter, first_read, minimum=2)
-        assert_releases_gil(meter, windows, "first read in Silero mode", _MODEL_LOAD)
-
-
-# Attempts the close() test makes before deciding with the windows it has.
-_CLOSE_ATTEMPTS = 100
+# Attempts the close() test makes to bracket BRACKETS closes that waited.
+_CLOSE_ATTEMPTS = 5 * BRACKETS
 
 
 @pytest.mark.requires_bundled_ort
@@ -116,13 +131,15 @@ def test_file_close_during_a_read_releases_gil(tmp_path: Path) -> None:
     the detector waits for that read without holding the GIL."""
     path = tmp_path / "clip.wav"
     _write_wav(path, 1.0)
-    windows: list[Window] = []
+    brackets: list[Bracket] = []
     attempts = 0
-    with GilMeter() as meter:
-        target = meter.target_ms()
-        while sum(w.ms for w in windows) < target and attempts < _CLOSE_ATTEMPTS:
+    with GilProbe() as probe:
+        while len(brackets) < BRACKETS and attempts < _CLOSE_ATTEMPTS:
             attempts += 1
             file = File(path, vad="silero")
+            # File.close passes the bridge no arguments, so the bridge's
+            # close is bracketed.
+            close = file._bridge.close
             reading = threading.Event()
             returned: list[object] = []
 
@@ -135,29 +152,30 @@ def test_file_close_during_a_read_releases_gil(tmp_path: Path) -> None:
                 out.append(source.read())
 
             thread = threading.Thread(target=read)
-            thread.start()
-            # With timed switching off, wait() returns once the reading thread
-            # has released the GIL inside read(), whose locked section takes
-            # the source's lock as it begins. The sleep gives it time to take
-            # the lock.
-            reading.wait()
-            time.sleep(0.005)
-            window = meter.measure(file.close)
+            # Garbage is collected before the read begins, so the bracket
+            # makes no collection while the read is in progress.
+            with probe.collector_paused():
+                thread.start()
+                # With timed switching off, wait() returns once the reading
+                # thread has released the GIL inside read(), whose locked
+                # section takes the source's lock as it begins. The sleep
+                # gives it time to take the lock.
+                reading.wait()
+                time.sleep(0.005)
+                bracket = probe.bracket(close)
             thread.join(timeout=10)
             # A read that returned its chunk held the source's lock when
             # close() was called, so close() waited for it. A read that
             # returned None reached the source after close(), and that close()
-            # is not measured.
+            # is not counted.
             if returned and isinstance(returned[0], bytes):
-                windows.append(window)
-            time.sleep(0.02)
-        assert windows, f"in {attempts} attempts no close() waited for a read in progress"
-        assert_releases_gil(
-            meter,
-            windows,
-            "close() during a first read in Silero mode",
-            "close() holds the GIL while it waits for the read",
-        )
+                brackets.append(bracket)
+    assert brackets, f"in {attempts} attempts no close() waited for a read in progress"
+    assert_releases_gil(
+        brackets,
+        "close() during a first read in Silero mode",
+        "close() holds the GIL while it waits for the read",
+    )
 
 
 # ---------------------------------------------------------------------------

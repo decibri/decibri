@@ -9,16 +9,15 @@ Three sections:
    the blocking next_chunk call, allowing other Python threads to run.
    Marked requires_audio_input.
 
-The GIL test compares a background thread's progress during blocking reads
-against its progress during sleeps, which release the GIL, and during sorts,
-which hold it, all of the same lengths and measured in the same run.
+The GIL test brackets blocking reads with _gil_probe and checks that a thread
+which runs only while the GIL is free runs during at least one of them.
 """
 
 import threading
 from typing import Any
 
 import pytest
-from _gil_meter import GilMeter, Window, assert_releases_gil
+from _gil_probe import BRACKETS, Bracket, GilProbe, assert_releases_gil
 
 from decibri import Microphone
 
@@ -174,46 +173,42 @@ def test_close_resets_vad_state() -> None:
 # ---------------------------------------------------------------------------
 # Section 3: GIL-release correctness.
 #
-# The measurement is _gil_meter's: a background thread's progress during the
-# reads is compared, in the same run, against its progress during sleeps and
-# during GIL-holding sorts of the same lengths. read() wraps the blocking
-# next_chunk in py.detach(...) (the PyO3 GIL-release primitive), so the
-# background thread runs throughout the park. Each read's chunk spans a second
-# of audio, and reads follow one another until they are long enough for the
-# comparison to decide.
+# The check is _gil_probe's: the test brackets BRACKETS reads and passes when
+# the probe's thread ran during at least one of them. read() wraps the
+# blocking next_chunk in py.detach(...) (the PyO3 GIL-release primitive), so
+# the probe's thread runs while the read parks.
 #
 # One invariant a maintainer must keep: nothing may pause between start() and
-# the first read, or between reads, since a pause fills the capture buffer and
-# the next read then returns without parking. The meter's target is therefore
-# measured before start(), and the controls after stop().
+# the first read, or between reads, for as long as a chunk lasts, since a
+# pause that long fills the capture buffer and the next read then returns
+# without parking. The collection before each bracket is far shorter.
 # ---------------------------------------------------------------------------
-
-# Most reads the test makes.
-_MAX_READS = 10
 
 
 @pytest.mark.requires_audio_input
 def test_read_releases_gil() -> None:
     """Microphone.read() releases the GIL during its blocking next_chunk call.
 
-    A background thread advances during a parked read() as it does during a
-    sleep of the same length, and unlike during a GIL-holding call of that
-    length. Both controls are measured in the same run, so the assertion holds
-    whatever the read's park duration turns out to be.
+    A thread that runs only while the GIL is free runs during a parked read().
+    Nothing else in the bracket around each read can release the GIL, so a
+    read() that held the GIL while it parked would let that thread run during
+    no read at all, however long each read parks.
     """
-    # A chunk of one second of audio. The core re-blocks to exactly this
-    # size, so each read below parks for about a second.
-    d = Microphone(sample_rate=16000, channels=1, frames_per_buffer=16000)
-    reads: list[Window] = []
-    with GilMeter() as meter:
-        target = meter.target_ms()
+    # A chunk of a quarter second of audio. The core re-blocks to exactly
+    # this size, so each read below parks for about a quarter second.
+    d = Microphone(sample_rate=16000, channels=1, frames_per_buffer=4000)
+    reads: list[Bracket] = []
+    # Microphone.read passes the bridge the caller's timeout, so the bridge's
+    # own read is bracketed.
+    read = d._bridge.read
+    with GilProbe() as probe:
         d.start()
         try:
-            while sum(w.ms for w in reads) < target and len(reads) < _MAX_READS:
-                reads.append(meter.measure(lambda: d.read(timeout_ms=5000)))
+            for _ in range(BRACKETS):
+                reads.append(probe.bracket(read, timeout_ms=5000))
         finally:
             d.stop()
-        assert_releases_gil(meter, reads, "read()", "read() holds the GIL while it parks")
+    assert_releases_gil(reads, "read()", "read() holds the GIL while it parks")
 
 
 # ---------------------------------------------------------------------------

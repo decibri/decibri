@@ -4,9 +4,8 @@ Three sections:
 
 1. GIL release: Microphone and Speaker start() and stop(), and Microphone
    construction with Silero VAD, let other threads run while they work. The
-   measurement is _gil_meter's: a background thread's progress during the
-   calls is compared, in the same run, against its progress during sleeps and
-   during GIL-holding sorts of the same lengths.
+   check is _gil_probe's: a thread that runs only while the GIL is free runs
+   during at least one of the bracketed native calls.
 2. start() races: a second start() while a start is in progress raises
    AlreadyRunning, and a stop() that arrives while a start is in progress
    leaves the stream stopped.
@@ -29,9 +28,9 @@ import time
 from typing import Callable, Iterator
 
 import pytest
-from _gil_meter import GilMeter, Window, assert_releases_gil, measure_calls
+from _gil_probe import BRACKETS, Bracket, GilProbe, assert_releases_gil
 
-from decibri import AlreadyRunning, Microphone, Speaker, SpeakerStreamClosed
+from decibri import AlreadyRunning, Microphone, Speaker, SpeakerStreamClosed, _decibri
 
 # One second of int16 mono silence at the default 16 kHz.
 _SECOND = b"\x00\x00" * 16000
@@ -40,35 +39,29 @@ _SECOND = b"\x00\x00" * 16000
 # ---------------------------------------------------------------------------
 # Section 1: GIL release.
 #
-# The measurement is _gil_meter's. start() and stop() each take milliseconds,
-# so start/stop cycles are repeated until the measured start() calls and the
-# measured stop() calls are each long enough for the comparison with the two
-# controls to decide.
+# The check is _gil_probe's. The start/stop tests make BRACKETS start/stop
+# cycles, bracket every start() and every stop(), and pass when the probe's
+# thread ran during at least one start() and at least one stop().
 # ---------------------------------------------------------------------------
-
-# Fewest and most start/stop cycles a test makes.
-_CYCLES = 8
-_MAX_CYCLES = 250
 
 
 def _assert_start_and_stop_release_gil(source: Microphone | Speaker) -> None:
-    starts: list[Window] = []
-    stops: list[Window] = []
-    with GilMeter() as meter:
-        target = meter.target_ms()
+    starts: list[Bracket] = []
+    stops: list[Bracket] = []
+    # The wrappers' start() and stop() pass the bridge no arguments, so the
+    # bridge's own start() and stop() are bracketed.
+    start, stop = source._bridge.start, source._bridge.stop
+    with GilProbe() as probe:
         try:
-            while len(stops) < _CYCLES or (
-                min(sum(w.ms for w in starts), sum(w.ms for w in stops)) < target
-                and len(stops) < _MAX_CYCLES
-            ):
-                starts.append(meter.measure(source.start))
+            for _ in range(BRACKETS):
+                starts.append(probe.bracket(start))
                 time.sleep(0.02)
-                stops.append(meter.measure(source.stop))
+                stops.append(probe.bracket(stop))
                 time.sleep(0.02)
         finally:
             source.stop()
-        assert_releases_gil(meter, starts, "start()", "start() holds the GIL")
-        assert_releases_gil(meter, stops, "stop()", "stop() holds the GIL")
+    assert_releases_gil(starts, "start()", "start() holds the GIL")
+    assert_releases_gil(stops, "stop()", "stop() holds the GIL")
 
 
 @pytest.mark.requires_audio_input
@@ -84,17 +77,25 @@ def test_speaker_start_and_stop_release_gil() -> None:
 
 
 @pytest.mark.requires_bundled_ort
-def test_silero_construction_releases_gil() -> None:
+def test_silero_construction_releases_gil(monkeypatch: pytest.MonkeyPatch) -> None:
     """Constructing a Microphone with Silero VAD lets other threads run while
     the model loads. Construction opens no device."""
-    with GilMeter() as meter:
-        windows = measure_calls(meter, lambda i: lambda: Microphone(vad="silero"))
-        assert_releases_gil(
-            meter,
-            windows,
-            "Silero construction",
-            "construction holds the GIL while the model loads",
+    brackets: list[Bracket] = []
+    with GilProbe() as probe:
+        # The constructor resolves the bridge's arguments itself, so the
+        # native constructor it calls is bracketed where it is called.
+        monkeypatch.setattr(
+            _decibri,
+            "MicrophoneBridge",
+            probe.bracketed(_decibri.MicrophoneBridge, brackets),
         )
+        for _ in range(BRACKETS):
+            Microphone(vad="silero")
+    assert_releases_gil(
+        brackets,
+        "Silero construction",
+        "construction holds the GIL while the model loads",
+    )
 
 
 # ---------------------------------------------------------------------------
