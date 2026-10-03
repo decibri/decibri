@@ -9,15 +9,16 @@ Three sections:
    the blocking next_chunk call, allowing other Python threads to run.
    Marked requires_audio_input.
 
-The GIL test compares a background thread's progress during a blocking read
-against its progress during a sleep, which releases the GIL by definition.
+The GIL test compares a background thread's progress during blocking reads
+against its progress during sleeps, which release the GIL, and during sorts,
+which hold it, all of the same lengths and measured in the same run.
 """
 
 import threading
-import time
 from typing import Any
 
 import pytest
+from _gil_meter import GilMeter, Window, assert_releases_gil
 
 from decibri import Microphone
 
@@ -173,82 +174,46 @@ def test_close_resets_vad_state() -> None:
 # ---------------------------------------------------------------------------
 # Section 3: GIL-release correctness.
 #
-# Pattern: a background daemon thread increments a counter and sleeps 1ms in
-# a tight loop. The main thread issues one read() whose chunk spans a second
-# of audio, then sleeps for a shorter baseline window. read() wraps the
-# blocking next_chunk in py.detach(...) (the PyO3 GIL-release primitive), so
-# the background thread runs throughout the park and the counter advances at
-# its natural rate. While next_chunk holds the C-level GIL the background
-# thread blocks on its post-sleep GIL acquisition and advances only once the
-# read returns, which is one increment for the whole window.
+# The measurement is _gil_meter's: a background thread's progress during the
+# reads is compared, in the same run, against its progress during sleeps and
+# during GIL-holding sorts of the same lengths. read() wraps the blocking
+# next_chunk in py.detach(...) (the PyO3 GIL-release primitive), so the
+# background thread runs throughout the park. Each read's chunk spans a second
+# of audio, and reads follow one another until they are long enough for the
+# comparison to decide.
 #
-# The assertion compares the counter's rate during the read against its rate
-# during the baseline sleep, both measured in the same run. It therefore
-# carries no constant tied to how long the read parks, to the platform's
-# sleep granularity, or to the machine's speed. Two invariants a maintainer
-# must keep: the read has to be a single call, since a loop of shorter reads
-# hands the background thread one increment per read boundary and closes the
-# gap between the two regimes, and the baseline has to follow the read, since
-# a pause before it fills the capture buffer and the read then returns
-# without parking.
+# One invariant a maintainer must keep: nothing may pause between start() and
+# the first read, or between reads, since a pause fills the capture buffer and
+# the next read then returns without parking. The meter's target is therefore
+# measured before start(), and the controls after stop().
 # ---------------------------------------------------------------------------
+
+# Most reads the test makes.
+_MAX_READS = 10
 
 
 @pytest.mark.requires_audio_input
 def test_read_releases_gil() -> None:
     """Microphone.read() releases the GIL during its blocking next_chunk call.
 
-    A background thread advances at essentially the same rate during a
-    parked read() as it does during a sleep. The rates are measured rather
-    than assumed, so the assertion holds whatever the read's park duration
-    turns out to be.
+    A background thread advances during a parked read() as it does during a
+    sleep of the same length, and unlike during a GIL-holding call of that
+    length. Both controls are measured in the same run, so the assertion holds
+    whatever the read's park duration turns out to be.
     """
-    counter = [0]
-    stop_flag = threading.Event()
-
-    def background_worker() -> None:
-        while not stop_flag.is_set():
-            counter[0] += 1
-            time.sleep(0.001)
-
     # A chunk of one second of audio. The core re-blocks to exactly this
-    # size, so the single read below parks for about a second.
+    # size, so each read below parks for about a second.
     d = Microphone(sample_rate=16000, channels=1, frames_per_buffer=16000)
-    d.start()
-    try:
-        worker = threading.Thread(target=background_worker, daemon=True)
-        worker.start()
-
-        read_ticks_start = counter[0]
-        read_start = time.perf_counter()
-        d.read(timeout_ms=5000)
-        read_ms = (time.perf_counter() - read_start) * 1000.0
-        read_ticks = counter[0] - read_ticks_start
-
-        base_ticks_start = counter[0]
-        base_start = time.perf_counter()
-        time.sleep(0.15)
-        base_ms = (time.perf_counter() - base_start) * 1000.0
-        base_ticks = counter[0] - base_ticks_start
-    finally:
-        stop_flag.set()
-        worker.join(timeout=1.0)
-        d.stop()
-
-    read_rate = read_ticks / read_ms
-    base_rate = base_ticks / base_ms
-
-    # The baseline is the yardstick, so a stalled one makes the comparison
-    # meaningless rather than merely generous.
-    assert base_rate > 0, (
-        f"background thread made no progress during a {base_ms:.0f}ms sleep; "
-        f"the baseline is unusable"
-    )
-    assert read_rate > base_rate / 2, (
-        f"background thread advanced at {read_rate:.4f} ticks/ms during a "
-        f"{read_ms:.0f}ms read against {base_rate:.4f} ticks/ms during a "
-        f"{base_ms:.0f}ms sleep; read() holds the GIL while it parks"
-    )
+    reads: list[Window] = []
+    with GilMeter() as meter:
+        target = meter.target_ms()
+        d.start()
+        try:
+            while sum(w.ms for w in reads) < target and len(reads) < _MAX_READS:
+                reads.append(meter.measure(lambda: d.read(timeout_ms=5000)))
+        finally:
+            d.stop()
+        assert_releases_gil(meter, reads, "read()", "read() holds the GIL while it parks")
 
 
 # ---------------------------------------------------------------------------

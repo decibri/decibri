@@ -487,6 +487,51 @@ assert(freeVer.binding === pkg.version, `free version().binding equals package v
 console.log('  Group 6 done\n');
 
 // ═══════════════════════════════════════════════════════════════════════════════
+// Group 6b: device calls after the first device thread has exited
+// ═══════════════════════════════════════════════════════════════════════════════
+//
+// A worker thread makes the first device call in a fresh Node process and
+// exits, then the main thread lists the devices. The main thread loads decibri
+// before the worker starts, so the module stays loaded when the worker exits.
+// Each case runs in its own child process, so the worker's call is the first in
+// that process and a fault ends only the child. The child must exit normally
+// and print its completion line. No device is needed: with none present the
+// listings are empty and the constructors throw, which the worker ignores.
+
+console.log('--- Group 6b: device calls after the first device thread exits ---');
+
+{
+  const { spawnSync } = require('child_process');
+  const entry = path.join(__dirname, '..', 'npm', 'decibri', 'src', 'decibri.js');
+  const firstCalls = {
+    'a worker that lists the devices': 'Microphone.devices(); Speaker.devices();',
+    'a worker that constructs a Microphone': 'try { new Microphone(); } catch (e) {}',
+    'a worker that constructs a Speaker': 'try { new Speaker(); } catch (e) {}',
+  };
+  for (const [label, first] of Object.entries(firstCalls)) {
+    const load = `const { Microphone, Speaker } = require(${JSON.stringify(entry)});`;
+    const script = [
+      "const { Worker } = require('worker_threads');",
+      load,
+      `const worker = new Worker(${JSON.stringify(load + ' ' + first)}, { eval: true });`,
+      "worker.on('exit', () => {",
+      '  Microphone.devices();',
+      '  Speaker.devices();',
+      "  console.log('device calls complete');",
+      '});',
+    ].join('\n');
+    const child = spawnSync(process.execPath, ['-e', script], { encoding: 'utf8', timeout: 60000 });
+    assert(
+      child.status === 0 && child.stdout.includes('device calls complete'),
+      `after ${label} exits, the main thread lists the devices ` +
+        `(status ${child.status}, signal ${child.signal}, stderr: ${(child.stderr || '').trim().slice(0, 400)})`
+    );
+  }
+}
+
+console.log('  Group 6b done\n');
+
+// ═══════════════════════════════════════════════════════════════════════════════
 // Group 7: Error class parity (instanceof + code)
 // ═══════════════════════════════════════════════════════════════════════════════
 

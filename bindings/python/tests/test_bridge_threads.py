@@ -6,9 +6,9 @@ Three sections:
    File.open and File.buffer, and the first read of a File in Silero mode let
    other threads run while the model loads, and a close() made while another
    thread's read is in progress lets them run while it waits for the read. The
-   method and threshold are those of test_read_releases_gil in
-   test_lifecycle.py: a background thread's progress during the calls is
-   compared against its progress during a sleep measured in the same run.
+   measurement is _gil_meter's: a background thread's progress during the
+   calls is compared, in the same run, against its progress during sleeps and
+   during GIL-holding sorts of the same lengths.
 2. Concurrent calls on one File: a read() or close() made while another
    thread's read() is in progress waits for it and then completes. Each case
    runs in a subprocess, which is ended if it does not finish in time.
@@ -34,6 +34,7 @@ from pathlib import Path
 from typing import Callable
 
 import pytest
+from _gil_meter import GilMeter, Window, assert_releases_gil, measure_calls
 
 from decibri import File, Microphone, MicrophoneStreamClosed
 
@@ -59,72 +60,13 @@ def _write_wav(path: Path, seconds: float) -> None:
 # ---------------------------------------------------------------------------
 # Section 1: GIL release while a File loads a model.
 #
-# A background daemon thread increments a counter and sleeps 1ms in a tight
-# loop. While a call releases the GIL the counter advances at its natural
-# rate; while a call holds it the background thread cannot run. Each model
-# load takes tens of milliseconds, so the counter is read immediately before
-# and after every call, and the ticks and the time spent inside the calls are
-# summed over several calls. The rate is compared against the rate during a
-# sleep that follows the calls, in the same run.
+# The measurement is _gil_meter's. Each model load takes tens of milliseconds,
+# so loads are repeated until the measured calls are long enough for the
+# comparison with the two controls to decide. Every measured call works on a
+# File built outside its window.
 # ---------------------------------------------------------------------------
 
-
-class _Counter:
-    """A daemon thread that increments a counter and sleeps 1ms, in a loop."""
-
-    def __init__(self) -> None:
-        self.ticks = 0
-        self._stop = threading.Event()
-        self._thread = threading.Thread(target=self._run, daemon=True)
-
-    def _run(self) -> None:
-        while not self._stop.is_set():
-            self.ticks += 1
-            time.sleep(0.001)
-
-    def __enter__(self) -> _Counter:
-        self._thread.start()
-        return self
-
-    def __exit__(self, *exc: object) -> None:
-        self._stop.set()
-        self._thread.join(timeout=1.0)
-
-    def baseline_rate(self) -> float:
-        """Ticks per millisecond during a 150ms sleep."""
-        ticks = self.ticks
-        began = time.perf_counter()
-        time.sleep(0.15)
-        elapsed_ms = (time.perf_counter() - began) * 1000.0
-        rate = (self.ticks - ticks) / elapsed_ms
-        # The baseline is the yardstick, so a stalled one makes the comparison
-        # meaningless rather than merely generous.
-        assert rate > 0, (
-            f"background thread made no progress during a {elapsed_ms:.0f}ms "
-            "sleep; the baseline is unusable"
-        )
-        return rate
-
-
-def _assert_calls_release_gil(calls: list[Callable[[], object]], what: str) -> None:
-    ticks = 0
-    elapsed_ms = 0.0
-    with _Counter() as counter:
-        for call in calls:
-            before = counter.ticks
-            began = time.perf_counter()
-            call()
-            elapsed_ms += (time.perf_counter() - began) * 1000.0
-            ticks += counter.ticks - before
-            time.sleep(0.02)
-        base_rate = counter.baseline_rate()
-
-    rate = ticks / elapsed_ms
-    assert rate > base_rate / 2, (
-        f"background thread advanced at {rate:.4f} ticks/ms across {len(calls)} "
-        f"calls ({what}) totalling {elapsed_ms:.1f}ms against {base_rate:.4f} "
-        "ticks/ms during a sleep; the calls hold the GIL while the model loads"
-    )
+_MODEL_LOAD = "the calls hold the GIL while the model loads"
 
 
 @pytest.mark.requires_bundled_ort
@@ -139,7 +81,9 @@ def test_file_construction_with_denoise_releases_gil(tmp_path: Path) -> None:
         lambda: File.open(path, denoise="fastenhancer-t"),
         lambda: File.buffer(samples, input_rate=_RATE, denoise="fastenhancer-t"),
     ]
-    _assert_calls_release_gil(calls * 3, "File construction with denoise")
+    with GilMeter() as meter:
+        windows = measure_calls(meter, lambda i: calls[i % len(calls)], minimum=len(calls))
+        assert_releases_gil(meter, windows, "File construction with denoise", _MODEL_LOAD)
 
 
 @pytest.mark.requires_bundled_ort
@@ -149,9 +93,21 @@ def test_first_silero_read_of_a_file_releases_gil(tmp_path: Path) -> None:
     path = tmp_path / "clip.wav"
     _write_wav(path, 1.0)
     samples = _sine(1.0)
-    files = [File(path, vad="silero") for _ in range(3)]
-    files += [File.buffer(samples, input_rate=_RATE, vad="silero") for _ in range(3)]
-    _assert_calls_release_gil([f.read for f in files], "first read in Silero mode")
+
+    def first_read(i: int) -> Callable[[], object]:
+        # A new File for every call, from the path and from samples in turn,
+        # so every measured read is a first read.
+        if i % 2 == 0:
+            return File(path, vad="silero").read
+        return File.buffer(samples, input_rate=_RATE, vad="silero").read
+
+    with GilMeter() as meter:
+        windows = measure_calls(meter, first_read, minimum=2)
+        assert_releases_gil(meter, windows, "first read in Silero mode", _MODEL_LOAD)
+
+
+# Attempts the close() test makes before deciding with the windows it has.
+_CLOSE_ATTEMPTS = 100
 
 
 @pytest.mark.requires_bundled_ort
@@ -160,38 +116,48 @@ def test_file_close_during_a_read_releases_gil(tmp_path: Path) -> None:
     the detector waits for that read without holding the GIL."""
     path = tmp_path / "clip.wav"
     _write_wav(path, 1.0)
-    files = [File(path, vad="silero") for _ in range(3)]
-    ticks = 0
-    elapsed_ms = 0.0
-    with _Counter() as counter:
-        for file in files:
+    windows: list[Window] = []
+    attempts = 0
+    with GilMeter() as meter:
+        target = meter.target_ms()
+        while sum(w.ms for w in windows) < target and attempts < _CLOSE_ATTEMPTS:
+            attempts += 1
+            file = File(path, vad="silero")
             reading = threading.Event()
+            returned: list[object] = []
 
-            def read(target: File = file) -> None:
-                reading.set()
-                target.read()
+            def read(
+                source: File = file,
+                started: threading.Event = reading,
+                out: list[object] = returned,
+            ) -> None:
+                started.set()
+                out.append(source.read())
 
             thread = threading.Thread(target=read)
             thread.start()
+            # With timed switching off, wait() returns once the reading thread
+            # has released the GIL inside read(), whose locked section takes
+            # the source's lock as it begins. The sleep gives it time to take
+            # the lock.
             reading.wait()
-            # Long enough for the read to take the source's lock, well short
-            # of the detector build that follows.
-            time.sleep(0.01)
-            before = counter.ticks
-            began = time.perf_counter()
-            file.close()
-            elapsed_ms += (time.perf_counter() - began) * 1000.0
-            ticks += counter.ticks - before
+            time.sleep(0.005)
+            window = meter.measure(file.close)
             thread.join(timeout=10)
+            # A read that returned its chunk held the source's lock when
+            # close() was called, so close() waited for it. A read that
+            # returned None reached the source after close(), and that close()
+            # is not measured.
+            if returned and isinstance(returned[0], bytes):
+                windows.append(window)
             time.sleep(0.02)
-        base_rate = counter.baseline_rate()
-
-    rate = ticks / elapsed_ms
-    assert rate > base_rate / 2, (
-        f"background thread advanced at {rate:.4f} ticks/ms across {len(files)} "
-        f"close() calls totalling {elapsed_ms:.1f}ms against {base_rate:.4f} "
-        "ticks/ms during a sleep; close() holds the GIL while it waits for the read"
-    )
+        assert windows, f"in {attempts} attempts no close() waited for a read in progress"
+        assert_releases_gil(
+            meter,
+            windows,
+            "close() during a first read in Silero mode",
+            "close() holds the GIL while it waits for the read",
+        )
 
 
 # ---------------------------------------------------------------------------

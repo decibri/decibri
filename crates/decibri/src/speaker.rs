@@ -595,15 +595,9 @@ mod tests {
     /// overflow. `cargo test` builds with overflow checks on, so a guard that
     /// stopped working would abort this test rather than fail it.
     ///
-    /// Ignored by default, and run on a machine that has an output device with
-    /// `cargo test-decibri --lib -- --ignored`. Two things put it there. It
-    /// needs a device to reach `start`. And the platform library keeps one
-    /// device enumerator for the whole process, created in the COM apartment of
-    /// whichever thread first reaches it; on a host with no audio endpoints that
-    /// apartment closes when the thread ends and the kept handle is left
-    /// dangling, so a second test reaching the platform library faults the
-    /// process rather than failing. One test reaches it on every host already,
-    /// `backend::tests::backend_enumeration_runs`, and it stays the only one.
+    /// Ignored by default, because it needs an output device to reach `start`,
+    /// and run on a machine that has one with
+    /// `cargo test-decibri --lib -- --ignored`.
     ///
     /// What runs everywhere in place of this is
     /// `backend::tests::output_channel_guard_brackets_the_platform_limit`, which

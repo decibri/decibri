@@ -352,6 +352,48 @@ impl AudioBackend for CpalBackend {
     }
 }
 
+/// The platform host that enumeration, default-device lookup and selector
+/// resolution start from. A [`BackendDevice`] comes only from resolution, so
+/// every later call on a device follows a call to this function.
+fn platform_host() -> cpal::Host {
+    #[cfg(windows)]
+    com::keep_com_in_use();
+    cpal::default_host()
+}
+
+/// COM state the Windows device layer relies on.
+#[cfg(windows)]
+mod com {
+    use std::ffi::c_void;
+    use std::sync::Once;
+
+    #[link(name = "ole32")]
+    unsafe extern "system" {
+        fn CoIncrementMTAUsage(cookie: *mut *mut c_void) -> i32;
+    }
+
+    /// Takes a usage reference on the process's multithreaded COM apartment,
+    /// once per process, and never releases it.
+    ///
+    /// COM then stays in use in the process for its whole life, whichever
+    /// threads have made device calls and exited since, so device calls work
+    /// from every thread. The reference must be in place before the first
+    /// device call, which [`super::platform_host`] ensures. A thread that
+    /// enters its own apartment afterwards does so as before.
+    pub(super) fn keep_com_in_use() {
+        static TAKEN: Once = Once::new();
+        TAKEN.call_once(|| {
+            let mut cookie = std::ptr::null_mut();
+            // SAFETY: the call writes one cookie through the valid pointer it
+            // is given and has no other precondition. The cookie is never
+            // returned, so the usage lasts until the process ends. A failed
+            // call leaves COM as it was and the device calls proceed as they
+            // would without it.
+            let _ = unsafe { CoIncrementMTAUsage(&mut cookie) };
+        });
+    }
+}
+
 /// Build a cpal stream config from decibri-owned [`StreamParams`].
 fn stream_config(params: &StreamParams) -> cpal::StreamConfig {
     cpal::StreamConfig {
@@ -478,7 +520,7 @@ impl DeviceDirection for Output {
 /// Shared implementation behind [`AudioBackend::input_devices`] /
 /// [`AudioBackend::output_devices`]. Direction-generic via [`DeviceDirection`].
 fn enumerate_devices<D: DeviceDirection>() -> Result<Vec<D::Info>, DecibriError> {
-    let host = cpal::default_host();
+    let host = platform_host();
 
     // Stable per-host id (WASAPI endpoint ID / CoreAudio UID / ALSA pcm_id)
     // for the OS default device. `.id()` is fallible on rare host backends;
@@ -513,7 +555,7 @@ fn enumerate_devices<D: DeviceDirection>() -> Result<Vec<D::Info>, DecibriError>
 fn resolve_device_generic<D: DeviceDirection>(
     selector: &DeviceSelector,
 ) -> Result<cpal::Device, DecibriError> {
-    let host = cpal::default_host();
+    let host = platform_host();
 
     match selector {
         DeviceSelector::Default => D::default_device(&host).ok_or_else(D::no_device_error),
@@ -615,11 +657,6 @@ mod tests {
     /// Enumeration through the seam reaches cpal and returns without panicking
     /// on any host, including headless CI runners with no audio devices (the
     /// result may be an empty list or an enumeration error, both acceptable).
-    ///
-    /// The one test in this crate that reaches the platform library on every
-    /// host, and it has to stay the only one: a second faults the process on a
-    /// host with no audio endpoints. See the note on
-    /// `speaker::tests::a_count_the_platform_cannot_express_is_refused_not_panicked`.
     #[test]
     fn backend_enumeration_runs() {
         let _ = CpalBackend.input_devices();
