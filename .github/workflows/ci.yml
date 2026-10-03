@@ -68,7 +68,7 @@ jobs:
           # builds nothing and only needs the registry warm, so it neither
           # depends on nor overwrites their target/ cache.
           shared-key: "rust-deny"
-      - uses: taiki-e/install-action@5b4d68e2e660441203ab128a23676f1e4faf1532 # v2.86.3
+      - uses: taiki-e/install-action@83ac0ad63c0167e6f06796fab0fce28db1bf3db0 # v2.87.22
         with:
           # Pinned exactly. cargo-deny's config semantics change between minor
           # versions, so an unpinned upgrade can silently change what
