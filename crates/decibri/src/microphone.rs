@@ -20,7 +20,7 @@ use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
 #[cfg(feature = "capture")]
-use crossbeam_channel::{Receiver, RecvTimeoutError, Sender, TryRecvError, TrySendError};
+use std::sync::mpsc::{self, Receiver, RecvTimeoutError, SyncSender, TryRecvError, TrySendError};
 
 #[cfg(feature = "capture")]
 use crate::backend::{
@@ -180,12 +180,10 @@ pub struct MicrophoneConfig {
     /// derives the delivered channels as [`channels`](Self::channels)
     /// documents.
     ///
-    /// The same shape as CoreAudio AUHAL's channel map
-    /// (`kAudioOutputUnitProperty_ChannelMap`: an array of device channel
-    /// indices, one entry per client channel). NOT miniaudio's `channelMap`,
-    /// which names a spatial layout (which channel is front-left, and so on).
-    /// sounddevice's `mapping` is the same idea 1-based; decibri is 0-based,
-    /// matching [`crate::device::DeviceSelector::Index`].
+    /// The map selects device channels by index, one entry per delivered
+    /// channel; it does not describe a spatial layout (which channel is
+    /// front-left, and so on). Indices are 0-based, matching
+    /// [`crate::device::DeviceSelector::Index`].
     ///
     /// Validated when the stream starts, against the resolved device's own
     /// report: every entry must be below the device's native channel count
@@ -567,7 +565,6 @@ pub struct MicrophoneStream {
     /// `tests::test_stream()` helper builds it with `BackendStream::empty()`
     /// (no real device); production stores the opened stream.
     _stream: BackendStream,
-    receiver: Receiver<AudioChunk>,
     running: Arc<AtomicBool>,
     sample_rate: u32,
     channels: u16,
@@ -582,15 +579,17 @@ pub struct MicrophoneStream {
     // [`overrun_count`](Self::overrun_count). Bounds memory by dropping rather
     // than queuing without limit.
     overruns: Arc<AtomicU64>,
-    // Consumer-side re-block buffer: a FIFO of interleaved `f32` samples pulled
-    // from `receiver`, drained in fixed `samples`-sized blocks so
-    // [`next_chunk`](Self::next_chunk) / [`try_next_chunk`](Self::try_next_chunk)
-    // deliver exactly the requested size regardless of the device's native
-    // buffer size. Lives behind a `Mutex` (kept off the realtime callback, which
-    // only `try_send`s native buffers) so the type stays `Send + Sync` and
-    // concurrent consumers serialize. `Mutex<VecDeque<f32>>` is `Send + Sync`
-    // because `VecDeque<f32>` is `Send`.
-    reblock_buffer: Mutex<VecDeque<f32>>,
+    // Consumer side of the capture channel: the receiving end the realtime
+    // callback `try_send`s native buffers to, and the re-block buffer, a FIFO
+    // of interleaved `f32` samples drained from it in fixed `samples`-sized
+    // blocks so [`next_chunk`](Self::next_chunk) /
+    // [`try_next_chunk`](Self::try_next_chunk) deliver exactly the requested
+    // size regardless of the device's native buffer size. Both live behind one
+    // `Mutex` (kept off the realtime callback), so every receive runs under the
+    // same lock as the buffer access and concurrent consumers serialize on it.
+    // The receiver is `Send` but not `Sync`; `Mutex<Reblock>` is `Send + Sync`
+    // because `Reblock` is `Send`, so the type stays `Send + Sync`.
+    reblock_buffer: Mutex<Reblock>,
     // The capture stage chain, applied to each native block before it lands in
     // `reblock_buffer`. `None` when no conditioning is needed (an already-mono
     // device), keeping the drain on the direct, zero-cost no-chain path. When `Some`,
@@ -667,21 +666,18 @@ pub struct MicrophoneStream {
     aec_reference_channels: u16,
 }
 
+/// The consumer side of a capture stream, held behind
+/// [`MicrophoneStream`]'s `reblock_buffer` mutex: the receiving end of the
+/// capture channel, and the re-block buffer the native buffers it carries are
+/// drained into.
+#[cfg(feature = "capture")]
+struct Reblock {
+    receiver: Receiver<AudioChunk>,
+    buffer: VecDeque<f32>,
+}
+
 #[cfg(feature = "capture")]
 impl MicrophoneStream {
-    /// Returns the stream's capture channel, the `crossbeam_channel::Receiver`
-    /// on which the capture callback sends each device buffer as an
-    /// [`AudioChunk`] at the device's native rate and channel count, before
-    /// any conditioning.
-    ///
-    /// [`try_next_chunk`](Self::try_next_chunk) and
-    /// [`next_chunk`](Self::next_chunk) drain the same channel, apply the
-    /// stream's conditioning, and return blocks of the requested size. A
-    /// chunk received from this channel directly is not delivered by either.
-    pub fn receiver(&self) -> &Receiver<AudioChunk> {
-        &self.receiver
-    }
-
     /// Attempt to read exactly `samples` interleaved samples without blocking.
     ///
     /// `samples` is the requested block size in interleaved `f32` samples
@@ -714,33 +710,37 @@ impl MicrophoneStream {
     ///
     /// # Thread safety
     /// May be called from any thread. Takes the re-block buffer mutex, so
-    /// concurrent callers serialize on it; a non-blocking
-    /// `crossbeam_channel::try_recv` drains the native buffers into it.
+    /// concurrent callers serialize on it; a non-blocking `try_recv` on the
+    /// capture channel drains the native buffers into it.
     ///
     /// # Stability
     /// Part of decibri's stable FFI-consumer API surface, alongside
     /// [`next_chunk`](Self::next_chunk).
     pub fn try_next_chunk(&self, samples: usize) -> Result<Option<AudioChunk>, DecibriError> {
         self.check_frame_alignment(samples)?;
-        let mut buf = self
+        let mut reblock = self
             .reblock_buffer
             .lock()
             .unwrap_or_else(PoisonError::into_inner);
+        let Reblock {
+            receiver,
+            buffer: buf,
+        } = &mut *reblock;
 
         // The chain has already been drained, so the stream is over: deliver what
         // is buffered and leave the channel alone. Checked before the drain so a
         // block arriving now is never fed through the emptied chain. Never taken
         // on the no-chain path, which has nothing to flush.
         if self.chain_flushed.load(Ordering::Relaxed) {
-            return self.take_block_or_closed(&mut buf, samples);
+            return self.take_block_or_closed(buf, samples);
         }
 
         // Pull every immediately-available native buffer into the re-block
         // buffer without blocking.
         let mut disconnected = false;
         loop {
-            match self.receiver.try_recv() {
-                Ok(chunk) => self.ingest(&mut buf, chunk)?,
+            match receiver.try_recv() {
+                Ok(chunk) => self.ingest(buf, chunk)?,
                 Err(TryRecvError::Empty) => break,
                 Err(TryRecvError::Disconnected) => {
                     disconnected = true;
@@ -752,13 +752,13 @@ impl MicrophoneStream {
         if buf.len() >= samples {
             // A full block is ready; deliver buffered data first, even when the
             // stream has since closed.
-            Ok(Some(self.take_block(&mut buf, samples)))
+            Ok(Some(self.take_block(buf, samples)))
         } else if disconnected || !self.is_open() {
             // Closed with fewer than a full block left. Drain the chain's
             // end-of-stream tail (once) into the buffer first, then deliver the
             // remaining samples as full blocks plus one final short chunk.
-            self.flush_chain(&mut buf)?;
-            self.take_block_or_closed(&mut buf, samples)
+            self.flush_chain(buf)?;
+            self.take_block_or_closed(buf, samples)
         } else {
             // Open, but not yet a full block. Try again shortly.
             Ok(None)
@@ -823,23 +823,27 @@ impl MicrophoneStream {
 
         self.check_frame_alignment(samples)?;
         let deadline = timeout.map(|t| Instant::now() + t);
-        let mut buf = self
+        let mut reblock = self
             .reblock_buffer
             .lock()
             .unwrap_or_else(PoisonError::into_inner);
+        let Reblock {
+            receiver,
+            buffer: buf,
+        } = &mut *reblock;
 
         // The chain has already been drained, so the stream is over: deliver what
         // is buffered without waiting on the channel. Checked before the wait so a
         // block arriving now is never fed through the emptied chain. Never taken
         // on the no-chain path, which has nothing to flush.
         if self.chain_flushed.load(Ordering::Relaxed) {
-            return self.take_block_or_closed(&mut buf, samples);
+            return self.take_block_or_closed(buf, samples);
         }
 
         loop {
             // Fast path: a full block is already buffered.
             if buf.len() >= samples {
-                return Ok(Some(self.take_block(&mut buf, samples)));
+                return Ok(Some(self.take_block(buf, samples)));
             }
 
             let wait = match deadline {
@@ -849,9 +853,9 @@ impl MicrophoneStream {
                         // Deadline reached. Absorb any last-moment arrivals,
                         // then deliver a full block if one is now ready, else
                         // `None` (the partial stays buffered for the next call).
-                        self.drain_available(&mut buf)?;
+                        self.drain_available(receiver, buf)?;
                         if buf.len() >= samples {
-                            return Ok(Some(self.take_block(&mut buf, samples)));
+                            return Ok(Some(self.take_block(buf, samples)));
                         }
                         return Ok(None);
                     }
@@ -860,9 +864,9 @@ impl MicrophoneStream {
                 None => POLL_INTERVAL,
             };
 
-            match self.receiver.recv_timeout(wait) {
+            match receiver.recv_timeout(wait) {
                 Ok(chunk) => {
-                    self.ingest(&mut buf, chunk)?;
+                    self.ingest(buf, chunk)?;
                     // Loop: re-check whether a full block is ready.
                 }
                 Err(RecvTimeoutError::Timeout) => {
@@ -870,9 +874,9 @@ impl MicrophoneStream {
                     // waited (a driver-error close flips `is_open` without
                     // disconnecting the channel).
                     if !self.is_open() {
-                        self.drain_available(&mut buf)?;
-                        self.flush_chain(&mut buf)?;
-                        return self.take_block_or_closed(&mut buf, samples);
+                        self.drain_available(receiver, buf)?;
+                        self.flush_chain(buf)?;
+                        return self.take_block_or_closed(buf, samples);
                     }
                     // Stream still alive; loop with whatever deadline remains.
                 }
@@ -880,8 +884,8 @@ impl MicrophoneStream {
                     // Channel closed and drained. Drain the chain's end-of-stream
                     // tail (once) into the buffer, then deliver any remaining full
                     // blocks and the final short tail before reporting closed.
-                    self.flush_chain(&mut buf)?;
-                    return self.take_block_or_closed(&mut buf, samples);
+                    self.flush_chain(buf)?;
+                    return self.take_block_or_closed(buf, samples);
                 }
             }
         }
@@ -944,8 +948,13 @@ impl MicrophoneStream {
     /// Move every immediately-available native buffer from the channel into the
     /// re-block buffer without blocking. Stops on an empty or disconnected
     /// channel; the caller inspects `buf.len()` and the close state afterwards.
-    fn drain_available(&self, buf: &mut VecDeque<f32>) -> Result<(), DecibriError> {
-        while let Ok(chunk) = self.receiver.try_recv() {
+    /// The caller holds the `reblock_buffer` lock both ends live behind.
+    fn drain_available(
+        &self,
+        receiver: &Receiver<AudioChunk>,
+        buf: &mut VecDeque<f32>,
+    ) -> Result<(), DecibriError> {
+        while let Ok(chunk) = receiver.try_recv() {
             self.ingest(buf, chunk)?;
         }
         Ok(())
@@ -1538,10 +1547,12 @@ impl Microphone {
         crate::device::input_devices()
     }
 
-    /// Start capturing audio. Returns a stream handle with a receiver for audio chunks.
+    /// Start capturing audio. Returns a stream handle to read audio chunks from
+    /// with [`try_next_chunk`](MicrophoneStream::try_next_chunk) and
+    /// [`next_chunk`](MicrophoneStream::next_chunk).
     pub fn start(&self) -> Result<MicrophoneStream, DecibriError> {
-        let (sender, receiver): (Sender<AudioChunk>, Receiver<AudioChunk>) =
-            crossbeam_channel::bounded(CAPTURE_CHANNEL_CAPACITY);
+        let (sender, receiver): (SyncSender<AudioChunk>, Receiver<AudioChunk>) =
+            mpsc::sync_channel(CAPTURE_CHANNEL_CAPACITY);
 
         let running = Arc::new(AtomicBool::new(true));
         let running_clone = running.clone();
@@ -1717,7 +1728,6 @@ impl Microphone {
 
         Ok(MicrophoneStream {
             _stream,
-            receiver,
             running,
             // Consumers receive the target rate; `take_block` stamps it on every
             // delivered chunk.
@@ -1725,7 +1735,10 @@ impl Microphone {
             channels: output_channels,
             last_error,
             overruns,
-            reblock_buffer: Mutex::new(VecDeque::new()),
+            reblock_buffer: Mutex::new(Reblock {
+                receiver,
+                buffer: VecDeque::new(),
+            }),
             capture_stage: capture_stage.map(Mutex::new),
             chain_flushed: AtomicBool::new(false),
             vad_tap,
@@ -1743,6 +1756,7 @@ impl Microphone {
 #[cfg(all(test, feature = "capture"))]
 mod tests {
     use super::*;
+    use std::sync::mpsc::Sender;
     use std::thread;
 
     /// Construct a synthetic `MicrophoneStream` with no underlying cpal device,
@@ -1768,7 +1782,7 @@ mod tests {
         capture_stage: Option<CaptureStage>,
         channels: u16,
     ) -> (MicrophoneStream, Sender<AudioChunk>, Arc<AtomicBool>) {
-        let (sender, receiver) = crossbeam_channel::unbounded::<AudioChunk>();
+        let (sender, receiver) = mpsc::channel::<AudioChunk>();
         let running = Arc::new(AtomicBool::new(true));
         let vad_tap = match &capture_stage {
             Some(stage) if stage.has_transform() => Some(Mutex::new(VecDeque::new())),
@@ -1783,13 +1797,15 @@ mod tests {
             .map_or(channels, CaptureStage::tap_channels);
         let stream = MicrophoneStream {
             _stream: BackendStream::empty(),
-            receiver,
             running: running.clone(),
             sample_rate: 16000,
             channels,
             last_error: Arc::new(Mutex::new(None)),
             overruns: Arc::new(AtomicU64::new(0)),
-            reblock_buffer: Mutex::new(VecDeque::new()),
+            reblock_buffer: Mutex::new(Reblock {
+                receiver,
+                buffer: VecDeque::new(),
+            }),
             capture_stage: capture_stage.map(Mutex::new),
             vad_tap,
             tap_channels,

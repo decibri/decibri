@@ -242,7 +242,9 @@ class Speaker extends Writable {
   }
 
   /**
-   * Whether audio is currently being output.
+   * Whether the output stream is running: `true` once a non-empty write opens
+   * it, until `stop()`, `end()` once the queued audio has played, or a device
+   * failure. `drainAsync()` leaves it `true`.
    * @returns {boolean}
    */
   get isPlaying() {

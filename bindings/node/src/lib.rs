@@ -57,11 +57,10 @@ pub struct DecibriOptions {
     pub sample_rate: Option<u32>,
     pub channels: Option<u32>,
     /// Capture channel map: 0-based device channel indices, one per delivered
-    /// channel (the shape of CoreAudio AUHAL's channel map, an index list, not
-    /// miniaudio's spatial `channelMap`). Absent delivers the documented
-    /// average of every opened channel. Entries are validated against the
-    /// resolved device's own report when the stream starts; no fixed maximum
-    /// exists.
+    /// channel, selecting device channels by index rather than describing a
+    /// spatial layout. Absent delivers the documented average of every opened
+    /// channel. Entries are validated against the resolved device's own report
+    /// when the stream starts; no fixed maximum exists.
     pub channel_map: Option<Vec<u32>>,
     /// The source of the detector feed: the 0-based DELIVERED channel the
     /// voice-activity detector reads, resolved by the JS wrapper from the
@@ -1182,7 +1181,7 @@ impl SpeakerParts {
 
 /// Background task that performs the blocking channel `send` (write under
 /// backpressure) off the JS event loop. It holds only `Send` primitives: a clone
-/// of the stream's crossbeam `Sender` (wrapped in a `SpeakerSink`) and the
+/// of the stream's channel sender (wrapped in a `SpeakerSink`) and the
 /// already-converted samples. The `cpal::Stream` is not touched here; because the
 /// sink is lock-free, the offloaded `send` cannot block the JS thread's `stop` or
 /// `is_playing`. A stopped stream rejects the Promise with `SpeakerStreamClosed`;

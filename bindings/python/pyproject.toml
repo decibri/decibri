@@ -45,8 +45,7 @@ dependencies = []
 # includes the rust-numpy code paths, so the extra is a Python
 # dependency only. Requesting ndarray output without the Python `numpy`
 # package installed raises ImportError at construction. Lower bound 1.20
-# covers the abi3-py310 baseline and matches industry convention
-# (sounddevice, polars).
+# covers the abi3-py310 baseline.
 [project.optional-dependencies]
 numpy = ["numpy>=1.20"]
 

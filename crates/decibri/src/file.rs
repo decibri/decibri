@@ -126,12 +126,11 @@ pub struct FileConfig {
     /// The source of the detector feed: which of the delivered channels a
     /// voice-activity detector reads, for the per-chunk feed
     /// ([`File::vad_input`]) and the whole-recording analysis
-    /// ([`File::analyze`]) alike.
-    /// [`DetectorSource::Average`](crate::microphone::DetectorSource::Average)
-    /// (the default) feeds the frame average of every delivered channel;
-    /// [`DetectorSource::Channel`](crate::microphone::DetectorSource::Channel)
-    /// feeds one delivered channel alone. Names a DELIVERED channel index,
-    /// never a source index: with a [`channel_map`](Self::channel_map)
+    /// ([`File::analyze`]) alike. [`DetectorSource::Average`] (the default)
+    /// feeds the frame average of every delivered channel;
+    /// [`DetectorSource::Channel`] feeds one delivered channel alone. Names a
+    /// DELIVERED channel index, never a source index: with a
+    /// [`channel_map`](Self::channel_map)
     /// present, delivered channel `j` carries source channel
     /// `channel_map[j]` and the source names `j`. Affects only the detector
     /// feed; the delivered audio is untouched.
@@ -139,13 +138,13 @@ pub struct FileConfig {
     /// The same meaning as
     /// [`crate::MicrophoneConfig::detector_source`], with the source's
     /// channels standing where the device's stand on the live path. A
-    /// [`DetectorSource::Channel`](crate::microphone::DetectorSource::Channel)
-    /// index is validated by [`validate`](Self::validate) against
+    /// [`DetectorSource::Channel`] index is validated by
+    /// [`validate`](Self::validate) against
     /// [`channels`](Self::channels), the delivered count
     /// ([`DecibriError::DetectorSourceOutOfRange`] when it is not below that
     /// count). The delivered count is the only ceiling; no fixed maximum
     /// exists. Honoured only when the `vad` feature is compiled in. Default:
-    /// [`DetectorSource::Average`](crate::microphone::DetectorSource::Average).
+    /// [`DetectorSource::Average`].
     pub detector_source: DetectorSource,
     /// Remove a constant (DC) offset with a one-pole DC-blocking high-pass,
     /// applied after the channel and rate normalization. Default: false (off).
@@ -1260,7 +1259,7 @@ impl File {
 impl Iterator for File {
     type Item = Result<AudioChunk, DecibriError>;
 
-    /// Deliver the next conditioned chunk: [`DELIVERY_FRAMES`] frames of
+    /// Deliver the next conditioned chunk: `DELIVERY_FRAMES` frames of
     /// interleaved samples at the delivered channel count and the target
     /// rate, with a possibly shorter final chunk once the chain's
     /// end-of-stream tail has been drained. Every chunk is a whole number of

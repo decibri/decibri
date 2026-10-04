@@ -11,12 +11,18 @@ For other decibri packages, see:
 
 ## [Unreleased]
 
+### Breaking changes
+
+- **`MicrophoneConfig` and `FileConfig` carry `denoise`, `denoise_model_path` and `ort_library_path` only with the `denoise` feature, and `agc` and `limiter` only with the `gain` feature.** A build that disables the default features and leaves out `denoise` or `gain` has no such field, so code that names one does not compile. Enable the feature, or delete the assignment: in a build without the feature the setting has no effect, so deleting it changes no behaviour. The default feature set, which both bindings build, carries every field, and `dc_removal` and `highpass` are unconditional.
+- **`DenoiseModel` and its crate-root re-export `decibri::DenoiseModel` exist only with the `denoise` feature.** A build without `denoise` has no such type, so code that names it does not compile. Enable `denoise`, or remove the reference. The default feature set carries it, and `HighpassFilter` and `DetectorSource` are unconditional.
+- **`MicrophoneStream::receiver()` is removed.** Chunks are read with `try_next_chunk` and `next_chunk`, which return them conditioned and re-blocked to the requested size.
+
 ### Changed
 
 - `File::save` refuses an AIFF above 32767 channels with `DecibriError::AudioFormatUnsupported` carrying the container layer's own text, the refusal a FLAC above 8 channels and a WAV above 32767 already receive: an AIFF `COMM` chunk's `numChannels` is a signed 16-bit field, so 32767 is the format's own maximum. There is nothing a caller needs to do, because no container decibri writes accepts more. Reading an AIFF, every count up to 32767, WAV, FLAC and `File::buffer` delivery at any count are unchanged.
 - A device failure during capture or playback is no longer written to stderr. The failure reaches the consumer as before: the stream closes, and `MicrophoneStream::take_last_error` or `SpeakerStream::take_last_error` returns the `DecibriError::DeviceFailed` that caused it.
-- `MicrophoneConfig` and `FileConfig` carry `denoise`, `denoise_model_path` and `ort_library_path` only when the `denoise` feature is compiled in, and `agc` and `limiter` only when the `gain` feature is, as `aec` and its settings exist only with `aec`. A build without the feature has no field to set, so assigning one does not compile there. The default feature set, which both bindings build, carries every field; `dc_removal` and `highpass` are unconditional.
-- `DenoiseModel` and its crate-root re-export `decibri::DenoiseModel` exist only when the `denoise` feature is compiled in, as the `denoise` field that carries it does. A build without the feature has no model to name, so naming one does not compile there. The default feature set, which both bindings build, carries it; `HighpassFilter` and `DetectorSource` are unconditional.
+- The capture and playback queues use the standard library's channels (`std::sync::mpsc`), and the crate no longer depends on `crossbeam-channel`. The queue capacities, the capture overrun count, playback backpressure, and the wake of a pending `next_chunk` when the stream stops are unchanged.
+- The crate requires `decibri-decode` 0.1.5 or later, the release that refuses an AIFF above 32767 channels.
 
 ### Fixed
 

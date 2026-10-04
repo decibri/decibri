@@ -469,11 +469,12 @@ jobs:
         # matrix axis (the matrix uses fromJSON-driven flat axes; adding
         # a per-entry target field would require an include: block).
         #
-        # before-script-linux runs INSIDE the container before maturin builds.
-        # ORT download lives here so the dylib lands in the workspace at
-        # bindings/python/python/decibri/_ort/ before maturin's [tool.maturin]
-        # include directive packages it. Container's curl + tar are part of
-        # the manylinux_2_28 base image.
+        # before-script-linux runs INSIDE the container before maturin builds,
+        # in the step's working-directory (bindings/python), so its paths are
+        # relative to that directory. ORT download lives here so the dylib
+        # lands in the workspace at bindings/python/python/decibri/_ort/ before
+        # maturin's [tool.maturin] include directive packages it. Container's
+        # curl + tar are part of the manylinux_2_28 base image.
         #
         # Reference: PyO3/maturin-action README; matches polars / ruff /
         # tokenizers production CI patterns. Fully cited in
@@ -523,7 +524,7 @@ jobs:
             ORT_URL="https://github.com/microsoft/onnxruntime/releases/download/v${ORT_VERSION}/${ORT_TARBALL}"
             echo "Downloading ORT inside container: $ORT_URL"
 
-            mkdir -p bindings/python/python/decibri/_ort
+            mkdir -p python/decibri/_ort
             curl -sL --retry 3 --retry-delay 2 -o /tmp/ort.tgz "$ORT_URL"
             ACTUAL=$(sha256sum /tmp/ort.tgz | cut -d' ' -f1)
             if [ -z "$ORT_SHA256" ] || [ "$ACTUAL" != "$ORT_SHA256" ]; then
@@ -534,9 +535,9 @@ jobs:
             fi
             tar -xzf /tmp/ort.tgz -C /tmp
             SRC="/tmp/onnxruntime-${ORT_ARCH}-${ORT_VERSION}"
-            cp -L "$SRC/lib/libonnxruntime.so" bindings/python/python/decibri/_ort/libonnxruntime.so
-            cp    "$SRC/lib/libonnxruntime_providers_shared.so" bindings/python/python/decibri/_ort/
-            ls -la bindings/python/python/decibri/_ort/
+            cp -L "$SRC/lib/libonnxruntime.so" python/decibri/_ort/libonnxruntime.so
+            cp    "$SRC/lib/libonnxruntime_providers_shared.so" python/decibri/_ort/
+            ls -la python/decibri/_ort/
 
       - name: Install auditwheel (Linux only)
         if: runner.os == 'Linux'
@@ -720,14 +721,17 @@ jobs:
       - name: Wheel install-test (Phase 3 acceptance gate)
         working-directory: bindings/python
         shell: bash
+        env:
+          DECIBRI_REQUIRE_BUNDLED_ORT: "1"
         # Catches the original Phase 2 gap: "wheel built fine, but breaks
         # on user install". A clean venv installs the just-built wheel
         # path-based (NOT from any registry) and runs the ORT bundling
         # test suite against it. No editable install in this venv, so
         # `import decibri` resolves to the wheel's installed layout
         # exactly as a user's `pip install decibri` would. The
-        # requires_bundled_ort tests must RUN (not skip) here; if they
-        # skip, the wheel is missing the bundled _ort/ and the gate fails.
+        # requires_bundled_ort tests must RUN (not skip) here:
+        # DECIBRI_REQUIRE_BUNDLED_ORT=1 makes tests/conftest.py fail them,
+        # rather than skip them, when the wheel holds no runtime in _ort/.
         #
         # uv venv creates Scripts/python.exe on Windows and bin/python on
         # Unix; we resolve the platform-specific path explicitly to keep

@@ -7,7 +7,7 @@
 //! [`crate::SpeakerConfig`] carry in their `device` field.
 //!
 //! The platform enumeration and resolution themselves run behind
-//! [`crate::backend::AudioBackend`]; this module owns the public device types
+//! `crate::backend::AudioBackend`; this module owns the public device types
 //! and the pure `is_default` matching, and routes listing through the seam.
 
 use crate::error::DecibriError;

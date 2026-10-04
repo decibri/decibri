@@ -13,7 +13,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 #[cfg(feature = "playback")]
-use crossbeam_channel::{Receiver, Sender};
+use std::sync::mpsc::{self, Receiver, SyncSender};
 
 #[cfg(feature = "playback")]
 use crate::backend::{
@@ -64,7 +64,7 @@ impl SpeakerConfig {
     /// reported as [`DecibriError::SpeakerChannelsUnsupported`], naming the
     /// figure the device states. The one count refused ahead of the device is
     /// one the platform cannot express at all; see the output channel guard in
-    /// [`crate::backend`].
+    /// `crate::backend`.
     pub fn validate(&self) -> Result<(), DecibriError> {
         if !(1000..=384000).contains(&self.sample_rate) {
             return Err(DecibriError::SampleRateOutOfRange);
@@ -162,7 +162,7 @@ fn render_output(
 /// disconnected channel) returns [`DecibriError::SpeakerStreamClosed`].
 #[cfg(feature = "playback")]
 fn send_impl(
-    sender: &Sender<Vec<f32>>,
+    sender: &SyncSender<Vec<f32>>,
     running: &AtomicBool,
     samples: Vec<f32>,
 ) -> Result<(), DecibriError> {
@@ -184,7 +184,7 @@ fn send_impl(
 /// stream. Returns early if the stream has been stopped or its channel closed.
 #[cfg(feature = "playback")]
 fn drain_impl(
-    sender: &Sender<Vec<f32>>,
+    sender: &SyncSender<Vec<f32>>,
     running: &AtomicBool,
     sentinel_seq: &AtomicUsize,
     sentinels_played: &AtomicUsize,
@@ -221,7 +221,7 @@ pub struct SpeakerStream {
     // releases the device. The test seam builds it with `BackendStream::empty()`
     // (no real device); production stores the opened stream.
     _stream: BackendStream,
-    sender: Sender<Vec<f32>>,
+    sender: SyncSender<Vec<f32>>,
     running: Arc<AtomicBool>,
     // Drain handshake. `drain()` reserves the next `sentinel_seq` ticket and
     // sends an empty-vec sentinel; the output callback bumps `sentinels_played`
@@ -344,7 +344,7 @@ impl SpeakerStream {
     /// off-thread `send` and `drain` never block a holder of the stream that
     /// needs `stop` or `is_playing`.
     ///
-    /// The handle shares the same crossbeam channel, atomic drain flags and
+    /// The handle shares the same channel, atomic drain flags and
     /// device-error slot as the stream, so [`SpeakerSink::send`],
     /// [`SpeakerSink::drain`] and [`SpeakerSink::take_last_error`] behave
     /// exactly like their [`SpeakerStream`] counterparts. The stream must stay
@@ -367,7 +367,7 @@ impl Drop for SpeakerStream {
     /// Release any drain parked on this stream, or on a [`SpeakerSink`] that
     /// shares its `running` flag, when the stream is dropped without `stop()`.
     ///
-    /// `drain()` waits in a poll loop ([`drain_impl`]) that exits only on its
+    /// `drain()` waits in a poll loop (`drain_impl`) that exits only on its
     /// sentinel count or `running == false`. Dropping the stream tears down the
     /// cpal callback that advances the sentinel count, so without this a
     /// `drain()` already mid-wait at drop time would block forever (and, in the
@@ -388,15 +388,15 @@ impl Drop for SpeakerStream {
 ///
 /// Obtained from [`SpeakerStream::sink`]. The `SpeakerStream` itself is `Send`,
 /// so it can be held wherever its owner likes; a `SpeakerSink` is a cheaper,
-/// lock-free companion that clones only the thread-safe pieces (the crossbeam
-/// channel sender and the atomic flags) and is `Send + Sync + Clone`. Several
+/// lock-free companion that clones only the thread-safe pieces (the channel
+/// sender and the atomic flags) and is `Send + Sync + Clone`. Several
 /// threads can push samples or wait for drain through sinks at once, and because
 /// a sink never touches the audio stream handle, its `send` and `drain` cannot
 /// block whoever holds the `SpeakerStream` and needs `stop` or `is_playing`.
 #[cfg(feature = "playback")]
 #[derive(Clone)]
 pub struct SpeakerSink {
-    sender: Sender<Vec<f32>>,
+    sender: SyncSender<Vec<f32>>,
     running: Arc<AtomicBool>,
     sentinel_seq: Arc<AtomicUsize>,
     sentinels_played: Arc<AtomicUsize>,
@@ -480,8 +480,7 @@ impl Speaker {
 
     /// Start the output stream. Returns a handle for sending samples.
     pub fn start(&self) -> Result<SpeakerStream, DecibriError> {
-        let (sender, receiver): (Sender<Vec<f32>>, Receiver<Vec<f32>>) =
-            crossbeam_channel::bounded(32);
+        let (sender, receiver): (SyncSender<Vec<f32>>, Receiver<Vec<f32>>) = mpsc::sync_channel(32);
 
         let running = Arc::new(AtomicBool::new(true));
         let sentinel_seq = Arc::new(AtomicUsize::new(0));
@@ -629,7 +628,7 @@ mod tests {
     /// stream plus the receiving end of its channel and a clone of the
     /// played-sentinel counter, so a test can drive the output callback by hand.
     fn test_stream() -> (SpeakerStream, Receiver<Vec<f32>>, Arc<AtomicUsize>) {
-        let (sender, receiver) = crossbeam_channel::bounded::<Vec<f32>>(32);
+        let (sender, receiver) = mpsc::sync_channel::<Vec<f32>>(32);
         let sentinels_played = Arc::new(AtomicUsize::new(0));
         let stream = SpeakerStream {
             _stream: BackendStream::empty(),
@@ -703,7 +702,7 @@ mod tests {
         // clears `running`; this test fails (via the watchdog) without it.
         let (stream, receiver, _played) = test_stream();
         let sink = stream.sink();
-        let (done_tx, done_rx) = crossbeam_channel::bounded::<()>(1);
+        let (done_tx, done_rx) = mpsc::sync_channel::<()>(1);
         let drain_thread = thread::spawn(move || {
             // Sends a sentinel (the channel is open: `receiver` is held below),
             // then polls `sentinels_played`, which nothing advances here.

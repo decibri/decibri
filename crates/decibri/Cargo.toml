@@ -52,8 +52,8 @@ no-default-features = true
 default = ["capture", "playback", "vad", "denoise", "gain", "aec", "ort-load-dynamic"]
 
 # Core feature set.
-capture = ["dep:cpal", "dep:crossbeam-channel", "dep:decibri-resampler", "dep:decibri-decode"]
-playback = ["dep:cpal", "dep:crossbeam-channel"]
+capture = ["dep:cpal", "dep:decibri-resampler", "dep:decibri-decode"]
+playback = ["dep:cpal"]
 vad = ["dep:ort"]
 # Single-channel speech enhancement (denoise). Pulls `ort`: the capture denoise
 # stage runs an ONNX model through the same session seam as `vad`. Meaningful
@@ -84,7 +84,6 @@ rocm = ["ort?/rocm"]
 [dependencies]
 cpal = { workspace = true, optional = true }
 thiserror = { workspace = true }
-crossbeam-channel = { workspace = true, optional = true }
 ort = { workspace = true, optional = true }
 # Capture-path resampler: converts a device's native sample rate to the
 # requested target rate. Optional, pulled by the `capture` feature only.
@@ -93,7 +92,7 @@ decibri-resampler = { version = "0.4", optional = true }
 # AIFF, AIFF-C and FLAC. Optional, pulled by the `capture` feature only, which
 # is where the `File` source lives. It requires the same `decibri-resampler`
 # release decibri pins above, so cargo unifies the two into one tree entry.
-decibri-decode = { version = "0.1", optional = true }
+decibri-decode = { version = "0.1.5", optional = true }
 # Capture-path echo canceller: cancels the echo of caller-supplied far-end audio
 # out of the captured signal. Optional, pulled by the `aec` feature only.
 # `default-features` is left at its default (the crate has no default features);

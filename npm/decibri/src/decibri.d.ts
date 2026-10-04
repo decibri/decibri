@@ -296,14 +296,12 @@ export interface MicrophoneOptions extends ReadableOptions {
    * and may name more delivered channels than the device has. Absent derives
    * the delivered channels from `channels` as documented there.
    *
-   * The same shape as CoreAudio AUHAL's channel map
-   * (`kAudioOutputUnitProperty_ChannelMap`: an array of device channel
-   * indices, one entry per client channel). NOT miniaudio's `channelMap`,
-   * which names a spatial layout. Entries are validated against the resolved
-   * device's own report when the stream starts: an entry the device does not
-   * have throws a `DecibriError` with code `'CHANNEL_MAP_OUT_OF_RANGE'` naming
-   * the entry and the count the device reports. The device's report is the
-   * only ceiling; no fixed maximum exists.
+   * The map selects device channels by index, one entry per delivered
+   * channel; it does not describe a spatial layout. Entries are validated
+   * against the resolved device's own report when the stream starts: an entry
+   * the device does not have throws a `DecibriError` with code
+   * `'CHANNEL_MAP_OUT_OF_RANGE'` naming the entry and the count the device
+   * reports. The device's report is the only ceiling; no fixed maximum exists.
    * @default undefined (the derivation `channels` documents)
    */
   channelMap?: number[];
@@ -1096,7 +1094,11 @@ export declare class Speaker extends Writable {
   /** Immediate stop. Discards remaining buffered audio. */
   stop(): void;
 
-  /** Whether audio is currently being output. */
+  /**
+   * Whether the output stream is running: `true` once a non-empty write opens
+   * it, until `stop()`, `end()` once the queued audio has played, or a device
+   * failure. `drainAsync()` leaves it `true`.
+   */
   readonly isPlaying: boolean;
 
   /**

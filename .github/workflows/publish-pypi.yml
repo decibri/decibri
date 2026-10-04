@@ -268,7 +268,8 @@ jobs:
         # floor compatible with ONNX Runtime 1.28's documented requirements.
         # PyO3/maturin-action provides the container; before-script-linux
         # installs alsa-lib-devel + downloads + stages the ORT dylib before
-        # maturin runs.
+        # maturin runs. It runs in the step's working-directory
+        # (bindings/python), so its paths are relative to that directory.
         uses: PyO3/maturin-action@e83996d129638aa358a18fbd1dfb82f0b0fb5d3b # v1.51.0
         with:
           manylinux: 2_28
@@ -291,7 +292,7 @@ jobs:
             ORT_TARBALL="onnxruntime-${ORT_ARCH}-${ORT_VERSION}.tgz"
             ORT_URL="https://github.com/microsoft/onnxruntime/releases/download/v${ORT_VERSION}/${ORT_TARBALL}"
             echo "Downloading ORT inside container: $ORT_URL"
-            mkdir -p bindings/python/python/decibri/_ort
+            mkdir -p python/decibri/_ort
             curl -sL --retry 3 --retry-delay 2 -o /tmp/ort.tgz "$ORT_URL"
             ACTUAL=$(sha256sum /tmp/ort.tgz | cut -d' ' -f1)
             if [ -z "$ORT_SHA256" ] || [ "$ACTUAL" != "$ORT_SHA256" ]; then
@@ -302,9 +303,9 @@ jobs:
             fi
             tar -xzf /tmp/ort.tgz -C /tmp
             SRC="/tmp/onnxruntime-${ORT_ARCH}-${ORT_VERSION}"
-            cp -L "$SRC/lib/libonnxruntime.so" bindings/python/python/decibri/_ort/libonnxruntime.so
-            cp    "$SRC/lib/libonnxruntime_providers_shared.so" bindings/python/python/decibri/_ort/
-            ls -la bindings/python/python/decibri/_ort/
+            cp -L "$SRC/lib/libonnxruntime.so" python/decibri/_ort/libonnxruntime.so
+            cp    "$SRC/lib/libonnxruntime_providers_shared.so" python/decibri/_ort/
+            ls -la python/decibri/_ort/
 
       # auditwheel / delocate: bundle external deps + rewrite RPATH /
       # install-name. Required for PyPI manylinux compliance + macOS
@@ -403,12 +404,15 @@ jobs:
       # 603-670. Polars-style in-job verification: install the just-built
       # wheel into a fresh venv on the same platform that built it, run
       # smoke tests with CI=true so hardware-gated tests skip via the
-      # Phase 9 conftest auto-skip policy.
+      # Phase 9 conftest auto-skip policy. DECIBRI_REQUIRE_BUNDLED_ORT=1
+      # makes the requires_bundled_ort tests fail, rather than skip, when
+      # the wheel holds no runtime in _ort/.
       - name: Wheel install-test in clean venv
         working-directory: bindings/python
         shell: bash
         env:
           CI: 'true'
+          DECIBRI_REQUIRE_BUNDLED_ORT: '1'
         run: |
           set -euo pipefail
           WHEEL=$(ls "${GITHUB_WORKSPACE}/target/wheels/decibri-"*.whl | head -1)
