@@ -68,7 +68,7 @@ wheels = [
 
 [[package]]
 name = "decibri"
-version = "0.12.0"
+version = "0.13.0"
 source = { editable = "." }
 
 [package.optional-dependencies]
