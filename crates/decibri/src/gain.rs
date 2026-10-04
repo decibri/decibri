@@ -1,17 +1,17 @@
 //! Adaptive level control for the capture chain.
 //!
-//! [`LevelControl`] is one internal engine that drives a captured signal's level
+//! `LevelControl` is one internal engine that drives a captured signal's level
 //! toward a target by applying a smoothed, rate-limited gain. It is a same-length
 //! stage: it reads one frame and writes one frame, carrying
 //! its level estimate and current gain across blocks. In the chain it wraps
 //! through the `Linked` adapter: one detector reading each frame across every
 //! delivered channel, one gain applied to all of them, so the inter-channel
-//! balance is preserved. The per-sample [`InPlaceDsp`] form is the same
+//! balance is preserved. The per-sample `InPlaceDsp` form is the same
 //! control loop over a single run, and the two are identical at one channel.
 //! It adds no algorithmic delay (no look-ahead), so it declares zero latency.
 //!
-//! The engine is built around a [`LevelMode`] seam that selects what it measures
-//! and how fast its gain envelope moves. Today the only mode is [`LevelMode::Agc`]
+//! The engine is built around a `LevelMode` seam that selects what it measures
+//! and how fast its gain envelope moves. Today the only mode is `LevelMode::Agc`
 //! (automatic gain control: a broadband RMS level driven toward a dBFS target with
 //! a fast envelope). The seam is the extension point for a future loudness mode
 //! (a K-weighted loudness target with a slower envelope); adding it is a new

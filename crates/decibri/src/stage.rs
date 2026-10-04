@@ -251,9 +251,7 @@ impl Stage for Downmix {
 /// The map is a list of 0-based device channel indices, one entry per
 /// delivered channel: delivered channel `j` of each output frame is device
 /// channel `map[j]` of the matching input frame, in the order the map gives.
-/// The same shape as CoreAudio AUHAL's channel map
-/// (`kAudioOutputUnitProperty_ChannelMap`, an array of device channel indices,
-/// one per client channel); NOT miniaudio's `channelMap`, which is a spatial
+/// The map selects device channels by index and does not describe a spatial
 /// layout. Duplicate entries are permitted (each delivered channel is an
 /// independent copy of its source) and order is meaningful.
 ///

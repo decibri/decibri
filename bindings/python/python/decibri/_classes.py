@@ -709,12 +709,11 @@ class Microphone:
     ``channel_map=[1, 0]`` delivers the first two swapped). Entries may repeat
     and may appear in any order, so a map both selects and permutes. Omit it
     (the default ``None``) to take the derivation ``channels`` documents. The
-    same shape as CoreAudio AUHAL's channel map
-    (``kAudioOutputUnitProperty_ChannelMap``: an array of device channel
-    indices, one per client channel); NOT miniaudio's ``channelMap``, which
-    names a spatial layout. Entries are checked against the device's own
-    channel count when the stream starts (``ChannelMapOutOfRange`` names an
-    entry the device does not have); the device's report is the only ceiling.
+    map selects device channels by index, one entry per delivered channel; it
+    does not describe a spatial layout. Entries are checked against the
+    device's own channel count when the stream starts (``ChannelMapOutOfRange``
+    names an entry the device does not have); the device's report is the only
+    ceiling.
 
     The ``device`` parameter selects the input device. ``None`` (the default)
     uses the system default input. An ``int`` is an index from

@@ -25,10 +25,7 @@ jobs:
       # The policy and its one exception (dtolnay/rust-toolchain) live in
       # .github/zizmor.yml, which enforces them in CI.
       #
-      # actions/checkout appears here at v6.1.0 and in the deny job at
-      # v6.0.2. The deny job was pinned earlier at the version current then;
-      # both are the version each site already ran. Dependabot's grouped
-      # github-actions update converges them.
+      # actions/checkout is pinned to the same release (v7.0.1) in every job.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false

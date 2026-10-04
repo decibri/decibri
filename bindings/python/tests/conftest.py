@@ -25,6 +25,14 @@ Auto-skip semantics:
         where maturin develop leaves _ort/ empty. The check inspects the
         installed package via importlib.resources, so editable installs
         and wheel installs both go through the same code path.
+
+    Required bundled ORT (DECIBRI_REQUIRE_BUNDLED_ORT=1):
+        With this environment variable set to 1, a requires_bundled_ort
+        test fails instead of skipping when _ort/ holds no
+        platform-appropriate dylib. The wheel install-test steps in
+        python-ci.yml and publish-pypi.yml set it, so a wheel built
+        without its runtime fails there. Unset, or set to any other value,
+        the skip policy above applies unchanged.
 """
 
 from __future__ import annotations
@@ -41,6 +49,13 @@ _PLATFORM_PATTERN: dict[str, str] = {
     "darwin": "libonnxruntime*.dylib",
     "win32": "onnxruntime*.dll",
 }
+
+_REQUIRE_BUNDLED_ORT = "DECIBRI_REQUIRE_BUNDLED_ORT"
+
+
+def _bundled_ort_required() -> bool:
+    """Return True iff the environment requires the bundled ORT dylib."""
+    return os.environ.get(_REQUIRE_BUNDLED_ORT) == "1"
 
 
 def _bundled_ort_available() -> bool:
@@ -95,11 +110,33 @@ def pytest_collection_modifyitems(
     )
 
     bundled_available = _bundled_ort_available()
+    bundled_required = _bundled_ort_required()
 
     for item in items:
         if in_ci and "requires_audio_input" in item.keywords:
             item.add_marker(skip_audio_input)
         if in_ci and "requires_audio_output" in item.keywords:
             item.add_marker(skip_audio_output)
-        if (not bundled_available) and "requires_bundled_ort" in item.keywords:
+        if (
+            (not bundled_available)
+            and (not bundled_required)
+            and "requires_bundled_ort" in item.keywords
+        ):
             item.add_marker(skip_bundled_ort)
+
+
+def pytest_runtest_call(item: pytest.Item) -> None:
+    """Fail a requires_bundled_ort test when the required dylib is missing.
+
+    Applies only with DECIBRI_REQUIRE_BUNDLED_ORT=1; see the module
+    docstring. The test body does not run.
+    """
+    if (
+        "requires_bundled_ort" in item.keywords
+        and _bundled_ort_required()
+        and not _bundled_ort_available()
+    ):
+        pytest.fail(
+            f"{_REQUIRE_BUNDLED_ORT}=1 is set and decibri/_ort/ holds no "
+            "platform ONNX Runtime library"
+        )

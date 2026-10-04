@@ -6,11 +6,11 @@ Reference guide to the Cargo features exposed by the `decibri` crate. Aimed at R
 
 | Flag | Default | Purpose |
 |------|---------|---------|
-| `capture` | on | Microphone input stream support (pulls in `cpal`, `crossbeam-channel`, `decibri-resampler`, `decibri-decode`) |
-| `playback` | on | Speaker output stream support (pulls in `cpal`, `crossbeam-channel`) |
+| `capture` | on | Microphone input stream support (pulls in `cpal`, `decibri-resampler`, `decibri-decode`) |
+| `playback` | on | Speaker output stream support (pulls in `cpal`) |
 | `vad` | on | Silero VAD ONNX inference (pulls in `ort`) |
-| `denoise` | on | On by default; no runtime cost when off |
-| `gain` | on | On by default; no runtime cost when off |
+| `denoise` | on | Capture-path single-channel speech enhancement (pulls in `ort`); carries the `denoise`, `denoise_model_path` and `ort_library_path` fields of `MicrophoneConfig` and `FileConfig`, and `DenoiseModel` |
+| `gain` | on | Capture-path AGC and peak limiter (pure DSP); carries the `agc` and `limiter` fields of `MicrophoneConfig` and `FileConfig` |
 | `aec` | on | Acoustic echo cancellation on the capture path (pulls in `decibri-aec`) |
 | `ort-load-dynamic` | **on** | ORT loaded at runtime from a user-supplied path |
 | `ort-download-binaries` | off | ORT downloaded at build time, statically embedded |

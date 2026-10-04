@@ -1,7 +1,7 @@
 //! Speech enhancement (denoise) for the capture path: a single-channel model
 //! run over each carried channel.
 //!
-//! Wraps the bundled FastEnhancer-T ONNX model as a capture [`Stage`]. The model
+//! Wraps the bundled FastEnhancer-T ONNX model as a capture `Stage`. The model
 //! is the waveform-in / waveform-out variant: it bakes the complete spectral path
 //! (windowing, the forward and inverse DFT, power compression, and overlap-add)
 //! into its graph, so this stage owns no spectral DSP. The host's job is purely

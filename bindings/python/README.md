@@ -230,7 +230,7 @@ The same `aec` parameter is available on `AsyncMicrophone`. `push_aec_reference(
 
 ## Files
 
-Everything a `Microphone` does to live audio, `File` does to audio you already have: the same conditioning options (`dc_removal`, `denoise`, `highpass`, `agc`, `limiter`), the same iteration, the same conditioned chunks out, and the same opt-in `vad=`. A `File` reads WAV, AIFF, AIFF-C and FLAC (`File("clip.wav")`, or the identical `File.open("clip.wav")`; the container is identified from the file's own bytes rather than its extension) or wraps in-memory samples (`File.buffer(samples, input_rate=48000)`; raw samples carry no header, so their native rate is explicit). `sample_rate` stays the target output rate, the same meaning it has on `Microphone`, so a 44.1 kHz recording comes out at 16 kHz unless you set it.
+`File` runs the same conditioning chain as `Microphone` on audio you already have: the same conditioning options (`dc_removal`, `denoise`, `highpass`, `agc`, `limiter`), the same iteration, the same conditioned chunks out, and the same opt-in `vad=`. Echo cancellation is a live-capture option and is not offered on `File`. A `File` reads WAV, AIFF, AIFF-C and FLAC (`File("clip.wav")`, or the identical `File.open("clip.wav")`; the container is identified from the file's own bytes rather than its extension) or wraps in-memory samples (`File.buffer(samples, input_rate=48000)`; raw samples carry no header, so their native rate is explicit). `sample_rate` stays the target output rate, the same meaning it has on `Microphone`, so a 44.1 kHz recording comes out at 16 kHz unless you set it.
 
 Because a `File` is a complete recording, it can analyze the whole recording for speech:
 
@@ -251,7 +251,7 @@ report = decibri.File("noisy.wav", denoise="fastenhancer-t").save("clean.flac")
 print(report.clipped_samples, report.non_finite_samples)
 ```
 
-The container comes from the path's extension (`.wav`, `.aiff`, `.aif`, `.aifc` or `.flac`) or from `format`; an extension it does not recognise raises `AudioFormatUnsupported` rather than defaulting. `compression` sets the FLAC compression level, 0 to 8 with 5 the default. The returned `SaveReport` says what the write did to the samples: `clipped_samples` counts finite samples outside full scale clamped to `[-1.0, 1.0]`, and `non_finite_samples` counts non-finite samples that never reach the file (NaN is written as silence, an infinity as full scale). Saving consumes the source and raises `FileEngaged` once iteration has begun, exactly as `analyze()` does.
+The container comes from the path's extension (`.wav`, `.aiff`, `.aif`, `.aifc` or `.flac`) or from `format`; an extension it does not recognise raises `AudioFormatUnsupported` rather than defaulting. `compression` sets the FLAC compression level, 0 to 8 with 5 the default. The returned `SaveReport` says what the write did to the samples: `clipped_samples` counts finite samples outside full scale clamped to `[-1.0, 1.0]`, and `non_finite_samples` counts the non-finite samples the save replaces before they reach the file (NaN as silence, an infinity as full scale). When the conditioning chain runs it has already replaced every non-finite sample with silence at its entry, so the count covers the direct path only, a mono source already at `sample_rate` with no conditioning enabled. Saving consumes the source and raises `FileEngaged` once iteration has begun, exactly as `analyze()` does.
 
 Iteration, analysis and saving are separate single passes; construct one `File` per operation. `AsyncFile` mirrors the whole surface with `async` semantics, `await file.save(...)` included.
 
@@ -283,9 +283,15 @@ Two limits apply on Windows and decibri can close neither, so decibri does not c
 For Silero VAD in async code, use the `open()` factory to dispatch the synchronous ORT init off the event loop:
 
 ```python
-async with await decibri.AsyncMicrophone.open(vad="silero") as mic:
-    async for chunk in mic:
-        ...
+import asyncio
+import decibri
+
+async def main():
+    async with await decibri.AsyncMicrophone.open(vad="silero") as mic:
+        async for chunk in mic:
+            ...
+
+asyncio.run(main())
 ```
 
 Synchronous constructors (`AsyncMicrophone(...)`) remain supported and unchanged; `open()` is the recommended pattern when ORT load cost matters.

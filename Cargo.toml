@@ -19,7 +19,6 @@ edition = "2021"
 #   1.78  cpal 0.17.3
 #   1.71  serde_json 1.0.151
 #   1.68  thiserror 2.0.18
-#   1.60  crossbeam-channel 0.5.16
 # Bump when dependencies force it; otherwise hold.
 rust-version = "1.88"
 license = "Apache-2.0"
@@ -28,7 +27,6 @@ repository = "https://github.com/decibri/decibri"
 [workspace.dependencies]
 cpal = "0.17"
 thiserror = "2"
-crossbeam-channel = "0.5"
 # ort 2.0.0-rc.13 targets ONNX Runtime C API version 28 (ORT_API_VERSION = 28).
 # We bundle ONNX Runtime 1.28.1 archives into each npm platform package and
 # into the wheel.

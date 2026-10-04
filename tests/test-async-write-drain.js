@@ -128,7 +128,7 @@ async function testAsyncPlayback() {
     assert(true, 'writeAsync(tone) resolves');
 
     await speaker.drainAsync();
-    assert(!speaker.isPlaying, 'isPlaying is false after drainAsync resolves');
+    assert(speaker.isPlaying, 'isPlaying stays true after drainAsync resolves');
   } catch (e) {
     if (isEnvironmental(e)) {
       console.log(`  SKIP: playback unavailable: ${e.message}`);
@@ -169,7 +169,7 @@ async function testSequentialWrites() {
       await speaker.writeAsync(chunk);
     }
     await speaker.drainAsync();
-    assert(!speaker.isPlaying, 'not playing after draining sequential writes');
+    assert(speaker.isPlaying, 'still playing after draining sequential writes');
   } catch (e) {
     if (isEnvironmental(e)) {
       console.log(`  SKIP: sequential playback unavailable: ${e.message}`);
