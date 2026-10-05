@@ -21,7 +21,7 @@ on:
       - '.github/workflows/python-ci.yml'
   workflow_dispatch:
   schedule:
-    # Nightly full 7 OS x 5 Python regression run at 04:00 UTC
+    # Nightly full 8 OS x 5 Python regression run at 04:00 UTC
     # (14:00 AEST / 13:00 AEDT). Catches forward-compatibility issues
     # that the reduced push matrix (3.10 floor + 3.14 ceiling only)
     # does not exercise on every commit. Distinct from any other cron
@@ -68,6 +68,13 @@ env:
   ORT_SHA256_OSX_ARM64: 18c853e5c5deba90e244e1b953a65121f23747ba2c04e6743885caa6ce1ea12f
   ORT_SHA256_WIN_X64: e46ac7652def5da0e5223372be21185ffff553e0419459f66e0114d460c38162
   ORT_SHA256_WIN_ARM64: 953f1187e262e60820cdafdc5cbe63930f24fe4d961182b739bf3effdf3f608f
+  # MACOS_DEPLOYMENT_TARGET is the minimum macOS version of the extension in
+  # the macOS wheel, the same value publish-pypi.yml builds the release with.
+  # The "Build release wheel (macOS/Windows host build; smoke, not uploaded)"
+  # step passes it to maturin as MACOSX_DEPLOYMENT_TARGET. Only that step sets
+  # MACOSX_DEPLOYMENT_TARGET. If the delocate step sees it, delocate refuses a
+  # wheel whose bundled library declares a higher version.
+  MACOS_DEPLOYMENT_TARGET: "11.0"
   # Phase 7 wheel size thresholds. Soft warning continues the Phase 3
   # alarm (150 MB; today's bundled wheel is ~30 to 50 MB). Hard fail at
   # 200 MB catches pathological regressions (e.g., accidentally bundling
@@ -92,9 +99,9 @@ jobs:
       matrix:
         # Matrix sizing by trigger:
         #   pull_request:      6 jobs  (ubuntu-24.04 and ubuntu-26.04 x 3 Python: floor, middle, ceiling)
-        #   push:              13 jobs (7 OS x 2 Python: 3.10 floor + 3.14 ceiling, less the excluded cell)
-        #   workflow_dispatch: 34 jobs (full 7 OS x 5 Python, less the excluded cell)
-        #   schedule (nightly): 34 jobs (full 7 OS x 5 Python, less the excluded cell)
+        #   push:              15 jobs (8 OS x 2 Python: 3.10 floor + 3.14 ceiling, less the excluded cell)
+        #   workflow_dispatch: 39 jobs (full 8 OS x 5 Python, less the excluded cell)
+        #   schedule (nightly): 39 jobs (full 8 OS x 5 Python, less the excluded cell)
         #
         # abi3-py310 wheels are forward-compatible by construction across
         # Python 3.10-3.14 per CPython's stable ABI guarantee. Running 5
@@ -105,7 +112,8 @@ jobs:
         # manual dispatch for comprehensive coverage.
         #
         # OS matrix (full) mirrors publish-npm.yml's cross-platform precedent,
-        # with each Linux platform on both Ubuntu 24.04 and Ubuntu 26.04:
+        # with each Linux platform on both Ubuntu 24.04 and Ubuntu 26.04, and
+        # macOS on both macOS 15 and macOS 26:
         # - ubuntu-24.04          (x86_64-unknown-linux-gnu)
         # - ubuntu-26.04          (x86_64-unknown-linux-gnu)
         # - ubuntu-24.04-arm      (aarch64-unknown-linux-gnu)
@@ -113,10 +121,11 @@ jobs:
         # - windows-2025-vs2026   (x86_64-pc-windows-msvc)
         # - windows-11-vs2026-arm (aarch64-pc-windows-msvc; Python 3.11 and
         #                          newer, see the exclude below)
-        # - macos-14              (aarch64-apple-darwin; Apple Silicon only,
+        # - macos-15              (aarch64-apple-darwin; Apple Silicon only,
         #                          no Intel coverage matching publish-npm.yml)
-        # macos-14 is pinned (not macos-latest) for consistency with
-        # publish-npm.yml; pin-bumping is a deliberate cross-workflow action.
+        # - macos-26              (aarch64-apple-darwin; Apple Silicon only)
+        # The macOS labels are explicit pins, not macos-latest. publish-npm.yml
+        # and publish-pypi.yml build the macOS release on macos-15.
         # ubuntu-24.04-arm and ubuntu-26.04-arm are the explicit pins for
         # native ARM64 runners.
         #
@@ -130,7 +139,7 @@ jobs:
         #
         # fromJSON(...) wrappers are required: GitHub Actions expression
         # results are strings, but matrix axes must be arrays.
-        os: ${{ fromJSON(github.event_name == 'pull_request' && '["ubuntu-24.04", "ubuntu-26.04"]' || '["ubuntu-24.04", "ubuntu-26.04", "ubuntu-24.04-arm", "ubuntu-26.04-arm", "windows-2025-vs2026", "windows-11-vs2026-arm", "macos-14"]') }}
+        os: ${{ fromJSON(github.event_name == 'pull_request' && '["ubuntu-24.04", "ubuntu-26.04"]' || '["ubuntu-24.04", "ubuntu-26.04", "ubuntu-24.04-arm", "ubuntu-26.04-arm", "windows-2025-vs2026", "windows-11-vs2026-arm", "macos-15", "macos-26"]') }}
         python-version: ${{ fromJSON((github.event_name == 'workflow_dispatch' || github.event_name == 'schedule') && '["3.10", "3.11", "3.12", "3.13", "3.14"]' || github.event_name == 'pull_request' && '["3.10", "3.12", "3.14"]' || '["3.10", "3.14"]') }}
         # No CPython 3.10 exists for Windows ARM64 (the platform's first
         # release is 3.11), so the 3.10 cell on windows-11-vs2026-arm cannot
@@ -177,7 +186,12 @@ jobs:
           # target graphs diverge (napi cdylib vs pyo3 cdylib + python3-dll-a
           # + abi3 import-lib generation), so isolated caches reach steady
           # state independently without write contention.
-          shared-key: "rust-python"
+          #
+          # The key of a macOS cell includes the runner label, so the macos-15
+          # and macos-26 cells keep separate caches. Of the runner's
+          # properties, rust-cache keys only on the OS family and the
+          # architecture.
+          shared-key: ${{ runner.os == 'macOS' && format('rust-python-{0}', matrix.os) || 'rust-python' }}
 
       - uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
         with:
@@ -386,7 +400,7 @@ jobs:
 
       - name: Run mypy --strict (Linux only)
         # mypy strict is identical regardless of OS; running it on every
-        # matrix entry would surface the same errors seven times for no
+        # matrix entry would surface the same errors eight times for no
         # additional signal. Pinned to Linux (both x64 and ARM64) because
         # both share the canonical type-check environment; macOS / Windows
         # entries skip this step.
@@ -398,6 +412,9 @@ jobs:
         if: runner.os != 'Linux'
         working-directory: bindings/python
         shell: bash
+        env:
+          # The Windows build ignores this variable.
+          MACOSX_DEPLOYMENT_TARGET: ${{ env.MACOS_DEPLOYMENT_TARGET }}
         # Validates the release-profile abi3 wheel builds end-to-end,
         # separate from the dev-profile `maturin develop` above. Catches
         # release-only issues (lto, strip, codegen-units = 1) before they'd
@@ -671,9 +688,10 @@ jobs:
           uv run delocate-listdeps --depending "$NEW_WHEEL"
 
       # abi3 compliance gate, shifted left from publish-pypi.yml to PR CI in
-      # 0.1.3. Mirrors publish-pypi.yml lines 296-308 verbatim. Defense in
-      # depth: abi3audit also continues to run at publish time so a wheel that
-      # somehow escapes PR review still cannot reach PyPI without the gate.
+      # 0.1.3. Mirrors the publish-pypi.yml step "Verify abi3 compliance"
+      # verbatim. Defense in depth: abi3audit also continues to run at publish
+      # time so a wheel that somehow escapes PR review still cannot reach PyPI
+      # without the gate.
       # The audit runs after auditwheel / delocate so the wheel under audit
       # is the repaired artifact that publish would actually upload, not the
       # raw maturin output. --strict fails on any abi3 violation;

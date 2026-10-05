@@ -65,6 +65,20 @@ env:
   ORT_SHA256_OSX_ARM64: 18c853e5c5deba90e244e1b953a65121f23747ba2c04e6743885caa6ce1ea12f
   ORT_SHA256_WIN_X64: e46ac7652def5da0e5223372be21185ffff553e0419459f66e0114d460c38162
   ORT_SHA256_WIN_ARM64: 953f1187e262e60820cdafdc5cbe63930f24fe4d961182b739bf3effdf3f608f
+  # MACOS_DEPLOYMENT_TARGET is the minimum macOS version of the extension in
+  # the macOS wheel. The "Build release wheel (macOS / Windows host build)"
+  # step passes it to maturin as MACOSX_DEPLOYMENT_TARGET. Only that step sets
+  # MACOSX_DEPLOYMENT_TARGET. If the delocate step sees it, delocate refuses a
+  # wheel whose bundled library declares a higher version. The "Check the
+  # minimum macOS version (macOS)" step fails the job if the extension
+  # declares another version.
+  MACOS_DEPLOYMENT_TARGET: "11.0"
+  # MACOS_PACKAGE_MINIMUM is the minimum macOS version of the macOS wheel,
+  # which its bundled ONNX Runtime library sets. delocate sets the wheel's
+  # platform tag from the highest minimum among the wheel's binaries. The
+  # same check step fails the job if a bundled library declares a higher
+  # version.
+  MACOS_PACKAGE_MINIMUM: "14.0"
   # Required for maturin abi3 builds on Python 3.14 hosts targeting py310
   # abi3. See PyO3 issue #5505. Workflow-level setting applies to every
   # matrix entry; no-op on Python 3.10-3.13 hosts.
@@ -91,7 +105,7 @@ jobs:
             ort_platform_slug: linux-aarch64
             ort_ext: tgz
             python: '3.10'
-          - os: macos-14
+          - os: macos-15
             target: aarch64-apple-darwin
             ort_platform_slug: osx-arm64
             ort_ext: tgz
@@ -133,7 +147,7 @@ jobs:
 
       # ALSA dev headers are needed for cpal -> alsa-sys on Linux. macOS and
       # Windows pull CoreAudio / WASAPI from system frameworks.
-      # Mirrors python-ci.yml line 137-146.
+      # Mirrors the "Install libasound2-dev (Linux only)" step of python-ci.yml.
       - name: Install libasound2-dev (Linux only)
         if: runner.os == 'Linux'
         run: sudo apt-get update && sudo apt-get install -y libasound2-dev
@@ -177,7 +191,8 @@ jobs:
       # (ORT downloaded inside the container); macOS and Windows download
       # on the host and stage into bindings/python/python/decibri/_ort/
       # before maturin packages it via the [tool.maturin] include directive.
-      # Mirrors python-ci.yml lines 178-305 for the host-build paths.
+      # Mirrors the "Download and extract ONNX Runtime (macOS)" and
+      # "Download and extract ONNX Runtime (Windows)" steps of python-ci.yml.
       - name: Compute ORT URL and archive digest
         if: runner.os != 'Linux'
         shell: bash
@@ -244,11 +259,15 @@ jobs:
           Copy-Item "$src/lib/onnxruntime.dll" bindings/python/python/decibri/_ort/
 
       # macOS / Windows: build the release wheel on the host. Linux uses the
-      # manylinux container step further down. Mirrors python-ci.yml line 335.
+      # manylinux container step further down. Mirrors the python-ci.yml step
+      # "Build release wheel (macOS/Windows host build; smoke, not uploaded)".
       - name: Build release wheel (macOS / Windows host build)
         if: runner.os != 'Linux'
         working-directory: bindings/python
         shell: bash
+        env:
+          # The Windows build ignores this variable.
+          MACOSX_DEPLOYMENT_TARGET: ${{ env.MACOS_DEPLOYMENT_TARGET }}
         run: |
           rm -rf "${GITHUB_WORKSPACE}/target/wheels/"
           uv run maturin build --release
@@ -259,13 +278,16 @@ jobs:
         # Wipe target/ before the manylinux_2_28 container build so cached
         # host-built artifacts (linked against ubuntu-24.04's glibc 2.39)
         # do not leak into the container's glibc 2.28 build context.
-        # Mirrors python-ci.yml line 366-391.
+        # Mirrors the python-ci.yml step
+        # "Clean target/ before Linux container build".
         run: rm -rf "${GITHUB_WORKSPACE}/target/"
 
       - name: Build Linux wheel in manylinux_2_28 container
         if: runner.os == 'Linux'
-        # Mirrors python-ci.yml lines 393-472. manylinux_2_28 is the glibc
-        # floor compatible with ONNX Runtime 1.28's documented requirements.
+        # Mirrors the python-ci.yml step
+        # "Build Linux wheel in manylinux_2_28 container (Phase 7 Step 2.5)".
+        # manylinux_2_28 is the glibc floor compatible with ONNX Runtime 1.28's
+        # documented requirements.
         # PyO3/maturin-action provides the container; before-script-linux
         # installs alsa-lib-devel + downloads + stages the ORT dylib before
         # maturin runs. It runs in the step's working-directory
@@ -309,7 +331,8 @@ jobs:
 
       # auditwheel / delocate: bundle external deps + rewrite RPATH /
       # install-name. Required for PyPI manylinux compliance + macOS
-      # @loader_path. Mirrors python-ci.yml lines 474-601.
+      # @loader_path. Mirrors the python-ci.yml steps from
+      # "Install auditwheel (Linux only)" to "Run delocate repair (macOS only)".
       - name: Install auditwheel (Linux only)
         if: runner.os == 'Linux'
         working-directory: bindings/python
@@ -381,6 +404,53 @@ jobs:
           NEW_WHEEL=$(ls "${GITHUB_WORKSPACE}/target/wheels/decibri-"*.whl | head -1)
           uv run delocate-listdeps --depending "$NEW_WHEEL"
 
+      - name: Check the minimum macOS version (macOS)
+        if: runner.os == 'macOS'
+        shell: bash
+        # Reads the minimum macOS version that each Mach-O file in the
+        # repaired wheel declares, from LC_BUILD_VERSION or
+        # LC_VERSION_MIN_MACOSX, and prints one table row per file. The step
+        # fails if the extension declares a version other than
+        # MACOS_DEPLOYMENT_TARGET, or if a bundled library declares a version
+        # above MACOS_PACKAGE_MINIMUM.
+        run: |
+          set -euo pipefail
+          WHEEL=$(ls "${GITHUB_WORKSPACE}/target/wheels/decibri-"*.whl | head -1)
+          if [ -z "$WHEEL" ]; then
+            echo "ERROR: no wheel found for the minimum macOS check"
+            exit 1
+          fi
+          echo "Wheel: $(basename "$WHEEL")"
+          cd "$(mktemp -d)"
+          unzip -q "$WHEEL"
+          # Prints the row for file $1 and fails unless the highest minimum
+          # macOS version in the file satisfies the relation "$2 $3".
+          check() {
+            otool -l "$1" | awk -v file="$1" -v op="$2" -v want="$3" '
+              function key(v, p) { split(v, p, "."); return p[1] * 1000000 + p[2] * 1000 + p[3] }
+              $1 == "cmd" { cmd = $2 }
+              (cmd == "LC_BUILD_VERSION" && $1 == "minos") || (cmd == "LC_VERSION_MIN_MACOSX" && $1 == "version") {
+                if (got == "" || key($2) > key(got)) got = $2
+              }
+              END {
+                ok = got != "" && (op == "=" ? key(got) == key(want) : key(got) <= key(want))
+                printf "%-40s %-8s %-9s %s\n", file, (got == "" ? "none" : got), op " " want, (ok ? "ok" : "FAIL")
+                exit !ok
+              }'
+          }
+          printf '%-40s %-8s %-9s %s\n' FILE MINIMUM REQUIRED RESULT
+          FAIL=0
+          check decibri/_decibri.abi3.so = "$MACOS_DEPLOYMENT_TARGET" || FAIL=1
+          LIBS=$(find . -name '*.dylib' | sort)
+          if [ -z "$LIBS" ]; then
+            echo "ERROR: the wheel holds no .dylib file"
+            FAIL=1
+          fi
+          for f in $LIBS; do
+            check "${f#./}" '<=' "$MACOS_PACKAGE_MINIMUM" || FAIL=1
+          done
+          exit "$FAIL"
+
       # abi3 compliance gate (LD-10-4). Hard fail via --strict; --assume-
       # minimum-abi3 3.10 pins to decibri's abi3 floor and avoids the
       # documented bare-.so abi3-cp32 false-positive case from abi3audit's
@@ -397,8 +467,9 @@ jobs:
           fi
           uvx abi3audit==0.0.26 --strict --verbose --assume-minimum-abi3 3.10 "$WHEEL"
 
-      # Wheel install-test gate (LD-10-3). Mirrors python-ci.yml lines
-      # 603-670. Polars-style in-job verification: install the just-built
+      # Wheel install-test gate (LD-10-3). Mirrors the python-ci.yml step
+      # "Wheel install-test (Phase 3 acceptance gate)". Polars-style in-job
+      # verification: install the just-built
       # wheel into a fresh venv on the same platform that built it, run
       # smoke tests with CI=true so hardware-gated tests skip via the
       # Phase 9 conftest auto-skip policy. DECIBRI_REQUIRE_BUNDLED_ORT=1
@@ -425,8 +496,9 @@ jobs:
             VENV_PY=".install-test/bin/python"
           fi
           uv pip install --python "$VENV_PY" "$WHEEL" pytest
-          # Same test surface as python-ci.yml's canonical install gate
-          # (line 670): test_ort_bundling.py + test_wheel_smoke.py cover
+          # Same test surface as python-ci.yml's canonical install gate, the
+          # "Wheel install-test (Phase 3 acceptance gate)" step.
+          # test_ort_bundling.py + test_wheel_smoke.py cover
           # bundled ORT layout, import, sync construct, async construct,
           # numpy=True, resolver-finds-bundled. test_smoke.py adds the
           # public surface count + version assertions.
