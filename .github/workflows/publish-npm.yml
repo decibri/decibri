@@ -39,7 +39,7 @@ env:
 jobs:
   preflight:
     name: Preflight (version match)
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     permissions:
       contents: read
     steps:
@@ -75,7 +75,7 @@ jobs:
           MISMATCH=0
 
           # Every package.json must match the tag. jq is preinstalled on
-          # ubuntu-latest runners; no setup needed.
+          # ubuntu-24.04 runners; no setup needed.
           for pkg in \
             npm/decibri/package.json \
             npm/platform-darwin-arm64/package.json \
@@ -109,12 +109,12 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - os: windows-latest
+          - os: windows-2025-vs2026
             target: x86_64-pc-windows-msvc
             artifact: win32-x64-msvc
             ort_platform_slug: win-x64
             ort_ext: zip
-          - os: windows-11-arm
+          - os: windows-11-vs2026-arm
             target: aarch64-pc-windows-msvc
             artifact: win32-arm64-msvc
             ort_platform_slug: win-arm64
@@ -124,7 +124,7 @@ jobs:
             artifact: darwin-arm64
             ort_platform_slug: osx-arm64
             ort_ext: tgz
-          - os: ubuntu-latest
+          - os: ubuntu-24.04
             target: x86_64-unknown-linux-gnu
             artifact: linux-x64-gnu
             setup: sudo apt-get update && sudo apt-get install -y libasound2-dev
@@ -347,7 +347,7 @@ jobs:
 
   publish:
     name: Publish
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     needs: build
     # Required-reviewer protection on this environment gates the publish
     # behind a manual approval in the Actions UI.
@@ -571,15 +571,47 @@ jobs:
 
       - name: Verify npm publish
         if: github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.publish == true)
-        # Strip the `npm-v` prefix from the tag so the `npm view` lookup
-        # uses the registry-side semver, not the literal tag name. Under
-        # workflow_dispatch the tag is HEAD's most recent tag or empty;
-        # the strip is a no-op for non-prefixed inputs.
+        # TAG is the ref the run started from. The step strips its `npm-v`
+        # prefix to get the registry version. The registry can list a new
+        # version after a delay. The step therefore polls the main package and
+        # the five platform packages, with 20 seconds between rounds. If a
+        # package does not list the version within 600 seconds, the step fails
+        # and names each such package.
         shell: bash
         env:
           TAG: ${{ github.ref_name }}
         run: |
           VERSION="${TAG#npm-v}"
-          echo "Verifying npm registry view for decibri@${VERSION}"
-          sleep 30
-          npm view "decibri@${VERSION}"
+          PENDING=(
+            @decibri/decibri-win32-x64-msvc
+            @decibri/decibri-win32-arm64-msvc
+            @decibri/decibri-darwin-arm64
+            @decibri/decibri-linux-x64-gnu
+            @decibri/decibri-linux-arm64-gnu
+            decibri
+          )
+          DEADLINE=$((SECONDS + 600))
+          while :; do
+            MISSING=()
+            for PKG in "${PENDING[@]}"; do
+              if [ "$(npm view "${PKG}@${VERSION}" version 2>/dev/null)" = "$VERSION" ]; then
+                echo "OK: ${PKG}@${VERSION} is on the registry"
+              else
+                MISSING+=("$PKG")
+              fi
+            done
+            if [ "${#MISSING[@]}" -eq 0 ]; then
+              echo "OK: all 6 packages are on the registry at ${VERSION}"
+              exit 0
+            fi
+            if [ "$SECONDS" -ge "$DEADLINE" ]; then
+              echo "ERROR: after 600 seconds, these packages are not on the registry at ${VERSION}:"
+              for PKG in "${MISSING[@]}"; do
+                echo "  ${PKG}@${VERSION}"
+              done
+              exit 1
+            fi
+            PENDING=("${MISSING[@]}")
+            echo "Waiting 20 seconds for ${#MISSING[@]} package(s): ${MISSING[*]}"
+            sleep 20
+          done

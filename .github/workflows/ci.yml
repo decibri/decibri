@@ -19,7 +19,7 @@ concurrency:
 jobs:
   lint:
     name: Lint
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     steps:
       # Action references are pinned to commit SHAs with a version comment.
       # The policy and its one exception (dtolnay/rust-toolchain) live in
@@ -46,7 +46,7 @@ jobs:
 
   deny:
     name: Dependency Policy
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     # This job reads the dependency graph and the lockfile. It writes nothing
     # and needs no token beyond source access.
     permissions:
@@ -85,10 +85,10 @@ jobs:
       # The golden VAD anchors are pinned to values generated on Windows and
       # carry a 1e-4 tolerance sized for cross-platform ORT CPU-kernel drift, so
       # run them on every platform rather than ubuntu only. macOS in particular
-      # had no coverage of the pinned trajectories before. windows-11-arm runs
-      # them natively on Windows ARM64.
+      # had no coverage of the pinned trajectories before.
+      # windows-11-vs2026-arm runs them natively on Windows ARM64.
       matrix:
-        os: [ubuntu-latest, macos-14, windows-latest, windows-11-arm]
+        os: [ubuntu-24.04, ubuntu-26.04, macos-14, windows-2025-vs2026, windows-11-vs2026-arm]
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -97,7 +97,11 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@f0d9c3887740aee45f6153b24b3a6b815192ec16 # v2.9.1
         with:
-          shared-key: "rust"
+          # The key includes the runner label. Of the runner's properties,
+          # rust-cache keys only on the OS family and the architecture.
+          # Without the label, the ubuntu-24.04 and ubuntu-26.04 cells share
+          # one cache.
+          shared-key: "rust-${{ matrix.os }}"
       - name: Install ALSA (Linux only)
         if: runner.os == 'Linux'
         run: sudo apt-get update && sudo apt-get install -y libasound2-dev
@@ -116,7 +120,7 @@ jobs:
 
   feature-combinations:
     name: Feature Combinations (${{ matrix.name }})
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     needs: lint
     strategy:
       fail-fast: false
@@ -174,9 +178,12 @@ jobs:
         run: cargo ${{ matrix.command }} -p decibri ${{ matrix.flags }}
 
   test-node:
-    name: Node.js Tests
-    runs-on: ubuntu-latest
+    name: Node.js Tests (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
     needs: lint
+    strategy:
+      matrix:
+        os: [ubuntu-24.04, ubuntu-26.04]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -184,7 +191,8 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@f0d9c3887740aee45f6153b24b3a6b815192ec16 # v2.9.1
         with:
-          shared-key: "rust"
+          # The key includes the runner label, as in the Rust Tests job.
+          shared-key: "rust-${{ matrix.os }}"
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: '22'
@@ -202,7 +210,7 @@ jobs:
 
   test-browser:
     name: Browser Tests
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     needs: lint
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1

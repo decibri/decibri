@@ -21,7 +21,7 @@ on:
       - '.github/workflows/python-ci.yml'
   workflow_dispatch:
   schedule:
-    # Nightly full 5 OS x 5 Python regression run at 04:00 UTC
+    # Nightly full 7 OS x 5 Python regression run at 04:00 UTC
     # (14:00 AEST / 13:00 AEDT). Catches forward-compatibility issues
     # that the reduced push matrix (3.10 floor + 3.14 ceiling only)
     # does not exercise on every commit. Distinct from any other cron
@@ -91,10 +91,10 @@ jobs:
       fail-fast: true
       matrix:
         # Matrix sizing by trigger:
-        #   pull_request:      3 jobs  (ubuntu-latest x 3 Python: floor, middle, ceiling)
-        #   push:              9 jobs  (5 OS x 2 Python: 3.10 floor + 3.14 ceiling, less the excluded cell)
-        #   workflow_dispatch: 24 jobs (full 5 OS x 5 Python, less the excluded cell)
-        #   schedule (nightly): 24 jobs (full 5 OS x 5 Python, less the excluded cell)
+        #   pull_request:      6 jobs  (ubuntu-24.04 and ubuntu-26.04 x 3 Python: floor, middle, ceiling)
+        #   push:              13 jobs (7 OS x 2 Python: 3.10 floor + 3.14 ceiling, less the excluded cell)
+        #   workflow_dispatch: 34 jobs (full 7 OS x 5 Python, less the excluded cell)
+        #   schedule (nightly): 34 jobs (full 7 OS x 5 Python, less the excluded cell)
         #
         # abi3-py310 wheels are forward-compatible by construction across
         # Python 3.10-3.14 per CPython's stable ABI guarantee. Running 5
@@ -102,20 +102,23 @@ jobs:
         # floor + ceiling on push catches forward-compat issues that abi3
         # does not shield (e.g., behavior changes in CPython runtime APIs
         # that abi3 still inherits). The full matrix runs nightly and on
-        # manual dispatch for comprehensive coverage. Roughly 60% reduction
-        # in push-triggered CI minutes vs. the prior 4 OS x 5 Python shape.
+        # manual dispatch for comprehensive coverage.
         #
-        # OS matrix (full) mirrors publish-npm.yml's cross-platform precedent:
-        # - ubuntu-latest         (x86_64-unknown-linux-gnu)
+        # OS matrix (full) mirrors publish-npm.yml's cross-platform precedent,
+        # with each Linux platform on both Ubuntu 24.04 and Ubuntu 26.04:
+        # - ubuntu-24.04          (x86_64-unknown-linux-gnu)
+        # - ubuntu-26.04          (x86_64-unknown-linux-gnu)
         # - ubuntu-24.04-arm      (aarch64-unknown-linux-gnu)
-        # - windows-latest        (x86_64-pc-windows-msvc)
-        # - windows-11-arm        (aarch64-pc-windows-msvc; Python 3.11 and
+        # - ubuntu-26.04-arm      (aarch64-unknown-linux-gnu)
+        # - windows-2025-vs2026   (x86_64-pc-windows-msvc)
+        # - windows-11-vs2026-arm (aarch64-pc-windows-msvc; Python 3.11 and
         #                          newer, see the exclude below)
         # - macos-14              (aarch64-apple-darwin; Apple Silicon only,
         #                          no Intel coverage matching publish-npm.yml)
         # macos-14 is pinned (not macos-latest) for consistency with
         # publish-npm.yml; pin-bumping is a deliberate cross-workflow action.
-        # ubuntu-24.04-arm is the explicit pin for native ARM64 runners.
+        # ubuntu-24.04-arm and ubuntu-26.04-arm are the explicit pins for
+        # native ARM64 runners.
         #
         # Python version matrix (full): floor 3.10 per pyproject.toml
         # requires-python. 3.14 GA'd 2025-10-07; well-seasoned by Phase 2
@@ -127,25 +130,25 @@ jobs:
         #
         # fromJSON(...) wrappers are required: GitHub Actions expression
         # results are strings, but matrix axes must be arrays.
-        os: ${{ fromJSON(github.event_name == 'pull_request' && '["ubuntu-latest"]' || '["ubuntu-latest", "ubuntu-24.04-arm", "windows-latest", "windows-11-arm", "macos-14"]') }}
+        os: ${{ fromJSON(github.event_name == 'pull_request' && '["ubuntu-24.04", "ubuntu-26.04"]' || '["ubuntu-24.04", "ubuntu-26.04", "ubuntu-24.04-arm", "ubuntu-26.04-arm", "windows-2025-vs2026", "windows-11-vs2026-arm", "macos-14"]') }}
         python-version: ${{ fromJSON((github.event_name == 'workflow_dispatch' || github.event_name == 'schedule') && '["3.10", "3.11", "3.12", "3.13", "3.14"]' || github.event_name == 'pull_request' && '["3.10", "3.12", "3.14"]' || '["3.10", "3.14"]') }}
         # No CPython 3.10 exists for Windows ARM64 (the platform's first
-        # release is 3.11), so the 3.10 cell on windows-11-arm cannot install
-        # its interpreter. An exclude is a partial match against the generated
-        # combinations; when none matches (the pull_request matrix has no
-        # windows-11-arm) it removes nothing.
+        # release is 3.11), so the 3.10 cell on windows-11-vs2026-arm cannot
+        # install its interpreter. An exclude is a partial match against the
+        # generated combinations; when none matches (the pull_request matrix
+        # has no windows-11-vs2026-arm) it removes nothing.
         exclude:
-          - os: windows-11-arm
+          - os: windows-11-vs2026-arm
             python-version: "3.10"
     env:
       # Drives uv's interpreter selection per matrix entry. The install step
       # installs this request and every uv command in the job resolves it.
-      # On windows-11-arm the request names the native architecture, because
-      # uv's default on Windows ARM64 selects an x86_64 CPython that runs
-      # under emulation, and the build backend uv installs for that
+      # On windows-11-vs2026-arm the request names the native architecture,
+      # because uv's default on Windows ARM64 selects an x86_64 CPython that
+      # runs under emulation, and the build backend uv installs for that
       # interpreter then builds for x86_64, which the runner's aarch64-hosted
       # Rust toolchain cannot do.
-      UV_PYTHON: ${{ matrix.os == 'windows-11-arm' && format('cpython-{0}-windows-aarch64-none', matrix.python-version) || matrix.python-version }}
+      UV_PYTHON: ${{ matrix.os == 'windows-11-vs2026-arm' && format('cpython-{0}-windows-aarch64-none', matrix.python-version) || matrix.python-version }}
     # Action references are pinned to commit SHAs with a `# vX.Y.Z` version
     # comment that dependabot parses for updates. The policy, and its one
     # exception (dtolnay/rust-toolchain), live in .github/zizmor.yml, which
@@ -161,8 +164,8 @@ jobs:
         # provides CoreAudio via system frameworks; Windows provides WASAPI
         # via the Windows SDK; neither needs a system package install.
         # `runner.os` is one of Linux / Windows / macOS regardless of
-        # architecture, so this single conditional covers both
-        # ubuntu-latest (x64) and ubuntu-24.04-arm (ARM64).
+        # architecture, so this single conditional covers every Ubuntu
+        # runner, x64 and ARM64.
         if: runner.os == 'Linux'
         run: sudo apt-get update && sudo apt-get install -y libasound2-dev
 
@@ -185,7 +188,7 @@ jobs:
         # uv ships pre-built Python interpreters for every supported
         # platform (linux-x64, linux-aarch64, darwin-aarch64, win-x64,
         # win-arm64), so this single command works across all five matrix
-        # OSes without per-OS conditionals. On win-arm64 the oldest
+        # platforms without per-OS conditionals. On win-arm64 the oldest
         # interpreter it can install is 3.11, which is why the 3.10 cell is
         # excluded above.
         #
@@ -195,7 +198,7 @@ jobs:
         # included.
         #
         # `shell: bash` is required, not cosmetic: the matrix includes
-        # windows-latest, whose default shell is pwsh, and `$UV_PYTHON`
+        # windows-2025-vs2026, whose default shell is pwsh, and `$UV_PYTHON`
         # below is bash syntax. pwsh reads it as an undefined PowerShell
         # variable and passes an empty argument to `uv python install`.
         shell: bash
@@ -383,7 +386,7 @@ jobs:
 
       - name: Run mypy --strict (Linux only)
         # mypy strict is identical regardless of OS; running it on every
-        # matrix entry would surface the same errors five times for no
+        # matrix entry would surface the same errors seven times for no
         # additional signal. Pinned to Linux (both x64 and ARM64) because
         # both share the canonical type-check environment; macOS / Windows
         # entries skip this step.
@@ -403,9 +406,9 @@ jobs:
         # not uploaded; Phase 3 adds the cross-platform wheel upload matrix.
         #
         # Linux jobs use the maturin-action container build step below
-        # (Phase 7 Step 2.5) instead of this host-side build, because
-        # ubuntu-latest's glibc 2.38 produces wheels too new for the
-        # manylinux_2_28 floor that PyPI consumers expect.
+        # (Phase 7 Step 2.5) instead of this host-side build, because the
+        # runner's glibc (2.39 on ubuntu-24.04) produces wheels too new for
+        # the manylinux_2_28 floor that PyPI consumers expect.
         #
         # Clean target/wheels/ before invoking maturin. Swatinem/rust-cache
         # caches the entire target/ tree, including target/wheels/. When a
@@ -435,7 +438,7 @@ jobs:
         #
         # 2. Host-built build scripts in target/release/build/. The earlier
         #    host-side steps (maturin develop --uv, cargo test-decibri) ran
-        #    on Ubuntu 24.04 (glibc 2.38) and produced build-script binaries
+        #    on Ubuntu (glibc 2.39 on 24.04) and produced build-script binaries
         #    linked against that glibc. The manylinux_2_28 container has
         #    glibc 2.28 and cannot exec those host-built scripts (GLIBC_2.30
         #    + 2.32 + 2.33 + 2.34 symbols not found at runtime). Without
@@ -456,18 +459,17 @@ jobs:
         # via PyO3/maturin-action. The container provides glibc 2.28 + an
         # older toolchain so the produced wheel references symbols within
         # the manylinux_2_28 policy ceiling, which auditwheel can then
-        # repair / verify. Without this, ubuntu-latest's glibc 2.38 produces
-        # wheels with too-recent symbols (libc/libstdc++/libgcc_s) that
-        # auditwheel refuses to repair.
+        # repair / verify. Without this, the runner's glibc (2.39 on
+        # ubuntu-24.04) produces wheels with too-recent symbols
+        # (libc/libstdc++/libgcc_s) that auditwheel refuses to repair.
         #
         # Manylinux profile choice: 2_28 (matches ONNX Runtime 1.28's
         # documented glibc floor; targeting 2_17 would waste audit headroom).
         #
-        # Target derivation: matrix.os carries the runner OS; for Linux
-        # that's either ubuntu-latest (x86_64) or ubuntu-24.04-arm (aarch64).
-        # We compute the Rust target triple inline rather than adding a
-        # matrix axis (the matrix uses fromJSON-driven flat axes; adding
-        # a per-entry target field would require an include: block).
+        # Target derivation: the Rust target triple comes from `runner.arch`,
+        # which is `ARM64` on the ARM64 Linux runners and `X64` on the x64
+        # runners. The expression below computes it inline, because the
+        # matrix has flat fromJSON axes and no per-entry target field.
         #
         # before-script-linux runs INSIDE the container before maturin builds,
         # in the step's working-directory (bindings/python), so its paths are
@@ -482,7 +484,7 @@ jobs:
         uses: PyO3/maturin-action@e83996d129638aa358a18fbd1dfb82f0b0fb5d3b # v1.51.0
         with:
           manylinux: 2_28
-          target: ${{ matrix.os == 'ubuntu-24.04-arm' && 'aarch64-unknown-linux-gnu' || 'x86_64-unknown-linux-gnu' }}
+          target: ${{ runner.arch == 'ARM64' && 'aarch64-unknown-linux-gnu' || 'x86_64-unknown-linux-gnu' }}
           working-directory: bindings/python
           args: --release --compatibility pypi --out ${{ github.workspace }}/target/wheels
           before-script-linux: |
@@ -556,8 +558,8 @@ jobs:
         working-directory: bindings/python
         shell: bash
         # Phase 7 Step 2. Verifies external symbol versioning is within
-        # the manylinux_2_28 policy ceiling (chosen because ubuntu-latest
-        # ships glibc >= 2.35; manylinux_2_28 targets glibc >= 2.28 and
+        # the manylinux_2_28 policy ceiling (chosen because the Ubuntu
+        # runners ship glibc >= 2.39; manylinux_2_28 targets glibc >= 2.28 and
         # is widely accepted by PyPI consumers). auditwheel rewrites
         # RPATH entries in the bundled _decibri.*.so to use $ORIGIN-relative
         # paths so it loads libonnxruntime.so from _ort/. Repaired wheel
@@ -679,9 +681,6 @@ jobs:
       # the documented bare-.so abi3-cp32 false-positive case from abi3audit's
       # README. Pinned version (0.0.26) matches publish-pypi.yml so a single
       # cross-workflow bump is the only place the version lives.
-      - name: Install abi3audit
-        run: pip install 'abi3audit==0.0.26'
-
       - name: Verify abi3 compliance
         shell: bash
         run: |
@@ -691,7 +690,7 @@ jobs:
             echo "ERROR: no wheel found for abi3audit"
             exit 1
           fi
-          abi3audit --strict --verbose --assume-minimum-abi3 3.10 "$WHEEL"
+          uvx abi3audit==0.0.26 --strict --verbose --assume-minimum-abi3 3.10 "$WHEEL"
 
       - name: Wheel import with no other packages (Python 3.10)
         if: matrix.python-version == '3.10'

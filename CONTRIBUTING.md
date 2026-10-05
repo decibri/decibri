@@ -47,7 +47,7 @@ To build from source you will need:
    cd decibri
    ```
 
-2. Build the Rust crate and run its tests:
+2. Build the crate and run its tests:
 
    ```bash
    cargo build --workspace
@@ -87,8 +87,8 @@ To build from source you will need:
 
 ### Workspace layout
 
-- `crates/decibri/`: Rust crate
-- `bindings/node/`: Node.js bindings
+- `crates/decibri/`: Rust core
+- `bindings/node/`: Node.js native addon
 - `npm/decibri/`: JavaScript package (Node.js + browser)
 - `npm/platform-*/`: platform-specific binary packages
 
@@ -128,7 +128,7 @@ We welcome contributions from everyone interested in making decibri better. To p
 3. Make your changes.
 4. Test your changes thoroughly:
    - `cargo test-decibri` for Rust changes
-   - `cd npm/decibri && npm run build && cd ../.. && node tests/test-ci.js` for Node.js binding changes
+   - `cd npm/decibri && npm run build && cd ../.. && node tests/test-ci.js` for changes to the Node.js native addon
    - `npx vitest run` for browser-side changes
    - Live hardware tests if your change affects capture or playback behavior
    - Update `npm/decibri/src/decibri.d.ts` if your change affects the public API surface

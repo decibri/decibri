@@ -81,7 +81,7 @@ body:
     id: rust-version
     attributes:
       label: Rust version
-      description: Run `rustc --version` if using the Rust crate directly. Leave blank if not applicable.
+      description: Run `rustc --version` if using the `decibri` crate directly. Leave blank if not applicable.
       placeholder: rustc 1.84.0
 
   - type: dropdown

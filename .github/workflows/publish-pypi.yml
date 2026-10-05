@@ -81,7 +81,7 @@ jobs:
       fail-fast: true
       matrix:
         include:
-          - os: ubuntu-latest
+          - os: ubuntu-24.04
             target: x86_64-unknown-linux-gnu
             ort_platform_slug: linux-x64
             ort_ext: tgz
@@ -103,12 +103,12 @@ jobs:
           # severely under-provisioned (12+ minute queue times). Intel Mac
           # users (a vanishing population) can install from source via
           # `pip install decibri --no-binary :all:`.
-          - os: windows-latest
+          - os: windows-2025-vs2026
             target: x86_64-pc-windows-msvc
             ort_platform_slug: win-x64
             ort_ext: zip
             python: '3.10'
-          - os: windows-11-arm
+          - os: windows-11-vs2026-arm
             target: aarch64-pc-windows-msvc
             ort_platform_slug: win-arm64
             ort_ext: zip
@@ -257,7 +257,7 @@ jobs:
         if: runner.os == 'Linux'
         shell: bash
         # Wipe target/ before the manylinux_2_28 container build so cached
-        # host-built artifacts (linked against ubuntu-latest's glibc 2.38)
+        # host-built artifacts (linked against ubuntu-24.04's glibc 2.39)
         # do not leak into the container's glibc 2.28 build context.
         # Mirrors python-ci.yml line 366-391.
         run: rm -rf "${GITHUB_WORKSPACE}/target/"
@@ -386,9 +386,6 @@ jobs:
       # documented bare-.so abi3-cp32 false-positive case from abi3audit's
       # README. Empirically verified passing on the existing wheel during
       # Phase 10 prep research.
-      - name: Install abi3audit
-        run: pip install 'abi3audit==0.0.26'
-
       - name: Verify abi3 compliance
         shell: bash
         run: |
@@ -398,7 +395,7 @@ jobs:
             echo "ERROR: no wheel found for abi3audit"
             exit 1
           fi
-          abi3audit --strict --verbose --assume-minimum-abi3 3.10 "$WHEEL"
+          uvx abi3audit==0.0.26 --strict --verbose --assume-minimum-abi3 3.10 "$WHEEL"
 
       # Wheel install-test gate (LD-10-3). Mirrors python-ci.yml lines
       # 603-670. Polars-style in-job verification: install the just-built
@@ -470,7 +467,7 @@ jobs:
     # before upload so a malformed sdist fails the publish gate, not
     # the PyPI upload itself.
     name: Build sdist
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 10
     permissions:
       contents: read
@@ -496,22 +493,23 @@ jobs:
           args: --out ${{ github.workspace }}/target/wheels
           working-directory: bindings/python
 
+      - uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
+        with:
+          enable-cache: false
+
       - name: Validate sdist via twine check
         # twine check is a separate concern from maturin-action; it
         # validates the produced tarball's PKG-INFO and structure
-        # before the publish gate. Installed via pip directly (no uv
-        # involved) since this job no longer maintains a uv-managed
-        # virtualenv.
+        # before the publish gate.
         shell: bash
         run: |
           set -euo pipefail
-          pip install twine
           SDIST=$(ls "${GITHUB_WORKSPACE}/target/wheels/decibri-"*.tar.gz | head -1)
           if [ -z "$SDIST" ]; then
             echo "ERROR: no sdist found for twine check"
             exit 1
           fi
-          twine check "$SDIST"
+          uvx twine==7.0.0 check "$SDIST"
 
       - name: Upload sdist artifact
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
@@ -539,7 +537,7 @@ jobs:
         contains(github.ref_name, 'rc')
       ))
     needs: [build-and-validate, build-sdist]
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     environment:
       name: testpypi
       url: https://test.pypi.org/project/decibri/
@@ -587,7 +585,7 @@ jobs:
         contains(github.ref_name, 'rc')
       ))
     needs: [build-and-validate, build-sdist]
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     environment:
       name: pypi
       url: https://pypi.org/project/decibri/
