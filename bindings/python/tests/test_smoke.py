@@ -52,9 +52,10 @@ def test_version_returns_version_info() -> None:
 def test_version_decibri_matches_rust_core() -> None:
     from decibri import _decibri
 
-    # Literal equality is intentional. When the Rust workspace bumps past
-    # 4.0.0 this assertion breaks deliberately, to force a conscious update of
-    # the Python expectation alongside the Rust version bump.
+    # `VersionInfo.decibri` reports the version of the Rust core, which is
+    # the workspace version in `Cargo.toml`. The expected value is a literal,
+    # so a workspace version bump fails this test until the literal matches
+    # the new version.
     assert _decibri.MicrophoneBridge.version().decibri == "6.4.0"
 
 

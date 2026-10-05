@@ -1,6 +1,6 @@
 # Security
 
-Decibri takes security seriously. As a cross-platform audio library that ships prebuilt native binaries for Node.js and a Rust crate, we are especially attentive to supply chain, binary integrity, and runtime safety concerns. If you believe you have found a security vulnerability in this repository, please report it as described below.
+Decibri takes security seriously. As a cross-platform audio library that ships prebuilt native binaries for Node.js and a crate on crates.io, we are especially attentive to supply chain, binary integrity, and runtime safety concerns. If you believe you have found a security vulnerability in this repository, please report it as described below.
 
 ## Responsible Disclosure
 
@@ -36,7 +36,7 @@ Decibri ships prebuilt native binaries for five platforms (Windows x64, Windows 
 
 - npm publishing uses [Trusted Publishing via OIDC](https://docs.npmjs.com/trusted-publishers/). No long-lived npm tokens are stored in the repository or CI system. Each publish uses a short-lived, workflow-specific credential issued by npm.
 - All npm packages (`decibri`, `@decibri/decibri-win32-x64-msvc`, `@decibri/decibri-win32-arm64-msvc`, `@decibri/decibri-darwin-arm64`, `@decibri/decibri-linux-x64-gnu`, `@decibri/decibri-linux-arm64-gnu`) are configured to require 2FA and disallow legacy token publishing.
-- The Rust crate on crates.io is published from the same CI pipeline using keyless [Trusted Publishing via OIDC](https://crates.io/docs/trusted-publishing): a short-lived, crate-specific publish token is issued per run by exchanging a GitHub OIDC token (via `rust-lang/crates-io-auth-action`). No long-lived crates.io token is stored in the repository or CI system.
+- The `decibri` crate on crates.io is published from the same CI pipeline using keyless [Trusted Publishing via OIDC](https://crates.io/docs/trusted-publishing): a short-lived, crate-specific publish token is issued per run by exchanging a GitHub OIDC token (via `rust-lang/crates-io-auth-action`). No long-lived crates.io token is stored in the repository or CI system.
 
 ### Provenance and attestation
 

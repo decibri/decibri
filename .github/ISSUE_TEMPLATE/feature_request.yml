@@ -39,7 +39,7 @@ body:
     id: runtime
     attributes:
       label: Which runtime would this apply to?
-      description: Is this feature for Node.js, the browser, the Rust crate, or all of them?
+      description: Is this feature for Node.js, the browser, the `decibri` crate, or all of them?
       multiple: true
       options:
         - Node.js

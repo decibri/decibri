@@ -14,7 +14,7 @@ permissions:
 jobs:
   check-cpal:
     name: Check cpal
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     permissions:
       contents: read
       issues: write
@@ -76,7 +76,7 @@ jobs:
 
   check-ort:
     name: Check ort
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     permissions:
       contents: read
       issues: write
@@ -135,7 +135,7 @@ jobs:
 
   check-onnxruntime:
     name: Check ONNX Runtime upstream
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     # Same per-job grant as check-cpal and check-ort: this job creates the
     # label and opens the drift issue.
     permissions:

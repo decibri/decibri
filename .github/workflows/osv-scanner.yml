@@ -46,7 +46,7 @@ concurrency:
 jobs:
   scan:
     name: Lockfile Vulnerabilities
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     permissions:
       contents: read
       # Uploading SARIF to the Security tab. This is the only write scope in

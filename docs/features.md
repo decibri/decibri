@@ -1,6 +1,6 @@
 # decibri feature flags
 
-Reference guide to the Cargo features exposed by the `decibri` crate. Aimed at Rust crate consumers evaluating which feature set to build with, and at FFI binding authors who need to understand the ORT distribution tradeoffs.
+Reference guide to the Cargo features exposed by the `decibri` crate. Aimed at crate consumers evaluating which feature set to build with, and at FFI binding authors who need to understand the ORT distribution tradeoffs.
 
 ## Full feature list
 
@@ -53,7 +53,7 @@ This pattern lets binding authors:
 
 Static linking via `ort-download-binaries` would grow every native artifact by ~13.5 MB and complicate the cross-platform publishing workflow.
 
-### When a Rust crate consumer should pick `ort-download-binaries`
+### When a crate consumer should pick `ort-download-binaries`
 
 Pick `ort-download-binaries` when your Rust binary is the deliverable and you want a single self-contained executable:
 
